@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
+last-updated: 2026-07-06
+verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 ---
 
 # Project Map
@@ -10,7 +10,7 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 | Feature | Modules | Key Decisions |
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, subprocess_utils, cli, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only |
-| Task inventory | task_store, models | local parser only; do not import protocol/orchestrator code |
+| Task inventory | task_store, models | implemented; local parser only; index supplies active ids/summaries, task frontmatter supplies authoritative status/blockers; run overlay remains future |
 | Run lifecycle | runs, subprocess_utils, control_dir, models | launch deployed orchestrator as subprocess; per-repo serialization |
 | Human question relay | control_dir, runs, notifications, models | file-channel question/answer contract; audit answers |
 | Log viewing | logs, runs, api | tail orchestrator log files; SSE for live stream |
@@ -40,12 +40,12 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 | Module | Responsibilities |
 |---|---|
 | config | Environment overrides, default ai-native-development path, derived `aii-2` and registry-file paths, future service settings |
-| models | Stable repo/readiness data structures shared by CLI/API/tests |
+| models | Stable repo/readiness/task inventory data structures shared by CLI/API/tests |
 | registry | Discover managed repos from `aii-2` or registry file |
 | readiness | Validate target repo launch readiness with seven fail-closed checks |
 | subprocess_utils | Run external commands consistently and surface missing executables distinctly |
 | cli | Human and JSON repo readiness output |
-| task_store | Parse `.ai-tasks` indexes and frontmatter |
+| task_store | Parse `.ai-tasks` indexes and task frontmatter into repo task inventories |
 | runs | Own orchestrator subprocess lifecycle and run state |
 | control_dir | Own question/answer/stop file-channel handling |
 | logs | Read and stream orchestrator logs |

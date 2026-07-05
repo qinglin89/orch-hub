@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
+last-updated: 2026-07-06
+verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 ---
 
 # Modules
@@ -11,11 +11,11 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
 | Config | `orch_hub/config.py` | Implemented defaults, `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, and derived `aii-2`/registry paths |
-| Models | `orch_hub/models.py` | Implemented `ManagedRepo`, readiness models, and repo payload helpers |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory models, and payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
-| Task inventory | `orch_hub/task_store.py` | Future parser for `.ai-tasks/index.md` and task frontmatter |
+| Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md` and task frontmatter |
 | Run manager | `orch_hub/runs.py` | Future orchestrator subprocess lifecycle and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Future question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
@@ -55,7 +55,7 @@ Future config belongs here too: data dir, token, host/port, notifier settings.
 
 Location: `orch_hub/models.py`
 
-Responsibility: define stable data shapes for managed repos and readiness reports now; add task summaries, run records, questions, and answers in future slices. Public readiness payloads contain `ready` plus failed check reasons only.
+Responsibility: define stable data shapes for managed repos, readiness reports, and task inventory. `TaskSummary` carries `task_id`, task-file `status`, optional index summary, and blockers; `RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered tasks. Public readiness payloads contain `ready` plus failed check reasons only.
 
 ### Registry
 
@@ -79,7 +79,7 @@ Responsibility: central wrapper for running commands with cwd, capture, timeout 
 
 Location: `orch_hub/task_store.py`
 
-Responsibility: future parser for active task files. It should not import protocol or orchestrator code; use small local frontmatter parsing for fields needed by the UI.
+Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`.
 
 ### Run Manager
 

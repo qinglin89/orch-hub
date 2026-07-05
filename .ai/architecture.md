@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+last-updated: 2026-07-06
+verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 ---
 
 # Architecture
@@ -54,7 +54,7 @@ Each failure should produce a concise machine-readable reason and a human-readab
 
 ### Task Inventory
 
-Reads `.ai-tasks/index.md` and individual task frontmatter from managed repos. It should classify tasks by file status (`pending`, `in_progress`, `final_review`, `blocked`) and overlay run state from orch-hub to label active and waiting tasks.
+Reads `.ai-tasks/index.md` and individual task frontmatter from managed repos. The implemented `task_store` slice treats the index as the active task-id set plus human summary, and treats each `.ai-tasks/<id>.md` frontmatter as the source of truth for status and blockers. It classifies task-file statuses such as `pending`, `in_progress`, `final_review`, `completed`, and `blocked`, with parser sentinels for missing task files or missing status. Future run-manager data will overlay active/waiting run state without replacing the task-file status.
 
 ### Run Manager
 
@@ -114,6 +114,14 @@ Core application services should be independent from FastAPI so CLI and HTTP rou
 3. If command fails or is unavailable, read `<ai-native-development>/.registry/repos.local.json`.
 4. For each repo entry, run readiness checks.
 5. Return stable JSON for CLI output and future API responses.
+
+### Task Inventory
+
+1. Receive `ManagedRepo` values from registry discovery or a caller-provided filter.
+2. For each repo, read `.ai-tasks/index.md`; missing indexes return `index_present=false` with no tasks so callers can surface the repo-level issue.
+3. Parse task ids and summaries from the index table without trusting the index Status column.
+4. Read each listed `.ai-tasks/<task-id>.md` frontmatter for authoritative `status` and `blockers`.
+5. Return `RepoTaskInventory` values that can be serialized directly for future task APIs.
 
 ### Start Run
 

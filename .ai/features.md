@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
+last-updated: 2026-07-06
+verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 ---
 
 # Features
@@ -10,7 +10,7 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|
 | Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, models | CLI `repos`, CLI `repos --json`, future `GET /api/repos` |
-| Task inventory | planned | task_store, models | future `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
+| Task inventory | implemented | task_store, models | future `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | Run lifecycle | planned | runs, subprocess_utils, control_dir | future `POST /api/runs`, `GET /api/runs` |
 | Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
 | Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
@@ -44,13 +44,21 @@ Implemented behavior:
 
 ### Task Inventory
 
-Status: planned
+Status: implemented
 
 Description: Read `.ai-tasks/index.md` and task frontmatter in managed repos. Distinguish task-file statuses from hub run overlay statuses.
 
 Modules: task_store, models.
 
 APIs: future task list endpoints.
+
+Implemented behavior:
+
+- `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and human summaries, preserving index row order.
+- The index Status column is not authoritative; each `.ai-tasks/<id>.md` frontmatter supplies task status and blockers.
+- Missing `.ai-tasks/index.md` is represented as `index_present=False` with no task rows, distinct from a present-but-empty index.
+- Missing listed task files use status `missing`; files with no parseable status use `unknown`.
+- `TaskSummary`, `RepoTaskInventory`, and `tasks_payload` provide reusable data shapes for future CLI/API adapters.
 
 ### Run Lifecycle
 

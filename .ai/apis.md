@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
+last-updated: 2026-07-06
+verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 ---
 
 # APIs and Interfaces
@@ -106,9 +106,9 @@ Behavior: pure inspection and subprocess checks only; no mutation. Missing repo 
 
 Input: repo path.
 
-Output: task summaries and optional full task text.
+Output: `RepoTaskInventory` values containing repo fields, `index_present`, and ordered `TaskSummary` rows.
 
-Behavior: parse `.ai-tasks/index.md` and task frontmatter locally.
+Behavior: parse `.ai-tasks/index.md` and task frontmatter locally. The index supplies active task ids and summaries; task frontmatter supplies authoritative status and blockers. The reusable `tasks_payload(inventories)` helper serializes as `{"repos": [...]}` for future CLI/API adapters.
 
 ### Run Manager
 
