@@ -1,0 +1,12 @@
+# BEGIN ai-native-deployment
+/.ai-deploy-manifest.json
+/.cursor/
+/.codex/
+/.claude/
+/CLAUDE.md
+/ai-coding*.md
+/.ai-tasks/
+__pycache__/
+*.py[cod]
+!/.ai-deploy-lock.json
+# END ai-native-deployment

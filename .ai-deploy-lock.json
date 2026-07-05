@@ -1,0 +1,182 @@
+{
+  "canonical_payload_sha256": "69c257767dd2bebecfc26881f61ec4b459b9ee2db26869684b15fb85ae8c540c",
+  "deployed_files": [
+    {
+      "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
+      "canonical_sha256": "f7fd85c3a7b4ef1c58c0783445c842e22972c46614c84386268cefe41d52b36b",
+      "canonical_size_bytes": 1244,
+      "target_relative_path": ".claude/hooks/session-start-housekeeping-check.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/hooks/stop-context-check.sh",
+      "canonical_sha256": "2256f50bfb14cfa0110785c60fa9adfbd884e243b10a6557cbe2dcb050c26b2e",
+      "canonical_size_bytes": 7143,
+      "target_relative_path": ".claude/hooks/stop-context-check.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/settings.json",
+      "canonical_sha256": "dbc3caaec1e8656baab0a341ec2dfaca1ab729e205349dc5b57b688083f75b09",
+      "canonical_size_bytes": 503,
+      "target_relative_path": ".claude/settings.json"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/session-ai-audit/SKILL.md",
+      "canonical_sha256": "086f2cf432b1b91c7125c4ac58535b71d66bf0c550279e813befa4537d9cf447",
+      "canonical_size_bytes": 6798,
+      "target_relative_path": ".claude/skills/session-ai-audit/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/codex/README.md",
+      "canonical_sha256": "bf47b5708749b2f949c9d3b7fcc7efcfd8bb56dad8744a8095beb8b5ed67721f",
+      "canonical_size_bytes": 5181,
+      "target_relative_path": ".codex/README.md"
+    },
+    {
+      "canonical_relative_path": "canonical/codex/config.toml.template",
+      "canonical_sha256": "5a27fdb06794f46e75c8c42700ffcdad5a6aec5b9c610ecbef57f376776c5a38",
+      "canonical_size_bytes": 1224,
+      "target_relative_path": ".codex/config.toml"
+    },
+    {
+      "canonical_relative_path": "canonical/codex/hooks/session-start.sh",
+      "canonical_sha256": "18e63c5a0dcf32233841e75f2cef14859748d4370073414893142003853337a7",
+      "canonical_size_bytes": 5183,
+      "target_relative_path": ".codex/hooks/session-start.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/codex/hooks/stop-context-check.sh",
+      "canonical_sha256": "8ff3dc27897d1283e8749575da14827c89c4392b3c97f244ab1c6d0a4e80b199",
+      "canonical_size_bytes": 7990,
+      "target_relative_path": ".codex/hooks/stop-context-check.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/codex/review-workflow.md",
+      "canonical_sha256": "0614312354fdf15bd3a8748065841cedb7f16cb79c723fa7d6db653df3e5a6b4",
+      "canonical_size_bytes": 655,
+      "target_relative_path": ".codex/review-workflow.md"
+    },
+    {
+      "canonical_relative_path": "canonical/cursor/hooks.json",
+      "canonical_sha256": "1bcef714fac227d69fb74bec32ba9ec10af5a20df99ab5298525b578d82178f0",
+      "canonical_size_bytes": 299,
+      "target_relative_path": ".cursor/hooks.json"
+    },
+    {
+      "canonical_relative_path": "canonical/cursor/hooks/session-start.sh",
+      "canonical_sha256": "b7fed9d274bfed24836d46e210f855c666a67098af696956d42e66c6fe2a29be",
+      "canonical_size_bytes": 3296,
+      "target_relative_path": ".cursor/hooks/session-start.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/cursor/hooks/stop-context-check.sh",
+      "canonical_sha256": "89e373982a53e7f1f281cafcc8add5283fed6153a8a368aa961dac7d1f953d2b",
+      "canonical_size_bytes": 7731,
+      "target_relative_path": ".cursor/hooks/stop-context-check.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/.env.example",
+      "canonical_sha256": "9ce5c22f171f4327f3acbc30557a98f9b89ba1705589c1405f86c0130e0c4220",
+      "canonical_size_bytes": 1071,
+      "target_relative_path": ".cursor/orchestrator/.env.example"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub.md",
+      "canonical_sha256": "54063662a559720cead91c12c85b59a6f712f75490ae7502e2fc55f95c70a5ee",
+      "canonical_size_bytes": 12471,
+      "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/README.md",
+      "canonical_sha256": "41e59f5e1439aa63dd1abc91b56733b3112efec54031dffc8d62a72154fea7a0",
+      "canonical_size_bytes": 25916,
+      "target_relative_path": ".cursor/orchestrator/README.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/automation-mode.md",
+      "canonical_sha256": "393835daefa7d10124333a9460c27a01925801fd682c2ebdf77e15af47da6226",
+      "canonical_size_bytes": 2948,
+      "target_relative_path": ".cursor/orchestrator/automation-mode.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
+      "canonical_sha256": "308f626743355d2060bb59a58cc4f87a264252113f03ff4cb3b5e1ec4d47c311",
+      "canonical_size_bytes": 86037,
+      "target_relative_path": ".cursor/orchestrator/orchestrator.py"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/requirements.txt",
+      "canonical_sha256": "65d1e5c94c612731f7149c1e460ee4ac8a7f3f7752d07d35f4d2d456d6c94203",
+      "canonical_size_bytes": 11,
+      "target_relative_path": ".cursor/orchestrator/requirements.txt"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/smoke_hooks.py",
+      "canonical_sha256": "0e523524d11c6c4acea8dd0c64b5a090561e72d901a09f1f513ea688a8d8e630",
+      "canonical_size_bytes": 3781,
+      "target_relative_path": ".cursor/orchestrator/smoke_hooks.py"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
+      "canonical_sha256": "ac676dd0c5779b7177f6f31565febfa6ca69602ad2564b7f9959db2521871307",
+      "canonical_size_bytes": 60106,
+      "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
+    },
+    {
+      "canonical_relative_path": "canonical/cursor/rules/protocol.mdc",
+      "canonical_sha256": "3d2e6dd7347e03c8a4b91e0428332334b229bddb6e834b19cb9055f6dcf96ae1",
+      "canonical_size_bytes": 1851,
+      "target_relative_path": ".cursor/rules/protocol.mdc"
+    },
+    {
+      "canonical_relative_path": "canonical/cursor/rules/review-workflow.mdc",
+      "canonical_sha256": "9e403e2d015c9200fd264448178115d66c44cfa5be5a87a2d8857d53879a9d9d",
+      "canonical_size_bytes": 743,
+      "target_relative_path": ".cursor/rules/review-workflow.mdc"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/CLAUDE.md",
+      "canonical_sha256": "7f60a44399bce947afe981d15cce68c55949d9f87867e2240800394b28e9c1dd",
+      "canonical_size_bytes": 33,
+      "target_relative_path": "CLAUDE.md"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/ai-coding-init-v2.md",
+      "canonical_sha256": "72418e6c08c9531a393b0174f2aa05e486fc8bbe241f9a62ac72785c4b4fb1a4",
+      "canonical_size_bytes": 7547,
+      "target_relative_path": "ai-coding-init-v2.md"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/ai-coding-memory-v2.md",
+      "canonical_sha256": "7a5734fe50d3fb81a146a753a6078ff0d5b7ab15f2bac3f994bb7c1ea420eb1e",
+      "canonical_size_bytes": 4385,
+      "target_relative_path": "ai-coding-memory-v2.md"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/ai-coding-review-v2.md",
+      "canonical_sha256": "7efae94e3dafb8043267fbcfd9a45cb5b946ce2987276c19938622358ba5b445",
+      "canonical_size_bytes": 6939,
+      "target_relative_path": "ai-coding-review-v2.md"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/ai-coding-tasks-v2-tmp.md",
+      "canonical_sha256": "2709aacca4b9bcf76c50f1a0db5e6435a88df400da7d504e0ae93321e0794252",
+      "canonical_size_bytes": 3238,
+      "target_relative_path": "ai-coding-tasks-v2-tmp.md"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/ai-coding-tasks-v2.md",
+      "canonical_sha256": "7a3d46d52198ff8ae8860287d65fe5cc82c7ba022c78aa5b0d161217c22c4e6e",
+      "canonical_size_bytes": 4446,
+      "target_relative_path": "ai-coding-tasks-v2.md"
+    },
+    {
+      "canonical_relative_path": "canonical/repo-root/ai-coding-v2.md",
+      "canonical_sha256": "8a87be2997520d1fd881eddee7137038f00f7365278f0a0c4f0be7aded411257",
+      "canonical_size_bytes": 7571,
+      "target_relative_path": "ai-coding-v2.md"
+    }
+  ],
+  "schema_version": 1,
+  "source_git_commit": "a51a03f787268c6a36326dba446ab0ea8ef5e746",
+  "source_repo": "ai-native-deployment"
+}
