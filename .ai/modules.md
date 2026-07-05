@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ---
 
 # Modules
@@ -9,12 +9,12 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 | Module | Location | Description |
 |---|---|---|
-| CLI | `orch_hub/cli.py` | Command entry points for discovery/readiness and later run controls |
-| Config | `orch_hub/config.py` | Defaults and environment overrides |
-| Models | `orch_hub/models.py` | Typed domain data returned by CLI/API |
-| Registry | `orch_hub/registry.py` | Managed repo discovery from `aii-2` or registry file |
-| Readiness | `orch_hub/readiness.py` | Per-repo launch readiness checks |
-| Subprocess utilities | `orch_hub/subprocess_utils.py` | Shared subprocess execution wrappers |
+| CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
+| Config | `orch_hub/config.py` | Implemented defaults, `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, and derived `aii-2`/registry paths |
+| Models | `orch_hub/models.py` | Implemented `ManagedRepo`, readiness models, and repo payload helpers |
+| Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
+| Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
+| Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Future parser for `.ai-tasks/index.md` and task frontmatter |
 | Run manager | `orch_hub/runs.py` | Future orchestrator subprocess lifecycle and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Future question/answer/stop file-channel handling |
@@ -30,7 +30,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 Location: `orch_hub/cli.py`
 
-Responsibility: expose user-facing commands. The first command should list repos and readiness:
+Responsibility: expose user-facing commands. The implemented first command lists repos and readiness:
 
 ```bash
 python -m orch_hub.cli repos
@@ -43,7 +43,7 @@ Dependencies: config, registry, readiness, models.
 
 Location: `orch_hub/config.py`
 
-Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override and default ai-native-development path:
+Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default ai-native-development path, and derived `aii-2`/registry file paths:
 
 ```text
 /Users/linqing/workplace/github.com/qinglin89/ai-native-development
@@ -55,19 +55,19 @@ Future config belongs here too: data dir, token, host/port, notifier settings.
 
 Location: `orch_hub/models.py`
 
-Responsibility: define stable data shapes for managed repos, readiness checks, task summaries, run records, questions, and answers. Use these shapes for both CLI JSON and future API responses.
+Responsibility: define stable data shapes for managed repos and readiness reports now; add task summaries, run records, questions, and answers in future slices. Public readiness payloads contain `ready` plus failed check reasons only.
 
 ### Registry
 
 Location: `orch_hub/registry.py`
 
-Responsibility: prefer `aii-2 registry list --json`; if unavailable or failing, fallback to `<ai-native-development>/.registry/repos.local.json`. Validate and normalize registry entries.
+Responsibility: prefer `<ai-native-development>/aii-2 registry list --json`; if unavailable or failing, fallback to `<ai-native-development>/.registry/repos.local.json`. Validate and normalize JSON-array entries into `ManagedRepo`.
 
 ### Readiness
 
 Location: `orch_hub/readiness.py`
 
-Responsibility: check repo filesystem, deployed manifest, orchestrator script, venv Python, task index, clean git tree, and `aii-2 status <repo>`.
+Responsibility: check repo filesystem, deployed manifest, orchestrator script, venv Python, task index, clean git tree, and `aii-2 status <repo>`. Reports keep all seven checks internally and fail closed when paths or tools are missing.
 
 ### Subprocess Utilities
 

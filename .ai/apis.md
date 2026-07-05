@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ---
 
 # APIs and Interfaces
@@ -10,14 +10,14 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 ### `python -m orch_hub.cli repos`
 
 - Purpose: list managed repos discovered from ai-native-development with readiness.
-- Initial output: human-readable table or lines.
+- Output: human-readable status lines, followed by failed readiness reasons for non-ready repos.
 - Source: registry adapter plus readiness checker.
 - Non-goal: does not start orchestrators.
 
 ### `python -m orch_hub.cli repos --json`
 
 - Purpose: stable JSON form for automation and future FastAPI reuse.
-- Expected shape:
+- Stable shape:
 
 ```json
 {
@@ -35,7 +35,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 }
 ```
 
-Exact field names may evolve during the first implementation task, but should remain coherent for future HTTP responses.
+`readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture.
 
 ## Future HTTP API
 
@@ -92,7 +92,7 @@ Input: config with ai-native-development path.
 
 Output: list of managed repo models.
 
-Behavior: command source first, registry-file fallback second.
+Behavior: command source first, registry-file fallback second. An exit-0 command with invalid JSON raises `RegistryError`; command missing/non-zero falls back; missing fallback file returns an empty list.
 
 ### Readiness Checker
 
@@ -100,7 +100,7 @@ Input: managed repo model.
 
 Output: readiness report with boolean `ready` and list of failed checks.
 
-Behavior: pure inspection and subprocess checks only; no mutation.
+Behavior: pure inspection and subprocess checks only; no mutation. Missing repo path skips subprocess execution but records `git_clean` and `aii_status` as failed so launch readiness still fails closed.
 
 ### Task Store
 

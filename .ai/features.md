@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ---
 
 # Features
@@ -9,7 +9,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|
-| Repo discovery and readiness | planned first | registry, readiness, cli, models | CLI `repos`, future `GET /api/repos` |
+| Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, models | CLI `repos`, CLI `repos --json`, future `GET /api/repos` |
 | Task inventory | planned | task_store, models | future `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | Run lifecycle | planned | runs, subprocess_utils, control_dir | future `POST /api/runs`, `GET /api/runs` |
 | Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
@@ -26,7 +26,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 ### Repo Discovery and Readiness
 
-Status: planned first
+Status: implemented
 
 Description: Load managed repos from ai-native-development and report whether each is ready for orchestration. This validates the registry and target-repo deployment assumptions before service/UI work.
 
@@ -34,7 +34,13 @@ Modules: config, registry, readiness, models, subprocess_utils, cli.
 
 APIs: `python -m orch_hub.cli repos`, `python -m orch_hub.cli repos --json`; future `GET /api/repos`.
 
-Acceptance direction: pytest coverage for registry parsing, missing registry file, ready repo, missing deploy pieces, dirty git tree, and `aii-2 status` failure.
+Implemented behavior:
+
+- Discovery invokes `<ai-native-development>/aii-2 registry list --json` by absolute path, then falls back to `<ai-native-development>/.registry/repos.local.json` when the command is unavailable or exits non-zero.
+- Registry data is a JSON array of `{name, path, manifest}`. Missing fallback file means no repos; invalid JSON or malformed entries raise an operational error.
+- Readiness runs seven checks in stable order: repo path, manifest, deployed orchestrator script, orchestrator venv Python, `.ai-tasks/index.md`, clean `git status --porcelain`, and passing `aii-2 status <repo>`.
+- Public readiness JSON serializes `ready` and only failed checks as `{name, message}` reasons; ready repos have `checks: []`.
+- Tests cover registry parsing/fallbacks, every requested missing-piece readiness failure, dirty git state, `aii-2 status` failure, config, and CLI output.
 
 ### Task Inventory
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ---
 
 # Conventions
@@ -28,6 +28,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 - Include concise command output for failed `aii-2 status` checks.
 - Registry loading should tolerate a missing registry file as an empty repo list, but invalid JSON should be an explicit error.
 - CLI should return non-zero for operational errors.
+- Invoke `aii-2` through the configured absolute path (`Config.aii2_bin`), not by relying on PATH.
 
 ## Logging
 
@@ -57,6 +58,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 - Use `tmp_path` for fake repos and registry files.
 - Mock subprocess for dirty git trees and `aii-2 status` failures.
 - Prefer testing structured return values before testing text formatting.
+- Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
 
 ## Dependencies
 

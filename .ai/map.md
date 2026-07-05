@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ---
 
 # Project Map
@@ -9,7 +9,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 | Feature | Modules | Key Decisions |
 |---|---|---|
-| Repo discovery and readiness | config, registry, readiness, subprocess_utils, cli, models | ai-native-development registry is source of truth; `aii-2` first, registry-file fallback |
+| Repo discovery and readiness | config, registry, readiness, subprocess_utils, cli, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only |
 | Task inventory | task_store, models | local parser only; do not import protocol/orchestrator code |
 | Run lifecycle | runs, subprocess_utils, control_dir, models | launch deployed orchestrator as subprocess; per-repo serialization |
 | Human question relay | control_dir, runs, notifications, models | file-channel question/answer contract; audit answers |
@@ -39,12 +39,12 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 | Module | Responsibilities |
 |---|---|
-| config | Environment overrides, default ai-native-development path, future service settings |
-| models | Stable data structures shared by CLI/API/tests |
+| config | Environment overrides, default ai-native-development path, derived `aii-2` and registry-file paths, future service settings |
+| models | Stable repo/readiness data structures shared by CLI/API/tests |
 | registry | Discover managed repos from `aii-2` or registry file |
-| readiness | Validate target repo launch readiness |
-| subprocess_utils | Run external commands consistently |
-| cli | Human and JSON command output |
+| readiness | Validate target repo launch readiness with seven fail-closed checks |
+| subprocess_utils | Run external commands consistently and surface missing executables distinctly |
+| cli | Human and JSON repo readiness output |
 | task_store | Parse `.ai-tasks` indexes and frontmatter |
 | runs | Own orchestrator subprocess lifecycle and run state |
 | control_dir | Own question/answer/stop file-channel handling |

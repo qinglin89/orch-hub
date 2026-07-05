@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ---
 
 # Project Overview
@@ -9,7 +9,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 
 orch-hub is intended to be a long-lived local control plane for AI coding orchestrators. It will run on the user's Mac and allow remote control from iPhone, iPad, or another machine over a private network. The hub coordinates existing per-repository orchestrator programs that drive dev/review loops over `.ai-tasks/`.
 
-The immediate first slice is discovery and readiness: read the ai-native-development local registry, list managed repos, and report whether each repo is ready to launch its deployed orchestrator. Later slices add task inventory, subprocess runs, human-question relay, logs, notifications, and a mobile dashboard.
+The implemented first slice is discovery and readiness: read the ai-native-development local registry, list managed repos, and report whether each repo is ready to launch its deployed orchestrator. Later slices add task inventory, subprocess runs, human-question relay, logs, notifications, and a mobile dashboard.
 
 ## Users
 
@@ -53,20 +53,20 @@ The immediate first slice is discovery and readiness: read the ai-native-develop
 
 ## Repository Structure
 
-The repository currently contains AI protocol/deployment infrastructure only. Product code has not been created yet.
-
-Planned first package structure:
+The repository contains the first product package and tests:
 
 ```text
 orch_hub/
   __init__.py
   cli.py
   config.py
+  models.py
   registry.py
   readiness.py
-  models.py
   subprocess_utils.py
 tests/
+  test_cli.py
+  test_config.py
   test_registry.py
   test_readiness.py
 ```
