@@ -1,0 +1,92 @@
+---
+last-updated: 2026-07-05
+verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+---
+
+# Project Overview
+
+## Purpose
+
+orch-hub is intended to be a long-lived local control plane for AI coding orchestrators. It will run on the user's Mac and allow remote control from iPhone, iPad, or another machine over a private network. The hub coordinates existing per-repository orchestrator programs that drive dev/review loops over `.ai-tasks/`.
+
+The immediate first slice is discovery and readiness: read the ai-native-development local registry, list managed repos, and report whether each repo is ready to launch its deployed orchestrator. Later slices add task inventory, subprocess runs, human-question relay, logs, notifications, and a mobile dashboard.
+
+## Users
+
+- Primary user: qinglin, operating local AI coding workflows from mobile devices or another computer.
+- Remote clients: mobile-first web dashboard on iPhone/iPad; later possible IM bot surfaces.
+- Local service operator: launchd on the Mac, keeping the hub resident.
+
+## Scope
+
+- Discover managed repos from ai-native-development, not from GitHub and not from a separate orch-hub registry.
+- Inspect each managed repo for orchestrator launch readiness.
+- List active, waiting, pending, and blocked tasks per repo.
+- Launch and supervise one orchestrator run per repo at a time, each run attached to one `.ai-tasks/<task-id>.md` task.
+- Surface orchestrator human input requests remotely, collect answers, and deliver them back through a file-channel control dir once the orchestrator supports it.
+- Stream or tail orchestrator logs to the dashboard.
+- Provide simple remote auth suitable for a Tailscale-only v1 deployment.
+- Provide a mobile-first dashboard for repo, task, run, question, and log views.
+- Support launchd-based long-lived operation on macOS.
+
+## Non-Goals
+
+- Do not treat GitHub as the registry source of truth.
+- Do not maintain a separate orch-hub repository registry.
+- Do not import `.cursor/orchestrator/orchestrator.py`; launch it as a subprocess.
+- Do not add web, network, or orch-hub imports into the orchestrator itself.
+- Do not make the service public on the internet.
+- Do not implement watchdogs or hang/log-silence detection.
+- Do not run more than one orchestrator at a time in the same target repo.
+- Do not hand-edit deployed protocol/orchestrator copies in target repos; canonical changes belong in ai-native-development.
+
+## Tech Stack
+
+- Language: Python.
+- First implementation: package plus CLI, using pytest tests and stdlib subprocess/path/json primitives where practical.
+- Future service: FastAPI and uvicorn.
+- Future UI: mobile-first web dashboard served by the hub.
+- Local deployment: launchd on macOS.
+- Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
+- Notifications: Bark is the preferred v1 push path; IM bots are later.
+- External command source: `aii-2` from ai-native-development.
+
+## Repository Structure
+
+The repository currently contains AI protocol/deployment infrastructure only. Product code has not been created yet.
+
+Planned first package structure:
+
+```text
+orch_hub/
+  __init__.py
+  cli.py
+  config.py
+  registry.py
+  readiness.py
+  models.py
+  subprocess_utils.py
+tests/
+  test_registry.py
+  test_readiness.py
+```
+
+Later service work may add:
+
+```text
+orch_hub/
+  api.py
+  task_store.py
+  runs.py
+  control_dir.py
+  logs.py
+  notifications.py
+  web/
+```
+
+## External Project Facts
+
+- ai-native-development root: `/Users/linqing/workplace/github.com/qinglin89/ai-native-development`.
+- Default registry source should be `aii-2 registry list --json`; fallback is `<ai-native-development>/.registry/repos.local.json`.
+- The canonical orchestrator lives at `ai-native-development/canonical/orchestrator/orchestrator.py` and is deployed into target repos at `.cursor/orchestrator/orchestrator.py`.
+- The inspected orchestrator is a local CLI scheduler. It runs a dev/review loop over one `.ai-tasks/` task, selects dev or review turns from task file status and session log, pauses for human input through `ask_human`, and reads stdin in manual mode today.

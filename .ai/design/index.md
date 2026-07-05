@@ -1,0 +1,81 @@
+---
+last-updated: 2026-07-05
+verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+---
+
+# Design Principles and Decisions
+
+## Core Principles
+
+- Local-first control plane: orch-hub coordinates local repos and local processes on the Mac.
+- Single registry source: managed repos come from ai-native-development registry data.
+- Orchestrator isolation: launch the deployed orchestrator as a subprocess; never import it.
+- Non-invasive orchestrator integration: future `--control-dir` adds a file channel while preserving stdin behavior when unset.
+- File-channel boundary: questions, answers, and stop requests cross through run-dir files, not through network code inside the orchestrator.
+- Mobile-first operation: remote workflows should be practical from iPhone/iPad.
+- Fail closed before launch: readiness checks should block unclear or unsafe runs.
+- Per-repo serialization: one active run per target repo to protect the working tree.
+- Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
+
+## Key Tradeoffs
+
+### Tradeoff: ai-native-development registry vs orch-hub registry
+
+- Chose: ai-native-development registry.
+- Reason: deployment tooling already tracks managed repos locally, and duplicate registries would drift.
+- Consequence: orch-hub startup depends on ai-native-development path or `aii-2` availability.
+
+### Tradeoff: subprocess boundary vs importing orchestrator code
+
+- Chose: subprocess boundary.
+- Reason: the orchestrator is a CLI state machine with blocking loops and `sys.exit` paths; importing would couple the hub to internals and risk process-level side effects.
+- Consequence: status is inferred through task files, logs, process state, and future control-dir files.
+
+### Tradeoff: control-dir files vs HTTP callbacks inside orchestrator
+
+- Chose: control-dir files.
+- Reason: keeps orchestrator local, testable, and free of web/network dependencies.
+- Consequence: hub must poll or watch files and handle stale files robustly.
+
+### Tradeoff: Tailscale plus bearer token vs full auth system
+
+- Chose: Tailscale plus simple bearer token for v1.
+- Reason: the service controls arbitrary local code execution, so public exposure is out of scope; tailnet membership is the main security boundary.
+- Consequence: multi-user permissions and public OAuth flows are deferred.
+
+### Tradeoff: readiness CLI before web service
+
+- Chose: CLI-first discovery/readiness slice.
+- Reason: it validates the most important external integration before adding API/UI surface.
+- Consequence: FastAPI and dashboard come after the core functions are reusable and tested.
+
+## Patterns in Use
+
+- Prefer small, reusable application functions behind both CLI and future API routes.
+- Represent repo, readiness, task, run, and escalation data with typed Python models.
+- Use `pathlib.Path` for filesystem paths.
+- Use subprocess wrappers for `aii-2`, `git`, and future orchestrator launches.
+- Return stable JSON from CLI commands that mirrors future endpoint responses.
+- Tests should use temporary directories and mocked subprocess calls, never real user repos.
+- Configuration should have explicit defaults and environment overrides.
+
+## Anti-Patterns to Avoid
+
+- Importing `.cursor/orchestrator/orchestrator.py`.
+- Maintaining a second repo registry.
+- Treating GitHub as registry truth.
+- Starting orchestrator subprocesses before readiness checks exist.
+- Making network calls from the orchestrator control channel.
+- Exposing the hub outside the tailnet.
+- Running multiple orchestrators against the same repo.
+- Adding watchdog or log-silence detection.
+- Hardcoding target repo paths in product code.
+- Using broad shell commands where structured subprocess arguments are practical.
+
+## Open Design Items
+
+- Data directory location for run dirs and audit history.
+- Exact FastAPI route schema.
+- Exact dashboard layout and frontend stack.
+- Bark server packaging on the Mac.
+- Whether run history is file-backed JSONL, SQLite, or another lightweight store.
