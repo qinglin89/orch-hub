@@ -78,3 +78,55 @@ def repos_payload(
 ) -> dict:
     """Build the top-level ``{"repos": [...]}`` payload for CLI/API output."""
     return {"repos": [repo_readiness_dict(repo, report) for repo, report in pairs]}
+
+
+@dataclass(frozen=True)
+class TaskSummary:
+    """One managed-repo task, as read from its ``.ai-tasks`` files.
+
+    ``status`` is the task-file frontmatter status
+    (``pending``/``in_progress``/``final_review``/``completed``/``blocked``, or a
+    parser sentinel). It is deliberately kept distinct from the future run
+    overlay labels (``active``/``waiting``) the run manager will attach once run
+    data exists. ``summary`` is the human text from the index row when present;
+    ``blockers`` holds the frontmatter blocker entries (empty unless blocked).
+    """
+
+    task_id: str
+    status: str
+    summary: str | None = None
+    blockers: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "status": self.status,
+            "summary": self.summary,
+            "blockers": list(self.blockers),
+        }
+
+
+@dataclass(frozen=True)
+class RepoTaskInventory:
+    """A managed repo paired with its active-task summaries.
+
+    ``index_present`` is False when the repo has no ``.ai-tasks/index.md``, which
+    callers surface distinctly from a present-but-empty index. ``tasks`` follows
+    the order of the index rows.
+    """
+
+    repo: ManagedRepo
+    index_present: bool
+    tasks: tuple[TaskSummary, ...]
+
+    def to_dict(self) -> dict:
+        return {
+            **self.repo.to_dict(),
+            "index_present": self.index_present,
+            "tasks": [task.to_dict() for task in self.tasks],
+        }
+
+
+def tasks_payload(inventories: Iterable[RepoTaskInventory]) -> dict:
+    """Build the top-level ``{"repos": [...]}`` task payload for CLI/API output."""
+    return {"repos": [inventory.to_dict() for inventory in inventories]}
