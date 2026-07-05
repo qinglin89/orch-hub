@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "69c257767dd2bebecfc26881f61ec4b459b9ee2db26869684b15fb85ae8c540c",
+  "canonical_payload_sha256": "d0c65d345a2753762315c916c01675f36ecfce356f7c741e21080f8a75e915cf",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
@@ -141,8 +141,8 @@
     },
     {
       "canonical_relative_path": "canonical/repo-root/ai-coding-init-v2.md",
-      "canonical_sha256": "72418e6c08c9531a393b0174f2aa05e486fc8bbe241f9a62ac72785c4b4fb1a4",
-      "canonical_size_bytes": 7547,
+      "canonical_sha256": "7c2dd19511666857a670b92bee53696bce88b1dcac16736a05d564b6757c5de3",
+      "canonical_size_bytes": 9815,
       "target_relative_path": "ai-coding-init-v2.md"
     },
     {
@@ -177,6 +177,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "a51a03f787268c6a36326dba446ab0ea8ef5e746",
+  "source_git_commit": "c3b4a1f7648b7b862b7bb3fa177d208388ee9582",
   "source_repo": "ai-native-deployment"
 }
