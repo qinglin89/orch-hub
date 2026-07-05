@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "da674175965da57594a6498ec8fc8feac19d3c13cf63a960901b5c831ac8139c",
+  "canonical_payload_sha256": "47d7c48ea2b3de0f92711a70577fd1f7bd7e6a17316fb1c5ec97ebdec945465d",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
@@ -87,8 +87,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "9042918cb4918de18e93621ab3f672b0be9bd964e82ad3ef729579592ed2cd35",
-      "canonical_size_bytes": 26175,
+      "canonical_sha256": "0a1bb33027b09c76e401097eeb21708008d9155c124a51f9b09ff5098733ee71",
+      "canonical_size_bytes": 26400,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
@@ -99,8 +99,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "308f626743355d2060bb59a58cc4f87a264252113f03ff4cb3b5e1ec4d47c311",
-      "canonical_size_bytes": 86037,
+      "canonical_sha256": "fd55f1ed43cb96d50e5598ca75498a17a863f708aa756161e84b7af3277d3765",
+      "canonical_size_bytes": 92440,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -117,8 +117,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "ac676dd0c5779b7177f6f31565febfa6ca69602ad2564b7f9959db2521871307",
-      "canonical_size_bytes": 60106,
+      "canonical_sha256": "9711207f1ce070f7c6b06a6cd3dae4adb694bf1e1127da016087dd24598e89c3",
+      "canonical_size_bytes": 66352,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
@@ -165,18 +165,18 @@
     },
     {
       "canonical_relative_path": "canonical/repo-root/ai-coding-tasks-v2.md",
-      "canonical_sha256": "7a3d46d52198ff8ae8860287d65fe5cc82c7ba022c78aa5b0d161217c22c4e6e",
-      "canonical_size_bytes": 4446,
+      "canonical_sha256": "2b4edd5d55e7a272069c465b069a3ecd7ded81e6f6a4de5a96e7ce7cb48fe6c2",
+      "canonical_size_bytes": 5211,
       "target_relative_path": "ai-coding-tasks-v2.md"
     },
     {
       "canonical_relative_path": "canonical/repo-root/ai-coding-v2.md",
-      "canonical_sha256": "fd1103c025ac37eb0b7bf5ad8117dc52e7ce02f2b814bd8066ea8ad0cd8a257a",
-      "canonical_size_bytes": 7559,
+      "canonical_sha256": "01d94cb73f97e192aecd828fcd00d906f64cd5366a821b7b3556ccf8c5403bef",
+      "canonical_size_bytes": 8420,
       "target_relative_path": "ai-coding-v2.md"
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "ca9321a77bcf3f13d32a82a5c7817298cfd26391",
+  "source_git_commit": "63341c8ff7dcd9f2c47b39bf59b29cc88dddd38b",
   "source_repo": "ai-native-deployment"
 }
