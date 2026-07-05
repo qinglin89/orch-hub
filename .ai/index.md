@@ -13,11 +13,11 @@ Load only what the current task needs.
 |---|---|---|
 | Overview | overview.md | what orch-hub is, users, scope, non-goals, tech stack |
 | Architecture | architecture.md | service shape, components, data flow, external dependencies, deployment |
-| Design | design/index.md | principles, tradeoffs, patterns, anti-patterns |
+| Design | design.md | principles, tradeoffs, patterns, anti-patterns |
 | Modules | modules.md | planned module ownership, responsibilities, dependencies, boundaries |
 | APIs | apis.md | CLI, future HTTP routes, internal interfaces, API conventions |
 | Features | features.md | capabilities, status, cross-module behavior chains |
-| Conventions | conventions/index.md | code style, naming, error/logging, git workflow, testing, dependencies |
+| Conventions | conventions.md | code style, naming, error/logging, git workflow, testing, dependencies |
 | Map | map.md | feature to module to API cross-reference; horizontal sync source for absorption |
 
 ## Routing Table
@@ -29,10 +29,10 @@ Load only what the current task needs.
 | Bug / debugging | map -> modules -> code |
 | Architecture change | architecture -> design -> modules |
 | Code review | map -> relevant docs -> code/tests |
-| Conventions question | conventions/index.md |
+| Conventions question | conventions.md |
 | Onboarding | overview -> architecture -> map |
 | Orchestrator integration | architecture -> apis -> modules -> features |
-| Dashboard/UI work | features -> architecture -> design/index.md -> modules |
+| Dashboard/UI work | features -> architecture -> design.md -> modules |
 
 ## Domain Vocabulary
 
