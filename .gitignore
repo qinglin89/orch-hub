@@ -10,3 +10,8 @@ __pycache__/
 *.py[cod]
 !/.ai-deploy-lock.json
 # END ai-native-deployment
+
+# orch-hub Python dev environment
+/.venv/
+/.pytest_cache/
+/*.egg-info/

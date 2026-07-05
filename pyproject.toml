@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orch-hub"
+version = "0.1.0"
+description = "Local control plane for AI coding orchestrators (discovery and readiness slice)."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+orch-hub = "orch_hub.cli:main"
+
+[tool.setuptools]
+packages = ["orch_hub"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Make the in-repo `orch_hub` package importable without an install step.
+pythonpath = ["."]
