@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "eb296a3317c96b9ac1e19746c7604ce5cf31694556edee75b417a53f00f57f1d",
+  "canonical_payload_sha256": "da674175965da57594a6498ec8fc8feac19d3c13cf63a960901b5c831ac8139c",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
@@ -87,8 +87,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "41e59f5e1439aa63dd1abc91b56733b3112efec54031dffc8d62a72154fea7a0",
-      "canonical_size_bytes": 25916,
+      "canonical_sha256": "9042918cb4918de18e93621ab3f672b0be9bd964e82ad3ef729579592ed2cd35",
+      "canonical_size_bytes": 26175,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
