@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "47d7c48ea2b3de0f92711a70577fd1f7bd7e6a17316fb1c5ec97ebdec945465d",
+  "canonical_payload_sha256": "56896ce3eb2f65931c97de5c8377b6c806d8735ee673ff070a0c1f0f54dea051",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
@@ -9,8 +9,8 @@
     },
     {
       "canonical_relative_path": "canonical/claude/hooks/stop-context-check.sh",
-      "canonical_sha256": "2256f50bfb14cfa0110785c60fa9adfbd884e243b10a6557cbe2dcb050c26b2e",
-      "canonical_size_bytes": 7143,
+      "canonical_sha256": "8bb179f2a85148c7d08a2790ff7672b4b108c647a87ca4d70a705608a5295ba1",
+      "canonical_size_bytes": 7323,
       "target_relative_path": ".claude/hooks/stop-context-check.sh"
     },
     {
@@ -45,8 +45,8 @@
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/stop-context-check.sh",
-      "canonical_sha256": "8ff3dc27897d1283e8749575da14827c89c4392b3c97f244ab1c6d0a4e80b199",
-      "canonical_size_bytes": 7990,
+      "canonical_sha256": "04fd48e4c38db5decff2a06af92e5d9fcd9366a817ce74c66d3ee75f0940ba7c",
+      "canonical_size_bytes": 8170,
       "target_relative_path": ".codex/hooks/stop-context-check.sh"
     },
     {
@@ -69,8 +69,8 @@
     },
     {
       "canonical_relative_path": "canonical/cursor/hooks/stop-context-check.sh",
-      "canonical_sha256": "89e373982a53e7f1f281cafcc8add5283fed6153a8a368aa961dac7d1f953d2b",
-      "canonical_size_bytes": 7731,
+      "canonical_sha256": "ecc0712ab2f36dcbe3b5023e82989a4c8c9c678d72cc7375ffd3033fe89e6a5f",
+      "canonical_size_bytes": 7911,
       "target_relative_path": ".cursor/hooks/stop-context-check.sh"
     },
     {
@@ -81,14 +81,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub.md",
-      "canonical_sha256": "54063662a559720cead91c12c85b59a6f712f75490ae7502e2fc55f95c70a5ee",
-      "canonical_size_bytes": 12471,
+      "canonical_sha256": "f6b0acc7ae982f88a6b042374113bab29cc2b0820c8a35128c17b958492d5551",
+      "canonical_size_bytes": 14403,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "0a1bb33027b09c76e401097eeb21708008d9155c124a51f9b09ff5098733ee71",
-      "canonical_size_bytes": 26400,
+      "canonical_sha256": "30048dee7cd376f66f8fd11db1ca34aebd9fe5be31902638ce4016a7ac4a03cf",
+      "canonical_size_bytes": 28338,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
@@ -99,8 +99,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "fd55f1ed43cb96d50e5598ca75498a17a863f708aa756161e84b7af3277d3765",
-      "canonical_size_bytes": 92440,
+      "canonical_sha256": "423c38571c00aafc56854505acbf1163052384de8c6a90dd2d4995bfb74192dc",
+      "canonical_size_bytes": 98852,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -117,8 +117,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "9711207f1ce070f7c6b06a6cd3dae4adb694bf1e1127da016087dd24598e89c3",
-      "canonical_size_bytes": 66352,
+      "canonical_sha256": "6d8ac8bb5f3a1733536b6f518dd83030050817bdf3000c99a609fd527690f5ce",
+      "canonical_size_bytes": 77906,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
