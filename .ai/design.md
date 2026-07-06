@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+last-updated: 2026-07-06
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # Design Principles and Decisions
@@ -43,19 +43,26 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 - Reason: the service controls arbitrary local code execution, so public exposure is out of scope; tailnet membership is the main security boundary.
 - Consequence: multi-user permissions and public OAuth flows are deferred.
 
-### Tradeoff: readiness CLI before web service
+### Tradeoff: shared core before dashboard
 
-- Chose: CLI-first discovery/readiness slice.
-- Reason: it validates the most important external integration before adding API/UI surface.
-- Consequence: FastAPI and dashboard come after the core functions are reusable and tested.
+- Chose: CLI/shared-core slices before dashboard, then a thin FastAPI
+  foundation over the same functions.
+- Reason: this validates external integration and task parsing before adding UI
+  complexity, while keeping HTTP behavior aligned with the tested CLI/core
+  payloads.
+- Consequence: the dashboard can consume stable repo and task APIs; run,
+  question, log, auth, and UI behavior remain separate slices.
 
 ## Patterns in Use
 
-- Prefer small, reusable application functions behind both CLI and future API routes.
+- Prefer small, reusable application functions behind both CLI and API routes.
 - Represent repo, readiness, task, run, and escalation data with typed Python models.
 - Use `pathlib.Path` for filesystem paths.
 - Use subprocess wrappers for `aii-2`, `git`, and future orchestrator launches.
-- Return stable JSON from CLI commands that mirrors future endpoint responses.
+- Return stable JSON from CLI commands and API endpoints from the same payload
+  helpers.
+- Keep FastAPI route handlers thin over core functions; do not duplicate
+  discovery, readiness, or task-store logic in HTTP handlers.
 - Tests should use temporary directories and mocked subprocess calls, never real user repos.
 - Configuration should have explicit defaults and environment overrides.
 
@@ -75,7 +82,7 @@ verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
 ## Open Design Items
 
 - Data directory location for run dirs and audit history.
-- Exact FastAPI route schema.
+- Exact route schema beyond the implemented health/repos/tasks API foundation.
 - Exact dashboard layout and frontend stack.
 - Bark server packaging on the Mac.
 - Whether run history is file-backed JSONL, SQLite, or another lightweight store.

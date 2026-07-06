@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-06
-verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # Project Overview
@@ -9,7 +9,12 @@ verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 
 orch-hub is intended to be a long-lived local control plane for AI coding orchestrators. It will run on the user's Mac and allow remote control from iPhone, iPad, or another machine over a private network. The hub coordinates existing per-repository orchestrator programs that drive dev/review loops over `.ai-tasks/`.
 
-The implemented slices are discovery/readiness and task inventory: read the ai-native-development local registry, list managed repos, report launch readiness, and parse each repo's `.ai-tasks/` index plus task frontmatter for dashboard/API use. Later slices add subprocess runs, human-question relay, logs, notifications, and a mobile dashboard.
+The implemented slices are discovery/readiness, task inventory, and the FastAPI
+HTTP foundation: read the ai-native-development local registry, list managed
+repos, report launch readiness, parse each repo's `.ai-tasks/` index plus task
+frontmatter, and expose those payloads through HTTP. Later slices add
+subprocess runs, human-question relay, logs, notifications, auth hardening, and
+a mobile dashboard.
 
 ## Users
 
@@ -44,7 +49,7 @@ The implemented slices are discovery/readiness and task inventory: read the ai-n
 
 - Language: Python.
 - First implementation: package plus CLI, using pytest tests and stdlib subprocess/path/json primitives where practical.
-- Future service: FastAPI and uvicorn.
+- HTTP service: FastAPI and uvicorn, with a localhost-default entry point.
 - Future UI: mobile-first web dashboard served by the hub.
 - Local deployment: launchd on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
@@ -58,6 +63,7 @@ The repository contains the first product package and tests:
 ```text
 orch_hub/
   __init__.py
+  api.py
   cli.py
   config.py
   models.py
@@ -66,6 +72,7 @@ orch_hub/
   subprocess_utils.py
   task_store.py
 tests/
+  test_api.py
   test_cli.py
   test_config.py
   test_registry.py
@@ -77,7 +84,6 @@ Later service work may add:
 
 ```text
 orch_hub/
-  api.py
   runs.py
   control_dir.py
   logs.py

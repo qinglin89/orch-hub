@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
+last-updated: 2026-07-06
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # Conventions
@@ -12,7 +12,7 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 - Use `pathlib.Path` for filesystem work.
 - Keep subprocess invocations argument-list based; avoid shell strings unless there is a specific reason.
 - Keep CLI output human-readable by default and stable JSON with `--json`.
-- Keep functions small enough to reuse from both CLI and future FastAPI routes.
+- Keep functions small enough to reuse from both CLI and FastAPI routes.
 
 ## Naming
 
@@ -33,7 +33,8 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ## Logging
 
 - CLI logs should stay quiet unless an error occurs.
-- Future service logs should include run id, repo name/path, task id, and event kind.
+- Service logs should include run id, repo name/path, task id, and event kind
+  once run/event logging exists.
 - Human answers should be audit logged with timestamp and responder identity when available.
 - Do not log secrets or bearer tokens.
 
@@ -63,7 +64,8 @@ verified-against: 03f15d281756cfbbb2aa37b66f91336c02e53b6a
 ## Dependencies
 
 - Keep the first slice dependency-light.
-- FastAPI/uvicorn can be added when the service API task starts.
+- FastAPI and uvicorn are core runtime dependencies for the HTTP foundation.
+- httpx is a dev dependency for FastAPI TestClient coverage.
 - Frontend dependencies should be justified by the dashboard implementation, not added during CLI-only work.
 
 ## Security

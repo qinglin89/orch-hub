@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-06
-verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # Modules
@@ -19,7 +19,7 @@ verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 | Run manager | `orch_hub/runs.py` | Future orchestrator subprocess lifecycle and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Future question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
-| API | `orch_hub/api.py` | Future FastAPI app and routes |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, health/repo/task routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
 | Web UI | `orch_hub/web/` | Future mobile-first dashboard assets |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
@@ -80,6 +80,18 @@ Responsibility: central wrapper for running commands with cwd, capture, timeout 
 Location: `orch_hub/task_store.py`
 
 Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`.
+
+### API
+
+Location: `orch_hub/api.py`
+
+Responsibility: expose the implemented HTTP foundation as a thin FastAPI
+adapter over shared core functions. `create_app(config=None)` builds an app
+with `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, and
+`GET /api/repos/{repo_id}/tasks`. Module-level `app` supports
+`uvicorn orch_hub.api:app`; `run(host="127.0.0.1", port=8765)` and the
+`orch-hub-api` console script serve locally by default. `RegistryError` returns
+HTTP 500 and unknown per-repo task lookups return HTTP 404.
 
 ### Run Manager
 

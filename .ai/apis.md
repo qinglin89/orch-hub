@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-06
-verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # APIs and Interfaces
@@ -37,24 +37,42 @@ verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 
 `readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture.
 
-## Future HTTP API
+## HTTP API
 
 ### `GET /api/health`
 
 - Purpose: service liveness and configuration sanity.
+- Shape: `{"status": "ok", "ai_native_path": "..."}`.
 
 ### `GET /api/repos`
 
-- Purpose: list managed repos with readiness and run badges.
+- Purpose: list managed repos with readiness.
 - Source: same functions as CLI `repos --json`.
+- Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`.
 
 ### `GET /api/repos/{repo_id}/tasks`
 
-- Purpose: list tasks for one repo, including task frontmatter status and hub run overlay.
+- Purpose: list tasks for one repo, where `repo_id` is the managed-repo name.
+- Shape: `tasks_payload([inventory])`, the same `{"repos": [...]}` envelope as
+  all-repo task inventory with a single repo entry.
 
 ### `GET /api/tasks`
 
-- Purpose: list tasks across repos, filterable by repo and state.
+- Purpose: list tasks across discovered repos.
+- Shape: `tasks_payload(list_tasks(repos))`, preserving `index_present`,
+  ordered tasks, frontmatter-authoritative status/blockers, and `missing` /
+  `unknown` sentinel statuses.
+
+Current HTTP behavior:
+
+- `create_app(config=None)` captures `Config.from_env()` by default and is testable with an explicit `Config`.
+- Module-level `app` is the `uvicorn orch_hub.api:app` target.
+- `run(host="127.0.0.1", port=8765)` and console script `orch-hub-api` serve
+  the app on localhost by default.
+- `RegistryError` returns HTTP 500 with `{"detail": ...}`.
+- Unknown `repo_id` on the per-repo task endpoint returns HTTP 404.
+
+## Future HTTP API
 
 ### `GET /api/runs`
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-06
-verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # Architecture
@@ -76,7 +76,12 @@ Future file-channel adapter for orchestrator questions and answers. It watches f
 
 ### API Service
 
-Future FastAPI service exposing repo, task, run, escalation, log, and health endpoints. The API should call the same registry/readiness/task/run functions used by the CLI.
+Implemented FastAPI service exposing health, repo readiness, and task inventory
+endpoints. The current route set is `GET /api/health`, `GET /api/repos`,
+`GET /api/tasks`, and `GET /api/repos/{repo_id}/tasks`; run, escalation, log,
+auth, and dashboard routes remain future work. The API calls the same
+registry/readiness/task functions used by the CLI and keeps route handlers thin
+over shared application services.
 
 ### Dashboard
 
@@ -103,7 +108,7 @@ Adapters: aii-2 command, registry file, git subprocess, orchestrator subprocess,
 Managed repos and ai-native-development
 ```
 
-Core application services should be independent from FastAPI so CLI and HTTP routes can reuse them.
+Core application services are independent from FastAPI so CLI and HTTP routes can reuse them.
 
 ## Data Flow
 
@@ -113,7 +118,17 @@ Core application services should be independent from FastAPI so CLI and HTTP rou
 2. Try `aii-2 registry list --json`.
 3. If command fails or is unavailable, read `<ai-native-development>/.registry/repos.local.json`.
 4. For each repo entry, run readiness checks.
-5. Return stable JSON for CLI output and future API responses.
+5. Return stable JSON for CLI and API responses.
+
+### HTTP Foundation
+
+1. `create_app(config=None)` captures a `Config` value once per FastAPI app.
+2. Module-level `app = create_app()` is the uvicorn target.
+3. `run(host="127.0.0.1", port=8765)` serves the app with uvicorn and binds to
+   localhost by default until the auth/private-network slice hardens exposure.
+4. `RegistryError` maps to HTTP 500; unknown repo ids on per-repo task lookup
+   map to HTTP 404. Ordinary readiness failures stay inside 200 payloads as
+   `ready: false` with failure reasons.
 
 ### Task Inventory
 
@@ -152,7 +167,8 @@ Core application services should be independent from FastAPI so CLI and HTTP rou
 - Managed target repos with deployed `.cursor/orchestrator/` payloads.
 - Git CLI for cleanliness checks.
 - Python virtual environment inside each target repo's `.cursor/orchestrator/.venv`.
-- Future: FastAPI, uvicorn, Bark, launchd, Tailscale.
+- FastAPI and uvicorn for the HTTP foundation.
+- Future: Bark, launchd, Tailscale.
 
 ## Deployment
 

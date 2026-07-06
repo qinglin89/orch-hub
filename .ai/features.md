@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-06
-verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
+verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 ---
 
 # Features
@@ -9,8 +9,9 @@ verified-against: 27df28d046cf78be92bae5793c43030f9e8500c7
 
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|
-| Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, models | CLI `repos`, CLI `repos --json`, future `GET /api/repos` |
-| Task inventory | implemented | task_store, models | future `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
+| Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos` |
+| Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
+| HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | Run lifecycle | planned | runs, subprocess_utils, control_dir | future `POST /api/runs`, `GET /api/runs` |
 | Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
 | Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
@@ -32,7 +33,8 @@ Description: Load managed repos from ai-native-development and report whether ea
 
 Modules: config, registry, readiness, models, subprocess_utils, cli.
 
-APIs: `python -m orch_hub.cli repos`, `python -m orch_hub.cli repos --json`; future `GET /api/repos`.
+APIs: `python -m orch_hub.cli repos`, `python -m orch_hub.cli repos --json`,
+`GET /api/repos`.
 
 Implemented behavior:
 
@@ -48,9 +50,9 @@ Status: implemented
 
 Description: Read `.ai-tasks/index.md` and task frontmatter in managed repos. Distinguish task-file statuses from hub run overlay statuses.
 
-Modules: task_store, models.
+Modules: task_store, api, models.
 
-APIs: future task list endpoints.
+APIs: `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`.
 
 Implemented behavior:
 
@@ -59,6 +61,33 @@ Implemented behavior:
 - Missing `.ai-tasks/index.md` is represented as `index_present=False` with no task rows, distinct from a present-but-empty index.
 - Missing listed task files use status `missing`; files with no parseable status use `unknown`.
 - `TaskSummary`, `RepoTaskInventory`, and `tasks_payload` provide reusable data shapes for future CLI/API adapters.
+
+### HTTP API Foundation
+
+Status: implemented
+
+Description: Expose current repo readiness and task inventory data through a
+resident FastAPI app without duplicating core logic.
+
+Modules: api, config, registry, readiness, task_store, models.
+
+APIs: `GET /api/health`, `GET /api/repos`, `GET /api/tasks`,
+`GET /api/repos/{repo_id}/tasks`; `python -m orch_hub.api`; `orch-hub-api`;
+`uvicorn orch_hub.api:app`.
+
+Implemented behavior:
+
+- `create_app(config=None)` builds a FastAPI app, capturing explicit config for
+  tests or `Config.from_env()` by default.
+- `GET /api/repos` returns the same shape as CLI `repos --json`, including
+  readiness failure reasons.
+- Task endpoints return the `tasks_payload` envelope, preserving
+  `index_present`, ordered tasks, frontmatter-authoritative status/blockers,
+  and task-store sentinel statuses.
+- Malformed registry data maps to HTTP 500; unknown repo ids on per-repo task
+  lookup map to HTTP 404.
+- `run()` and `orch-hub-api` bind to `127.0.0.1:8765` by default; private
+  exposure and bearer-token enforcement remain separate planned work.
 
 ### Run Lifecycle
 
