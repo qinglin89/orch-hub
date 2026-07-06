@@ -5,9 +5,10 @@ Mac and is meant to be driven remotely (iPhone/iPad or another machine) over a
 private network, coordinating the per-repository orchestrator programs that run
 dev/review loops over `.ai-tasks/`.
 
-This repository currently implements only the **first slice**: repo discovery
-and launch readiness. Everything else (runs, question relay, logs,
-notifications, dashboard) is planned and intentionally not built yet.
+This repository implements the core application slices — repo discovery, launch
+readiness, and task inventory — plus a first **HTTP service foundation** that
+exposes them. The remaining surfaces (orchestrator runs, question relay, logs,
+notifications, dashboard, auth) are planned and intentionally not built yet.
 
 ## What this slice does
 
@@ -83,6 +84,38 @@ JSON shape:
 `readiness.checks` lists only the **failed** checks (the reasons a repo is not
 ready); it is empty when `ready` is `true`.
 
+## HTTP API
+
+A FastAPI app (`orch_hub.api`) exposes the same discovery, readiness, and
+task-inventory functions over HTTP. Handlers are thin adapters over the core
+functions, so the JSON matches the CLI shapes.
+
+```bash
+# Serve on localhost (default 127.0.0.1:8765)
+python -m orch_hub.api
+
+# or via the installed console script
+orch-hub-api
+
+# or with uvicorn directly, e.g. to change host/port
+uvicorn orch_hub.api:app --host 127.0.0.1 --port 8765
+```
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/health` | `{"status": "ok", "ai_native_path": "..."}` |
+| `GET /api/repos` | the same object as `repos --json` (repos with readiness) |
+| `GET /api/tasks` | task inventory across all repos |
+| `GET /api/repos/{repo_id}/tasks` | task inventory for one repo (`repo_id` is the repo name) |
+
+`GET /api/repos` and the task endpoints reuse the CLI's `repos_payload` /
+`tasks_payload` shapes unchanged; task responses preserve `index_present` and
+the `missing`/`unknown` sentinel statuses. A malformed registry returns HTTP
+500; an unknown `repo_id` returns HTTP 404.
+
+Binding defaults to localhost only; private-network exposure and bearer-token
+auth are a separate planned slice.
+
 ## Development
 
 ```bash
@@ -96,7 +129,6 @@ never touch real repos or the real ai-native-development registry.
 
 ## Not implemented yet (by design)
 
-- FastAPI service and HTTP endpoints.
 - Web/mobile dashboard.
 - Orchestrator subprocess runs and `--control-dir` question/answer relay.
 - Log streaming, Bark notifications, Tailscale/bearer-token auth, launchd

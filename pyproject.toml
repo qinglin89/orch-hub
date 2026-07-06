@@ -8,13 +8,17 @@ version = "0.1.0"
 description = "Local control plane for AI coding orchestrators (discovery and readiness slice)."
 readme = "README.md"
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "fastapi>=0.100",
+    "uvicorn>=0.23",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=7"]
+dev = ["pytest>=7", "httpx>=0.24"]
 
 [project.scripts]
 orch-hub = "orch_hub.cli:main"
+orch-hub-api = "orch_hub.api:run"
 
 [tool.setuptools]
 packages = ["orch_hub"]
