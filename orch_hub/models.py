@@ -130,3 +130,49 @@ class RepoTaskInventory:
 def tasks_payload(inventories: Iterable[RepoTaskInventory]) -> dict:
     """Build the top-level ``{"repos": [...]}`` task payload for CLI/API output."""
     return {"repos": [inventory.to_dict() for inventory in inventories]}
+
+
+@dataclass(frozen=True)
+class Question:
+    """One orchestrator human-input request read from a run control dir.
+
+    ``seq`` comes from the question filename, which is authoritative over any
+    ``seq`` field inside the payload. ``banner`` is the audit text; ``message``
+    is the display alias (identical to ``banner`` in v1). Payload fields are
+    ``None`` when absent or not strings; ``error`` is set when the question file
+    itself cannot be read as a JSON object.
+
+    ``answered`` is True only when a same-seq answer file exists *and* satisfies
+    the orchestrator's validity rule (a JSON object with a non-empty string
+    ``answer``). A present-but-malformed answer file keeps the question pending
+    — the orchestrator re-reads it each tick, never consumes it — and is
+    described by ``answer_error`` so callers can repair it by rewriting.
+    """
+
+    seq: int
+    path: Path
+    ts: str | None = None
+    kind: str | None = None
+    banner: str | None = None
+    message: str | None = None
+    error: str | None = None
+    answered: bool = False
+    answer_error: str | None = None
+
+    @property
+    def pending(self) -> bool:
+        return not self.answered
+
+    def to_dict(self) -> dict:
+        # ``path`` is deliberately internal: the UI gets run-level context from
+        # the future run manager, not filesystem locations.
+        return {
+            "seq": self.seq,
+            "ts": self.ts,
+            "kind": self.kind,
+            "banner": self.banner,
+            "message": self.message,
+            "error": self.error,
+            "answered": self.answered,
+            "answer_error": self.answer_error,
+        }
