@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- orch-hub launchd user agent template.
+
+       Replace every REPLACE-... placeholder with an absolute path or value
+       (launchd does not expand ~), then install per docs/launchd.md.
+       This file embeds ORCH_HUB_TOKEN: keep it chmod 600. -->
+  <key>Label</key>
+  <string>com.qinglin89.orch-hub</string>
+
+  <!-- Console script inside the venv where orch-hub is installed. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>REPLACE-ORCH-HUB-CHECKOUT/.venv/bin/orch-hub-api</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Required. With it unset the service fails closed: every protected
+         route answers 503 and only GET /api/health serves.
+         Generate one: openssl rand -hex 32 -->
+    <key>ORCH_HUB_TOKEN</key>
+    <string>REPLACE-BEARER-TOKEN</string>
+
+    <!-- Bind address/port. Keep 127.0.0.1 behind `tailscale serve`, or set
+         the Mac's Tailscale IP (100.x.y.z) for a direct tailnet bind.
+         Never a LAN or public interface. -->
+    <key>ORCH_HUB_HOST</key>
+    <string>127.0.0.1</string>
+    <key>ORCH_HUB_PORT</key>
+    <string>8765</string>
+
+    <!-- ai-native-development checkout that owns the managed-repo registry. -->
+    <key>ORCH_HUB_AI_NATIVE_DEPLOYMENT</key>
+    <string>REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT</string>
+
+    <!-- Reserved for future run dirs and audit history; unused today. -->
+    <key>ORCH_HUB_DATA_DIR</key>
+    <string>REPLACE-HOME/.orch-hub</string>
+
+    <!-- launchd agents get a minimal PATH. Readiness checks invoke `git`,
+         and aii-2 may need Homebrew-installed tooling. -->
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <!-- Start at login and restart on exit. `launchctl bootout` is the stop;
+       a plain kill only makes launchd respawn the service. -->
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <!-- launchd creates these files but not their directory:
+       mkdir -p ~/Library/Logs/orch-hub before bootstrapping.
+       uvicorn sends access logs to stdout, lifecycle/errors to stderr. -->
+  <key>StandardOutPath</key>
+  <string>REPLACE-HOME/Library/Logs/orch-hub/orch-hub.log</string>
+  <key>StandardErrorPath</key>
+  <string>REPLACE-HOME/Library/Logs/orch-hub/orch-hub.err.log</string>
+</dict>
+</plist>

@@ -52,9 +52,13 @@ A repo is ready only when all checks pass.
 |---|---|---|
 | ai-native-development path | `/Users/linqing/workplace/github.com/qinglin89/ai-native-development` | `ORCH_HUB_AI_NATIVE_DEPLOYMENT` |
 | HTTP bearer token | unset (protected routes answer 503) | `ORCH_HUB_TOKEN` |
+| HTTP bind address | `127.0.0.1` | `ORCH_HUB_HOST` |
+| HTTP port | `8765` | `ORCH_HUB_PORT` |
+| Data directory (reserved for future run dirs/audit; unused today) | `~/.orch-hub` | `ORCH_HUB_DATA_DIR` |
 
-An empty or whitespace-only `ORCH_HUB_TOKEN` counts as unset; surrounding
-whitespace is stripped.
+An empty or whitespace-only value counts as unset for every variable;
+surrounding whitespace is stripped. A malformed `ORCH_HUB_PORT` fails startup
+instead of silently binding the default port.
 
 ## CLI usage
 
@@ -102,7 +106,10 @@ python -m orch_hub.api
 # or via the installed console script
 orch-hub-api
 
-# or with uvicorn directly, e.g. to change host/port
+# host/port come from the environment (ORCH_HUB_HOST / ORCH_HUB_PORT)
+ORCH_HUB_PORT=9000 orch-hub-api
+
+# or with uvicorn directly
 uvicorn orch_hub.api:app --host 127.0.0.1 --port 8765
 ```
 
@@ -150,11 +157,20 @@ code execution surface:
 - Reachable only over a private network: localhost, or a Tailscale tailnet.
   Never expose it to the public internet.
 - Binding defaults to `127.0.0.1:8765`. For tailnet access, either bind the
-  Tailscale interface explicitly
-  (`uvicorn orch_hub.api:app --host <tailscale-ip> --port 8765`) or keep the
-  localhost bind behind `tailscale serve`.
+  Tailscale interface explicitly (`ORCH_HUB_HOST=<tailscale-ip> orch-hub-api`)
+  or keep the localhost bind behind `tailscale serve`.
 - The bearer token is required even on the tailnet: tailnet membership is the
   primary boundary, the token is defense in depth.
+
+## Run as a launchd service
+
+To keep the hub resident on the Mac (start at login, restart on exit), install
+it as a launchd user agent. A template plist is provided at
+[`deploy/launchd/com.qinglin89.orch-hub.plist`](deploy/launchd/com.qinglin89.orch-hub.plist);
+install, start/stop, and log inspection are documented in
+[docs/launchd.md](docs/launchd.md). The plist must set `ORCH_HUB_TOKEN` —
+with it unset the service fails closed (503 on every protected route; only
+`GET /api/health` serves).
 
 ## Development
 
@@ -171,7 +187,7 @@ never touch real repos or the real ai-native-development registry.
 
 - Web/mobile dashboard.
 - Orchestrator subprocess runs and `--control-dir` question/answer relay.
-- Log streaming, Bark notifications, launchd packaging.
+- Log streaming, Bark notifications.
 
 The core functions (`discover_repos`, `check_readiness`) are written to be
 reused unchanged by those future surfaces.
