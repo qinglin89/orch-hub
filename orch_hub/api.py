@@ -15,20 +15,36 @@ same object as ``python -m orch_hub.cli repos --json``; the task endpoints
 return the ``tasks_payload`` envelope, preserving ``index_present`` and the
 task-store sentinel statuses.
 
-Auth and non-localhost binding are intentionally out of scope here; they belong
-to the bearer-auth task. :func:`run` binds to localhost by default.
+Every route except the minimal ``GET /api/health`` liveness probe requires a
+bearer token (``Config.token``, from ``ORCH_HUB_TOKEN``). Enforcement is a
+default-deny middleware rather than per-route dependencies so future surfaces
+(runs, logs, dashboard) are protected the moment they are mounted, not when
+someone remembers to annotate them. With no token configured, protected routes
+fail closed with 503. :func:`run` still binds to localhost by default; the
+private-network deployment assumptions are documented in the README.
 """
 
 from __future__ import annotations
 
+import secrets
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from .config import Config
+from .config import TOKEN_ENV, Config
 from .models import repos_payload, tasks_payload
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
 from .task_store import list_repo_tasks, list_tasks
+
+PUBLIC_PATHS = frozenset({"/api/health"})
+"""Paths served without authentication.
+
+Only the minimal liveness probe: monitors and launchd health checks must not
+need secret material, and a 401 from any other path already reveals liveness
+anyway. Everything else — including docs/OpenAPI and future dashboard routes —
+requires the token.
+"""
 
 
 def create_app(config: Config | None = None) -> FastAPI:
@@ -52,10 +68,49 @@ def create_app(config: Config | None = None) -> FastAPI:
         # client error; surface it as 500 with the concise reason.
         return JSONResponse(status_code=500, content={"detail": str(exc)})
 
+    @app.middleware("http")
+    async def require_bearer_token(request: Request, call_next):
+        """Default-deny bearer auth for every path outside ``PUBLIC_PATHS``.
+
+        Runs before routing, so unknown paths get 401 (not 404) when
+        unauthenticated. Error bodies are static strings: the presented token
+        is never echoed, logged, or compared non-constant-time.
+        """
+        if request.url.path in PUBLIC_PATHS:
+            return await call_next(request)
+        if resolved.token is None:
+            # Fail closed: an unconfigured token disables serving, it never
+            # disables auth.
+            return JSONResponse(
+                status_code=503,
+                content={"detail": f"bearer token not configured; set {TOKEN_ENV}"},
+            )
+        scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
+        if scheme.lower() != "bearer" or not credentials.strip():
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "missing bearer token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if not secrets.compare_digest(
+            credentials.strip().encode(), resolved.token.encode()
+        ):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "invalid bearer token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return await call_next(request)
+
     @app.get("/api/health")
     def health() -> dict:
-        """Liveness plus configuration sanity (which deployment the hub targets)."""
-        return {"status": "ok", "ai_native_path": str(resolved.ai_native_path)}
+        """Minimal public liveness probe.
+
+        Deliberately free of configuration detail (it used to report
+        ``ai_native_path``): this is the one unauthenticated route, so it
+        must not disclose anything about the deployment.
+        """
+        return {"status": "ok"}
 
     @app.get("/api/repos")
     def get_repos() -> dict:
@@ -94,9 +149,9 @@ app = create_app()
 def run(host: str = "127.0.0.1", port: int = 8765) -> None:
     """Serve the API with uvicorn, bound to localhost by default.
 
-    The localhost default is deliberate: private-network binding and bearer
-    auth are the bearer-auth task's concern, so this foundation slice does not
-    expose the hub beyond the loopback interface.
+    Binding beyond loopback is only meant for private, Tailscale-reachable
+    interfaces, with ``ORCH_HUB_TOKEN`` exported first — without it every
+    protected route answers 503. Never expose the hub publicly.
     """
     import uvicorn
 

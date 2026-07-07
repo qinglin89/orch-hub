@@ -7,8 +7,9 @@ dev/review loops over `.ai-tasks/`.
 
 This repository implements the core application slices — repo discovery, launch
 readiness, and task inventory — plus a first **HTTP service foundation** that
-exposes them. The remaining surfaces (orchestrator runs, question relay, logs,
-notifications, dashboard, auth) are planned and intentionally not built yet.
+exposes them behind **bearer-token auth**. The remaining surfaces (orchestrator
+runs, question relay, logs, notifications, dashboard) are planned and
+intentionally not built yet.
 
 ## What this slice does
 
@@ -50,6 +51,10 @@ A repo is ready only when all checks pass.
 | Setting | Default | Override |
 |---|---|---|
 | ai-native-development path | `/Users/linqing/workplace/github.com/qinglin89/ai-native-development` | `ORCH_HUB_AI_NATIVE_DEPLOYMENT` |
+| HTTP bearer token | unset (protected routes answer 503) | `ORCH_HUB_TOKEN` |
+
+An empty or whitespace-only `ORCH_HUB_TOKEN` counts as unset; surrounding
+whitespace is stripped.
 
 ## CLI usage
 
@@ -103,7 +108,7 @@ uvicorn orch_hub.api:app --host 127.0.0.1 --port 8765
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/health` | `{"status": "ok", "ai_native_path": "..."}` |
+| `GET /api/health` | `{"status": "ok"}` — public, minimal liveness probe |
 | `GET /api/repos` | the same object as `repos --json` (repos with readiness) |
 | `GET /api/tasks` | task inventory across all repos |
 | `GET /api/repos/{repo_id}/tasks` | task inventory for one repo (`repo_id` is the repo name) |
@@ -113,8 +118,43 @@ uvicorn orch_hub.api:app --host 127.0.0.1 --port 8765
 the `missing`/`unknown` sentinel statuses. A malformed registry returns HTTP
 500; an unknown `repo_id` returns HTTP 404.
 
-Binding defaults to localhost only; private-network exposure and bearer-token
-auth are a separate planned slice.
+### Authentication
+
+Every route except `GET /api/health` requires a bearer token, sourced from the
+`ORCH_HUB_TOKEN` environment variable at service start:
+
+```bash
+export ORCH_HUB_TOKEN="$(openssl rand -hex 32)"
+orch-hub-api
+
+curl -H "Authorization: Bearer $ORCH_HUB_TOKEN" http://127.0.0.1:8765/api/repos
+```
+
+- There is no unauthenticated mode. If no token is configured, every protected
+  route fails closed with HTTP 503 (`bearer token not configured`); only the
+  health probe stays reachable.
+- Requests with a missing or invalid token get HTTP 401 with a
+  `WWW-Authenticate: Bearer` header. Token comparison is constant-time, and
+  responses/logs never contain the presented token.
+- Enforcement is a default-deny middleware: any path outside the public health
+  probe — including OpenAPI docs and future run/log/dashboard routes — is
+  protected the moment it exists.
+- `GET /api/health` is deliberately public and minimal (`{"status": "ok"}`) so
+  liveness probes need no secret; it no longer reports configuration details.
+
+### Deployment assumptions (private network only)
+
+orch-hub controls local code execution, so treat the HTTP service as a remote
+code execution surface:
+
+- Reachable only over a private network: localhost, or a Tailscale tailnet.
+  Never expose it to the public internet.
+- Binding defaults to `127.0.0.1:8765`. For tailnet access, either bind the
+  Tailscale interface explicitly
+  (`uvicorn orch_hub.api:app --host <tailscale-ip> --port 8765`) or keep the
+  localhost bind behind `tailscale serve`.
+- The bearer token is required even on the tailnet: tailnet membership is the
+  primary boundary, the token is defense in depth.
 
 ## Development
 
@@ -131,8 +171,7 @@ never touch real repos or the real ai-native-development registry.
 
 - Web/mobile dashboard.
 - Orchestrator subprocess runs and `--control-dir` question/answer relay.
-- Log streaming, Bark notifications, Tailscale/bearer-token auth, launchd
-  packaging.
+- Log streaming, Bark notifications, launchd packaging.
 
 The core functions (`discover_repos`, `check_readiness`) are written to be
 reused unchanged by those future surfaces.

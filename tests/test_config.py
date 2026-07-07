@@ -8,7 +8,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from orch_hub.config import AI_NATIVE_PATH_ENV, DEFAULT_AI_NATIVE_PATH, Config
+from orch_hub.config import (
+    AI_NATIVE_PATH_ENV,
+    DEFAULT_AI_NATIVE_PATH,
+    TOKEN_ENV,
+    Config,
+)
 
 
 def test_default_path_when_env_absent():
@@ -31,3 +36,23 @@ def test_derived_paths():
     cfg = Config(ai_native_path=Path("/root/ai-native"))
     assert cfg.aii2_bin == Path("/root/ai-native/aii-2")
     assert cfg.registry_file == Path("/root/ai-native/.registry/repos.local.json")
+
+
+def test_token_defaults_to_none():
+    assert Config.from_env({}).token is None
+    assert Config(ai_native_path=Path("/root/ai-native")).token is None
+
+
+def test_token_from_env():
+    cfg = Config.from_env({TOKEN_ENV: "s3cret-token"})
+    assert cfg.token == "s3cret-token"
+
+
+def test_token_strips_surrounding_whitespace():
+    cfg = Config.from_env({TOKEN_ENV: " s3cret-token\n"})
+    assert cfg.token == "s3cret-token"
+
+
+def test_token_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({TOKEN_ENV: ""}).token is None
+    assert Config.from_env({TOKEN_ENV: "   "}).token is None

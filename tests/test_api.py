@@ -23,7 +23,9 @@ from orch_hub.models import (
 from orch_hub.registry import RegistryError
 from orch_hub.task_store import STATUS_MISSING
 
-FAKE_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"))
+TOKEN = "test-token"
+FAKE_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"), token=TOKEN)
+NO_TOKEN_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"))
 
 
 def make_repo(name: str = "r") -> ManagedRepo:
@@ -34,17 +36,19 @@ def make_repo(name: str = "r") -> ManagedRepo:
     )
 
 
-def build_client(config: Config | None = None) -> TestClient:
-    return TestClient(api.create_app(config or FAKE_CONFIG))
+def build_client(config: Config | None = None, *, authed: bool = True) -> TestClient:
+    """Client against a fresh app; sends the valid bearer token by default."""
+    client = TestClient(api.create_app(config or FAKE_CONFIG))
+    if authed:
+        client.headers["Authorization"] = f"Bearer {TOKEN}"
+    return client
 
 
-def test_health_reports_ok_and_config():
-    resp = build_client().get("/api/health")
+def test_health_is_public_and_minimal():
+    # Liveness must work with no credentials and must not leak config.
+    resp = build_client(authed=False).get("/api/health")
     assert resp.status_code == 200
-    assert resp.json() == {
-        "status": "ok",
-        "ai_native_path": "/fake/ai-native-development",
-    }
+    assert resp.json() == {"status": "ok"}
 
 
 def test_repos_ready_matches_cli_shape(monkeypatch):
@@ -220,3 +224,94 @@ def test_module_level_app_is_fastapi():
     from fastapi import FastAPI
 
     assert isinstance(api.app, FastAPI)
+
+
+# --- bearer-token auth -------------------------------------------------------
+
+
+def routes_must_not_run(config):
+    raise AssertionError("protected route ran despite failed auth")
+
+
+def test_missing_token_returns_401_before_routing(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", routes_must_not_run)
+    resp = build_client(authed=False).get("/api/repos")
+    assert resp.status_code == 401
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+    assert resp.json() == {"detail": "missing bearer token"}
+
+
+def test_invalid_token_returns_401(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", routes_must_not_run)
+    resp = build_client(authed=False).get(
+        "/api/repos", headers={"Authorization": "Bearer wrong-token"}
+    )
+    assert resp.status_code == 401
+    assert resp.headers["WWW-Authenticate"] == "Bearer"
+    assert resp.json() == {"detail": "invalid bearer token"}
+
+
+def test_auth_errors_never_echo_the_presented_token(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", routes_must_not_run)
+    resp = build_client(authed=False).get(
+        "/api/repos", headers={"Authorization": "Bearer super-secret-guess"}
+    )
+    assert "super-secret-guess" not in resp.text
+
+
+def test_header_without_bearer_scheme_returns_401(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", routes_must_not_run)
+    resp = build_client(authed=False).get(
+        "/api/repos", headers={"Authorization": TOKEN}
+    )
+    assert resp.status_code == 401
+    assert resp.json() == {"detail": "missing bearer token"}
+
+
+def test_bearer_scheme_is_case_insensitive(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", lambda config: [])
+    resp = build_client(authed=False).get(
+        "/api/repos", headers={"Authorization": f"bearer {TOKEN}"}
+    )
+    assert resp.status_code == 200
+
+
+def test_valid_token_allows_all_api_routes(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", lambda config: [])
+    monkeypatch.setattr(api, "list_tasks", lambda repos: [])
+    client = build_client()
+    assert client.get("/api/repos").status_code == 200
+    assert client.get("/api/tasks").status_code == 200
+
+
+def test_unconfigured_token_fails_closed_with_503(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", routes_must_not_run)
+    client = build_client(NO_TOKEN_CONFIG, authed=False)
+    # Even presenting a token cannot help: serving is disabled, not auth.
+    resp = client.get("/api/repos", headers={"Authorization": f"Bearer {TOKEN}"})
+    assert resp.status_code == 503
+    assert "ORCH_HUB_TOKEN" in resp.json()["detail"]
+    # The minimal liveness probe stays reachable.
+    assert client.get("/api/health").status_code == 200
+
+
+def test_empty_bearer_credentials_rejected_when_unconfigured_token():
+    # An unset token must never make `Authorization: Bearer ` (empty) valid.
+    resp = build_client(NO_TOKEN_CONFIG, authed=False).get(
+        "/api/repos", headers={"Authorization": "Bearer "}
+    )
+    assert resp.status_code == 503
+
+
+def test_unknown_paths_are_denied_by_default(monkeypatch):
+    # Default-deny covers routes that do not exist yet (future dashboard/runs):
+    # the middleware answers before routing, so this is 401, not 404.
+    resp = build_client(authed=False).get("/future/dashboard")
+    assert resp.status_code == 401
+    # With credentials the same path falls through to normal routing.
+    assert build_client().get("/future/dashboard").status_code == 404
+
+
+def test_openapi_docs_require_auth():
+    assert build_client(authed=False).get("/openapi.json").status_code == 401
+    assert build_client().get("/openapi.json").status_code == 200
