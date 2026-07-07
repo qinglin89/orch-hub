@@ -12,11 +12,45 @@ DEFAULT_AI_NATIVE_PATH = Path(
 )
 """Default ai-native-development checkout that owns the managed-repo registry."""
 
+DEFAULT_HOST = "127.0.0.1"
+"""Default HTTP bind address: loopback only; see the deployment docs."""
+
+DEFAULT_PORT = 8765
+"""Default HTTP port."""
+
+DEFAULT_DATA_DIR = Path.home() / ".orch-hub"
+"""Default data directory, reserved for future run dirs and audit history."""
+
 AI_NATIVE_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
 """Environment variable overriding the ai-native-development path."""
 
 TOKEN_ENV = "ORCH_HUB_TOKEN"
 """Environment variable holding the v1 bearer token for the HTTP service."""
+
+HOST_ENV = "ORCH_HUB_HOST"
+"""Environment variable overriding the HTTP bind address."""
+
+PORT_ENV = "ORCH_HUB_PORT"
+"""Environment variable overriding the HTTP port."""
+
+DATA_DIR_ENV = "ORCH_HUB_DATA_DIR"
+"""Environment variable overriding the data directory."""
+
+
+def _parse_port(raw: str | None) -> int:
+    """Parse ``PORT_ENV``: unset/blank means the default; malformed is an
+    explicit error rather than a silent fallback, so a typo in the service
+    environment surfaces at startup instead of binding the wrong port."""
+    value = (raw or "").strip()
+    if not value:
+        return DEFAULT_PORT
+    try:
+        port = int(value)
+    except ValueError:
+        raise ValueError(f"{PORT_ENV} must be an integer, got {value!r}") from None
+    if not 1 <= port <= 65535:
+        raise ValueError(f"{PORT_ENV} must be in 1-65535, got {port}")
+    return port
 
 
 @dataclass(frozen=True)
@@ -31,20 +65,47 @@ class Config:
     than serving unauthenticated. There is no value that disables auth.
     """
 
+    host: str = DEFAULT_HOST
+    """HTTP bind address.
+
+    Loopback by default; any non-loopback bind is only meant for private,
+    Tailscale-reachable interfaces — never a public one.
+    """
+
+    port: int = DEFAULT_PORT
+    """HTTP port."""
+
+    data_dir: Path = DEFAULT_DATA_DIR
+    """Directory reserved for future run dirs and audit history.
+
+    Nothing writes here yet: the setting exists so service deployments
+    (launchd) pin a location up front. The default may still change while the
+    directory is unconsumed (open design item).
+    """
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
 
-        An empty or whitespace-only token counts as unset, so a stray
-        ``export ORCH_HUB_TOKEN=""`` cannot make the empty string a valid
-        credential; surrounding whitespace is stripped for the same reason.
+        An empty or whitespace-only value counts as unset for every variable,
+        so a stray ``export ORCH_HUB_TOKEN=""`` cannot make the empty string a
+        valid credential; surrounding whitespace is stripped for the same
+        reason. A malformed ``ORCH_HUB_PORT`` raises instead of silently
+        falling back to the default port.
         """
         env = os.environ if environ is None else environ
         raw = env.get(AI_NATIVE_PATH_ENV)
         path = Path(raw).expanduser() if raw else DEFAULT_AI_NATIVE_PATH
         raw_token = env.get(TOKEN_ENV)
         token = raw_token.strip() if raw_token else None
-        return cls(ai_native_path=path, token=token or None)
+        raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()
+        return cls(
+            ai_native_path=path,
+            token=token or None,
+            host=(env.get(HOST_ENV) or "").strip() or DEFAULT_HOST,
+            port=_parse_port(env.get(PORT_ENV)),
+            data_dir=Path(raw_data_dir).expanduser() if raw_data_dir else DEFAULT_DATA_DIR,
+        )
 
     @property
     def aii2_bin(self) -> Path:

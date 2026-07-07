@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from orch_hub import api
-from orch_hub.config import Config
+from orch_hub.config import HOST_ENV, PORT_ENV, Config
 from orch_hub.models import (
     ManagedRepo,
     ReadinessCheck,
@@ -315,3 +315,27 @@ def test_unknown_paths_are_denied_by_default(monkeypatch):
 def test_openapi_docs_require_auth():
     assert build_client(authed=False).get("/openapi.json").status_code == 401
     assert build_client().get("/openapi.json").status_code == 200
+
+
+def test_run_binds_env_configured_host_and_port(monkeypatch):
+    # The console script calls run() with no arguments, so the launchd plist
+    # must be able to steer the bind through the environment alone.
+    captured = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda app, host, port: captured.update(host=host, port=port)
+    )
+    monkeypatch.setenv(HOST_ENV, "100.64.0.7")
+    monkeypatch.setenv(PORT_ENV, "9000")
+    api.run()
+    assert captured == {"host": "100.64.0.7", "port": 9000}
+
+
+def test_run_explicit_args_override_env(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(
+        "uvicorn.run", lambda app, host, port: captured.update(host=host, port=port)
+    )
+    monkeypatch.setenv(HOST_ENV, "100.64.0.7")
+    monkeypatch.setenv(PORT_ENV, "9000")
+    api.run(host="127.0.0.1", port=8123)
+    assert captured == {"host": "127.0.0.1", "port": 8123}

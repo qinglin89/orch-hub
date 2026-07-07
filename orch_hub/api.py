@@ -146,16 +146,26 @@ app = create_app()
 """Module-level app for ``uvicorn orch_hub.api:app`` and default serving."""
 
 
-def run(host: str = "127.0.0.1", port: int = 8765) -> None:
+def run(host: str | None = None, port: int | None = None) -> None:
     """Serve the API with uvicorn, bound to localhost by default.
 
-    Binding beyond loopback is only meant for private, Tailscale-reachable
-    interfaces, with ``ORCH_HUB_TOKEN`` exported first — without it every
-    protected route answers 503. Never expose the hub publicly.
+    ``host``/``port`` fall back to the environment configuration
+    (``ORCH_HUB_HOST`` / ``ORCH_HUB_PORT``, default ``127.0.0.1:8765``), so
+    service deployments — the launchd agent in particular — configure the bind
+    through environment variables alone; the console script passes no
+    arguments. Binding beyond loopback is only meant for private,
+    Tailscale-reachable interfaces, with ``ORCH_HUB_TOKEN`` exported first —
+    without it every protected route answers 503. Never expose the hub
+    publicly.
     """
     import uvicorn
 
-    uvicorn.run(app, host=host, port=port)
+    config = Config.from_env()
+    uvicorn.run(
+        app,
+        host=config.host if host is None else host,
+        port=config.port if port is None else port,
+    )
 
 
 if __name__ == "__main__":
