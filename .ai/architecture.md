@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-07
-verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # Architecture
@@ -87,6 +87,17 @@ configured; if no token is configured, protected routes fail closed with HTTP
 503. The API calls the same registry/readiness/task functions used by the CLI
 and keeps route handlers thin over shared application services.
 
+### Launchd Service Packaging
+
+Implemented macOS launchd user-agent packaging lives in
+`deploy/launchd/com.qinglin89.orch-hub.plist`, with operator docs in
+`docs/launchd.md`. The plist runs the installed `orch-hub-api` console script,
+sets `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`, `ORCH_HUB_PORT`,
+`ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_DATA_DIR`, and an explicit `PATH`,
+uses `RunAtLoad` plus `KeepAlive`, and logs to `~/Library/Logs/orch-hub/`.
+The token is embedded in the user-agent plist, so installs should keep it
+`chmod 600`.
+
 ### Dashboard
 
 Future mobile-first web UI. Main views:
@@ -129,8 +140,10 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 1. `create_app(config=None)` captures a `Config` value once per FastAPI app,
    including `ORCH_HUB_TOKEN` from `Config.token`.
 2. Module-level `app = create_app()` is the uvicorn target.
-3. `run(host="127.0.0.1", port=8765)` serves the app with uvicorn and binds to
-   localhost by default; private-network exposure must stay Tailscale-only.
+3. `run(host=None, port=None)` serves the app with uvicorn, defaulting to
+   `Config.host` / `Config.port` from `ORCH_HUB_HOST` and `ORCH_HUB_PORT`
+   (`127.0.0.1:8765` when unset); private-network exposure must stay
+   Tailscale-only.
 4. A default-deny HTTP middleware allows public access only to `/api/health`.
    Missing/malformed credentials return 401 plus `WWW-Authenticate: Bearer`,
    invalid credentials return 401, and an unset token returns 503 for protected
@@ -177,15 +190,18 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 - Git CLI for cleanliness checks.
 - Python virtual environment inside each target repo's `.cursor/orchestrator/.venv`.
 - FastAPI and uvicorn for the HTTP foundation.
-- Future: Bark, launchd, Tailscale service exposure.
+- launchd for resident macOS service operation.
+- Future: Bark and Tailscale service exposure.
 
 ## Deployment
 
-v1 deployment target is the user's Mac. The service should run as a launchd
-agent and listen only on a private Tailscale-reachable interface or localhost
-behind Tailscale Serve. Simple bearer-token auth is required for all protected
+v1 deployment target is the user's Mac. The implemented launchd user-agent
+template should run `orch-hub-api` from the repo venv, set a nonblank
+`ORCH_HUB_TOKEN`, and listen only on localhost behind Tailscale Serve or on a
+private Tailscale IP. Simple bearer-token auth is required for all protected
 HTTP routes even on the tailnet; tailnet membership remains the primary
-boundary.
+boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub` and is reserved for
+future run dirs and audit history, but no component writes there yet.
 
 ## Invariants
 

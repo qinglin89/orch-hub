@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-07
-verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # Project Overview
@@ -10,12 +10,13 @@ verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 orch-hub is intended to be a long-lived local control plane for AI coding orchestrators. It will run on the user's Mac and allow remote control from iPhone, iPad, or another machine over a private network. The hub coordinates existing per-repository orchestrator programs that drive dev/review loops over `.ai-tasks/`.
 
 The implemented slices are discovery/readiness, task inventory, the FastAPI
-HTTP foundation, and fail-closed bearer-token auth: read the
-ai-native-development local registry, list managed repos, report launch
-readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
-those payloads through HTTP, and require `ORCH_HUB_TOKEN` on every non-health
-HTTP path. Later slices add subprocess runs, human-question relay, logs,
-notifications, launchd service packaging, and a mobile dashboard.
+HTTP foundation, fail-closed bearer-token auth, environment-configured service
+binding, and launchd service packaging/docs: read the ai-native-development
+local registry, list managed repos, report launch readiness, parse each repo's
+`.ai-tasks/` index plus task frontmatter, expose those payloads through HTTP,
+require `ORCH_HUB_TOKEN` on every non-health HTTP path, and provide a launchd
+user-agent template for resident macOS operation. Later slices add subprocess
+runs, human-question relay, logs, notifications, and a mobile dashboard.
 
 ## Users
 
@@ -50,10 +51,10 @@ notifications, launchd service packaging, and a mobile dashboard.
 
 - Language: Python.
 - First implementation: package plus CLI, using pytest tests and stdlib subprocess/path/json primitives where practical.
-- HTTP service: FastAPI and uvicorn, with a localhost-default entry point and
-  fail-closed bearer-token middleware.
+- HTTP service: FastAPI and uvicorn, with a localhost-default entry point,
+  environment-configured host/port, and fail-closed bearer-token middleware.
 - Future UI: mobile-first web dashboard served by the hub.
-- Local deployment: launchd on macOS.
+- Local deployment: launchd user-agent template and docs on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
 - Notifications: Bark is the preferred v1 push path; IM bots are later.
 - External command source: `aii-2` from ai-native-development.
@@ -80,6 +81,11 @@ tests/
   test_registry.py
   test_readiness.py
   test_task_store.py
+deploy/
+  launchd/
+    com.qinglin89.orch-hub.plist
+docs/
+  launchd.md
 ```
 
 Later service work may add:

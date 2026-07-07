@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-07
-verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # Features
@@ -18,7 +18,7 @@ verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 | Mobile dashboard | planned | api, web | future web routes and API calls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
-| Launchd service | planned | config, api | service packaging/docs |
+| Launchd service | implemented | config, api, docs, deploy | `orch-hub-api`, launchd plist/docs |
 | Run history and audit | planned | runs, control_dir, notifications | future history endpoints |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
 | IM bot control | future | notifications or bot adapter, api | future bot callback interface |
@@ -92,8 +92,9 @@ Implemented behavior:
 - A default-deny middleware protects every other path, including OpenAPI docs,
   unknown paths, and future routes. Missing/malformed or invalid credentials
   return 401; unset `ORCH_HUB_TOKEN` returns 503 on protected routes.
-- `run()` and `orch-hub-api` bind to `127.0.0.1:8765` by default; any private
-  exposure should remain Tailscale-only.
+- `run()` and `orch-hub-api` read `ORCH_HUB_HOST` / `ORCH_HUB_PORT` and bind
+  to `127.0.0.1:8765` by default; any private exposure should remain
+  Tailscale-only.
 
 ### Run Lifecycle
 
@@ -167,11 +168,25 @@ Modules: notifications, control_dir, runs.
 
 ### Launchd Service
 
-Status: planned
+Status: implemented
 
 Description: Package/document the hub as a long-lived launchd agent on macOS.
 
-Modules: config, api, docs.
+Modules: config, api, docs, deploy.
+
+Implemented behavior:
+
+- `deploy/launchd/com.qinglin89.orch-hub.plist` is a launchd user-agent
+  template that runs the installed `orch-hub-api` console script.
+- The plist sets `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`, `ORCH_HUB_PORT`,
+  `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_DATA_DIR`, and an explicit
+  `PATH`; token replacement is required because protected routes fail closed
+  when the token is unset or blank.
+- `RunAtLoad` and `KeepAlive` keep the service resident; stdout/stderr go to
+  `~/Library/Logs/orch-hub/`.
+- `docs/launchd.md` documents manual run-first verification, installation,
+  `launchctl bootstrap` / `kickstart -k` / `bootout`, plist reloads, log
+  inspection, and Tailscale-only exposure assumptions.
 
 ### Run History and Audit
 

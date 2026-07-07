@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # Conventions
@@ -28,7 +28,11 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 - Include concise command output for failed `aii-2 status` checks.
 - Registry loading should tolerate a missing registry file as an empty repo list, but invalid JSON should be an explicit error.
 - CLI should return non-zero for operational errors.
+- CLI config parsing errors should be reported as `error: ...` with non-zero
+  exit, not as uncaught tracebacks.
 - Invoke `aii-2` through the configured absolute path (`Config.aii2_bin`), not by relying on PATH.
+- Empty or whitespace-only environment config values count as unset; malformed
+  explicit values such as an invalid `ORCH_HUB_PORT` should fail loudly.
 
 ## Logging
 
@@ -43,6 +47,7 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 - Keep core logic in `orch_hub/`.
 - Keep tests in `tests/`.
 - Keep web assets under `orch_hub/web/` or a clear equivalent when the dashboard exists.
+- Keep deployment templates under `deploy/` and operator docs under `docs/`.
 - Do not place generated run dirs inside managed target repos unless deliberately matching an orchestrator contract.
 
 ## Git Workflow

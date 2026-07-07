@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # Design Principles and Decisions
@@ -43,6 +43,16 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 - Reason: the service controls arbitrary local code execution, so public exposure is out of scope; tailnet membership is the main security boundary.
 - Consequence: multi-user permissions and public OAuth flows are deferred.
 
+### Tradeoff: launchd environment config vs service CLI flags
+
+- Chose: configure the resident service entirely through environment variables.
+- Reason: launchd user agents naturally carry configuration in
+  `EnvironmentVariables`, and the installed `orch-hub-api` console script can
+  remain argument-free.
+- Consequence: malformed env values must fail explicitly or be reported as
+  operational CLI errors; the plist embeds `ORCH_HUB_TOKEN` and must be kept
+  permission-restricted.
+
 ### Tradeoff: shared core before dashboard
 
 - Chose: CLI/shared-core slices before dashboard, then a thin FastAPI
@@ -65,6 +75,9 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
   discovery, readiness, or task-store logic in HTTP handlers.
 - Tests should use temporary directories and mocked subprocess calls, never real user repos.
 - Configuration should have explicit defaults and environment overrides.
+- Empty or whitespace-only config environment values count as unset;
+  surrounding whitespace is stripped, and malformed ports raise an explicit
+  error instead of silently falling back.
 
 ## Anti-Patterns to Avoid
 
@@ -81,7 +94,8 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 
 ## Open Design Items
 
-- Data directory location for run dirs and audit history.
+- Data directory layout and retention policy for run dirs and audit history
+  under the currently reserved `ORCH_HUB_DATA_DIR`.
 - Exact route schema beyond the implemented health/repos/tasks API foundation.
 - Exact dashboard layout and frontend stack.
 - Bark server packaging on the Mac.

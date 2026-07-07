@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-07
-verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # Modules
@@ -10,7 +10,7 @@ verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
-| Config | `orch_hub/config.py` | Implemented defaults, `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, and derived `aii-2`/registry paths |
+| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, and derived `aii-2`/registry paths |
 | Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory models, and payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
@@ -22,6 +22,8 @@ verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
 | Web UI | `orch_hub/web/` | Future mobile-first dashboard assets |
+| Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
+| Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
 
 ## Module Details
@@ -44,16 +46,20 @@ Dependencies: config, registry, readiness, models.
 Location: `orch_hub/config.py`
 
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
-ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading, and derived
+ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
+`ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, and derived
 `aii-2`/registry file paths:
 
 ```text
 /Users/linqing/workplace/github.com/qinglin89/ai-native-development
 ```
 
-`ORCH_HUB_TOKEN` is stripped when loaded; empty or whitespace-only values count
-as unset so the empty string cannot become a valid credential. Future config
-belongs here too: data dir, host/port, notifier settings.
+All current environment variables strip surrounding whitespace. Empty or
+whitespace-only values count as unset; a malformed or out-of-range
+`ORCH_HUB_PORT` raises `ValueError` instead of silently binding the default.
+`ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub` but is reserved for future run
+dirs and audit history; nothing writes there yet. Future config belongs here
+too: notifier settings and storage-specific options.
 
 ### Models
 
@@ -94,9 +100,10 @@ adapter over shared core functions. `create_app(config=None)` builds an app
 with a default-deny bearer-token middleware, public `GET /api/health`, protected
 `GET /api/repos`, protected `GET /api/tasks`, and protected
 `GET /api/repos/{repo_id}/tasks`. Module-level `app` supports
-`uvicorn orch_hub.api:app`; `run(host="127.0.0.1", port=8765)` and the
-`orch-hub-api` console script serve locally by default. `RegistryError` returns
-HTTP 500 and unknown per-repo task lookups return HTTP 404.
+`uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
+console script serve locally by default and read host/port from environment
+when arguments are omitted. `RegistryError` returns HTTP 500 and unknown
+per-repo task lookups return HTTP 404.
 
 ### Run Manager
 

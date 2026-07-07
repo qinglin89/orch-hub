@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-05
-verified-against: 2ac51313fe081792d3cae8a8b40729561ab9b8f1
+last-updated: 2026-07-07
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # AI Knowledge Router
@@ -33,6 +33,7 @@ Load only what the current task needs.
 | Onboarding | overview -> architecture -> map |
 | Orchestrator integration | architecture -> apis -> modules -> features |
 | Dashboard/UI work | features -> architecture -> design.md -> modules |
+| Deployment packaging | features -> architecture -> modules -> conventions |
 
 ## Domain Vocabulary
 
@@ -53,3 +54,5 @@ Load only what the current task needs.
 - Answer file: future `NNN-answer.json` written by orch-hub after the remote user answers.
 - `stop.flag`: future control-dir file requesting graceful stop at an orchestrator session boundary.
 - Readiness: pre-launch checks proving a managed repo has required deployed files, task index, clean git state, and a passing `aii-2 status`.
+- Launchd service: resident macOS user agent that runs `orch-hub-api` from the repo venv.
+- Deployment template: checked-in operational artifact such as `deploy/launchd/com.qinglin89.orch-hub.plist`.

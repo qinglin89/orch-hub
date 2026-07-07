@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-07
-verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
+verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 ---
 
 # APIs and Interfaces
@@ -13,6 +13,8 @@ verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 - Output: human-readable status lines, followed by failed readiness reasons for non-ready repos.
 - Source: registry adapter plus readiness checker.
 - Non-goal: does not start orchestrators.
+- Operational errors, including malformed config such as a non-integer
+  `ORCH_HUB_PORT`, return exit 1 with `error: ...` on stderr.
 
 ### `python -m orch_hub.cli repos --json`
 
@@ -67,11 +69,14 @@ verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 Current HTTP behavior:
 
 - `create_app(config=None)` captures `Config.from_env()` by default and is testable with an explicit `Config`.
-- `Config.token` is loaded from `ORCH_HUB_TOKEN`; surrounding whitespace is
-  stripped and empty/whitespace-only values count as unset.
+- `Config` is loaded from environment by default. Current variables are
+  `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
+  `ORCH_HUB_PORT`, and `ORCH_HUB_DATA_DIR`; surrounding whitespace is stripped
+  and empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
-- `run(host="127.0.0.1", port=8765)` and console script `orch-hub-api` serve
-  the app on localhost by default.
+- `run(host=None, port=None)` and console script `orch-hub-api` serve the app
+  on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;
+  explicit function arguments override the environment.
 - Default-deny middleware protects every path outside `/api/health`, including
   `/docs`, `/openapi.json`, unknown paths, and future dashboard/run/log routes.
 - Missing or malformed credentials return HTTP 401 with
@@ -163,6 +168,19 @@ Input: notification event.
 Output: delivery result.
 
 Behavior: fan-out capable; Bark is the expected first implementation.
+
+### Launchd Service Template
+
+Input: environment variables in
+`deploy/launchd/com.qinglin89.orch-hub.plist`.
+
+Output: resident `orch-hub-api` process managed by launchd, with stdout/stderr
+logs under `~/Library/Logs/orch-hub/`.
+
+Behavior: user-agent template sets all current `ORCH_HUB_*` variables and an
+explicit `PATH`, starts at login, restarts on exit, and requires the operator
+to replace placeholders before bootstrapping. Install/start/stop/reload/log
+commands live in `docs/launchd.md`.
 
 ## API Conventions
 
