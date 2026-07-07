@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 ---
 
 # Modules
@@ -10,7 +10,7 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
-| Config | `orch_hub/config.py` | Implemented defaults, `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, and derived `aii-2`/registry paths |
+| Config | `orch_hub/config.py` | Implemented defaults, `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, and derived `aii-2`/registry paths |
 | Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory models, and payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
@@ -19,7 +19,7 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 | Run manager | `orch_hub/runs.py` | Future orchestrator subprocess lifecycle and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Future question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, health/repo/task routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
 | Web UI | `orch_hub/web/` | Future mobile-first dashboard assets |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
@@ -43,13 +43,17 @@ Dependencies: config, registry, readiness, models.
 
 Location: `orch_hub/config.py`
 
-Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default ai-native-development path, and derived `aii-2`/registry file paths:
+Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
+ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading, and derived
+`aii-2`/registry file paths:
 
 ```text
 /Users/linqing/workplace/github.com/qinglin89/ai-native-development
 ```
 
-Future config belongs here too: data dir, token, host/port, notifier settings.
+`ORCH_HUB_TOKEN` is stripped when loaded; empty or whitespace-only values count
+as unset so the empty string cannot become a valid credential. Future config
+belongs here too: data dir, host/port, notifier settings.
 
 ### Models
 
@@ -87,7 +91,8 @@ Location: `orch_hub/api.py`
 
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None)` builds an app
-with `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, and
+with a default-deny bearer-token middleware, public `GET /api/health`, protected
+`GET /api/repos`, protected `GET /api/tasks`, and protected
 `GET /api/repos/{repo_id}/tasks`. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host="127.0.0.1", port=8765)` and the
 `orch-hub-api` console script serve locally by default. `RegistryError` returns

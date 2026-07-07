@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 ---
 
 # APIs and Interfaces
@@ -41,8 +41,9 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 
 ### `GET /api/health`
 
-- Purpose: service liveness and configuration sanity.
-- Shape: `{"status": "ok", "ai_native_path": "..."}`.
+- Purpose: minimal public service liveness.
+- Shape: `{"status": "ok"}`.
+- Auth: public by design; it must not disclose deployment configuration.
 
 ### `GET /api/repos`
 
@@ -66,9 +67,20 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 Current HTTP behavior:
 
 - `create_app(config=None)` captures `Config.from_env()` by default and is testable with an explicit `Config`.
+- `Config.token` is loaded from `ORCH_HUB_TOKEN`; surrounding whitespace is
+  stripped and empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
 - `run(host="127.0.0.1", port=8765)` and console script `orch-hub-api` serve
   the app on localhost by default.
+- Default-deny middleware protects every path outside `/api/health`, including
+  `/docs`, `/openapi.json`, unknown paths, and future dashboard/run/log routes.
+- Missing or malformed credentials return HTTP 401 with
+  `WWW-Authenticate: Bearer` and `{"detail": "missing bearer token"}`; wrong
+  credentials return HTTP 401 with `{"detail": "invalid bearer token"}`.
+- When `ORCH_HUB_TOKEN` is unset, protected routes fail closed with HTTP 503
+  instead of serving unauthenticated; `/api/health` still works.
+- Token comparison uses `secrets.compare_digest`; auth error responses are
+  static and never echo presented credentials.
 - `RegistryError` returns HTTP 500 with `{"detail": ...}`.
 - Unknown `repo_id` on the per-repo task endpoint returns HTTP 404.
 

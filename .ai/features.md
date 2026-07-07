@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 ---
 
 # Features
@@ -16,7 +16,7 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 | Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
 | Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
 | Mobile dashboard | planned | api, web | future web routes and API calls |
-| Auth and private access | planned | api, config | bearer-token middleware |
+| Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
 | Launchd service | planned | config, api | service packaging/docs |
 | Run history and audit | planned | runs, control_dir, notifications | future history endpoints |
@@ -67,7 +67,8 @@ Implemented behavior:
 Status: implemented
 
 Description: Expose current repo readiness and task inventory data through a
-resident FastAPI app without duplicating core logic.
+resident FastAPI app without duplicating core logic, protected by bearer-token
+auth on every non-health path.
 
 Modules: api, config, registry, readiness, task_store, models.
 
@@ -86,8 +87,13 @@ Implemented behavior:
   and task-store sentinel statuses.
 - Malformed registry data maps to HTTP 500; unknown repo ids on per-repo task
   lookup map to HTTP 404.
-- `run()` and `orch-hub-api` bind to `127.0.0.1:8765` by default; private
-  exposure and bearer-token enforcement remain separate planned work.
+- `GET /api/health` is public and minimal (`{"status": "ok"}`); it no longer
+  exposes deployment paths.
+- A default-deny middleware protects every other path, including OpenAPI docs,
+  unknown paths, and future routes. Missing/malformed or invalid credentials
+  return 401; unset `ORCH_HUB_TOKEN` returns 503 on protected routes.
+- `run()` and `orch-hub-api` bind to `127.0.0.1:8765` by default; any private
+  exposure should remain Tailscale-only.
 
 ### Run Lifecycle
 
@@ -131,15 +137,25 @@ Description: Web UI for repo list, task list, task detail, active/waiting status
 
 Modules: api, web.
 
-APIs: all public HTTP APIs.
+APIs: all protected HTTP APIs plus the public health route.
 
 ### Auth and Private Access
 
-Status: planned
+Status: implemented
 
 Description: Protect the service with bearer-token auth and deploy it behind Tailscale/private networking.
 
 Modules: api, config.
+
+Implemented behavior:
+
+- `Config.token` is loaded from `ORCH_HUB_TOKEN`; empty/whitespace-only values
+  count as unset.
+- Every HTTP path except `/api/health` requires `Authorization: Bearer <token>`
+  when configured.
+- Protected routes fail closed with HTTP 503 when the token is unset; there is
+  no unauthenticated mode.
+- Auth error responses are static and never echo presented credentials.
 
 ### Notifications
 

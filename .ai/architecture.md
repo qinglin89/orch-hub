@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 ---
 
 # Architecture
@@ -77,11 +77,15 @@ Future file-channel adapter for orchestrator questions and answers. It watches f
 ### API Service
 
 Implemented FastAPI service exposing health, repo readiness, and task inventory
-endpoints. The current route set is `GET /api/health`, `GET /api/repos`,
-`GET /api/tasks`, and `GET /api/repos/{repo_id}/tasks`; run, escalation, log,
-auth, and dashboard routes remain future work. The API calls the same
-registry/readiness/task functions used by the CLI and keeps route handlers thin
-over shared application services.
+endpoints behind bearer-token auth. The current route set is
+`GET /api/health`, `GET /api/repos`, `GET /api/tasks`, and
+`GET /api/repos/{repo_id}/tasks`; run, escalation, log, and dashboard routes
+remain future work. `GET /api/health` is the only public route and returns only
+`{"status": "ok"}`. Every other path, including docs/OpenAPI and unknown future
+paths, requires `Authorization: Bearer <ORCH_HUB_TOKEN>` when the token is
+configured; if no token is configured, protected routes fail closed with HTTP
+503. The API calls the same registry/readiness/task functions used by the CLI
+and keeps route handlers thin over shared application services.
 
 ### Dashboard
 
@@ -122,11 +126,16 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 
 ### HTTP Foundation
 
-1. `create_app(config=None)` captures a `Config` value once per FastAPI app.
+1. `create_app(config=None)` captures a `Config` value once per FastAPI app,
+   including `ORCH_HUB_TOKEN` from `Config.token`.
 2. Module-level `app = create_app()` is the uvicorn target.
 3. `run(host="127.0.0.1", port=8765)` serves the app with uvicorn and binds to
-   localhost by default until the auth/private-network slice hardens exposure.
-4. `RegistryError` maps to HTTP 500; unknown repo ids on per-repo task lookup
+   localhost by default; private-network exposure must stay Tailscale-only.
+4. A default-deny HTTP middleware allows public access only to `/api/health`.
+   Missing/malformed credentials return 401 plus `WWW-Authenticate: Bearer`,
+   invalid credentials return 401, and an unset token returns 503 for protected
+   routes.
+5. `RegistryError` maps to HTTP 500; unknown repo ids on per-repo task lookup
    map to HTTP 404. Ordinary readiness failures stay inside 200 payloads as
    `ready: false` with failure reasons.
 
@@ -168,11 +177,15 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 - Git CLI for cleanliness checks.
 - Python virtual environment inside each target repo's `.cursor/orchestrator/.venv`.
 - FastAPI and uvicorn for the HTTP foundation.
-- Future: Bark, launchd, Tailscale.
+- Future: Bark, launchd, Tailscale service exposure.
 
 ## Deployment
 
-v1 deployment target is the user's Mac. The service should run as a launchd agent and listen only on a private Tailscale-reachable interface or localhost behind Tailscale Serve. Simple bearer-token auth is acceptable for v1 because tailnet membership is the primary boundary.
+v1 deployment target is the user's Mac. The service should run as a launchd
+agent and listen only on a private Tailscale-reachable interface or localhost
+behind Tailscale Serve. Simple bearer-token auth is required for all protected
+HTTP routes even on the tailnet; tailnet membership remains the primary
+boundary.
 
 ## Invariants
 

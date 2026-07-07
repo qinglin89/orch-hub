@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-06
-verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
+last-updated: 2026-07-07
+verified-against: 26711f3ca1dd2aaee4e68377327869e6d2d1724e
 ---
 
 # Project Overview
@@ -9,12 +9,13 @@ verified-against: a6bc7abaa8f2d181f0efb6cdde519ebea8bb7c4c
 
 orch-hub is intended to be a long-lived local control plane for AI coding orchestrators. It will run on the user's Mac and allow remote control from iPhone, iPad, or another machine over a private network. The hub coordinates existing per-repository orchestrator programs that drive dev/review loops over `.ai-tasks/`.
 
-The implemented slices are discovery/readiness, task inventory, and the FastAPI
-HTTP foundation: read the ai-native-development local registry, list managed
-repos, report launch readiness, parse each repo's `.ai-tasks/` index plus task
-frontmatter, and expose those payloads through HTTP. Later slices add
-subprocess runs, human-question relay, logs, notifications, auth hardening, and
-a mobile dashboard.
+The implemented slices are discovery/readiness, task inventory, the FastAPI
+HTTP foundation, and fail-closed bearer-token auth: read the
+ai-native-development local registry, list managed repos, report launch
+readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
+those payloads through HTTP, and require `ORCH_HUB_TOKEN` on every non-health
+HTTP path. Later slices add subprocess runs, human-question relay, logs,
+notifications, launchd service packaging, and a mobile dashboard.
 
 ## Users
 
@@ -49,7 +50,8 @@ a mobile dashboard.
 
 - Language: Python.
 - First implementation: package plus CLI, using pytest tests and stdlib subprocess/path/json primitives where practical.
-- HTTP service: FastAPI and uvicorn, with a localhost-default entry point.
+- HTTP service: FastAPI and uvicorn, with a localhost-default entry point and
+  fail-closed bearer-token middleware.
 - Future UI: mobile-first web dashboard served by the hub.
 - Local deployment: launchd on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
