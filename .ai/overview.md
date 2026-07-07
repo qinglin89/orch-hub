@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # Project Overview
@@ -11,12 +11,14 @@ orch-hub is intended to be a long-lived local control plane for AI coding orches
 
 The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
-binding, and launchd service packaging/docs: read the ai-native-development
-local registry, list managed repos, report launch readiness, parse each repo's
-`.ai-tasks/` index plus task frontmatter, expose those payloads through HTTP,
-require `ORCH_HUB_TOKEN` on every non-health HTTP path, and provide a launchd
-user-agent template for resident macOS operation. Later slices add subprocess
-runs, human-question relay, logs, notifications, and a mobile dashboard.
+binding, launchd service packaging/docs, and the control-dir file-channel
+adapter: read the ai-native-development local registry, list managed repos,
+report launch readiness, parse each repo's `.ai-tasks/` index plus task
+frontmatter, expose those payloads through HTTP, require `ORCH_HUB_TOKEN` on
+every non-health HTTP path, provide a launchd user-agent template for resident
+macOS operation, and read/write orchestrator question, answer, and stop files.
+Later slices add subprocess runs, API/UI human-question relay, logs,
+notifications, and a mobile dashboard.
 
 ## Users
 
@@ -30,7 +32,7 @@ runs, human-question relay, logs, notifications, and a mobile dashboard.
 - Inspect each managed repo for orchestrator launch readiness.
 - List active, waiting, pending, and blocked tasks per repo.
 - Launch and supervise one orchestrator run per repo at a time, each run attached to one `.ai-tasks/<task-id>.md` task.
-- Surface orchestrator human input requests remotely, collect answers, and deliver them back through a file-channel control dir once the orchestrator supports it.
+- Surface orchestrator human input requests remotely, collect answers, and deliver them back through the implemented control-dir file channel.
 - Stream or tail orchestrator logs to the dashboard.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
@@ -74,10 +76,12 @@ orch_hub/
   readiness.py
   subprocess_utils.py
   task_store.py
+  control_dir.py
 tests/
   test_api.py
   test_cli.py
   test_config.py
+  test_control_dir.py
   test_registry.py
   test_readiness.py
   test_task_store.py
@@ -93,7 +97,6 @@ Later service work may add:
 ```text
 orch_hub/
   runs.py
-  control_dir.py
   logs.py
   notifications.py
   web/
@@ -104,4 +107,4 @@ orch_hub/
 - ai-native-development root: `/Users/linqing/workplace/github.com/qinglin89/ai-native-development`.
 - Default registry source should be `aii-2 registry list --json`; fallback is `<ai-native-development>/.registry/repos.local.json`.
 - The canonical orchestrator lives at `ai-native-development/canonical/orchestrator/orchestrator.py` and is deployed into target repos at `.cursor/orchestrator/orchestrator.py`.
-- The inspected orchestrator is a local CLI scheduler. It runs a dev/review loop over one `.ai-tasks/` task, selects dev or review turns from task file status and session log, pauses for human input through `ask_human`, and reads stdin in manual mode today.
+- The inspected orchestrator is a local CLI scheduler. It runs a dev/review loop over one `.ai-tasks/` task, selects dev or review turns from task file status and session log, pauses for human input through `ask_human`, and uses stdin unless launched with `--control-dir`.

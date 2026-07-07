@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # Design Principles and Decisions
@@ -10,7 +10,7 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 - Local-first control plane: orch-hub coordinates local repos and local processes on the Mac.
 - Single registry source: managed repos come from ai-native-development registry data.
 - Orchestrator isolation: launch the deployed orchestrator as a subprocess; never import it.
-- Non-invasive orchestrator integration: future `--control-dir` adds a file channel while preserving stdin behavior when unset.
+- Non-invasive orchestrator integration: `--control-dir` adds a file channel while preserving stdin behavior when unset.
 - File-channel boundary: questions, answers, and stop requests cross through run-dir files, not through network code inside the orchestrator.
 - Mobile-first operation: remote workflows should be practical from iPhone/iPad.
 - Fail closed before launch: readiness checks should block unclear or unsafe runs.
@@ -78,6 +78,11 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 - Empty or whitespace-only config environment values count as unset;
   surrounding whitespace is stripped, and malformed ports raise an explicit
   error instead of silently falling back.
+- Treat a control-dir question as pending until its answer file is valid by
+  the orchestrator's own rule; malformed answers remain visible so the hub can
+  repair them by atomic rewrite.
+- Refuse to overwrite existing valid answer files; they may already be
+  consumed and are part of the answer audit trail.
 
 ## Anti-Patterns to Avoid
 
@@ -86,6 +91,8 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 - Treating GitHub as registry truth.
 - Starting orchestrator subprocesses before readiness checks exist.
 - Making network calls from the orchestrator control channel.
+- Duplicating control-dir filename, validity, or stop-flag logic outside
+  `orch_hub.control_dir`.
 - Exposing the hub outside the tailnet.
 - Running multiple orchestrators against the same repo.
 - Adding watchdog or log-silence detection.

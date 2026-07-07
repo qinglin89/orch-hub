@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # Modules
@@ -11,13 +11,13 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
 | Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, and derived `aii-2`/registry paths |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory models, and payload helpers |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory, and question models plus payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md` and task frontmatter |
 | Run manager | `orch_hub/runs.py` | Future orchestrator subprocess lifecycle and per-repo serialization |
-| Control dir | `orch_hub/control_dir.py` | Future question/answer/stop file-channel handling |
+| Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
@@ -65,7 +65,13 @@ too: notifier settings and storage-specific options.
 
 Location: `orch_hub/models.py`
 
-Responsibility: define stable data shapes for managed repos, readiness reports, and task inventory. `TaskSummary` carries `task_id`, task-file `status`, optional index summary, and blockers; `RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered tasks. Public readiness payloads contain `ready` plus failed check reasons only.
+Responsibility: define stable data shapes for managed repos, readiness reports,
+task inventory, and control-dir questions. `TaskSummary` carries `task_id`,
+task-file `status`, optional index summary, and blockers; `RepoTaskInventory`
+pairs a `ManagedRepo` with `index_present` and ordered tasks. `Question` carries
+filename-authoritative `seq`, display/audit fields, parse error, answered
+state, and answer repair error; `to_dict()` deliberately excludes the local
+path. Public readiness payloads contain `ready` plus failed check reasons only.
 
 ### Registry
 
@@ -115,7 +121,14 @@ Responsibility: future owner of run lifecycle: start, stop, list, reattach, reco
 
 Location: `orch_hub/control_dir.py`
 
-Responsibility: future file-channel implementation for pending questions, answer writes, and stop flags.
+Responsibility: implement the hub side of the orchestrator `--control-dir`
+file channel. `list_questions(control_dir)` returns `Question` records for
+matching `NNN-question.json` files; `pending_questions(control_dir)` filters to
+questions without a same-seq valid answer; `write_answer(question, answer,
+responder="orch-hub")` atomically writes the mirrored `NNN-answer.json` with
+`seq`, `ts`, `responder`, and stripped `answer`; `request_stop(control_dir)`
+writes an idempotent empty `stop.flag`. Existing valid answers raise
+`DuplicateAnswerError`; malformed answers can be repaired by atomic rewrite.
 
 ## Boundary Rules
 
@@ -123,5 +136,6 @@ Responsibility: future file-channel implementation for pending questions, answer
 - Readiness code does not launch orchestrators.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
+- Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
 - API and CLI should be thin adapters over application functions.
 - No module imports deployed orchestrator code.

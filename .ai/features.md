@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # Features
@@ -12,6 +12,7 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 | Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos` |
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
+| Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | planned | runs, subprocess_utils, control_dir | future `POST /api/runs`, `GET /api/runs` |
 | Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
 | Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
@@ -106,7 +107,45 @@ Modules: runs, subprocess_utils, control_dir, models.
 
 APIs: future run endpoints.
 
-Dependency: orchestrator `--control-dir` support is needed before full remote control, but basic launch mechanics can be modeled before that.
+Dependency: the orchestrator and hub-side control-dir adapter are implemented;
+run lifecycle owns run-dir layout, subprocess launch, process tracking, and API
+integration.
+
+### Control-dir File Channel
+
+Status: implemented
+
+Description: Hub-side file adapter for the deployed orchestrator
+`--control-dir` contract. It discovers human-question files, classifies pending
+and answered state, writes answer files, and writes stop flags without adding
+web/API logic to the adapter.
+
+Modules: control_dir, models.
+
+APIs: internal `list_questions`, `pending_questions`, `write_answer`,
+`request_stop`, `DuplicateAnswerError`, and `Question`.
+
+Implemented behavior:
+
+- `list_questions(control_dir)` reads `NNN-question.json` files ordered by
+  filename sequence; missing dirs return no questions; malformed question files
+  are returned with `Question.error` instead of being skipped.
+- Filename sequence is authoritative over payload `seq`; unknown `kind` values
+  are surfaced for forward compatibility.
+- `pending_questions(control_dir)` treats a question as pending until a same-seq
+  answer file passes the orchestrator validity rule: JSON object with a
+  non-empty string `answer`. Malformed answers keep the question pending and
+  expose `Question.answer_error` for repair.
+- `write_answer(question, answer, responder="orch-hub")` strips the answer,
+  rejects empty text, mirrors the observed question filename, writes full audit
+  fields atomically with a same-dir temp file plus rename, refuses to overwrite
+  an existing valid answer, and repairs malformed answer files by atomic
+  rewrite.
+- `request_stop(control_dir)` writes an idempotent empty `stop.flag` and raises
+  `FileNotFoundError` if the run dir does not exist.
+- Tests cover discovery, parsing, pending/answered state, stale and malformed
+  files, duplicate answer refusal, repair rewrite, stop flag writes, and
+  `Question.to_dict()` path exclusion.
 
 ### Human Question Relay
 
@@ -118,7 +157,9 @@ Modules: control_dir, runs, notifications, models.
 
 APIs: future escalation endpoints.
 
-Dependency: external orchestrator change to support `--control-dir`.
+Dependency: run manager must create fresh run dirs and expose API/UI routes
+that reuse the implemented control-dir adapter; notifications and audit storage
+remain future slices.
 
 ### Log Viewing
 
@@ -194,7 +235,7 @@ Status: planned
 
 Description: Persist run events, human answers, stop requests, and end states for later inspection.
 
-Modules: runs, control_dir.
+Modules: runs, control_dir, models.
 
 ### Remote Intake-Task
 

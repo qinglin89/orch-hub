@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # APIs and Interfaces
@@ -101,7 +101,7 @@ Current HTTP behavior:
 
 ### `POST /api/runs/{run_id}/stop`
 
-- Purpose: request graceful stop, initially by writing future `stop.flag`.
+- Purpose: request graceful stop by calling `request_stop` to write `stop.flag`.
 
 ### `GET /api/escalations`
 
@@ -159,7 +159,13 @@ Input: run dir.
 
 Output: pending question records and answer/stop write operations.
 
-Behavior: file-channel only.
+Behavior: file-channel only. Missing control dirs list no questions.
+Question filenames supply the authoritative sequence. Malformed question JSON is
+reported on the returned `Question` instead of hiding the file. A question is
+answered only when a same-seq answer file is a JSON object with a non-empty
+string `answer`; malformed answers keep the question pending and can be
+repaired with `write_answer`. Valid answer files are never overwritten.
+`request_stop` writes an empty `stop.flag` and requires the run dir to exist.
 
 ### Notifier
 
@@ -190,3 +196,5 @@ commands live in `docs/launchd.md`.
 - Raise or return operational errors for invalid registry JSON, unreadable config, or malformed user requests.
 - Keep task `blocked` distinct from run `waiting`.
 - Never make API handlers call orchestrator internals directly.
+- API/run handlers should reuse `orch_hub.control_dir` for question, answer,
+  and stop files instead of reconstructing filenames or validity rules.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # AI Knowledge Router
@@ -49,10 +49,10 @@ Load only what the current task needs.
 - Waiting task: an active task whose orchestrator has emitted a human question and is awaiting an answer.
 - Pending task: a task whose frontmatter status is `pending`.
 - Blocked task: a task whose frontmatter status is `blocked`.
-- Control dir: future per-run directory shared between orch-hub and orchestrator for question/answer files and stop requests.
-- Question file: future `NNN-question.json` written by orchestrator when human input is needed.
-- Answer file: future `NNN-answer.json` written by orch-hub after the remote user answers.
-- `stop.flag`: future control-dir file requesting graceful stop at an orchestrator session boundary.
+- Control dir: per-run directory shared between orch-hub and orchestrator for question/answer files and stop requests.
+- Question file: `NNN-question.json` written by orchestrator when human input is needed.
+- Answer file: `NNN-answer.json` written by orch-hub after the remote user answers.
+- `stop.flag`: control-dir file requesting graceful stop at a session boundary, or abort while an answer is pending.
 - Readiness: pre-launch checks proving a managed repo has required deployed files, task index, clean git state, and a passing `aii-2 status`.
 - Launchd service: resident macOS user agent that runs `orch-hub-api` from the repo venv.
 - Deployment template: checked-in operational artifact such as `deploy/launchd/com.qinglin89.orch-hub.plist`.

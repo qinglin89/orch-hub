@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 ---
 
 # Architecture
@@ -72,7 +72,17 @@ The run manager should use `cwd=<repo>` and keep a per-repo mutex or serial queu
 
 ### Control Dir Store
 
-Future file-channel adapter for orchestrator questions and answers. It watches for `NNN-question.json`, writes corresponding `NNN-answer.json`, tracks pending questions, and writes `stop.flag` for graceful stop. It must not require web or network logic inside the orchestrator.
+Implemented file-channel adapter for orchestrator questions, answers, and stop
+requests. `list_questions` and `pending_questions` read `NNN-question.json`
+files, use the filename sequence as authoritative, tolerate malformed question
+payloads by surfacing an error, and keep a question pending until a same-seq
+answer file satisfies the orchestrator rule: JSON object with a non-empty
+string `answer`. `write_answer` mirrors the observed question filename, writes
+`seq`, `ts`, `responder`, and stripped `answer` atomically by same-dir temp file
+plus rename, refuses to overwrite an existing valid answer, and repairs a
+malformed answer by atomic rewrite. `request_stop` writes an idempotent empty
+`stop.flag` in an existing run dir. The module is file-channel only and has no
+web/API/subprocess ownership.
 
 ### API Service
 
@@ -165,22 +175,22 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 1. Client selects repo and task.
 2. Hub verifies repo readiness and task existence/status.
 3. Hub enforces per-repo single-run rule.
-4. Hub creates a run dir.
-5. Hub starts the deployed orchestrator subprocess with future `--control-dir`.
+4. Hub creates a fresh run dir outside the target repo.
+5. Hub starts the deployed orchestrator subprocess with `--control-dir`.
 6. Hub records pid, repo, task, run dir, start time, and log path.
 
 ### Human Answer
 
 1. Orchestrator writes a question file in the control dir.
-2. Hub lists it as waiting and notifies the user.
+2. Hub lists it as waiting with `pending_questions` and notifies the user.
 3. User submits an answer through the dashboard or future bot.
-4. Hub writes the answer file and records an audit event.
+4. Hub writes the answer file with `write_answer` and records an audit event.
 5. Orchestrator consumes the answer and continues.
 
 ### Stop
 
 1. User requests stop.
-2. Hub writes `stop.flag` for graceful stop at a session boundary.
+2. Hub writes `stop.flag` with `request_stop` for graceful stop at a session boundary.
 3. If a hard kill is ever exposed, it must warn that the repo may be dirty and children may be orphaned.
 
 ## External Dependencies
@@ -208,6 +218,7 @@ future run dirs and audit history, but no component writes there yet.
 - ai-native-development registry is the source of managed repo truth.
 - orch-hub never imports orchestrator code.
 - The orchestrator remains usable manually when `--control-dir` is unset.
+- Control-dir adapter code stays file-channel only; API/UI/run-manager code calls it instead of duplicating file writes.
 - Same target repo cannot have two active orchestrator runs.
 - Human answers are auditable.
 - Readiness must fail closed; missing deploy pieces, dirty trees, or failed `aii-2 status` should block launch.
