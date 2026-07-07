@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "56896ce3eb2f65931c97de5c8377b6c806d8735ee673ff070a0c1f0f54dea051",
+  "canonical_payload_sha256": "0e48621c3b36654e27bb8be81ea550587e1054a26fa2a3ab4224c621dbc89cdf",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
@@ -9,8 +9,8 @@
     },
     {
       "canonical_relative_path": "canonical/claude/hooks/stop-context-check.sh",
-      "canonical_sha256": "8bb179f2a85148c7d08a2790ff7672b4b108c647a87ca4d70a705608a5295ba1",
-      "canonical_size_bytes": 7323,
+      "canonical_sha256": "22271068cb07aecda874327faeb6401400c719e9d26dcf6085056fa072f04153",
+      "canonical_size_bytes": 7801,
       "target_relative_path": ".claude/hooks/stop-context-check.sh"
     },
     {
@@ -45,8 +45,8 @@
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/stop-context-check.sh",
-      "canonical_sha256": "04fd48e4c38db5decff2a06af92e5d9fcd9366a817ce74c66d3ee75f0940ba7c",
-      "canonical_size_bytes": 8170,
+      "canonical_sha256": "4a5b07b595f2ed5c2f17ba90d6adfaebbcfcd3d77d192d26ea60da89a902ecfe",
+      "canonical_size_bytes": 8648,
       "target_relative_path": ".codex/hooks/stop-context-check.sh"
     },
     {
@@ -69,8 +69,8 @@
     },
     {
       "canonical_relative_path": "canonical/cursor/hooks/stop-context-check.sh",
-      "canonical_sha256": "ecc0712ab2f36dcbe3b5023e82989a4c8c9c678d72cc7375ffd3033fe89e6a5f",
-      "canonical_size_bytes": 7911,
+      "canonical_sha256": "a7dd45cc0e6a16225278ff1cce26ba212ab317b5fd776a4dd3590258ef4ac623",
+      "canonical_size_bytes": 8389,
       "target_relative_path": ".cursor/hooks/stop-context-check.sh"
     },
     {
@@ -87,20 +87,20 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "30048dee7cd376f66f8fd11db1ca34aebd9fe5be31902638ce4016a7ac4a03cf",
-      "canonical_size_bytes": 28338,
+      "canonical_sha256": "56bc8f75eb94106c622a90211a43de6a038671ed9d3df1c18bd297b5de18f1e6",
+      "canonical_size_bytes": 29005,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/automation-mode.md",
-      "canonical_sha256": "393835daefa7d10124333a9460c27a01925801fd682c2ebdf77e15af47da6226",
-      "canonical_size_bytes": 2948,
+      "canonical_sha256": "40e28dcbc2eebfdcac62098808ce6d230966250e62d5f5a6f48a09d969ecdaf6",
+      "canonical_size_bytes": 3008,
       "target_relative_path": ".cursor/orchestrator/automation-mode.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "423c38571c00aafc56854505acbf1163052384de8c6a90dd2d4995bfb74192dc",
-      "canonical_size_bytes": 98852,
+      "canonical_sha256": "6b59c67572185d18b8b73fe4a81e60bc6fd1c82694b0a79104a3d4cca6bd8bfe",
+      "canonical_size_bytes": 100993,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -165,18 +165,18 @@
     },
     {
       "canonical_relative_path": "canonical/repo-root/ai-coding-tasks-v2.md",
-      "canonical_sha256": "2b4edd5d55e7a272069c465b069a3ecd7ded81e6f6a4de5a96e7ce7cb48fe6c2",
-      "canonical_size_bytes": 5211,
+      "canonical_sha256": "c2133e14363c6c269eb32b94d26e688e0d37017d741f0a88ef79f18bf6f4dc0b",
+      "canonical_size_bytes": 6653,
       "target_relative_path": "ai-coding-tasks-v2.md"
     },
     {
       "canonical_relative_path": "canonical/repo-root/ai-coding-v2.md",
-      "canonical_sha256": "01d94cb73f97e192aecd828fcd00d906f64cd5366a821b7b3556ccf8c5403bef",
-      "canonical_size_bytes": 8420,
+      "canonical_sha256": "bcb86ba830654307f5b68d27f5a5eab7212145baa19e2cb08efeb15baccc4cf6",
+      "canonical_size_bytes": 9447,
       "target_relative_path": "ai-coding-v2.md"
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "63341c8ff7dcd9f2c47b39bf59b29cc88dddd38b",
+  "source_git_commit": "47fac0e75be33ce8647cdbdff012c873de30cc4b",
   "source_repo": "ai-native-deployment"
 }
