@@ -40,6 +40,20 @@ def test_env_override_expands_user():
     assert not str(cfg.ai_native_path).startswith("~")
 
 
+def test_ai_native_path_strips_surrounding_whitespace():
+    cfg = Config.from_env({AI_NATIVE_PATH_ENV: " /custom/ai-native \n"})
+    assert cfg.ai_native_path == Path("/custom/ai-native")
+
+
+def test_ai_native_path_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({AI_NATIVE_PATH_ENV: ""}).ai_native_path == (
+        DEFAULT_AI_NATIVE_PATH
+    )
+    assert Config.from_env({AI_NATIVE_PATH_ENV: "   "}).ai_native_path == (
+        DEFAULT_AI_NATIVE_PATH
+    )
+
+
 def test_derived_paths():
     cfg = Config(ai_native_path=Path("/root/ai-native"))
     assert cfg.aii2_bin == Path("/root/ai-native/aii-2")

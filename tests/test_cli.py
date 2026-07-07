@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from orch_hub import cli
+from orch_hub.config import PORT_ENV
 from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.registry import RegistryError
 
@@ -64,6 +65,17 @@ def test_repos_json_reports_failures(monkeypatch, capsys):
     assert readiness["checks"] == [
         {"name": "git_clean", "message": "working tree has uncommitted changes"}
     ]
+
+
+def test_malformed_port_env_returns_1(monkeypatch, capsys):
+    # A service-only env typo must exit cleanly, not escape as a traceback.
+    monkeypatch.setenv(PORT_ENV, "eight")
+
+    rc = cli.main(["repos", "--json"])
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert PORT_ENV in err
 
 
 def test_registry_error_returns_1(monkeypatch, capsys):

@@ -43,7 +43,13 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _cmd_repos(*, json_output: bool) -> int:
-    config = Config.from_env()
+    try:
+        # Config.from_env raises ValueError for malformed service settings
+        # (e.g. ORCH_HUB_PORT); report it as an operational error, not a crash.
+        config = Config.from_env()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     try:
         repos = discover_repos(config)
     except RegistryError as exc:

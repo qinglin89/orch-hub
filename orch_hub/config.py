@@ -94,8 +94,8 @@ class Config:
         falling back to the default port.
         """
         env = os.environ if environ is None else environ
-        raw = env.get(AI_NATIVE_PATH_ENV)
-        path = Path(raw).expanduser() if raw else DEFAULT_AI_NATIVE_PATH
+        raw_path = (env.get(AI_NATIVE_PATH_ENV) or "").strip()
+        path = Path(raw_path).expanduser() if raw_path else DEFAULT_AI_NATIVE_PATH
         raw_token = env.get(TOKEN_ENV)
         token = raw_token.strip() if raw_token else None
         raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()
