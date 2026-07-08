@@ -34,9 +34,9 @@ Two supported network shapes:
 
 ## Environment variables
 
-The service is configured entirely through environment variables — the
-console script takes no arguments, so the plist's `EnvironmentVariables` dict
-is the single configuration surface.
+The resident service is configured entirely through environment variables —
+the `orch-hub-api` service console script takes no arguments, so the plist's
+`EnvironmentVariables` dict is the service configuration surface.
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -44,13 +44,13 @@ is the single configuration surface.
 | `ORCH_HUB_HOST` | `127.0.0.1` | Bind address. Loopback or a Tailscale IP only. |
 | `ORCH_HUB_PORT` | `8765` | Bind port. A malformed value fails startup instead of binding a default silently. |
 | `ORCH_HUB_AI_NATIVE_DEPLOYMENT` | `/Users/linqing/workplace/github.com/qinglin89/ai-native-development` | ai-native-development checkout that owns the managed-repo registry. |
-| `ORCH_HUB_DATA_DIR` | `~/.orch-hub` | Reserved for future run dirs and audit history; nothing writes here yet. |
+| `ORCH_HUB_DATA_DIR` | `~/.orch-hub` | Hub-owned run dirs and audit history. |
 | `PATH` | launchd's minimal default | Readiness checks invoke `git`; `aii-2` may need Homebrew tooling. The template sets a sane explicit PATH. |
 
 Empty or whitespace-only values count as unset. In the plist, write absolute
 paths — launchd does not expand `~`.
 
-## 1. Install orch-hub into a venv
+## 1. Install the CLI into a venv
 
 From the repository checkout:
 
@@ -59,79 +59,113 @@ python3 -m venv .venv
 .venv/bin/pip install .
 ```
 
-This installs the `orch-hub-api` console script at
-`<checkout>/.venv/bin/orch-hub-api` — the path the plist runs.
+This installs two console scripts:
 
-## 2. Run the service manually first
+- `.venv/bin/orch-hub` — operational CLI, including launchd management.
+- `.venv/bin/orch-hub-api` — the resident HTTP service launchd runs.
 
-Always verify the service runs in the foreground before handing it to
-launchd; startup errors are much easier to read in a terminal:
+## 2. Deploy or update the launchd agent
 
-```bash
-export ORCH_HUB_TOKEN="$(openssl rand -hex 32)"
-echo "$ORCH_HUB_TOKEN"   # keep it for the plist and your clients
-.venv/bin/orch-hub-api
-```
-
-From another terminal:
+The integrated command creates/updates the venv package install, writes a
+machine-generated plist, validates it, unloads any currently loaded
+`com.qinglin89.orch-hub` user agent, and bootstraps the new one:
 
 ```bash
-curl -s http://127.0.0.1:8765/api/health
-# {"status":"ok"}
-curl -s -H "Authorization: Bearer $ORCH_HUB_TOKEN" http://127.0.0.1:8765/api/repos
+.venv/bin/orch-hub launchd deploy
 ```
 
-Stop it with `Ctrl-C` once both calls answer.
-
-## 3. Install the launchd agent
+After code changes, run the same flow again, or use the explicit alias:
 
 ```bash
-mkdir -p ~/Library/Logs/orch-hub   # launchd creates log files, not directories
-cp deploy/launchd/com.qinglin89.orch-hub.plist ~/Library/LaunchAgents/
+.venv/bin/orch-hub launchd update
 ```
 
-Edit `~/Library/LaunchAgents/com.qinglin89.orch-hub.plist` and replace every
-`REPLACE-...` placeholder:
+`deploy` / `update` resolve configuration in this order:
 
-| Placeholder | Replace with |
+| Setting | Resolution |
 |---|---|
-| `REPLACE-ORCH-HUB-CHECKOUT` | absolute path of this repository checkout |
-| `REPLACE-BEARER-TOKEN` | the token from step 2 (or a fresh `openssl rand -hex 32`) |
-| `REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT` | absolute path of the ai-native-development checkout |
-| `REPLACE-HOME` | your home directory, e.g. `/Users/you` |
+| Checkout | nearest orch-hub checkout above the current directory, or `--checkout` |
+| Token | `--token`, then `ORCH_HUB_TOKEN`, then existing installed plist token, then a generated token printed once |
+| ai-native checkout | `--ai-native`, then `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then built-in default |
+| Host/port/data dir | corresponding flags, then environment, then defaults |
+| Plist/log paths | `--plist-path` / `--log-dir`, then `~/Library/...` defaults |
 
-The plist embeds the bearer token, so restrict and validate it, then load:
+Common examples:
 
 ```bash
-chmod 600 ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
-plutil -lint ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
-launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
+# First deployment; prints a generated token if none exists.
+.venv/bin/orch-hub launchd deploy
+
+# Use an explicit token or rotate it.
+.venv/bin/orch-hub launchd deploy --token "$(openssl rand -hex 32)"
+
+# Bind directly to the Mac's Tailscale IP instead of loopback.
+.venv/bin/orch-hub launchd deploy --host "$(tailscale ip -4)"
 ```
 
-With `RunAtLoad` the service starts immediately and again at every login.
+The generated plist is written with mode `600` because it embeds the bearer
+token.
 
-## 4. Manage the service
+## 3. Check status
 
 ```bash
-# Status (state, pid, last exit code)
+.venv/bin/orch-hub launchd status
+```
+
+Status reports:
+
+- fixed launchd label (`com.qinglin89.orch-hub`);
+- installed plist path and whether it exists;
+- whether launchd currently has the job loaded;
+- configured dashboard URL;
+- public `/api/health` probe result.
+
+For lower-level launchd diagnostics:
+
+```bash
 launchctl print gui/$UID/com.qinglin89.orch-hub
-
-# Restart now (also starts it if stopped)
-launchctl kickstart -k gui/$UID/com.qinglin89.orch-hub
-
-# Stop and unload (KeepAlive means a plain kill just respawns it)
-launchctl bootout gui/$UID/com.qinglin89.orch-hub
 ```
 
-After editing the plist (token rotation, port change), apply it with a
-reload — launchd does not re-read a loaded plist:
+## 4. Stop the hub service
+
+```bash
+.venv/bin/orch-hub launchd stop
+```
+
+There is one launchd-managed orch-hub service: the fixed label
+`com.qinglin89.orch-hub` in the current user's `gui/$UID` domain. `stop`
+unloads that job. It is idempotent: if the job is not loaded, the command
+reports that it is already stopped.
+
+Stopping the launchd service is deliberately different from stopping an
+orchestrator run:
+
+- It does not call the run API.
+- It does not write any run `stop.flag`.
+- It does not signal pids recorded in `~/.orch-hub/runs/.../run.json`.
+- It does not wait for active orchestrator runs to finish.
+
+The hub launches orchestrators as detached subprocess sessions
+(`start_new_session=True`), so unloading the hub should leave those runs to
+continue under their own process/session. To stop a run, use the dashboard or
+`POST /api/runs/{run_id}/stop` while the hub is running.
+
+The `launchctl bootout` call itself may briefly wait for launchd to tear down
+the hub process, but it does not block on orchestrator completion.
+
+## 5. Manual fallback
+
+The checked-in plist template remains at
+[`deploy/launchd/com.qinglin89.orch-hub.plist`](../deploy/launchd/com.qinglin89.orch-hub.plist)
+for inspection or manual recovery. If you edit the installed plist yourself,
+reload it with:
 
 ```bash
 launchctl bootout gui/$UID/com.qinglin89.orch-hub
 launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
 ```
 
-Uninstall completely:
+To remove the launchd registration entirely:
 
 ```bash
 launchctl bootout gui/$UID/com.qinglin89.orch-hub
@@ -139,7 +173,7 @@ rm ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
 rm -r ~/Library/Logs/orch-hub   # optional
 ```
 
-## 5. Logs
+## 6. Logs
 
 uvicorn writes access logs to stdout and lifecycle/errors to stderr:
 

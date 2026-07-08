@@ -54,7 +54,7 @@ A repo is ready only when all checks pass.
 | HTTP bearer token | unset (protected routes answer 503) | `ORCH_HUB_TOKEN` |
 | HTTP bind address | `127.0.0.1` | `ORCH_HUB_HOST` |
 | HTTP port | `8765` | `ORCH_HUB_PORT` |
-| Data directory (reserved for future run dirs/audit; unused today) | `~/.orch-hub` | `ORCH_HUB_DATA_DIR` |
+| Data directory (run dirs and audit history) | `~/.orch-hub` | `ORCH_HUB_DATA_DIR` |
 
 An empty or whitespace-only value counts as unset for every variable;
 surrounding whitespace is stripped. A malformed `ORCH_HUB_PORT` fails startup
@@ -206,12 +206,22 @@ code execution surface:
 ## Run as a launchd service
 
 To keep the hub resident on the Mac (start at login, restart on exit), install
-it as a launchd user agent. A template plist is provided at
-[`deploy/launchd/com.qinglin89.orch-hub.plist`](deploy/launchd/com.qinglin89.orch-hub.plist);
-install, start/stop, and log inspection are documented in
+it as a launchd user agent:
+
+```bash
+.venv/bin/orch-hub launchd deploy   # install/update package, write plist, bootstrap
+.venv/bin/orch-hub launchd status   # launchd state + /api/health probe
+.venv/bin/orch-hub launchd stop     # unload hub service only
+.venv/bin/orch-hub launchd update   # same flow as deploy after code changes
+```
+
+The launchd label is a singleton (`com.qinglin89.orch-hub`) in the user's
+`gui/$UID` domain. `launchd stop` unloads only that hub service; it does not
+write run `stop.flag` files or signal detached orchestrator subprocesses.
+Detailed install, update, stop, and log inspection guidance is in
 [docs/launchd.md](docs/launchd.md). The plist must set `ORCH_HUB_TOKEN` —
-with it unset the service fails closed (503 on every protected route; only
-`GET /api/health` serves).
+`deploy` preserves an existing plist token, uses `ORCH_HUB_TOKEN` when set, or
+generates and prints a new token.
 
 ## Development
 
