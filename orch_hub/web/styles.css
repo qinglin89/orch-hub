@@ -558,6 +558,71 @@ code {
   color: var(--bad-fg);
 }
 
+/* Cancel stays secondary inside .run-controls, whose broad button rule would
+   otherwise paint it with the primary accent. */
+.run-controls .btn-secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+/* ---- cc-codex launch options dialog ---- */
+
+.run-options {
+  width: min(92vw, 420px);
+  max-height: 86vh;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  padding: 18px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+}
+
+.run-options::backdrop {
+  background: rgba(0, 0, 0, 0.45);
+}
+
+.run-options h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.run-options .opts-note {
+  margin: 0 0 14px;
+  font-size: 13px;
+}
+
+.run-options label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.run-options input,
+.run-options select {
+  font-size: 16px; /* >=16px keeps iOS Safari from zooming on focus */
+  padding: 9px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+}
+
+.run-options .control-actions {
+  flex-wrap: wrap;
+  margin-top: 4px;
+}
+
 /* ---- inline text link (e.g. "View logs") ---- */
 
 .text-link {

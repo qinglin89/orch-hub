@@ -742,38 +742,117 @@
           its <code>claimed-by</code> session is resumable, else the orchestrator
           exits with guidance (README §5.4).</span></label>`
       : "";
+    // Start opens an options dialog rather than launching immediately. Every
+    // dashboard run pins the backend to cc-codex (there is deliberately no
+    // backend selector); the fields below are optional overrides for the
+    // cc-codex run parameters. A blank field is omitted from the argv, so the
+    // orchestrator keeps its own default — only a changed field adds an arg
+    // (see buildExtraArgs). The blocked-task acknowledgement moves inside the
+    // dialog, so it is confirmed together with the launch.
     return (
       head +
-      `<form class="start-form" data-repo="${escapeHtml(
-        repoName
-      )}" data-task="${escapeHtml(detail.task_id)}" data-blocked="${
+      `<button type="button" class="open-run-options">Start run…</button>
+      <dialog class="run-options">
+        <form class="start-form" data-repo="${escapeHtml(
+          repoName
+        )}" data-task="${escapeHtml(detail.task_id)}" data-blocked="${
         blocked ? "1" : ""
       }">
-        ${ack}
-        <div class="control-actions">
-          <button type="submit">Start run</button>
-          <span class="control-status" role="status"></span>
-        </div>
-      </form>` +
+          <h3>Start run</h3>
+          <p class="muted opts-note">Backend is fixed to <code>cc-codex</code>.
+            Leave a field blank to use the orchestrator default; only changed
+            fields are passed.</p>
+          <label>Dev agent
+            <select class="opt-dev-agent">
+              <option value="">default</option>
+              <option value="claude">claude</option>
+              <option value="codex">codex</option>
+            </select>
+          </label>
+          <label>Dev model
+            <input type="text" class="opt-dev-model" autocapitalize="off"
+              autocomplete="off" spellcheck="false" placeholder="default" />
+          </label>
+          <label>Dev effort
+            <input type="text" class="opt-dev-effort" autocapitalize="off"
+              autocomplete="off" spellcheck="false" placeholder="default" />
+          </label>
+          <label>Review model
+            <input type="text" class="opt-review-model" autocapitalize="off"
+              autocomplete="off" spellcheck="false" placeholder="default" />
+          </label>
+          <label>Review effort
+            <input type="text" class="opt-review-effort" autocapitalize="off"
+              autocomplete="off" spellcheck="false" placeholder="default" />
+          </label>
+          ${ack}
+          <div class="control-actions">
+            <button type="submit">Launch run</button>
+            <button type="button" class="btn-secondary cancel-run-options">Cancel</button>
+            <span class="control-status" role="status"></span>
+          </div>
+        </form>
+      </dialog>` +
       foot
     );
   }
 
   function wireRunControls() {
+    const openBtn = document.querySelector(".open-run-options");
+    const dialog = document.querySelector(".run-options");
+    if (openBtn && dialog) {
+      openBtn.addEventListener("click", () => openRunOptions(dialog));
+      const cancel = dialog.querySelector(".cancel-run-options");
+      if (cancel) cancel.addEventListener("click", () => dialog.close());
+    }
     const startForm = document.querySelector(".start-form");
     if (startForm) startForm.addEventListener("submit", onStartSubmit);
     const stopForm = document.querySelector(".stop-form");
     if (stopForm) stopForm.addEventListener("submit", onStopSubmit);
   }
 
-  // Start: POST /api/runs. A success re-renders (the run is now live, so the
-  // view flips to Stop); a refusal is shown in place — the backend, not this
+  // Open the options dialog. Prefer the native modal; fall back to a plain open
+  // attribute on the rare browser without <dialog>.showModal so the form is
+  // still reachable.
+  function openRunOptions(dialog) {
+    if (typeof dialog.showModal === "function") dialog.showModal();
+    else dialog.setAttribute("open", "");
+  }
+
+  // The launch overrides, each as [orchestrator flag, field class]. Order fixes
+  // the argv order; every field is optional.
+  const RUN_OPTION_FIELDS = [
+    ["--dev-agent", "opt-dev-agent"],
+    ["--dev-model", "opt-dev-model"],
+    ["--dev-effort", "opt-dev-effort"],
+    ["--review-model", "opt-review-model"],
+    ["--review-effort", "opt-review-effort"],
+  ];
+
+  // Build the orchestrator extra args for a Start. The backend is always pinned
+  // to cc-codex (never selectable from the dashboard); each override adds its
+  // flag only when the user supplied a value, so a blank field defers to the
+  // orchestrator default and never reaches the argv.
+  function buildExtraArgs(form) {
+    const args = ["--backend", "cc-codex"];
+    for (const [flag, cls] of RUN_OPTION_FIELDS) {
+      const field = form.querySelector("." + cls);
+      const value = field ? field.value.trim() : "";
+      if (value) args.push(flag, value);
+    }
+    return args;
+  }
+
+  // Start: POST /api/runs with the fixed cc-codex backend plus any overrides. A
+  // success closes the dialog and re-renders (the run is now live, so the view
+  // flips to Stop); a refusal stays in the open dialog — the backend, not this
   // form, decides whether the launch is allowed.
   async function onStartSubmit(ev) {
     ev.preventDefault();
     const form = ev.currentTarget;
+    const dialog = form.closest("dialog");
     const statusEl = form.querySelector(".control-status");
-    const button = form.querySelector("button");
+    const button = form.querySelector('button[type="submit"]');
     const ackBox = form.querySelector(".ack-blocked");
     const acknowledgeBlocked =
       form.dataset.blocked === "1" ? !!(ackBox && ackBox.checked) : false;
@@ -786,9 +865,11 @@
         body: {
           repo_id: form.dataset.repo,
           task_id: form.dataset.task,
+          extra_args: buildExtraArgs(form),
           acknowledge_blocked: acknowledgeBlocked,
         },
       });
+      if (dialog && dialog.open) dialog.close();
       router(); // now shows the live run + Stop control
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown

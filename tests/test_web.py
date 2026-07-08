@@ -153,3 +153,62 @@ def test_start_reflects_non_runnable_and_not_ready_states():
     body = app_js()
     assert "RUNNABLE_STATUSES" in body
     assert "not ready to launch" in body
+
+
+# ---- cc-codex launch options (dialog + extra args) --------------------------
+#
+# Session-1 of the launch-options task: Start no longer launches immediately —
+# it opens an options dialog whose submit builds `extra_args` with a *fixed*
+# `--backend cc-codex` plus only the override fields the user changed, then POSTs
+# them to the existing /api/runs route. Like the run-control checks above, the
+# wiring is asserted at the served-asset boundary (no JS runtime in this suite).
+
+
+def test_start_run_pins_the_cc_codex_backend():
+    # Every dashboard-initiated run fixes the backend to cc-codex; the value is
+    # hard-coded in the extra-args builder, never read from a form field.
+    body = app_js()
+    assert '"--backend"' in body
+    assert '"cc-codex"' in body
+    assert "buildExtraArgs" in body
+
+
+def test_start_run_exposes_no_backend_selector():
+    # The control must not let the operator pick the alternative (cursor)
+    # backend. `cursor` is the only other --backend value, so its total absence
+    # from the served script is the proxy for "no backend selector is rendered".
+    assert "cursor" not in app_js()
+
+
+def test_launch_options_dialog_renders_the_supported_overrides():
+    # The options dialog exposes exactly the supported cc-codex overrides, each
+    # with an input/select field. buildExtraArgs trims and skips blanks, so an
+    # unchanged field never reaches the argv and keeps the orchestrator default.
+    body = app_js()
+    assert "run-options" in body  # the <dialog>
+    assert "open-run-options" in body  # the button that opens it
+    for flag in (
+        "--dev-agent",
+        "--dev-model",
+        "--dev-effort",
+        "--review-model",
+        "--review-effort",
+    ):
+        assert flag in body
+    for cls in (
+        "opt-dev-agent",
+        "opt-dev-model",
+        "opt-dev-effort",
+        "opt-review-model",
+        "opt-review-effort",
+    ):
+        assert cls in body
+
+
+def test_launch_dialog_submit_sends_extra_args_and_keeps_ack():
+    # Start still carries acknowledge_blocked (blocked-task launch) and now also
+    # sends the constructed extra_args to the same /api/runs create route.
+    body = app_js()
+    assert "extra_args" in body
+    assert "acknowledge_blocked" in body
+    assert '"/api/runs"' in body
