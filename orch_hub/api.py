@@ -29,8 +29,10 @@ from __future__ import annotations
 import secrets
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import TOKEN_ENV, Config
 from .control_dir import (
@@ -40,7 +42,7 @@ from .control_dir import (
     pending_questions,
     write_answer,
 )
-from .logs import DEFAULT_TAIL_LINES, read_recent
+from .logs import DEFAULT_TAIL_LINES, read_recent, tail_events
 from .models import repos_payload, tasks_payload
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
@@ -62,6 +64,63 @@ need secret material, and a 401 from any other path already reveals liveness
 anyway. Everything else — including docs/OpenAPI and future dashboard routes —
 requires the token.
 """
+
+
+class BearerAuthMiddleware:
+    """Default-deny bearer auth for every path outside :data:`PUBLIC_PATHS`.
+
+    Pure ASGI, deliberately not ``BaseHTTPMiddleware`` (the ``@app.middleware(
+    "http")`` form): ``BaseHTTPMiddleware`` wraps the response in an anyio
+    stream that can buffer a streaming body and delay client-disconnect
+    propagation, which breaks a long-lived SSE log stream
+    (``GET /api/runs/{run_id}/logs/stream``). Running before routing means an
+    unknown path is 401 (not 404) when unauthenticated. Error bodies are static
+    — the presented token is never echoed — and the compare is constant-time.
+    Behavior is otherwise identical to the previous ``@app.middleware("http")``
+    implementation; the auth tests pin every case.
+    """
+
+    def __init__(self, app: ASGIApp, token: str | None):
+        self.app = app
+        self.token = token
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Non-HTTP scopes (lifespan; websockets, of which there are none) and the
+        # public liveness probe pass straight through.
+        if scope["type"] != "http" or scope["path"] in PUBLIC_PATHS:
+            await self.app(scope, receive, send)
+            return
+        denial = self._denial(scope)
+        if denial is not None:
+            await denial(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+    def _denial(self, scope: Scope) -> JSONResponse | None:
+        """Return the response to send if unauthorized, else ``None`` to allow."""
+        if self.token is None:
+            # Fail closed: an unconfigured token disables serving, never auth.
+            return JSONResponse(
+                status_code=503,
+                content={"detail": f"bearer token not configured; set {TOKEN_ENV}"},
+            )
+        authorization = Headers(scope=scope).get("Authorization", "")
+        scheme, _, credentials = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not credentials.strip():
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "missing bearer token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        if not secrets.compare_digest(
+            credentials.strip().encode(), self.token.encode()
+        ):
+            return JSONResponse(
+                status_code=401,
+                content={"detail": "invalid bearer token"},
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        return None
 
 
 class StartRunRequest(BaseModel):
@@ -163,39 +222,11 @@ def create_app(
     ) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
-    @app.middleware("http")
-    async def require_bearer_token(request: Request, call_next):
-        """Default-deny bearer auth for every path outside ``PUBLIC_PATHS``.
-
-        Runs before routing, so unknown paths get 401 (not 404) when
-        unauthenticated. Error bodies are static strings: the presented token
-        is never echoed, logged, or compared non-constant-time.
-        """
-        if request.url.path in PUBLIC_PATHS:
-            return await call_next(request)
-        if resolved.token is None:
-            # Fail closed: an unconfigured token disables serving, it never
-            # disables auth.
-            return JSONResponse(
-                status_code=503,
-                content={"detail": f"bearer token not configured; set {TOKEN_ENV}"},
-            )
-        scheme, _, credentials = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not credentials.strip():
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "missing bearer token"},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        if not secrets.compare_digest(
-            credentials.strip().encode(), resolved.token.encode()
-        ):
-            return JSONResponse(
-                status_code=401,
-                content={"detail": "invalid bearer token"},
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return await call_next(request)
+    # Default-deny bearer auth as pure ASGI middleware (see BearerAuthMiddleware
+    # for why not BaseHTTPMiddleware): it wraps the whole app, so it protects
+    # every current and future path — including the SSE log stream — the moment
+    # it is mounted, and lets the streaming response pass through unbuffered.
+    app.add_middleware(BearerAuthMiddleware, token=resolved.token)
 
     @app.get("/api/health")
     def health() -> dict:
@@ -303,6 +334,39 @@ def create_app(
         status = manager.get_run(run_id)
         snapshot = read_recent(status.record, max_lines=tail)
         return {"run_id": run_id, **snapshot.to_dict()}
+
+    @app.get("/api/runs/{run_id}/logs/stream")
+    def stream_run_logs(run_id: str, tail: int = DEFAULT_TAIL_LINES) -> StreamingResponse:
+        """Live-tail one run's orchestrator log as Server-Sent Events.
+
+        Resolves the run by ``run_id`` (unknown → 404), then follows its located
+        log file: a bounded initial tail of ``tail`` lines (same clamp as the
+        recent-log route), then one ``data:`` event per newly appended line, then
+        a terminal ``event: end`` when the run finishes or the log rotates away.
+        Liveness is re-checked from the run manager each poll, so the stream
+        terminates on its own once the run ends — an already-ended run streams
+        its final log and closes.
+
+        Auth is the standard bearer header (the default-deny middleware covers
+        this path too), so a browser client tails it with ``fetch`` plus a
+        stream reader, not ``EventSource`` (which cannot set ``Authorization``);
+        the token is never taken from the URL. ``Cache-Control``/
+        ``X-Accel-Buffering`` ask any intermediary not to buffer the stream.
+        """
+        record = manager.get_run(run_id).record  # UnknownRunError → 404
+
+        def is_live() -> bool:
+            try:
+                current = manager.get_run(run_id).record
+            except UnknownRunError:
+                return False
+            return current.ended_ts is None and current.error is None
+
+        return StreamingResponse(
+            tail_events(record, is_live=is_live, initial_lines=tail),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @app.get("/api/escalations")
     def list_escalations() -> dict:

@@ -8,6 +8,7 @@ deployed orchestrator's own ``self.log_file`` construction.
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 from pathlib import Path
 
@@ -244,3 +245,166 @@ def test_snapshot_defaults_are_absent():
         "size": 0,
         "detail": None,
     }
+
+
+# -- tail_events (SSE) --------------------------------------------------------
+#
+# The async tail generator is driven to completion on a private event loop with
+# an injected ``sleep`` (so no real time passes) and an injected ``is_live``
+# probe (so the test decides when the run ends). ``sleep`` doubles as the hook
+# that mutates the log file *between* polls — appending, creating, or removing
+# it — which deterministically simulates a growing/rotating live log.
+
+
+async def _collect(agen) -> list[str]:
+    return [frame async for frame in agen]
+
+
+def drive(agen) -> list[str]:
+    """Run a tail generator to completion and return the emitted SSE frames."""
+    return asyncio.run(_collect(agen))
+
+
+async def _instant(_seconds) -> None:
+    """A sleep that never actually waits."""
+    return None
+
+
+def data_frames(frames: list[str]) -> list[str]:
+    """Just the ``data:`` line events (drops heartbeats and the end event)."""
+    return [f for f in frames if f.startswith("data: ")]
+
+
+def test_tail_ended_run_emits_existing_lines_then_end(tmp_path):
+    logdir = tmp_path / "logs"
+    write_log(logdir, RUN_STAMP, ["run started", "dev turn", "done"])
+    frames = drive(
+        logs.tail_events(make_record(logdir), is_live=lambda: False, sleep=_instant)
+    )
+    assert frames == [
+        "data: run started\n\n",
+        "data: dev turn\n\n",
+        "data: done\n\n",
+        "event: end\ndata: run ended\n\n",
+    ]
+
+
+def test_tail_streams_appended_lines(tmp_path):
+    logdir = tmp_path / "logs"
+    path = write_log(logdir, RUN_STAMP, ["start"])
+    batches = [["line-2", "line-3"], ["line-4"]]
+
+    async def sleep(_seconds):
+        # Each poll wait appends the next batch, so the follow phase sees them.
+        if batches:
+            with path.open("a", encoding="utf-8") as handle:
+                for line in batches.pop(0):
+                    handle.write(line + "\n")
+
+    frames = drive(
+        logs.tail_events(
+            make_record(logdir), is_live=lambda: bool(batches), sleep=sleep
+        )
+    )
+    assert data_frames(frames) == [
+        "data: start\n\n",
+        "data: line-2\n\n",
+        "data: line-3\n\n",
+        "data: line-4\n\n",
+    ]
+    assert frames[-1] == "event: end\ndata: run ended\n\n"
+
+
+def test_tail_waits_for_missing_log_then_streams(tmp_path):
+    logdir = tmp_path / "logs"
+    logdir.mkdir(parents=True)
+    state = {"created": False}
+
+    async def sleep(_seconds):
+        if not state["created"]:
+            write_log(logdir, RUN_STAMP, ["first line"])
+            state["created"] = True
+
+    frames = drive(
+        logs.tail_events(
+            make_record(logdir), is_live=lambda: not state["created"], sleep=sleep
+        )
+    )
+    # Heartbeat while the file is absent, then the line once it appears, then end.
+    assert frames[0] == ": keep-alive\n\n"
+    assert "data: first line\n\n" in frames
+    assert frames[-1].startswith("event: end")
+
+
+def test_tail_run_ends_without_log_emits_end(tmp_path):
+    logdir = tmp_path / "logs"
+    logdir.mkdir(parents=True)
+    frames = drive(
+        logs.tail_events(make_record(logdir), is_live=lambda: False, sleep=_instant)
+    )
+    assert frames == ["event: end\ndata: no log file was written for this run\n\n"]
+
+
+def test_tail_emits_heartbeat_while_idle(tmp_path):
+    logdir = tmp_path / "logs"
+    write_log(logdir, RUN_STAMP, ["only line"])
+    checks = {"n": 0}
+
+    def is_live():
+        checks["n"] += 1
+        return checks["n"] <= 1  # live for one idle poll, then ended
+
+    frames = drive(
+        logs.tail_events(
+            make_record(logdir),
+            is_live=is_live,
+            sleep=_instant,
+            poll_interval=1.0,
+            heartbeat_seconds=1.0,
+        )
+    )
+    assert "data: only line\n\n" in frames
+    assert ": keep-alive\n\n" in frames
+    assert frames[-1].startswith("event: end")
+
+
+def test_tail_rotation_ends_gracefully(tmp_path):
+    logdir = tmp_path / "logs"
+    path = write_log(logdir, RUN_STAMP, ["line one"])
+
+    async def sleep(_seconds):
+        if path.exists():
+            path.unlink()  # the located file rotates away between polls
+
+    frames = drive(
+        logs.tail_events(make_record(logdir), is_live=lambda: True, sleep=sleep)
+    )
+    assert "data: line one\n\n" in frames
+    assert frames[-1] == "event: end\ndata: log file rotated or removed\n\n"
+
+
+def test_tail_initial_lines_bounds_context(tmp_path):
+    logdir = tmp_path / "logs"
+    write_log(logdir, RUN_STAMP, [f"line-{i}" for i in range(5)])
+    frames = drive(
+        logs.tail_events(
+            make_record(logdir),
+            is_live=lambda: False,
+            initial_lines=2,
+            sleep=_instant,
+        )
+    )
+    assert data_frames(frames) == ["data: line-3\n\n", "data: line-4\n\n"]
+    assert frames[-1].startswith("event: end")
+
+
+def test_tail_initial_byte_window_drops_partial_head(tmp_path):
+    logdir = tmp_path / "logs"
+    write_log(logdir, RUN_STAMP, ["aaaa", "bbbb", "cccc"])  # 15 bytes total
+    frames = drive(
+        logs.tail_events(
+            make_record(logdir), is_live=lambda: False, max_bytes=8, sleep=_instant
+        )
+    )
+    # An 8-byte tail window starts mid-file; the partial head line is dropped.
+    assert data_frames(frames) == ["data: cccc\n\n"]

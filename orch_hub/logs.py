@@ -24,12 +24,22 @@ run id), never a client-supplied path, so no path outside a managed repo's log
 dir is ever read. Missing or rotated logs are reported as an absent snapshot,
 never an error — a run may be listed before its orchestrator writes the first
 line, and old logs get cleaned up out from under us.
+
+Live tailing (:func:`tail_events`) follows that same located file, emitting each
+newly completed line as a Server-Sent Events ``data:`` frame and a terminal
+``event: end`` frame when the run ends or the file rotates away. It rides the
+same bearer-header auth as every other route, so browser clients tail it with
+``fetch`` plus a stream reader rather than ``EventSource`` (which cannot set an
+``Authorization`` header): the hub keeps one header-based credential path and
+never accepts the token in a URL.
 """
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import os
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -181,6 +191,168 @@ def read_recent(
         size=size,
         path=path,
     )
+
+
+# -- live tailing (SSE) -------------------------------------------------------
+
+DEFAULT_POLL_INTERVAL = 1.0
+"""Seconds between file polls while following a live log."""
+
+HEARTBEAT_SECONDS = 15.0
+"""Idle gap after which the tailer emits an SSE comment heartbeat, so a client
+(or an intermediary) can see the connection is alive during quiet stretches."""
+
+
+def _sse_data(line: str) -> str:
+    """Frame one log line as an SSE ``data:`` event.
+
+    The line carries no embedded newline (the tailer splits on ``\\n``), so a
+    single ``data:`` field holds it verbatim and the blank line ends the event.
+    """
+    return f"data: {line}\n\n"
+
+
+def _sse_end(reason: str) -> str:
+    """Frame the terminal ``event: end`` event that closes a stream cleanly."""
+    return f"event: end\ndata: {reason}\n\n"
+
+
+_SSE_HEARTBEAT = ": keep-alive\n\n"
+"""An SSE comment line: clients ignore it; it keeps an idle connection warm."""
+
+
+async def tail_events(
+    record: RunRecord,
+    *,
+    is_live: Callable[[], bool],
+    locator: Callable[[RunRecord], Path | None] = locate_log,
+    initial_lines: int = DEFAULT_TAIL_LINES,
+    max_bytes: int = _TAIL_BYTES,
+    poll_interval: float = DEFAULT_POLL_INTERVAL,
+    heartbeat_seconds: float = HEARTBEAT_SECONDS,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> AsyncIterator[str]:
+    """Follow this run's log, yielding Server-Sent Events until the run ends.
+
+    Emits a bounded initial tail (the last ``initial_lines`` lines, same clamp
+    as :func:`read_recent`) as ``data:`` events, then follows appended lines —
+    one ``data:`` event per newly completed line. ``is_live()`` is re-checked
+    each poll: once it returns False the tailer does one final draining read,
+    emits a terminal ``event: end``, and stops, so an already-ended run yields a
+    finite stream. A log that never appears (the run ended before its first
+    write) or one that rotates away also ends cleanly with an ``event: end``
+    carrying the reason. Only complete (newline-terminated) lines are emitted; a
+    half-written trailing line waits for its newline.
+
+    ``is_live`` and ``sleep`` are injected so the caller owns liveness (the run
+    manager) and tests can drive the loop without real time; the route passes
+    the defaults (:func:`asyncio.sleep` and a run-manager liveness probe). Each
+    poll reads at most ``max_bytes`` so a burst of appended output cannot load
+    unboundedly. The reads run inline on the event loop, acceptable for the v1
+    localhost/tailnet deployment's low connection count.
+
+    Client disconnects need no handling here: Starlette's ``StreamingResponse``
+    races this generator against a disconnect listener and closes it when the
+    client goes away.
+    """
+    initial_lines = max(1, min(initial_lines, MAX_TAIL_LINES))
+
+    # Phase 1 — wait for the log file to appear. A run is listed the instant it
+    # starts, before its orchestrator opens the log; poll until the file exists
+    # or the run ends without ever writing one.
+    path = locator(record)
+    while path is None:
+        if not is_live():
+            yield _sse_end("no log file was written for this run")
+            return
+        yield _SSE_HEARTBEAT
+        await sleep(poll_interval)
+        path = locator(record)
+
+    # Phase 2 — bounded initial tail. ``_initial_window`` returns the exact end
+    # offset, so the follow phase never re-emits a line across the seam.
+    try:
+        offset, pending, initial = _initial_window(path, initial_lines, max_bytes)
+    except OSError:
+        yield _sse_end("log file rotated or removed")
+        return
+    for line in initial:
+        yield _sse_data(line)
+
+    # Phase 3 — follow. Read new bytes, emit each completed line, and once the
+    # run is no longer live do one final draining read before ending.
+    idle = 0.0
+    ended = False
+    while True:
+        try:
+            data, offset = _read_from(path, offset, max_bytes)
+        except OSError:
+            yield _sse_end("log file rotated or removed")
+            return
+        pending += data
+        parts = pending.split(b"\n")
+        pending = parts.pop()  # trailing partial line (empty after a newline)
+        for chunk in parts:
+            yield _sse_data(chunk.decode("utf-8", errors="replace"))
+        if ended and not data:
+            # The run is over and the final drain read nothing new: done.
+            yield _sse_end("run ended")
+            return
+        if parts:
+            idle = 0.0
+        elif not is_live():
+            # Keep reading (no sleep) until a drain read comes back empty, so a
+            # final burst larger than one ``max_bytes`` window is not truncated.
+            ended = True
+            continue
+        else:
+            idle += poll_interval
+            if idle >= heartbeat_seconds:
+                yield _SSE_HEARTBEAT
+                idle = 0.0
+        await sleep(poll_interval)
+
+
+def _initial_window(
+    path: Path, max_lines: int, max_bytes: int
+) -> tuple[int, bytes, list[str]]:
+    """Read the last ``max_lines`` lines of the ``max_bytes`` tail window.
+
+    Returns the exact end offset (where following resumes), the trailing partial
+    bytes not yet a complete line, and the decoded initial lines. A window that
+    starts mid-file drops its partial head line, mirroring :func:`read_recent`.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        start = max(0, size - max_bytes)
+        handle.seek(start)
+        data = handle.read()
+        offset = handle.tell()
+    parts = data.split(b"\n")
+    pending = parts.pop()  # trailing partial (empty when data ended on a newline)
+    if start > 0 and parts:
+        parts = parts[1:]  # byte window began mid-line: drop the partial head
+    if len(parts) > max_lines:
+        parts = parts[-max_lines:]
+    return offset, pending, [chunk.decode("utf-8", errors="replace") for chunk in parts]
+
+
+def _read_from(path: Path, offset: int, max_bytes: int) -> tuple[bytes, int]:
+    """Read up to ``max_bytes`` new bytes from ``offset``; return (data, offset).
+
+    A file now shorter than ``offset`` was truncated or rotated in place, so the
+    read restarts from the top. A missing file raises ``OSError`` for the caller
+    to treat as rotation.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        if size < offset:
+            offset = 0
+        handle.seek(offset)
+        data = handle.read(max_bytes)
+        return data, handle.tell()
 
 
 def _parse_stamp(stamp: str) -> dt.datetime | None:

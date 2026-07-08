@@ -809,6 +809,59 @@ def test_get_run_logs_unknown_run_is_404(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+# -- run logs: SSE stream ------------------------------------------------------
+#
+# The stream is driven against ended runs so the tail generator terminates and
+# ``client.get`` returns the full body (a live run would tail forever). The
+# generator hits no real ``asyncio.sleep`` on the ended path: it drains the
+# located log, emits ``event: end``, and stops.
+
+
+def test_stream_run_logs_emits_events_for_ended_run(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], ["run started", "dev turn", "done"])
+    spawner.procs[0].returncode = 0  # the run ends, so the stream terminates
+
+    resp = client.get(f"/api/runs/{started['run_id']}/logs/stream")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    body = resp.text
+    assert "data: run started\n\n" in body
+    assert "data: dev turn\n\n" in body
+    assert "data: done\n\n" in body
+    assert body.endswith("event: end\ndata: run ended\n\n")
+
+
+def test_stream_run_logs_missing_log_ends_cleanly(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    spawner.procs[0].returncode = 0  # ended, and no log was ever written
+
+    resp = client.get(f"/api/runs/{started['run_id']}/logs/stream")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+    assert resp.text == "event: end\ndata: no log file was written for this run\n\n"
+
+
+def test_stream_run_logs_tail_param_bounds_context(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], [f"line-{i}" for i in range(5)])
+    spawner.procs[0].returncode = 0
+
+    body = client.get(f"/api/runs/{started['run_id']}/logs/stream?tail=2").text
+    assert "data: line-3\n\n" in body
+    assert "data: line-4\n\n" in body
+    assert "data: line-0\n\n" not in body
+
+
+def test_stream_run_logs_unknown_run_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get("/api/runs/20990101T000000Z-nope-x/logs/stream")
+    assert resp.status_code == 404
+
+
 # -- auth ----------------------------------------------------------------------
 
 
@@ -824,6 +877,7 @@ def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.get("/api/runs/anything").status_code == 401
     assert unauthed.post("/api/runs/anything/stop").status_code == 401
     assert unauthed.get("/api/runs/anything/logs").status_code == 401
+    assert unauthed.get("/api/runs/anything/logs/stream").status_code == 401
     assert unauthed.get("/api/escalations").status_code == 401
     assert unauthed.post(
         "/api/runs/anything/escalations/1/answer", json={"answer": "go"}
