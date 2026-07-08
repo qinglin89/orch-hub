@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # Features
@@ -13,7 +13,7 @@ verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
-| Run lifecycle | planned | runs, subprocess_utils, control_dir | future `POST /api/runs`, `GET /api/runs` |
+| Run lifecycle | implemented | runs, config, control_dir, models, readiness, task_store | internal `RunManager`; future `POST /api/runs`, `GET /api/runs` |
 | Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
 | Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
 | Mobile dashboard | planned | api, web | future web routes and API calls |
@@ -99,17 +99,41 @@ Implemented behavior:
 
 ### Run Lifecycle
 
-Status: planned
+Status: implemented
 
-Description: Start, stop, list, and reattach orchestrator subprocesses. Each run attaches to one repo and one task. Same-repo runs are serialized.
+Description: Start, stop, list, get, and reattach orchestrator subprocesses.
+Each run attaches to one repo and one task. Same-repo live runs are serialized;
+cross-repo runs may overlap.
 
-Modules: runs, subprocess_utils, control_dir, models.
+Modules: runs, config, control_dir, models, readiness, task_store.
 
-APIs: future run endpoints.
+APIs: internal `RunManager`; future run HTTP endpoints.
 
-Dependency: the orchestrator and hub-side control-dir adapter are implemented;
-run lifecycle owns run-dir layout, subprocess launch, process tracking, and API
-integration.
+Implemented behavior:
+
+- `RunManager.start_run(repo, task_id, extra_args=(), acknowledge_blocked=False)`
+  gates launches fail-closed: same-repo live run, task inventory/status from
+  `list_repo_tasks`, then readiness from `check_readiness`.
+- Task launch validation uses frontmatter-authoritative `TaskSummary.status`;
+  unlisted tasks, `missing`/`unknown` task-store sentinels, and unrecognized
+  statuses are rejected. `blocked` tasks require explicit acknowledgement.
+- Run dirs live outside target repos under `<data_dir>/runs/<run_id>/`, with
+  `run.json`, a fresh `control/` dir, and `spawn.out`. `run_id` combines UTC
+  timestamp, repo slug, task slug, and a collision suffix when needed.
+- Launch command is `/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
+  <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
+  <run>/control [extra args]`, with `cwd=<repo>`, stdin from devnull,
+  stdout/stderr redirected to `spawn.out`, and `start_new_session=True`.
+- `run.json` is the file-backed source of truth and is atomically rewritten;
+  in-memory `Popen` handles only capture exit codes while the hub is the
+  parent process.
+- Reattach scans run dirs and probes pid liveness. If a run ended while the hub
+  was down, `ended_ts` is persisted with `exit_code=None`.
+- Live status is `active` or `waiting` based on pending control-dir questions.
+  End status is classified as `completed`, `stopped`, `error`, or `ended` by
+  task completion/archival evidence, stop evidence, and then exit code.
+- `stop_run` writes `stop.flag` through `control_dir.request_stop` and refuses
+  unknown, broken, or already-ended runs.
 
 ### Control-dir File Channel
 
@@ -157,9 +181,8 @@ Modules: control_dir, runs, notifications, models.
 
 APIs: future escalation endpoints.
 
-Dependency: run manager must create fresh run dirs and expose API/UI routes
-that reuse the implemented control-dir adapter; notifications and audit storage
-remain future slices.
+Dependency: run manager creates fresh run dirs and exposes waiting state; API/UI
+routes, notifications, and audit storage remain future slices.
 
 ### Log Viewing
 
@@ -236,6 +259,11 @@ Status: planned
 Description: Persist run events, human answers, stop requests, and end states for later inspection.
 
 Modules: runs, control_dir, models.
+
+Dependency: the implemented run manager already persists per-run `run.json`
+under `<data_dir>/runs/<run_id>/` with repo/task identity, pid, control dir,
+log dir, argv, `started_ts`, hub-observed `ended_ts`, and optional `exit_code`;
+history/audit storage can extend that substrate.
 
 ### Remote Intake-Task
 

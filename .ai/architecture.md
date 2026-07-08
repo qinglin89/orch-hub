@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # Architecture
@@ -25,7 +25,7 @@ Target repo N
   .cursor/orchestrator/orchestrator.py
   .cursor/orchestrator/.venv/bin/python
         |
-        | future subprocess run with --control-dir
+        | subprocess run with --control-dir
         v
 Orchestrator run
   logs/
@@ -58,17 +58,34 @@ Reads `.ai-tasks/index.md` and individual task frontmatter from managed repos. T
 
 ### Run Manager
 
-Future component that launches each target repo's deployed orchestrator as a subprocess:
+Implemented component that launches each target repo's deployed orchestrator as
+a detached subprocess and persists hub-owned run state:
 
 ```text
-<repo>/.cursor/orchestrator/.venv/bin/python \
+/usr/bin/caffeinate -i \
+  <repo>/.cursor/orchestrator/.venv/bin/python \
   <repo>/.cursor/orchestrator/orchestrator.py \
   <task-id> \
   --control-dir <run-dir> \
   [flags]
 ```
 
-The run manager should use `cwd=<repo>` and keep a per-repo mutex or serial queue. Cross-repo parallelism is allowed; same-repo parallelism is not.
+The run manager uses `cwd=<repo>`, `start_new_session=True`, stdin from
+devnull, and stdout/stderr redirected to `<data_dir>/runs/<run_id>/spawn.out`.
+It creates a fresh external run dir per run:
+
+```text
+<data_dir>/runs/<run_id>/
+  run.json
+  control/
+  spawn.out
+```
+
+`run.json` records run id, repo/task identity, pid, started timestamp, control
+dir, log dir, argv, optional ended timestamp, and optional exit code. A
+resident manager keeps `Popen` handles only to capture exit codes; a fresh
+manager reattaches by scanning run dirs and probing pid liveness. Cross-repo
+parallelism is allowed; same-repo live runs are not.
 
 ### Control Dir Store
 
@@ -173,11 +190,15 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 ### Start Run
 
 1. Client selects repo and task.
-2. Hub verifies repo readiness and task existence/status.
-3. Hub enforces per-repo single-run rule.
-4. Hub creates a fresh run dir outside the target repo.
-5. Hub starts the deployed orchestrator subprocess with `--control-dir`.
-6. Hub records pid, repo, task, run dir, start time, and log path.
+2. Hub enforces the per-repo single-live-run rule.
+3. Hub verifies task existence/status through `list_repo_tasks` and rejects
+   unlisted, `missing`, `unknown`, or unrecognized statuses. A `blocked` task
+   requires explicit acknowledgement.
+4. Hub verifies repo readiness with the existing checker.
+5. Hub creates a fresh run dir outside the target repo.
+6. Hub starts the deployed orchestrator subprocess with `--control-dir`.
+7. Hub records pid, repo, task, control dir, log dir, start time, argv, and
+   later observed end state in `run.json`.
 
 ### Human Answer
 
@@ -193,11 +214,24 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 2. Hub writes `stop.flag` with `request_stop` for graceful stop at a session boundary.
 3. If a hard kill is ever exposed, it must warn that the repo may be dirty and children may be orphaned.
 
+### Run State Refresh
+
+1. Hub lists run dirs under `<data_dir>/runs/`.
+2. For a run with an in-memory `Popen`, `poll()` captures exit code when it
+   ends.
+3. For reattached runs, pid liveness decides whether the run is still active;
+   if not, the hub records `ended_ts` with unknown exit code.
+4. Live runs are `waiting` when control-dir questions are pending, otherwise
+   `active`.
+5. End classification prefers task completion/archival evidence, then stop
+   evidence (`stop.flag` or a valid `"stop"` answer), then bare exit code.
+
 ## External Dependencies
 
 - ai-native-development repository and its `aii-2` CLI.
 - Managed target repos with deployed `.cursor/orchestrator/` payloads.
 - Git CLI for cleanliness checks.
+- `/usr/bin/caffeinate` on macOS for long-running orchestrator subprocesses.
 - Python virtual environment inside each target repo's `.cursor/orchestrator/.venv`.
 - FastAPI and uvicorn for the HTTP foundation.
 - launchd for resident macOS service operation.
@@ -210,8 +244,9 @@ template should run `orch-hub-api` from the repo venv, set a nonblank
 `ORCH_HUB_TOKEN`, and listen only on localhost behind Tailscale Serve or on a
 private Tailscale IP. Simple bearer-token auth is required for all protected
 HTTP routes even on the tailnet; tailnet membership remains the primary
-boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub` and is reserved for
-future run dirs and audit history, but no component writes there yet.
+boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; run dirs are stored
+under `<data_dir>/runs/<run_id>/`, and future audit/history storage should
+extend that hub-owned data area.
 
 ## Invariants
 
@@ -220,5 +255,6 @@ future run dirs and audit history, but no component writes there yet.
 - The orchestrator remains usable manually when `--control-dir` is unset.
 - Control-dir adapter code stays file-channel only; API/UI/run-manager code calls it instead of duplicating file writes.
 - Same target repo cannot have two active orchestrator runs.
+- Run dirs must stay outside target repo working trees and be fresh per run.
 - Human answers are auditable.
 - Readiness must fail closed; missing deploy pieces, dirty trees, or failed `aii-2 status` should block launch.

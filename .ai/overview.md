@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # Project Overview
@@ -11,14 +11,15 @@ orch-hub is intended to be a long-lived local control plane for AI coding orches
 
 The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
-binding, launchd service packaging/docs, and the control-dir file-channel
-adapter: read the ai-native-development local registry, list managed repos,
-report launch readiness, parse each repo's `.ai-tasks/` index plus task
-frontmatter, expose those payloads through HTTP, require `ORCH_HUB_TOKEN` on
-every non-health HTTP path, provide a launchd user-agent template for resident
-macOS operation, and read/write orchestrator question, answer, and stop files.
-Later slices add subprocess runs, API/UI human-question relay, logs,
-notifications, and a mobile dashboard.
+binding, launchd service packaging/docs, the control-dir file-channel adapter,
+and the run manager: read the ai-native-development local registry, list
+managed repos, report launch readiness, parse each repo's `.ai-tasks/` index
+plus task frontmatter, expose those payloads through HTTP, require
+`ORCH_HUB_TOKEN` on every non-health HTTP path, provide a launchd user-agent
+template for resident macOS operation, read/write orchestrator question,
+answer, and stop files, and launch/list/stop/reattach orchestrator subprocess
+runs with per-repo serialization. Later slices add run/escalation HTTP routes,
+UI human-question relay, logs, notifications, and a mobile dashboard.
 
 ## Users
 
@@ -74,6 +75,7 @@ orch_hub/
   models.py
   registry.py
   readiness.py
+  runs.py
   subprocess_utils.py
   task_store.py
   control_dir.py
@@ -96,7 +98,6 @@ Later service work may add:
 
 ```text
 orch_hub/
-  runs.py
   logs.py
   notifications.py
   web/

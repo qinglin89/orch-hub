@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # Design Principles and Decisions
@@ -29,7 +29,27 @@ verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 
 - Chose: subprocess boundary.
 - Reason: the orchestrator is a CLI state machine with blocking loops and `sys.exit` paths; importing would couple the hub to internals and risk process-level side effects.
-- Consequence: status is inferred through task files, logs, process state, and future control-dir files.
+- Consequence: status is inferred through task files, control-dir files, process
+  state, and run records rather than direct orchestrator internals.
+
+### Tradeoff: file-backed run records vs in-memory state only
+
+- Chose: per-run `run.json` under `<data_dir>/runs/<run_id>/`.
+- Reason: the hub is a resident process that may restart while orchestrator
+  subprocesses keep running; persisted records let a fresh manager reattach by
+  scanning run dirs and probing pid liveness.
+- Consequence: ends observed while the hub was down have unknown exit code, and
+  pid reuse after reboot can temporarily make a stale run look active until the
+  dir is cleaned.
+
+### Tradeoff: write `run.json` after spawn vs before spawn
+
+- Chose: write after spawn succeeds.
+- Reason: a crash before spawn would otherwise leave a false live run blocking
+  the repo forever.
+- Consequence: a hub crash in the tiny post-spawn/pre-write window leaves an
+  unattributed broken run dir that surfaces as `error` but cannot block repo
+  launches.
 
 ### Tradeoff: control-dir files vs HTTP callbacks inside orchestrator
 
@@ -68,7 +88,9 @@ verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 - Prefer small, reusable application functions behind both CLI and API routes.
 - Represent repo, readiness, task, run, and escalation data with typed Python models.
 - Use `pathlib.Path` for filesystem paths.
-- Use subprocess wrappers for `aii-2`, `git`, and future orchestrator launches.
+- Use subprocess wrappers for blocking `aii-2` and `git` checks; detached
+  orchestrator runs use direct `subprocess.Popen` with argument lists so the
+  hub can keep a process handle and redirect output.
 - Return stable JSON from CLI commands and API endpoints from the same payload
   helpers.
 - Keep FastAPI route handlers thin over core functions; do not duplicate
@@ -83,13 +105,23 @@ verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
   repair them by atomic rewrite.
 - Refuse to overwrite existing valid answer files; they may already be
   consumed and are part of the answer audit trail.
+- Keep run dirs outside target repos and create a fresh control dir per run;
+  stale `stop.flag` files would stop reused runs immediately.
+- Treat `run.json` as the source of truth for run state; in-memory process
+  handles are only an optimization for observing exit codes.
+- Classify finished runs from stable evidence in order: task
+  completed/archived, hub stop evidence, then exit code.
+- Require explicit acknowledgement for any `blocked` task launch because the
+  hub cannot reliably distinguish a resumable blocked session from a foreign
+  manual-session `claimed-by` id.
 
 ## Anti-Patterns to Avoid
 
 - Importing `.cursor/orchestrator/orchestrator.py`.
 - Maintaining a second repo registry.
 - Treating GitHub as registry truth.
-- Starting orchestrator subprocesses before readiness checks exist.
+- Starting orchestrator subprocesses before task inventory and readiness gates pass.
+- Reusing run/control dirs across runs.
 - Making network calls from the orchestrator control channel.
 - Duplicating control-dir filename, validity, or stop-flag logic outside
   `orch_hub.control_dir`.
@@ -101,8 +133,7 @@ verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 
 ## Open Design Items
 
-- Data directory layout and retention policy for run dirs and audit history
-  under the currently reserved `ORCH_HUB_DATA_DIR`.
+- Retention policy for run dirs and audit history under `ORCH_HUB_DATA_DIR`.
 - Exact route schema beyond the implemented health/repos/tasks API foundation.
 - Exact dashboard layout and frontend stack.
 - Bark server packaging on the Mac.

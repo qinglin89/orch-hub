@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # Modules
@@ -10,13 +10,13 @@ verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
-| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, and derived `aii-2`/registry paths |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory, and question models plus payload helpers |
+| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, data-dir setting, and derived `aii-2`/registry paths |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory, question, and run models plus payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md` and task frontmatter |
-| Run manager | `orch_hub/runs.py` | Future orchestrator subprocess lifecycle and per-repo serialization |
+| Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task routes, and uvicorn entry point |
@@ -57,21 +57,24 @@ ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 All current environment variables strip surrounding whitespace. Empty or
 whitespace-only values count as unset; a malformed or out-of-range
 `ORCH_HUB_PORT` raises `ValueError` instead of silently binding the default.
-`ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub` but is reserved for future run
-dirs and audit history; nothing writes there yet. Future config belongs here
-too: notifier settings and storage-specific options.
+`ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; the run manager writes
+`<data_dir>/runs/<run_id>/` directories there. Future config belongs here too:
+notifier settings and storage-specific options.
 
 ### Models
 
 Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
-task inventory, and control-dir questions. `TaskSummary` carries `task_id`,
-task-file `status`, optional index summary, and blockers; `RepoTaskInventory`
-pairs a `ManagedRepo` with `index_present` and ordered tasks. `Question` carries
-filename-authoritative `seq`, display/audit fields, parse error, answered
-state, and answer repair error; `to_dict()` deliberately excludes the local
-path. Public readiness payloads contain `ready` plus failed check reasons only.
+task inventory, control-dir questions, and run state. `TaskSummary` carries
+`task_id`, task-file `status`, optional index summary, and blockers;
+`RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered
+tasks. `Question` carries filename-authoritative `seq`, display/audit fields,
+parse error, answered state, stripped valid `answer`, and answer repair error;
+`to_dict()` deliberately excludes the local path. `RunRecord` is the persisted
+run shape; `RunStatus` overlays active/waiting/completed/stopped/error/ended
+state plus pending question count. Public readiness payloads contain `ready`
+plus failed check reasons only.
 
 ### Registry
 
@@ -90,6 +93,9 @@ Responsibility: check repo filesystem, deployed manifest, orchestrator script, v
 Location: `orch_hub/subprocess_utils.py`
 
 Responsibility: central wrapper for running commands with cwd, capture, timeout if later needed, and concise output extraction. Do not hide command failures that readiness or API callers need to report.
+The detached orchestrator launch is not routed through this blocking wrapper;
+`RunManager` uses `subprocess.Popen` directly so it can keep a process handle
+and redirect output.
 
 ### Task Inventory
 
@@ -115,7 +121,29 @@ per-repo task lookups return HTTP 404.
 
 Location: `orch_hub/runs.py`
 
-Responsibility: future owner of run lifecycle: start, stop, list, reattach, record pid, enforce per-repo mutex, connect run dirs, and expose run state to API/UI.
+Responsibility: own run lifecycle for deployed orchestrator subprocesses:
+start, stop, list, get, reattach, record pid, enforce a per-repo live-run
+mutex, connect run dirs, and expose computed run state to future API/UI layers.
+Launch gates run fail-closed in order: existing live run for the repo, task
+inventory/status from `list_repo_tasks`, then readiness from `check_readiness`.
+`blocked` tasks require explicit acknowledgement before launch; `missing`,
+`unknown`, and unrecognized task statuses are rejected.
+
+Run dirs live under `<data_dir>/runs/<run_id>/` with `run.json`, `control/`,
+and `spawn.out`; each run gets a fresh external control dir. Launch uses
+`/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
+<repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
+<run>/control [extra args]`, `cwd=<repo>`, stdin from devnull, stdout/stderr to
+`spawn.out`, and `start_new_session=True`. `run.json` is the source of truth
+and is rewritten atomically; in-memory `Popen` handles exist only to capture
+exit codes for runs that end while the hub process is alive.
+
+Reattach scans run dirs, loads records, and probes pid liveness with
+`os.kill(pid, 0)`. If a run ended while the hub was down, `ended_ts` is
+recorded with `exit_code=None`. End classification prefers task completion or
+archival evidence, then hub stop evidence (`stop.flag` or a valid `"stop"`
+answer), then bare exit code. Broken run dirs surface as `error` states and do
+not block repo launches when no repo attribution is available.
 
 ### Control Dir
 
@@ -126,9 +154,11 @@ file channel. `list_questions(control_dir)` returns `Question` records for
 matching `NNN-question.json` files; `pending_questions(control_dir)` filters to
 questions without a same-seq valid answer; `write_answer(question, answer,
 responder="orch-hub")` atomically writes the mirrored `NNN-answer.json` with
-`seq`, `ts`, `responder`, and stripped `answer`; `request_stop(control_dir)`
-writes an idempotent empty `stop.flag`. Existing valid answers raise
-`DuplicateAnswerError`; malformed answers can be repaired by atomic rewrite.
+`seq`, `ts`, `responder`, and stripped `answer`; valid answers are exposed on
+`Question.answer`. `request_stop(control_dir)` writes an idempotent empty
+`stop.flag`; `stop_requested` and `stop_answered` support run-end
+classification. Existing valid answers raise `DuplicateAnswerError`; malformed
+answers can be repaired by atomic rewrite.
 
 ## Boundary Rules
 

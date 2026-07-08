@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-07
-verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
+last-updated: 2026-07-08
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # Conventions
@@ -11,19 +11,26 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 - Prefer stdlib modules for the first slice unless an external dependency removes real complexity.
 - Use `pathlib.Path` for filesystem work.
 - Keep subprocess invocations argument-list based; avoid shell strings unless there is a specific reason.
+- Use direct `subprocess.Popen` for detached long-running orchestrator runs;
+  the shared blocking subprocess wrapper is for command checks such as `git`
+  and `aii-2`.
 - Keep CLI output human-readable by default and stable JSON with `--json`.
 - Keep functions small enough to reuse from both CLI and FastAPI routes.
 
 ## Naming
 
 - Package name: `orch_hub`.
-- Use explicit domain names: `ManagedRepo`, `ReadinessReport`, `TaskSummary`, `RunRecord`, `Question`, `Answer`.
+- Use explicit domain names: `ManagedRepo`, `ReadinessReport`, `TaskSummary`,
+  `RunRecord`, `RunStatus`, `Question`, `Answer`.
 - Use `repo_path`, `task_id`, `run_id`, and `control_dir` consistently.
 - Use `waiting` for an active run awaiting a human answer; reserve `blocked` for task frontmatter status.
 
 ## Error Handling
 
 - Fail closed for launch readiness.
+- Fail closed for run starts: repo already busy, missing/unlisted/unknown task,
+  unrecognized task status, unacknowledged `blocked` task, or readiness failure
+  should prevent subprocess launch.
 - Return structured reasons for readiness failures.
 - Include concise command output for failed `aii-2 status` checks.
 - Registry loading should tolerate a missing registry file as an empty repo list, but invalid JSON should be an explicit error.
@@ -49,6 +56,8 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 - Keep web assets under `orch_hub/web/` or a clear equivalent when the dashboard exists.
 - Keep deployment templates under `deploy/` and operator docs under `docs/`.
 - Do not place generated run dirs inside managed target repos unless deliberately matching an orchestrator contract.
+- Put hub-owned run dirs under `<ORCH_HUB_DATA_DIR>/runs/`, outside every
+  managed target repo.
 
 ## Git Workflow
 
@@ -63,6 +72,8 @@ verified-against: 60a9ac47c9f6760b7c9aa1a739f53a182500aeab
 - Tests must not depend on real user repos or the real ai-native-development registry.
 - Use `tmp_path` for fake repos and registry files.
 - Mock subprocess for dirty git trees and `aii-2 status` failures.
+- Inject fake spawners, clocks, and pid probes for run-manager tests instead
+  of starting real orchestrator subprocesses.
 - Prefer testing structured return values before testing text formatting.
 - Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
 

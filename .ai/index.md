@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # AI Knowledge Router
@@ -45,6 +45,10 @@ Load only what the current task needs.
 - Target repo: a managed repo where an orchestrator may be launched.
 - Deployed orchestrator: target repo copy of `.cursor/orchestrator/orchestrator.py`.
 - Run: one orchestrator subprocess attached to one target repo and one `.ai-tasks/<task-id>.md` task.
+- Run manager: hub application service in `orch_hub.runs` that starts, lists,
+  gets, stops, reattaches, persists, and classifies runs.
+- Run record: `run.json` under `<ORCH_HUB_DATA_DIR>/runs/<run_id>/`, the
+  file-backed source of truth for one run.
 - Active task: a task with an attached running orchestrator process.
 - Waiting task: an active task whose orchestrator has emitted a human question and is awaiting an answer.
 - Pending task: a task whose frontmatter status is `pending`.

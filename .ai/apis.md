@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: bd7587946a0490c12b6d3a958a2edfd91f4bade8
+verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ---
 
 # APIs and Interfaces
@@ -149,9 +149,20 @@ Behavior: parse `.ai-tasks/index.md` and task frontmatter locally. The index sup
 
 Input: repo id, task id, start flags.
 
-Output: run record.
+Output: `RunRecord` from `start_run`, `RunStatus` from list/get operations,
+and idempotent stop-request results.
 
-Behavior: future subprocess lifecycle and per-repo serialization.
+Behavior: implemented subprocess lifecycle and per-repo serialization.
+`RunManager` receives a `ManagedRepo` plus task id, rejects launches when the
+repo already has a live run, when task inventory is missing/unlisted or reports
+`missing`/`unknown`/unrecognized statuses, when a `blocked` task is not
+explicitly acknowledged, or when readiness fails. A successful launch creates a
+fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
+deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
+persists `run.json`, and records stdout/stderr in `spawn.out`. `list_runs` and
+`get_run` refresh live/end state and support reattach from disk by pid probe.
+`stop_run` delegates to `control_dir.request_stop` and refuses ended or broken
+runs so a post-mortem flag cannot rewrite end classification.
 
 ### Control Dir Store
 
@@ -163,9 +174,11 @@ Behavior: file-channel only. Missing control dirs list no questions.
 Question filenames supply the authoritative sequence. Malformed question JSON is
 reported on the returned `Question` instead of hiding the file. A question is
 answered only when a same-seq answer file is a JSON object with a non-empty
-string `answer`; malformed answers keep the question pending and can be
-repaired with `write_answer`. Valid answer files are never overwritten.
-`request_stop` writes an empty `stop.flag` and requires the run dir to exist.
+string `answer`; the stripped valid answer is exposed as `Question.answer`.
+Malformed answers keep the question pending and can be repaired with
+`write_answer`. Valid answer files are never overwritten. `request_stop` writes
+an empty `stop.flag` and requires the run dir to exist; `stop_requested` and
+`stop_answered` are read helpers for run classification.
 
 ### Notifier
 
@@ -198,3 +211,6 @@ commands live in `docs/launchd.md`.
 - Never make API handlers call orchestrator internals directly.
 - API/run handlers should reuse `orch_hub.control_dir` for question, answer,
   and stop files instead of reconstructing filenames or validity rules.
+- API/run handlers should reuse `orch_hub.runs.RunManager` for launch gates,
+  per-repo serialization, stop requests, and end classification instead of
+  rebuilding subprocess or run-dir behavior in route code.
