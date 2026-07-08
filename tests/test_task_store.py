@@ -219,6 +219,19 @@ def test_read_task_content_rejects_unsafe_ids(tmp_path, bad_id):
     assert read_task_content(repo, bad_id) is None
 
 
+def test_read_task_content_rejects_symlink_escaping_tasks_dir(tmp_path):
+    # A listed task file may itself be a symlink; is_file()/read_text() follow
+    # symlinks, so a bare-filename id alone does not guarantee containment. A
+    # symlink whose target resolves outside .ai-tasks must not leak that file.
+    repo, tasks_dir = make_repo_with_index(
+        tmp_path, [("2026-07-05-linked", "pending", "Linked")]
+    )
+    secret = repo.path / "secret.md"
+    secret.write_text("top secret", encoding="utf-8")
+    (tasks_dir / "2026-07-05-linked.md").symlink_to(secret)
+    assert read_task_content(repo, "2026-07-05-linked") is None
+
+
 def test_to_dict_and_payload_shape(tmp_path):
     repo, tasks_dir = make_repo_with_index(
         tmp_path, [("2026-07-05-a", "blocked", "A work")]

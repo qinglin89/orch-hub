@@ -60,12 +60,14 @@ def read_task_content(repo: ManagedRepo, task_id: str) -> str | None:
     """Return the raw markdown of ``.ai-tasks/<task_id>.md``, or ``None``.
 
     ``None`` means the file is absent (e.g. a ``missing`` sentinel task listed
-    in the index but with no ``<id>.md``) or ``task_id`` is not a bare filename.
-    ``task_id`` is validated as a single path segment — no separators, no null,
-    not a dot ref — so a task-detail request can never read outside the repo's
-    ``.ai-tasks`` dir; clients never pass a filesystem path. This adds only the
-    file *body*; :func:`list_repo_tasks` remains the source of the
-    frontmatter-authoritative status/summary/blockers.
+    in the index but with no ``<id>.md``), ``task_id`` is not a bare filename,
+    or the resolved file escapes the repo's ``.ai-tasks`` dir. ``task_id`` is
+    validated as a single path segment — no separators, no null, not a dot ref
+    — and the resolved target must stay under the resolved ``.ai-tasks`` dir, so
+    neither a crafted id nor a symlinked task file can read outside it; clients
+    never pass a filesystem path. This adds only the file *body*;
+    :func:`list_repo_tasks` remains the source of the frontmatter-authoritative
+    status/summary/blockers.
     """
     if (
         not task_id
@@ -75,10 +77,17 @@ def read_task_content(repo: ManagedRepo, task_id: str) -> str | None:
         or task_id in (".", "..")
     ):
         return None
-    task_path = repo.path / ".ai-tasks" / f"{task_id}.md"
+    tasks_dir = repo.path / ".ai-tasks"
+    task_path = tasks_dir / f"{task_id}.md"
     if not task_path.is_file():
         return None
-    return task_path.read_text(encoding="utf-8")
+    # is_file()/read_text() follow symlinks, so a listed task file that is a
+    # symlink pointing outside .ai-tasks would otherwise escape containment.
+    # Require the fully resolved target to stay under the resolved tasks dir.
+    resolved = task_path.resolve()
+    if not resolved.is_relative_to(tasks_dir.resolve()):
+        return None
+    return resolved.read_text(encoding="utf-8")
 
 
 def _load_task(tasks_dir: Path, task_id: str, summary: str | None) -> TaskSummary:
