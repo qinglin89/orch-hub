@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 ---
 
 # APIs and Interfaces
@@ -66,9 +66,51 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
   ordered tasks, frontmatter-authoritative status/blockers, and `missing` /
   `unknown` sentinel statuses.
 
+### `POST /api/runs`
+
+- Purpose: start an orchestrator run for `{repo_id, task_id, extra_args,
+  acknowledge_blocked}`.
+- Source: resolves `repo_id` through registry discovery, then delegates launch
+  gates and subprocess start to the app's single `RunManager`.
+- Shape: returns the new run's serialized `RunStatus` with HTTP 201.
+
+### `GET /api/runs`
+
+- Purpose: list known runs with live/waiting/end-state overlays.
+- Shape: `{"runs": [RunStatus.to_dict(), ...]}`.
+
+### `GET /api/runs/{run_id}`
+
+- Purpose: fetch one run's serialized `RunStatus`.
+- Errors: unknown run id returns HTTP 404.
+
+### `POST /api/runs/{run_id}/stop`
+
+- Purpose: request graceful stop by delegating to `RunManager.stop_run`, which
+  writes `stop.flag` through `control_dir.request_stop`.
+- Shape: `{"run_id": ..., "newly_requested": bool, "detail": ...}`; the detail
+  surfaces the pending-question stop caveat.
+
+### `GET /api/escalations`
+
+- Purpose: list pending control-dir questions across live runs, with run/repo
+  context.
+- Shape: `{"escalations": [{"run_id", "repo_name", "task_id", "question"}]}`.
+
+### `POST /api/runs/{run_id}/escalations/{seq}/answer`
+
+- Purpose: write an answer file for one run/question sequence, auditing the
+  responder.
+- Source: locates the question with `control_dir.list_questions` and writes via
+  `control_dir.write_answer`; no orchestrator code is imported.
+- Shape: `{"run_id": ..., "seq": ..., "answered": true, "responder": ...,
+  "answer": ...}`.
+
 Current HTTP behavior:
 
-- `create_app(config=None)` captures `Config.from_env()` by default and is testable with an explicit `Config`.
+- `create_app(config=None, *, run_manager=None)` captures `Config.from_env()`
+  by default, is testable with an explicit `Config`, and holds one `RunManager`
+  instance for run/escalation routes.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, and `ORCH_HUB_DATA_DIR`; surrounding whitespace is stripped
@@ -88,28 +130,13 @@ Current HTTP behavior:
   static and never echo presented credentials.
 - `RegistryError` returns HTTP 500 with `{"detail": ...}`.
 - Unknown `repo_id` on the per-repo task endpoint returns HTTP 404.
+- Run-manager/control-dir errors map to client-actionable statuses:
+  `UnknownRunError` → 404; `RepoBusyError`, `RunEndedError`,
+  `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
+  empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
+  `BlockedTaskError` includes `acknowledge_required: true`.
 
 ## Future HTTP API
-
-### `GET /api/runs`
-
-- Purpose: list active and recent runs.
-
-### `POST /api/runs`
-
-- Purpose: start an orchestrator run for `{repo_id, task_id, flags}` after readiness checks.
-
-### `POST /api/runs/{run_id}/stop`
-
-- Purpose: request graceful stop by calling `request_stop` to write `stop.flag`.
-
-### `GET /api/escalations`
-
-- Purpose: list pending human questions from control-dir question files.
-
-### `POST /api/escalations/{question_id}/answer`
-
-- Purpose: write an answer file and audit the response.
 
 ### `GET /api/runs/{run_id}/logs`
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 ---
 
 # Features
@@ -13,8 +13,8 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
-| Run lifecycle | implemented | runs, config, control_dir, models, readiness, task_store | internal `RunManager`; future `POST /api/runs`, `GET /api/runs` |
-| Human question relay | planned | control_dir, runs, notifications | future `GET /api/escalations`, `POST /api/escalations/{id}/answer` |
+| Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
+| Human question relay | API implemented; UI/notifications planned | control_dir, runs, api, notifications | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
 | Mobile dashboard | planned | api, web | future web routes and API calls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
@@ -107,7 +107,8 @@ cross-repo runs may overlap.
 
 Modules: runs, config, control_dir, models, readiness, task_store.
 
-APIs: internal `RunManager`; future run HTTP endpoints.
+APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
+`GET /api/runs/{run_id}`, `POST /api/runs/{run_id}/stop`.
 
 Implemented behavior:
 
@@ -134,6 +135,10 @@ Implemented behavior:
   task completion/archival evidence, stop evidence, and then exit code.
 - `stop_run` writes `stop.flag` through `control_dir.request_stop` and refuses
   unknown, broken, or already-ended runs.
+- HTTP run routes resolve repos through registry discovery, return serialized
+  `RunStatus` payloads, expose start/list/get/stop behavior, and map launch/run
+  manager errors to 4xx JSON responses (`RepoBusyError` and ended/blocked
+  states use 409; unknown runs use 404).
 
 ### Control-dir File Channel
 
@@ -173,16 +178,27 @@ Implemented behavior:
 
 ### Human Question Relay
 
-Status: planned
+Status: API implemented; UI/notifications planned
 
-Description: Detect pending control-dir question files, render them in the UI, accept answers, write answer files, and audit the response.
+Description: Detect pending control-dir question files, list them remotely with
+run/repo context, accept answers, write answer files, and audit the responder.
 
-Modules: control_dir, runs, notifications, models.
+Modules: control_dir, runs, api, notifications, models.
 
-APIs: future escalation endpoints.
+APIs: `GET /api/escalations`,
+`POST /api/runs/{run_id}/escalations/{seq}/answer`.
 
-Dependency: run manager creates fresh run dirs and exposes waiting state; API/UI
-routes, notifications, and audit storage remain future slices.
+Implemented behavior:
+
+- `GET /api/escalations` scans live runs only and returns pending
+  control-dir questions with `run_id`, `repo_name`, `task_id`, and serialized
+  `Question`.
+- The answer route identifies questions by `(run_id, seq)` and writes through
+  `control_dir.write_answer`, preserving duplicate-answer protection, malformed
+  answer repair, empty-answer rejection, and responder audit fields.
+
+Remaining slices: dashboard rendering, notifications, and persistent
+history/audit views.
 
 ### Log Viewing
 

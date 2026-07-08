@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 ---
 
 # Modules
@@ -19,7 +19,7 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task/run/escalation routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
 | Web UI | `orch_hub/web/` | Future mobile-first dashboard assets |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
@@ -108,14 +108,19 @@ Responsibility: parse active task files without importing protocol or orchestrat
 Location: `orch_hub/api.py`
 
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
-adapter over shared core functions. `create_app(config=None)` builds an app
-with a default-deny bearer-token middleware, public `GET /api/health`, protected
-`GET /api/repos`, protected `GET /api/tasks`, and protected
-`GET /api/repos/{repo_id}/tasks`. Module-level `app` supports
+adapter over shared core functions. `create_app(config=None, *,
+run_manager=None)` builds an app with a default-deny bearer-token middleware,
+public `GET /api/health`, protected repo/task routes, and protected run and
+escalation routes over one `RunManager` instance. Implemented run routes are
+`POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
+`POST /api/runs/{run_id}/stop`; implemented escalation routes are
+`GET /api/escalations` and
+`POST /api/runs/{run_id}/escalations/{seq}/answer`. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
 console script serve locally by default and read host/port from environment
-when arguments are omitted. `RegistryError` returns HTTP 500 and unknown
-per-repo task lookups return HTTP 404.
+when arguments are omitted. `RegistryError` returns HTTP 500; unknown repo/task
+lookups and unknown runs return HTTP 404; launch/run state conflicts return
+HTTP 409 with structured details where useful.
 
 ### Run Manager
 
