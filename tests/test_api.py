@@ -478,6 +478,23 @@ def write_question(control: Path, seq: int = 1, **fields) -> None:
     )
 
 
+def write_run_log(
+    manager: RunManager, run_id: str, lines: list[str], *, stamp: str = "20260708T030000Z"
+) -> Path:
+    """Drop an orchestrator-style log file into the run's real ``log_dir``.
+
+    The stamp matches ``FIXED_NOW`` (the run's ``started_ts``), so the log
+    locator attributes it to this run; the filename shape mirrors the deployed
+    orchestrator's ``<utc-ts>-<task-id>.log``.
+    """
+    record = manager.get_run(run_id).record
+    log_dir = record.log_dir
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{stamp}-{record.task_id}.log"
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
 # -- start run -----------------------------------------------------------------
 
 
@@ -744,6 +761,54 @@ def test_answer_escalation_empty_answer_is_400(tmp_path, monkeypatch):
     assert resp.status_code == 400
 
 
+# -- run logs ------------------------------------------------------------------
+
+
+def test_get_run_logs_returns_recent_tail(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], ["run started", "dev turn", "done"])
+
+    resp = client.get(f"/api/runs/{started['run_id']}/logs")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == started["run_id"]
+    assert body["present"] is True
+    assert body["lines"] == ["run started", "dev turn", "done"]
+    assert body["truncated"] is False
+    assert body["size"] > 0
+    # Filesystem paths are internal; the route must not leak the log path.
+    assert "path" not in body
+
+
+def test_get_run_logs_missing_is_graceful(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)  # no log file written yet
+
+    resp = client.get(f"/api/runs/{started['run_id']}/logs")
+    assert resp.status_code == 200  # a missing log is normal, not an error
+    body = resp.json()
+    assert body["present"] is False
+    assert body["lines"] == []
+    assert body["detail"]
+
+
+def test_get_run_logs_tail_param_limits_lines(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], [f"line-{i}" for i in range(10)])
+
+    body = client.get(f"/api/runs/{started['run_id']}/logs?tail=3").json()
+    assert body["lines"] == ["line-7", "line-8", "line-9"]
+    assert body["truncated"] is True
+
+
+def test_get_run_logs_unknown_run_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get("/api/runs/20990101T000000Z-nope-x/logs")
+    assert resp.status_code == 404
+
+
 # -- auth ----------------------------------------------------------------------
 
 
@@ -758,6 +823,7 @@ def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.get("/api/runs").status_code == 401
     assert unauthed.get("/api/runs/anything").status_code == 401
     assert unauthed.post("/api/runs/anything/stop").status_code == 401
+    assert unauthed.get("/api/runs/anything/logs").status_code == 401
     assert unauthed.get("/api/escalations").status_code == 401
     assert unauthed.post(
         "/api/runs/anything/escalations/1/answer", json={"answer": "go"}

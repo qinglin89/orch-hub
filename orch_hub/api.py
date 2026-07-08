@@ -40,6 +40,7 @@ from .control_dir import (
     pending_questions,
     write_answer,
 )
+from .logs import DEFAULT_TAIL_LINES, read_recent
 from .models import repos_payload, tasks_payload
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
@@ -287,6 +288,21 @@ def create_app(
                 " ruling (README §5.5)."
             ),
         }
+
+    @app.get("/api/runs/{run_id}/logs")
+    def get_run_logs(run_id: str, tail: int = DEFAULT_TAIL_LINES) -> dict:
+        """Return a bounded recent tail of one run's orchestrator log.
+
+        The run is resolved by ``run_id`` (unknown → 404); its log file is then
+        located from the run record alone (``log_dir``/``task_id``/
+        ``started_ts``), never a client path. ``tail`` caps the returned lines
+        and is clamped to a sane range. A run with no log yet, or one whose file
+        rotated away, is a 200 with ``present: false`` and a ``detail`` — a
+        missing log is normal, not an error.
+        """
+        status = manager.get_run(run_id)
+        snapshot = read_recent(status.record, max_lines=tail)
+        return {"run_id": run_id, **snapshot.to_dict()}
 
     @app.get("/api/escalations")
     def list_escalations() -> dict:
