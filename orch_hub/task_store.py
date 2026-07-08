@@ -56,6 +56,31 @@ def list_tasks(repos: Iterable[ManagedRepo]) -> list[RepoTaskInventory]:
     return [list_repo_tasks(repo) for repo in repos]
 
 
+def read_task_content(repo: ManagedRepo, task_id: str) -> str | None:
+    """Return the raw markdown of ``.ai-tasks/<task_id>.md``, or ``None``.
+
+    ``None`` means the file is absent (e.g. a ``missing`` sentinel task listed
+    in the index but with no ``<id>.md``) or ``task_id`` is not a bare filename.
+    ``task_id`` is validated as a single path segment — no separators, no null,
+    not a dot ref — so a task-detail request can never read outside the repo's
+    ``.ai-tasks`` dir; clients never pass a filesystem path. This adds only the
+    file *body*; :func:`list_repo_tasks` remains the source of the
+    frontmatter-authoritative status/summary/blockers.
+    """
+    if (
+        not task_id
+        or "/" in task_id
+        or "\\" in task_id
+        or "\x00" in task_id
+        or task_id in (".", "..")
+    ):
+        return None
+    task_path = repo.path / ".ai-tasks" / f"{task_id}.md"
+    if not task_path.is_file():
+        return None
+    return task_path.read_text(encoding="utf-8")
+
+
 def _load_task(tasks_dir: Path, task_id: str, summary: str | None) -> TaskSummary:
     """Build a :class:`TaskSummary` from a task file, tolerating missing files."""
     task_path = tasks_dir / f"{task_id}.md"

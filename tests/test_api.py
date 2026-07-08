@@ -225,6 +225,68 @@ def test_repo_tasks_registry_error_returns_500(monkeypatch):
     assert resp.status_code == 500
 
 
+def test_repo_task_detail_returns_summary_and_content(monkeypatch):
+    repo = make_repo("alpha")
+    task = TaskSummary(task_id="2026-07-05-x", status="in_progress", summary="X")
+    inv = RepoTaskInventory(repo=repo, index_present=True, tasks=(task,))
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "list_repo_tasks", lambda r: inv)
+    # The body is read separately from the inventory (which lacks it).
+    monkeypatch.setattr(api, "read_task_content", lambda r, tid: "# body\n")
+
+    resp = build_client().get("/api/repos/alpha/tasks/2026-07-05-x")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "task_id": "2026-07-05-x",
+        "status": "in_progress",
+        "summary": "X",
+        "blockers": [],
+        "present": True,
+        "content": "# body\n",
+    }
+
+
+def test_repo_task_detail_unknown_repo_is_404(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", lambda config: [make_repo("alpha")])
+    resp = build_client().get("/api/repos/ghost/tasks/2026-07-05-x")
+    assert resp.status_code == 404
+    assert "ghost" in resp.json()["detail"]
+
+
+def test_repo_task_detail_unlisted_task_is_404(monkeypatch):
+    repo = make_repo("alpha")
+    inv = RepoTaskInventory(repo=repo, index_present=True, tasks=())
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "list_repo_tasks", lambda r: inv)
+
+    def fail(r, tid):  # pragma: no cover - reached only on a gating bug
+        raise AssertionError("read_task_content called for an unlisted task")
+
+    monkeypatch.setattr(api, "read_task_content", fail)
+
+    resp = build_client().get("/api/repos/alpha/tasks/2026-07-05-nope")
+    assert resp.status_code == 404
+    assert "2026-07-05-nope" in resp.json()["detail"]
+
+
+def test_repo_task_detail_missing_file_reports_absent(monkeypatch):
+    repo = make_repo("alpha")
+    task = TaskSummary(
+        task_id="2026-07-05-ghost", status=STATUS_MISSING, summary="Ghost"
+    )
+    inv = RepoTaskInventory(repo=repo, index_present=True, tasks=(task,))
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "list_repo_tasks", lambda r: inv)
+    monkeypatch.setattr(api, "read_task_content", lambda r, tid: None)
+
+    body = build_client().get("/api/repos/alpha/tasks/2026-07-05-ghost").json()
+    # A listed-but-absent task is a 200 data problem, not an error: the detail
+    # view shows the missing sentinel and an "absent" body.
+    assert body["status"] == STATUS_MISSING
+    assert body["present"] is False
+    assert body["content"] is None
+
+
 def test_module_level_app_is_fastapi():
     from fastapi import FastAPI
 

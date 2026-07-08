@@ -119,6 +119,7 @@ uvicorn orch_hub.api:app --host 127.0.0.1 --port 8765
 | `GET /api/repos` | the same object as `repos --json` (repos with readiness) |
 | `GET /api/tasks` | task inventory across all repos |
 | `GET /api/repos/{repo_id}/tasks` | task inventory for one repo (`repo_id` is the repo name) |
+| `GET /api/repos/{repo_id}/tasks/{task_id}` | one task's inventory fields plus its raw `.ai-tasks/<task_id>.md` body (`present`/`content`); read-only, scoped inside the repo |
 
 `GET /api/repos` and the task endpoints reuse the CLI's `repos_payload` /
 `tasks_payload` shapes unchanged; task responses preserve `index_present` and
@@ -166,11 +167,22 @@ as follows:
 - Every data route stays protected; only the three shell assets are on the auth
   allowlist (alongside `GET /api/health`).
 
-Current views: repo list (readiness reasons from `/api/repos` plus live
-run badges) and an all-task list (`/api/tasks`, filterable by repo and
-frontmatter status, with `missing`/`unknown` sentinels and missing-index states
-shown as data problems). Repo/task detail, answering waiting questions, and log
-tailing land in later slices.
+Current views:
+
+- **Repo list** — readiness reasons from `/api/repos` plus live run badges;
+  tap through to a repo.
+- **All-task list** — `/api/tasks`, filterable by repo and frontmatter status,
+  with `missing`/`unknown` sentinels and missing-index states shown as data
+  problems; tap through to a task.
+- **Repo detail** — the repo's tasks with a status filter, live run badges, and
+  the missing-index (`index_present == false`) state made explicit.
+- **Task detail** — the task's frontmatter status/summary/blockers, its current
+  run status, the raw task-file body (from
+  `GET /api/repos/{repo_id}/tasks/{task_id}`), and — when the run is `waiting` —
+  an inline answer box that writes the answer via
+  `POST /api/runs/{run_id}/escalations/{seq}/answer` (`"stop"` ends the run).
+
+In-browser log tailing lands in the next slice.
 
 ### Deployment assumptions (private network only)
 
@@ -208,8 +220,8 @@ never touch real repos or the real ai-native-development registry.
 
 ## Not implemented yet (by design)
 
-- Dashboard detail views (repo/task detail, answering waiting questions,
-  in-browser log tailing) — the shell and the repo/task lists are in place; see
+- In-browser log tailing in the dashboard — the shell, repo/task lists, repo
+  and task detail, and answering waiting questions are in place; see
   [Dashboard](#dashboard).
 - Bark notifications; remote intake-task; IM bot control.
 

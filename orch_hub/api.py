@@ -55,7 +55,7 @@ from .runs import (
     RunManager,
     UnknownRunError,
 )
-from .task_store import list_repo_tasks, list_tasks
+from .task_store import list_repo_tasks, list_tasks, read_task_content
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 """Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
@@ -302,6 +302,33 @@ def create_app(
             if repo.name == repo_id:
                 return tasks_payload([list_repo_tasks(repo)])
         raise HTTPException(status_code=404, detail=f"unknown repo: {repo_id}")
+
+    @app.get("/api/repos/{repo_id}/tasks/{task_id}")
+    def get_repo_task(repo_id: str, task_id: str) -> dict:
+        """Return one task's inventory fields plus its raw markdown body.
+
+        Backs the dashboard task-detail view, which needs the task file body the
+        list endpoints deliberately omit. ``repo_id`` is the managed-repo name
+        and ``task_id`` must be one listed in that repo's index (either unknown
+        → 404). Status/summary/blockers come from the same
+        frontmatter-authoritative inventory as ``/api/repos/{repo_id}/tasks``;
+        ``content`` is the read-only ``.ai-tasks/<task_id>.md`` body, scoped
+        inside the repo (clients never pass a path). ``present``/``content`` are
+        ``false``/``null`` for a ``missing`` sentinel task whose file is absent.
+        """
+        repos = discover_repos(resolved)
+        repo = next((r for r in repos if r.name == repo_id), None)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown repo: {repo_id}")
+        inventory = list_repo_tasks(repo)
+        task = next((t for t in inventory.tasks if t.task_id == task_id), None)
+        if task is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"repo {repo_id!r} has no task {task_id!r}",
+            )
+        content = read_task_content(repo, task_id)
+        return {**task.to_dict(), "present": content is not None, "content": content}
 
     @app.post("/api/runs", status_code=201)
     def start_run(req: StartRunRequest) -> dict:

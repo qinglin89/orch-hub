@@ -16,6 +16,7 @@ from orch_hub.task_store import (
     STATUS_UNKNOWN,
     list_repo_tasks,
     list_tasks,
+    read_task_content,
 )
 
 
@@ -181,6 +182,41 @@ def test_list_tasks_covers_all_repos(tmp_path):
     assert [inv.index_present for inv in inventories] == [True, False]
     assert inventories[0].tasks[0].task_id == "2026-07-05-a"
     assert inventories[1].tasks == ()
+
+
+def test_read_task_content_returns_raw_body(tmp_path):
+    repo, tasks_dir = make_repo_with_index(
+        tmp_path, [("2026-07-05-a", "pending", "A")]
+    )
+    write_task(tasks_dir, "2026-07-05-a", "pending")
+    content = read_task_content(repo, "2026-07-05-a")
+    # The whole file, frontmatter included — the detail view renders it verbatim.
+    assert content is not None
+    assert "status: pending" in content
+    assert "# 2026-07-05-a" in content
+
+
+def test_read_task_content_absent_file_is_none(tmp_path):
+    # Listed in the index but no <id>.md on disk (the STATUS_MISSING case).
+    repo, _ = make_repo_with_index(tmp_path, [("2026-07-05-ghost", "pending", "G")])
+    assert read_task_content(repo, "2026-07-05-ghost") is None
+
+
+def test_read_task_content_no_tasks_dir_is_none(tmp_path):
+    repo = make_repo(tmp_path)  # no .ai-tasks dir at all
+    assert read_task_content(repo, "2026-07-05-a") is None
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["../secret", "a/b", "..", ".", "", "nested\\win", "null\x00byte"],
+)
+def test_read_task_content_rejects_unsafe_ids(tmp_path, bad_id):
+    repo, tasks_dir = make_repo_with_index(tmp_path, [("2026-07-05-a", "pending", "A")])
+    write_task(tasks_dir, "2026-07-05-a", "pending")
+    # A file outside .ai-tasks must never be reachable via a crafted task id.
+    (repo.path / "secret.md").write_text("top secret", encoding="utf-8")
+    assert read_task_content(repo, bad_id) is None
 
 
 def test_to_dict_and_payload_shape(tmp_path):
