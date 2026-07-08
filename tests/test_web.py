@@ -86,3 +86,70 @@ def test_data_routes_stay_protected_after_adding_shell():
 def test_public_paths_are_exactly_health_plus_shell():
     # Pin the public allowlist so a future edit can't silently widen it.
     assert api.PUBLIC_PATHS == frozenset({"/api/health", "/", "/app.js", "/styles.css"})
+
+
+# ---- run controls (start / stop) --------------------------------------------
+#
+# The dashboard has no JS runtime in this suite, so — like the log-stream
+# decision pinned above — the run-control wiring is asserted at the served-asset
+# boundary. Each check maps to a scope/acceptance line of the run-controls task:
+# Start drives the create call (carrying the blocked-task acknowledgement), Stop
+# drives the stop call, launch refusals render their structured 409 detail, and
+# the busy / non-runnable / not-ready states are reflected before any POST so the
+# backend's per-repo serialization is pre-reflected but never the sole guard.
+
+
+def app_js() -> str:
+    """The served dashboard script (public shell asset)."""
+    return unauthed_client().get("/app.js").text
+
+
+def test_start_control_posts_run_create_with_ack_flag():
+    body = app_js()
+    # The Start form drives POST /api/runs with the documented body keys,
+    # including acknowledge_blocked so a blocked task can still be launched.
+    assert "start-form" in body
+    assert '"/api/runs"' in body
+    for key in ("repo_id", "task_id", "acknowledge_blocked"):
+        assert key in body
+
+
+def test_stop_control_posts_run_stop():
+    body = app_js()
+    # The Stop form drives POST /api/runs/{run_id}/stop.
+    assert "stop-form" in body
+    assert "/stop" in body
+    assert "Stop run" in body
+
+
+def test_blocked_task_offers_acknowledgement_checkbox():
+    # A blocked task is launchable only with an explicit acknowledgement; the
+    # control exposes a checkbox rather than silently acknowledging for the user.
+    body = app_js()
+    assert "ack-blocked" in body
+    assert "data-blocked" in body
+
+
+def test_launch_refusal_details_are_rendered():
+    # A 409 from POST /api/runs carries structured detail a flat message drops:
+    # LaunchBlocked `reasons` and the blocked-task `acknowledge_required` nudge.
+    # Rendering these is how the UI explains a refused (or raced) launch.
+    body = app_js()
+    assert "reasons" in body
+    assert "acknowledge_required" in body
+
+
+def test_start_reflects_per_repo_busy_state():
+    # Per-repo serialization is the backend's to enforce, but the dashboard
+    # pre-reflects it: a live run in the repo replaces Start with a busy note.
+    body = app_js()
+    assert "repoLiveRun" in body
+    assert "one run per repo" in body
+
+
+def test_start_reflects_non_runnable_and_not_ready_states():
+    # Start is offered only for a launchable status on a ready repo; the other
+    # states are explained in place instead of offering a launch bound to 409.
+    body = app_js()
+    assert "RUNNABLE_STATUSES" in body
+    assert "not ready to launch" in body

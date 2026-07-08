@@ -30,6 +30,17 @@
     "blocked",
   ];
   const SENTINELS = new Set(["missing", "unknown"]);
+  // Task statuses the orchestrator attaches to without caveats — mirrors
+  // runs.LAUNCHABLE_STATUSES. `blocked` is runnable only with an explicit
+  // acknowledgement; the sentinels and any other status are not runnable. This
+  // only gates whether the dashboard *offers* Start; the backend re-checks and
+  // stays the source of truth (a stale offer is answered by its 409).
+  const RUNNABLE_STATUSES = new Set([
+    "pending",
+    "in_progress",
+    "final_review",
+    "completed",
+  ]);
 
   // ---- token storage ----
   const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
@@ -40,9 +51,13 @@
 
   // ---- API client ----
   class ApiError extends Error {
-    constructor(message, status) {
+    constructor(message, status, body) {
       super(message);
       this.status = status;
+      // Parsed JSON error body when the hub sent one, so callers can render the
+      // structured launch-refusal details a plain message drops: `reasons`
+      // (LaunchBlocked), `run_id` (RepoBusy), `acknowledge_required` (blocked).
+      this.body = body || null;
     }
   }
 
@@ -84,13 +99,14 @@
     }
     if (!resp.ok) {
       let detail = resp.status + " " + resp.statusText;
+      let body = null;
       try {
-        const body = await resp.json();
+        body = await resp.json();
         if (body && body.detail) detail = body.detail;
       } catch (_) {
         /* non-JSON error body */
       }
-      throw new ApiError(detail, resp.status);
+      throw new ApiError(detail, resp.status, body);
     }
     if (resp.status === 204) return null;
     return resp.json();
@@ -615,6 +631,201 @@
     });
   }
 
+  // ---- run controls (start / stop) ----
+
+  // The one live run for this repo, if any. Per-repo serialization means at most
+  // one, so this both surfaces the run to Stop and marks the repo "busy" for a
+  // new Start (the backend enforces this; the dashboard only pre-reflects it).
+  function repoLiveRun(runs, repoName) {
+    return (
+      (runs || []).find(
+        (r) => r.repo_name === repoName && LIVE_STATES.has(r.state)
+      ) || null
+    );
+  }
+
+  // Why this task can't be launched right now (mirrors the run manager's task
+  // gate), or null if it looks launchable. `blocked` is launchable with an
+  // acknowledgement, so it is not a block here.
+  function taskNotRunnableReason(status) {
+    if (status === "missing") return "its task file is absent";
+    if (status === "unknown") return "its task file has no parseable status";
+    if (status === "blocked") return null; // runnable with acknowledgement
+    if (!RUNNABLE_STATUSES.has(status))
+      return "status " + status + " is not runnable";
+    return null;
+  }
+
+  // Readiness failure reasons as <li> rows (shared shape with the repo views).
+  function reasonItems(checks) {
+    return (checks || [])
+      .map(
+        (c) =>
+          `<li><code>${escapeHtml(c.name)}</code> ${escapeHtml(c.message)}</li>`
+      )
+      .join("");
+  }
+
+  // Turn a failed Start/Stop into a one-line message. A LaunchBlocked 409 rides
+  // its `reasons` list; a blocked-task 409 nudges toward the acknowledgement;
+  // otherwise the plain detail carries it (RepoBusy, RunEnded, …).
+  function controlErrorText(err, fallback) {
+    if (!(err instanceof ApiError)) return fallback;
+    const body = err.body || {};
+    if (Array.isArray(body.reasons) && body.reasons.length)
+      return err.message + " — " + body.reasons.join("; ");
+    if (body.acknowledge_required)
+      return err.message + " — tick the acknowledgement box, then retry.";
+    return err.message;
+  }
+
+  // The Start/Stop control for a task, chosen from the run overlay the backend
+  // already enforces. Order matters: a live run for THIS task offers Stop; a
+  // live run elsewhere in the repo blocks Start (busy); otherwise Start is
+  // offered only when the task status and (best-effort) readiness look launchable
+  // — every hidden Start is still backed by the backend 409 if raced.
+  function runControlsSection(repoName, detail, run, busyRun, readiness) {
+    const head = `<section class="section run-controls"><h2>Run controls</h2>`;
+    const foot = `</section>`;
+
+    if (run && LIVE_STATES.has(run.state)) {
+      return (
+        head +
+        `<form class="stop-form" data-run="${escapeHtml(run.run_id)}">
+          <button type="submit" class="btn-danger">Stop run</button>
+          <span class="control-status" role="status"></span>
+        </form>
+        <p class="muted">Stops at the next session boundary; a pending
+          question's wait is aborted (README §5.5).</p>` +
+        foot
+      );
+    }
+
+    if (busyRun) {
+      return (
+        head +
+        `<p class="muted">This repo already has a live run
+          (<a class="text-link" href="${taskHash(
+            repoName,
+            busyRun.task_id
+          )}">${escapeHtml(busyRun.task_id)}</a> ${runBadge(
+          busyRun.state
+        )}). Only one run per repo at a time.</p>` +
+        foot
+      );
+    }
+
+    const notRunnable = taskNotRunnableReason(detail.status);
+    if (notRunnable) {
+      return (
+        head +
+        `<p class="muted">This task can't be launched: ${escapeHtml(
+          notRunnable
+        )}.</p>` +
+        foot
+      );
+    }
+
+    if (readiness && !readiness.ready) {
+      return (
+        head +
+        `<p class="muted">The repo is not ready to launch a run:</p>
+         <ul class="reasons">${reasonItems(readiness.checks)}</ul>` +
+        foot
+      );
+    }
+
+    const blocked = detail.status === "blocked";
+    const ack = blocked
+      ? `<label class="ack"><input type="checkbox" class="ack-blocked" />
+          <span>Acknowledge: resuming a <code>blocked</code> task only works if
+          its <code>claimed-by</code> session is resumable, else the orchestrator
+          exits with guidance (README §5.4).</span></label>`
+      : "";
+    return (
+      head +
+      `<form class="start-form" data-repo="${escapeHtml(
+        repoName
+      )}" data-task="${escapeHtml(detail.task_id)}" data-blocked="${
+        blocked ? "1" : ""
+      }">
+        ${ack}
+        <div class="control-actions">
+          <button type="submit">Start run</button>
+          <span class="control-status" role="status"></span>
+        </div>
+      </form>` +
+      foot
+    );
+  }
+
+  function wireRunControls() {
+    const startForm = document.querySelector(".start-form");
+    if (startForm) startForm.addEventListener("submit", onStartSubmit);
+    const stopForm = document.querySelector(".stop-form");
+    if (stopForm) stopForm.addEventListener("submit", onStopSubmit);
+  }
+
+  // Start: POST /api/runs. A success re-renders (the run is now live, so the
+  // view flips to Stop); a refusal is shown in place — the backend, not this
+  // form, decides whether the launch is allowed.
+  async function onStartSubmit(ev) {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const statusEl = form.querySelector(".control-status");
+    const button = form.querySelector("button");
+    const ackBox = form.querySelector(".ack-blocked");
+    const acknowledgeBlocked =
+      form.dataset.blocked === "1" ? !!(ackBox && ackBox.checked) : false;
+    statusEl.textContent = "";
+    statusEl.classList.remove("error-text");
+    button.disabled = true;
+    try {
+      await api("/api/runs", {
+        method: "POST",
+        body: {
+          repo_id: form.dataset.repo,
+          task_id: form.dataset.task,
+          acknowledge_blocked: acknowledgeBlocked,
+        },
+      });
+      router(); // now shows the live run + Stop control
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      button.disabled = false;
+      statusEl.classList.add("error-text");
+      statusEl.textContent = controlErrorText(err, "Failed to start the run.");
+    }
+  }
+
+  // Stop: POST /api/runs/{id}/stop. The stop is graceful, so the run stays live
+  // until its next session boundary; rather than re-render to the same state, we
+  // keep the button disabled and show the caveat the API returns.
+  async function onStopSubmit(ev) {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const runId = form.dataset.run;
+    const statusEl = form.querySelector(".control-status");
+    const button = form.querySelector("button");
+    statusEl.textContent = "";
+    statusEl.classList.remove("error-text");
+    button.disabled = true;
+    try {
+      const res = await api(
+        "/api/runs/" + encodeURIComponent(runId) + "/stop",
+        { method: "POST" }
+      );
+      button.textContent = "Stop requested";
+      statusEl.textContent =
+        (res && res.detail) || "Stop requested; the run ends at a boundary.";
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      button.disabled = false;
+      statusEl.classList.add("error-text");
+      statusEl.textContent = controlErrorText(err, "Failed to request stop.");
+    }
+  }
+
   async function renderTaskDetail(repoName, taskId) {
     view().innerHTML = centerHtml("Loading task…");
     // Required: the task's inventory fields + raw file body. Unknown repo/task
@@ -627,10 +838,25 @@
     );
 
     // Best-effort run overlay; a runs failure must not hide the task file.
+    // `busyRun` is any live run in this repo — it decides whether Start is
+    // offered (and, when it is this task's run, whether Stop is).
     let run = null;
+    let busyRun = null;
     try {
       const runsData = await api("/api/runs");
       run = pickRunForTask(runsData.runs, repoName, taskId);
+      busyRun = repoLiveRun(runsData.runs, repoName);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
+
+    // Best-effort readiness so the Start control can pre-explain a not-ready
+    // repo; the backend re-checks readiness on launch and stays authoritative.
+    let readiness = null;
+    try {
+      const reposData = await api("/api/repos");
+      const match = (reposData.repos || []).find((r) => r.name === repoName);
+      if (match) readiness = match.readiness;
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
@@ -678,10 +904,12 @@
       ${blockers}
       ${unknownNote}
       ${runStatusSection(run)}
+      ${runControlsSection(repoName, detail, run, busyRun, readiness)}
       ${answerSection(run ? run.run_id : "", questions)}
       ${contentSection}`;
 
     wireAnswerForms();
+    wireRunControls();
   }
 
   // ---- run history ----
