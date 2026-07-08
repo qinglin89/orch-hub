@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import shutil
 import sys
 from pathlib import Path
 
@@ -24,9 +25,13 @@ from orch_hub.launchd import (
     LABEL,
     DeployOptions,
     LaunchdError,
+    PLIST_NAME,
+    TEMPLATE_RELATIVE_PATH,
     deploy_service,
+    restart_service,
     service_domain,
     service_target,
+    start_service,
     status_service,
     stop_service,
 )
@@ -55,6 +60,10 @@ def make_checkout(tmp_path: Path) -> Path:
     (checkout / "pyproject.toml").write_text(
         "[project]\nname = \"orch-hub\"\n", encoding="utf-8"
     )
+    template_src = Path(__file__).parents[1] / TEMPLATE_RELATIVE_PATH
+    template_dst = checkout / TEMPLATE_RELATIVE_PATH
+    template_dst.parent.mkdir(parents=True)
+    shutil.copyfile(template_src, template_dst)
     return checkout
 
 
@@ -101,6 +110,7 @@ def test_deploy_writes_plist_and_bootstraps(tmp_path):
     assert plist["KeepAlive"] is True
     assert plist["StandardOutPath"] == str(log_dir / "orch-hub.log")
     assert plist["StandardErrorPath"] == str(log_dir / "orch-hub.err.log")
+    assert "REPLACE-" not in plist_path.read_text(encoding="utf-8")
     assert runner.calls == [
         ("plutil", "-lint", str(plist_path)),
         ("launchctl", "bootout", service_target()),
@@ -164,6 +174,28 @@ def test_deploy_installs_package_when_requested(tmp_path):
     ]
 
 
+def test_deploy_requires_checkout_template(tmp_path):
+    checkout = tmp_path / "orch-hub"
+    (checkout / "orch_hub").mkdir(parents=True)
+    (checkout / "pyproject.toml").write_text(
+        "[project]\nname = \"orch-hub\"\n", encoding="utf-8"
+    )
+    runner = FakeRunner()
+
+    with pytest.raises(LaunchdError, match="launchd template not found"):
+        deploy_service(
+            DeployOptions(
+                checkout=checkout,
+                plist_path=tmp_path / PLIST_NAME,
+                install_package=False,
+            ),
+            runner=runner,
+            environ={},
+            token_generator=lambda: "token",
+        )
+    assert runner.calls == []
+
+
 def test_stop_treats_absent_launchd_job_as_already_stopped():
     runner = FakeRunner(bootout_not_loaded=True)
 
@@ -172,6 +204,49 @@ def test_stop_treats_absent_launchd_job_as_already_stopped():
     assert result.stopped is False
     assert result.already_stopped is True
     assert runner.calls == [("launchctl", "bootout", service_target())]
+
+
+def test_start_bootstraps_installed_plist_when_unloaded(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.write_text("plist", encoding="utf-8")
+    runner = FakeRunner(print_loaded=False)
+
+    result = start_service(plist_path=plist_path, runner=runner)
+
+    assert result.started is True
+    assert result.already_started is False
+    assert runner.calls == [
+        ("launchctl", "print", service_target()),
+        ("launchctl", "bootstrap", service_domain(os.getuid()), str(plist_path)),
+    ]
+
+
+def test_start_is_idempotent_when_already_loaded(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.write_text("plist", encoding="utf-8")
+    runner = FakeRunner(print_loaded=True)
+
+    result = start_service(plist_path=plist_path, runner=runner)
+
+    assert result.started is False
+    assert result.already_started is True
+    assert runner.calls == [("launchctl", "print", service_target())]
+
+
+def test_restart_stops_then_starts_installed_plist(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.write_text("plist", encoding="utf-8")
+    runner = FakeRunner(bootout_not_loaded=False, print_loaded=False)
+
+    result = restart_service(plist_path=plist_path, runner=runner)
+
+    assert result.stop.stopped is True
+    assert result.start.started is True
+    assert runner.calls == [
+        ("launchctl", "bootout", service_target()),
+        ("launchctl", "print", service_target()),
+        ("launchctl", "bootstrap", service_domain(os.getuid()), str(plist_path)),
+    ]
 
 
 def test_stop_raises_on_real_bootout_failure():

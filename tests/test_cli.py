@@ -132,6 +132,41 @@ def test_launchd_stop_cli(monkeypatch, capsys):
     assert "orchestrator runs were not stopped" in out
 
 
+def test_launchd_start_cli(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "start_service",
+        lambda plist_path=None: SimpleNamespace(
+            started=True, already_started=False
+        ),
+    )
+
+    rc = cli.main(["launchd", "start"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "launchd service started" in out
+    assert "deploy/update are required" in out
+
+
+def test_launchd_restart_cli(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "restart_service",
+        lambda plist_path=None: SimpleNamespace(
+            stop=SimpleNamespace(stopped=True),
+            start=SimpleNamespace(started=True),
+        ),
+    )
+
+    rc = cli.main(["launchd", "restart"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "launchd service restarted" in out
+    assert "use update after code changes" in out
+
+
 def test_launchd_status_cli(monkeypatch, capsys):
     monkeypatch.setattr(
         cli,

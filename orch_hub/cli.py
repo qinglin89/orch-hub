@@ -19,6 +19,8 @@ from .launchd import (
     LABEL,
     LaunchdError,
     deploy_service,
+    restart_service,
+    start_service,
     status_service,
     stop_service,
 )
@@ -69,21 +71,30 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_launchd_deploy_args(update_p)
     update_p.set_defaults(launchd_handler=_cmd_launchd_deploy)
 
+    start_p = launchd_sub.add_parser(
+        "start",
+        help="bootstrap the installed launchd service without reinstalling",
+    )
+    _add_plist_path_arg(start_p)
+    start_p.set_defaults(launchd_handler=_cmd_launchd_start)
+
     stop_p = launchd_sub.add_parser(
         "stop",
         help="unload the launchd service without stopping orchestrator runs",
     )
     stop_p.set_defaults(launchd_handler=_cmd_launchd_stop)
 
+    restart_p = launchd_sub.add_parser(
+        "restart",
+        help="stop and start the installed launchd service without reinstalling",
+    )
+    _add_plist_path_arg(restart_p)
+    restart_p.set_defaults(launchd_handler=_cmd_launchd_restart)
+
     status_p = launchd_sub.add_parser(
         "status", help="show launchd load state and health probe"
     )
-    status_p.add_argument(
-        "--plist-path",
-        type=Path,
-        default=None,
-        help="installed plist path (default: ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist)",
-    )
+    _add_plist_path_arg(status_p)
     status_p.set_defaults(launchd_handler=_cmd_launchd_status)
     return parser
 
@@ -139,6 +150,15 @@ def _add_launchd_deploy_args(parser: argparse.ArgumentParser) -> None:
         "--skip-install",
         action="store_true",
         help="rewrite/reload launchd without running venv creation or pip install",
+    )
+
+
+def _add_plist_path_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--plist-path",
+        type=Path,
+        default=None,
+        help="installed plist path (default: ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist)",
     )
 
 
@@ -213,6 +233,33 @@ def _cmd_launchd_stop(args: argparse.Namespace) -> int:
         "orchestrator runs were not stopped; stop individual runs through the "
         "dashboard/API if needed."
     )
+    return 0
+
+
+def _cmd_launchd_start(args: argparse.Namespace) -> int:
+    try:
+        result = start_service(plist_path=args.plist_path)
+    except LaunchdError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if result.started:
+        print("launchd service started")
+    elif result.already_started:
+        print("launchd service already started")
+    print("deploy/update are required after code or plist changes.")
+    return 0
+
+
+def _cmd_launchd_restart(args: argparse.Namespace) -> int:
+    try:
+        result = restart_service(plist_path=args.plist_path)
+    except LaunchdError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    stop_state = "stopped" if result.stop.stopped else "already stopped"
+    start_state = "started" if result.start.started else "already started"
+    print(f"launchd service restarted ({stop_state}, {start_state})")
+    print("restart does not reinstall package code; use update after code changes.")
     return 0
 
 

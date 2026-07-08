@@ -64,6 +64,12 @@ This installs two console scripts:
 - `.venv/bin/orch-hub` — operational CLI, including launchd management.
 - `.venv/bin/orch-hub-api` — the resident HTTP service launchd runs.
 
+The official operational entry point is `orch-hub launchd ...`. The
+`deploy/launchd/` directory holds deployment artifacts, including the plist
+template, but does not provide a second shell-script interface. Keeping the
+entry point inside the installed package lets the operations flow share the
+same config parsing, subprocess wrapper, and tests as the rest of orch-hub.
+
 ## 2. Deploy or update the launchd agent
 
 The integrated command creates/updates the venv package install, writes a
@@ -104,9 +110,38 @@ Common examples:
 ```
 
 The generated plist is written with mode `600` because it embeds the bearer
-token.
+token. Its structure comes from the checked-in template at
+[`deploy/launchd/com.qinglin89.orch-hub.plist`](../deploy/launchd/com.qinglin89.orch-hub.plist);
+the CLI parses that template with `plistlib`, replaces the `REPLACE-...`
+values, verifies no placeholders remain, and writes the installed plist. This
+keeps plist structure in one place while the Python code owns install/reload
+semantics.
 
-## 3. Check status
+## 3. Start, stop, or restart without changing deployment
+
+Use these lifecycle commands when the installed package and plist are already
+correct:
+
+```bash
+.venv/bin/orch-hub launchd start
+.venv/bin/orch-hub launchd stop
+.venv/bin/orch-hub launchd restart
+```
+
+Command semantics:
+
+| Command | Effect |
+|---|---|
+| `start` | Bootstrap the installed plist if the job is not loaded. If already loaded, report that state and do nothing. |
+| `stop` | Unload the fixed launchd label. If already unloaded, report that state and do nothing. |
+| `restart` | `stop` then `start`; does not reinstall package code and does not rewrite the plist. |
+| `deploy` | Install/update the local package, rewrite plist from the template, validate it, unload any existing job, and bootstrap. |
+| `update` | Alias for `deploy`, named for the code-update workflow. |
+
+There is one launchd-managed orch-hub service: the fixed label
+`com.qinglin89.orch-hub` in the current user's `gui/$UID` domain.
+
+## 4. Check status
 
 ```bash
 .venv/bin/orch-hub launchd status
@@ -126,16 +161,7 @@ For lower-level launchd diagnostics:
 launchctl print gui/$UID/com.qinglin89.orch-hub
 ```
 
-## 4. Stop the hub service
-
-```bash
-.venv/bin/orch-hub launchd stop
-```
-
-There is one launchd-managed orch-hub service: the fixed label
-`com.qinglin89.orch-hub` in the current user's `gui/$UID` domain. `stop`
-unloads that job. It is idempotent: if the job is not loaded, the command
-reports that it is already stopped.
+## 5. Stop semantics
 
 Stopping the launchd service is deliberately different from stopping an
 orchestrator run:
@@ -153,7 +179,7 @@ continue under their own process/session. To stop a run, use the dashboard or
 The `launchctl bootout` call itself may briefly wait for launchd to tear down
 the hub process, but it does not block on orchestrator completion.
 
-## 5. Manual fallback
+## 6. Manual fallback
 
 The checked-in plist template remains at
 [`deploy/launchd/com.qinglin89.orch-hub.plist`](../deploy/launchd/com.qinglin89.orch-hub.plist)
@@ -173,7 +199,7 @@ rm ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
 rm -r ~/Library/Logs/orch-hub   # optional
 ```
 
-## 6. Logs
+## 7. Logs
 
 uvicorn writes access logs to stdout and lifecycle/errors to stderr:
 

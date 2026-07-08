@@ -210,9 +210,11 @@ it as a launchd user agent:
 
 ```bash
 .venv/bin/orch-hub launchd deploy   # install/update package, write plist, bootstrap
-.venv/bin/orch-hub launchd status   # launchd state + /api/health probe
+.venv/bin/orch-hub launchd start    # bootstrap the installed plist only
 .venv/bin/orch-hub launchd stop     # unload hub service only
+.venv/bin/orch-hub launchd restart  # stop + start without reinstalling
 .venv/bin/orch-hub launchd update   # same flow as deploy after code changes
+.venv/bin/orch-hub launchd status   # launchd state + /api/health probe
 ```
 
 The launchd label is a singleton (`com.qinglin89.orch-hub`) in the user's
@@ -221,7 +223,9 @@ write run `stop.flag` files or signal detached orchestrator subprocesses.
 Detailed install, update, stop, and log inspection guidance is in
 [docs/launchd.md](docs/launchd.md). The plist must set `ORCH_HUB_TOKEN` —
 `deploy` preserves an existing plist token, uses `ORCH_HUB_TOKEN` when set, or
-generates and prints a new token.
+generates and prints a new token. The checked-in plist template under
+`deploy/launchd/` is the plist-structure source of truth; the CLI reads it and
+fills deployment values.
 
 ## Development
 

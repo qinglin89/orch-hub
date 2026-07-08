@@ -41,6 +41,7 @@ from .subprocess_utils import (
 LABEL = "com.qinglin89.orch-hub"
 PLIST_NAME = f"{LABEL}.plist"
 DEFAULT_PATH_ENV = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+TEMPLATE_RELATIVE_PATH = Path("deploy") / "launchd" / PLIST_NAME
 
 
 class LaunchdError(RuntimeError):
@@ -94,6 +95,10 @@ class Deployment:
     def dashboard_url(self) -> str:
         return f"http://{self.host}:{self.port}/"
 
+    @property
+    def template_path(self) -> Path:
+        return self.checkout / TEMPLATE_RELATIVE_PATH
+
 
 @dataclass(frozen=True)
 class DeployResult:
@@ -107,6 +112,20 @@ class StopResult:
     stopped: bool
     already_stopped: bool
     command: CommandResult
+
+
+@dataclass(frozen=True)
+class StartResult:
+    started: bool
+    already_started: bool
+    command: CommandResult
+    plist_path: Path
+
+
+@dataclass(frozen=True)
+class RestartResult:
+    stop: StopResult
+    start: StartResult
 
 
 @dataclass(frozen=True)
@@ -213,12 +232,13 @@ def deploy_service(
     deployment = resolve_deployment(
         options, environ=environ, token_generator=token_generator
     )
+    plist_data = _render_plist_from_template(deployment)
     commands: list[CommandResult] = []
     if options.install_package:
         commands.extend(_install_package(deployment, runner))
     deployment.log_dir.mkdir(parents=True, exist_ok=True)
     deployment.plist_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_plist(deployment)
+    _write_plist(deployment.plist_path, plist_data)
     deployment.plist_path.chmod(0o600)
     commands.append(
         _run_required(
@@ -259,6 +279,45 @@ def stop_service(*, runner: Runner = run_command) -> StopResult:
     raise LaunchdError(_format_failure("stop launchd service", result))
 
 
+def start_service(
+    *, plist_path: Path | None = None, runner: Runner = run_command
+) -> StartResult:
+    """Bootstrap the installed launchd plist without rewriting it."""
+    resolved_plist = (plist_path or default_plist_path()).expanduser()
+    if not resolved_plist.is_file():
+        raise LaunchdError(f"launchd plist is not installed: {resolved_plist}")
+    current = _print_service(runner)
+    if current.ok:
+        return StartResult(
+            started=False,
+            already_started=True,
+            command=current,
+            plist_path=resolved_plist,
+        )
+    if not _is_not_loaded(current):
+        raise LaunchdError(_format_failure("check launchd service", current))
+    started = _run_required(
+        runner,
+        ["launchctl", "bootstrap", service_domain(), resolved_plist],
+        "bootstrap launchd service",
+    )
+    return StartResult(
+        started=True,
+        already_started=False,
+        command=started,
+        plist_path=resolved_plist,
+    )
+
+
+def restart_service(
+    *, plist_path: Path | None = None, runner: Runner = run_command
+) -> RestartResult:
+    """Unload and then bootstrap the installed plist without reinstalling."""
+    stopped = stop_service(runner=runner)
+    started = start_service(plist_path=plist_path, runner=runner)
+    return RestartResult(stop=stopped, start=started)
+
+
 def status_service(
     *,
     plist_path: Path | None = None,
@@ -267,7 +326,7 @@ def status_service(
 ) -> StatusResult:
     """Return launchd load state plus a public health probe result."""
     resolved_plist = (plist_path or default_plist_path()).expanduser()
-    launchctl = _run(runner, ["launchctl", "print", service_target()])
+    launchctl = _print_service(runner)
     loaded = launchctl.ok
     plist, plist_error = _read_plist_with_error(resolved_plist)
     env = _plist_env(plist)
@@ -310,25 +369,74 @@ def _install_package(deployment: Deployment, runner: Runner) -> list[CommandResu
     return commands
 
 
-def _write_plist(deployment: Deployment) -> None:
-    data = {
-        "Label": LABEL,
-        "ProgramArguments": [str(deployment.api_bin)],
-        "EnvironmentVariables": {
-            TOKEN_ENV: deployment.token,
-            HOST_ENV: deployment.host,
-            PORT_ENV: str(deployment.port),
-            AI_NATIVE_PATH_ENV: str(deployment.ai_native_path),
-            DATA_DIR_ENV: str(deployment.data_dir),
-            "PATH": deployment.path_env,
+def _render_plist_from_template(deployment: Deployment) -> dict:
+    template = _load_template(deployment.template_path)
+    data = _replace_placeholders(
+        template,
+        {
+            "REPLACE-ORCH-HUB-CHECKOUT": str(deployment.checkout),
+            "REPLACE-BEARER-TOKEN": deployment.token,
+            "REPLACE-ORCH-HUB-HOST": deployment.host,
+            "REPLACE-ORCH-HUB-PORT": str(deployment.port),
+            "REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT": str(deployment.ai_native_path),
+            "REPLACE-ORCH-HUB-DATA-DIR": str(deployment.data_dir),
+            "REPLACE-ORCH-HUB-LOG-DIR": str(deployment.log_dir),
+            "REPLACE-PATH": deployment.path_env,
         },
-        "RunAtLoad": True,
-        "KeepAlive": True,
-        "StandardOutPath": str(deployment.log_dir / "orch-hub.log"),
-        "StandardErrorPath": str(deployment.log_dir / "orch-hub.err.log"),
-    }
-    with deployment.plist_path.open("wb") as fh:
+    )
+    _require_no_placeholders(data)
+    return data
+
+
+def _write_plist(path: Path, data: dict) -> None:
+    with path.open("wb") as fh:
         plistlib.dump(data, fh, fmt=plistlib.FMT_XML, sort_keys=False)
+
+
+def _load_template(path: Path) -> dict:
+    if not path.is_file():
+        raise LaunchdError(f"launchd template not found: {path}")
+    plist, error = _read_plist_with_error(path)
+    if error:
+        raise LaunchdError(f"invalid launchd template {path}: {error}")
+    if plist is None:
+        raise LaunchdError(f"invalid launchd template {path}")
+    label = plist.get("Label")
+    if label != LABEL:
+        raise LaunchdError(
+            f"launchd template label must be {LABEL!r}, got {label!r}"
+        )
+    return plist
+
+
+def _replace_placeholders(value, replacements: Mapping[str, str]):
+    if isinstance(value, str):
+        result = value
+        for placeholder, replacement in replacements.items():
+            result = result.replace(placeholder, replacement)
+        return result
+    if isinstance(value, list):
+        return [_replace_placeholders(item, replacements) for item in value]
+    if isinstance(value, dict):
+        return {
+            key: _replace_placeholders(item, replacements)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _require_no_placeholders(value) -> None:
+    if isinstance(value, str):
+        if "REPLACE-" in value:
+            raise LaunchdError(f"unreplaced launchd template placeholder: {value}")
+        return
+    if isinstance(value, list):
+        for item in value:
+            _require_no_placeholders(item)
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _require_no_placeholders(item)
 
 
 def _read_plist(path: Path) -> dict | None:
@@ -387,6 +495,10 @@ def _resolve_token(
 
 def _bootout(runner: Runner) -> CommandResult:
     return _run(runner, ["launchctl", "bootout", service_target()])
+
+
+def _print_service(runner: Runner) -> CommandResult:
+    return _run(runner, ["launchctl", "print", service_target()])
 
 
 def _run_required(
