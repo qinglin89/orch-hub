@@ -23,6 +23,11 @@ orch-hub-api = "orch_hub.api:run"
 [tool.setuptools]
 packages = ["orch_hub"]
 
+[tool.setuptools.package-data]
+# Ship the dashboard shell assets so a non-editable install can serve them
+# (the editable dev install resolves them from the source tree directly).
+orch_hub = ["web/*.html", "web/*.js", "web/*.css"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 # Make the in-repo `orch_hub` package importable without an install step.

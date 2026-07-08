@@ -149,6 +149,29 @@ curl -H "Authorization: Bearer $ORCH_HUB_TOKEN" http://127.0.0.1:8765/api/repos
 - `GET /api/health` is deliberately public and minimal (`{"status": "ok"}`) so
   liveness probes need no secret; it no longer reports configuration details.
 
+### Dashboard
+
+A mobile-first web dashboard is served by the same app (open `/` in a browser).
+It is a dependency-free, build-stepless single-page app; the token is presented
+as follows:
+
+- The **shell** (`/`, `/app.js`, `/styles.css`) is served **publicly** — it is
+  client code with no secrets. A browser cannot attach an `Authorization`
+  header on plain navigation, so the bootstrap page must load unauthenticated.
+- The SPA prompts for the bearer token once and keeps it **only in the
+  browser's `localStorage`**, attaching `Authorization: Bearer <token>` to every
+  data `fetch` (and, later, the SSE log stream). No cookies and no query-string
+  tokens: the API stays on a single credential path and secrets stay out of URLs
+  and server logs. A `401` clears the stored token and returns to the login gate.
+- Every data route stays protected; only the three shell assets are on the auth
+  allowlist (alongside `GET /api/health`).
+
+Current views: repo list (readiness reasons from `/api/repos` plus live
+run badges) and an all-task list (`/api/tasks`, filterable by repo and
+frontmatter status, with `missing`/`unknown` sentinels and missing-index states
+shown as data problems). Repo/task detail, answering waiting questions, and log
+tailing land in later slices.
+
 ### Deployment assumptions (private network only)
 
 orch-hub controls local code execution, so treat the HTTP service as a remote
@@ -185,9 +208,10 @@ never touch real repos or the real ai-native-development registry.
 
 ## Not implemented yet (by design)
 
-- Web/mobile dashboard.
-- Orchestrator subprocess runs and `--control-dir` question/answer relay.
-- Log streaming, Bark notifications.
+- Dashboard detail views (repo/task detail, answering waiting questions,
+  in-browser log tailing) — the shell and the repo/task lists are in place; see
+  [Dashboard](#dashboard).
+- Bark notifications; remote intake-task; IM bot control.
 
 The core functions (`discover_repos`, `check_readiness`) are written to be
 reused unchanged by those future surfaces.

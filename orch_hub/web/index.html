@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <title>orch-hub</title>
+    <!-- Inline empty icon: avoids a /favicon.ico request that the default-deny
+         auth middleware would answer with 401. -->
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <h1 class="app-title">orch-hub</h1>
+      <button
+        id="signout-btn"
+        class="icon-btn"
+        type="button"
+        aria-label="Sign out"
+        hidden
+      >
+        Sign&nbsp;out
+      </button>
+    </header>
+
+    <!-- app.js renders the login gate or the routed view into #view -->
+    <main id="view" class="view" aria-live="polite"></main>
+
+    <nav id="nav" class="tabbar" hidden>
+      <a href="#/repos" data-tab="/repos">Repos</a>
+      <a href="#/tasks" data-tab="/tasks">Tasks</a>
+    </nav>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

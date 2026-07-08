@@ -27,9 +27,10 @@ private-network deployment assumptions are documented in the README.
 from __future__ import annotations
 
 import secrets
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -56,13 +57,31 @@ from .runs import (
 )
 from .task_store import list_repo_tasks, list_tasks
 
-PUBLIC_PATHS = frozenset({"/api/health"})
+WEB_DIR = Path(__file__).resolve().parent / "web"
+"""Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
+
+SHELL_ASSETS = {
+    "/": ("index.html", "text/html"),
+    "/app.js": ("app.js", "text/javascript"),
+    "/styles.css": ("styles.css", "text/css"),
+}
+"""Public dashboard shell: request path -> (filename under WEB_DIR, media type).
+
+These are the only non-health public paths. The shell is pure client code with
+no secrets — a browser cannot attach an ``Authorization`` header on plain
+navigation, so the bootstrap page must load unauthenticated; the SPA then reads
+the bearer token from ``localStorage`` and attaches it to every data ``fetch``.
+Keeping the set explicit (not a ``StaticFiles`` mount) keeps default-deny tight:
+every public path is enumerated here and pinned by the auth tests.
+"""
+
+PUBLIC_PATHS = frozenset({"/api/health", *SHELL_ASSETS})
 """Paths served without authentication.
 
-Only the minimal liveness probe: monitors and launchd health checks must not
-need secret material, and a 401 from any other path already reveals liveness
-anyway. Everything else — including docs/OpenAPI and future dashboard routes —
-requires the token.
+The minimal liveness probe plus the dashboard shell assets (:data:`SHELL_ASSETS`).
+A 401 from any other path already reveals liveness, and the shell carries no
+secret material. Everything else — including docs/OpenAPI, all data routes, and
+future dashboard data endpoints — requires the token.
 """
 
 
@@ -237,6 +256,25 @@ def create_app(
         must not disclose anything about the deployment.
         """
         return {"status": "ok"}
+
+    # Public dashboard shell (see SHELL_ASSETS): the three static assets the
+    # browser needs before it can attach the bearer token. A factory binds each
+    # filename/media type so the loop variable is not captured late. They are
+    # kept out of the OpenAPI schema (which is itself protected) and the auth
+    # middleware allows exactly these paths unauthenticated.
+    def _make_shell_route(filename: str, media_type: str):
+        def serve_shell_asset() -> FileResponse:
+            return FileResponse(WEB_DIR / filename, media_type=media_type)
+
+        return serve_shell_asset
+
+    for shell_path, (shell_file, shell_type) in SHELL_ASSETS.items():
+        app.add_api_route(
+            shell_path,
+            _make_shell_route(shell_file, shell_type),
+            methods=["GET"],
+            include_in_schema=False,
+        )
 
     @app.get("/api/repos")
     def get_repos() -> dict:
