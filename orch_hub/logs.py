@@ -12,9 +12,11 @@ Attribution matters because one task is re-run across many dev/review sessions,
 each leaving its own ``<utc-ts>-<task-id>.log`` in the same dir. A run's own
 log is the earliest matching file stamped at or after the run started — a later
 re-run stamps a strictly later ts (:func:`locate_log`). The stamp format is the
-same ``%Y%m%dT%H%M%SZ`` the run manager uses for run ids, and the orchestrator's
-startup stamp is wall-clock >= the hub's spawn stamp on the same machine, so a
-second-floored ``started_ts`` is a sound lower bound.
+same ``%Y%m%dT%H%M%SZ`` the run manager uses for run ids. The run manager
+records ``started_ts`` just *before* spawning (:mod:`orch_hub.runs`), and the
+orchestrator picks its own filename later during its startup, so on one machine
+that stamp is wall-clock >= ``started_ts`` and a second-floored ``started_ts``
+is a sound lower bound.
 
 Log access is deliberately scoped to the run record: callers pass a
 :class:`~orch_hub.models.RunRecord` (obtained from the run manager for a known
@@ -86,12 +88,13 @@ def locate_log(record: RunRecord) -> Path | None:
     ts prefix parses and is at or after the run's floored start, then returns
     the earliest such file — the run's own log (a later re-run of the same task
     stamps a strictly later ts). The lower bound is exactly
-    ``floor(started_ts)``, with no pre-start slack: because the orchestrator
-    stamps its filename *after* the hub records ``started_ts`` on the same
-    machine (:mod:`orch_hub.runs` writes ``started_ts`` after the spawn returns),
-    a file stamped before the floored start belongs to an earlier run, not this
-    one. Any pre-start tolerance would re-admit that earlier run's file and, as
-    the earliest match, mis-attribute it. With no usable ``started_ts`` (broken
+    ``floor(started_ts)``, with no pre-start slack: the run manager stamps
+    ``started_ts`` just *before* spawning (:mod:`orch_hub.runs`), and the
+    orchestrator picks its own filename later during its startup, so on one
+    machine that stamp is at or after ``floor(started_ts)``. A file stamped
+    before the floored start therefore belongs to an earlier run, not this one;
+    any pre-start tolerance would re-admit that earlier run's file and, as the
+    earliest match, mis-attribute it. With no usable ``started_ts`` (broken
     record) the lower bound is dropped and the newest matching file is returned
     as a best-effort "most recent log for this task".
 

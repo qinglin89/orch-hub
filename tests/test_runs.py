@@ -234,6 +234,53 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
     assert not list(run_dir.glob("*.tmp"))
 
 
+def test_started_ts_is_stamped_before_the_spawn(tmp_path):
+    """started_ts must be a lower bound on the child's own log stamp.
+
+    The orchestrator picks its second-precision log filename during its startup
+    — after the spawn — so the run manager must read started_ts *before*
+    spawning. Otherwise a launch that crosses a one-second boundary records
+    started_ts a second ahead of the child's stamp, and ``logs.locate_log``
+    (lower bound ``floor(started_ts)``) hides the run's own log. A strictly
+    advancing clock crosses a second between the pre-spawn capture and the
+    spawner call: with the capture after the spawn, ``started_ts`` (03:00:01)
+    would floor past the child stamp (03:00:00); with it before, it stays at or
+    below the child's stamp.
+    """
+    repo = make_repo(tmp_path)
+
+    class AdvancingClock:
+        """Returns a strictly later time on every read (0.3s step)."""
+
+        def __init__(self, start: dt.datetime):
+            self.now = start
+
+        def __call__(self) -> dt.datetime:
+            current = self.now
+            self.now = current + dt.timedelta(milliseconds=300)
+            return current
+
+    # 03:00:00.5 → create-run-dir 03:00:00.5, started_ts 03:00:00.8,
+    # spawner-observed 03:00:01.1: the spawn crosses into the next second.
+    clock = AdvancingClock(dt.datetime(2026, 7, 8, 3, 0, 0, 500_000, tzinfo=dt.timezone.utc))
+    spawn_observed: list[dt.datetime] = []
+
+    def recording_spawner(argv, *, cwd, stdout, start_new_session):
+        # The child's log stamp is taken no earlier than this spawn call.
+        spawn_observed.append(clock())
+        return FakeProc(4000)
+
+    manager, _, _ = make_manager(tmp_path, spawner=recording_spawner, clock=clock)
+    record = manager.start_run(repo, TASK_ID)
+
+    started = dt.datetime.fromisoformat(record.started_ts)
+    # Core invariant: started_ts is read before the spawner runs.
+    assert started <= spawn_observed[0]
+    # So the floored lower bound never exceeds the child's second-precision stamp.
+    child_stamp = spawn_observed[0].replace(microsecond=0)
+    assert started.replace(microsecond=0) <= child_stamp
+
+
 def test_run_id_carries_timestamp_repo_and_task(tmp_path):
     repo = make_repo(tmp_path)
     manager, _, _ = make_manager(tmp_path)

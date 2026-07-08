@@ -259,6 +259,14 @@ class RunManager:
                 str(control_dir),
                 *(str(arg) for arg in extra_args),
             )
+            # Stamp the start time *before* spawning. The orchestrator picks its
+            # own second-precision log filename during its startup, which is
+            # necessarily after this point, so floor(started_ts) <= that stamp
+            # and logs.locate_log can never miss the run's own log. Stamping it
+            # after the spawn let a launch that crossed a one-second boundary
+            # record started_ts a second ahead of the child's stamp, hiding the
+            # real log behind locate_log's floored lower bound.
+            started_ts = self._clock().isoformat()
             try:
                 with (run_dir / SPAWN_OUT_NAME).open("wb") as spawn_out:
                     proc = self._spawner(
@@ -282,7 +290,7 @@ class RunManager:
                 log_dir=repo.path / ORCHESTRATOR_LOG_DIR,
                 argv=argv,
                 pid=proc.pid,
-                started_ts=self._clock().isoformat(),
+                started_ts=started_ts,
             )
             _write_record(run_dir, record)
             self._procs[run_id] = proc

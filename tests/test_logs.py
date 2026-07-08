@@ -129,6 +129,18 @@ def test_locate_tolerates_subsecond_start_floor(tmp_path):
     assert locate_log(rec) == mine
 
 
+def test_locate_finds_log_stamped_in_next_second_after_start(tmp_path):
+    logdir = tmp_path / "logs"
+    # The hub stamps started_ts just before spawning; the child then picks its
+    # own second-precision log filename during startup, which lands in the
+    # *next* second when the launch crosses a boundary. floor(started_ts) is
+    # still a valid lower bound (<= the child stamp), so the run's own log must
+    # be found rather than hidden as "no log yet".
+    mine = write_log(logdir, "20260708T030001Z", ["this run"])
+    rec = make_record(logdir, started_ts="2026-07-08T03:00:00.900000+00:00")
+    assert locate_log(rec) == mine
+
+
 def test_locate_without_start_returns_newest(tmp_path):
     logdir = tmp_path / "logs"
     write_log(logdir, "20260708T030000Z", ["old"])
