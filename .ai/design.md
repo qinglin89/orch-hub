@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # Design Principles and Decisions
@@ -51,6 +51,18 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
   unattributed broken run dir that surfaces as `error` but cannot block repo
   launches.
 
+### Tradeoff: pre-spawn `started_ts` vs post-spawn timestamp
+
+- Chose: capture `RunRecord.started_ts` just before spawning.
+- Reason: the deployed orchestrator chooses its second-precision log filename
+  during child startup; a post-spawn parent timestamp can land one second after
+  the child's log stamp and make the run's real log look pre-start. Pre-spawn
+  `started_ts`, floored to the second, is a sound lower bound for log
+  attribution.
+- Consequence: log location can reject earlier fast re-run logs without a
+  pre-start skew. Same-wall-clock-second re-runs of one task remain
+  indistinguishable unless the orchestrator adds finer stamps or run markers.
+
 ### Tradeoff: control-dir files vs HTTP callbacks inside orchestrator
 
 - Chose: control-dir files.
@@ -62,6 +74,24 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 - Chose: Tailscale plus simple bearer token for v1.
 - Reason: the service controls arbitrary local code execution, so public exposure is out of scope; tailnet membership is the main security boundary.
 - Consequence: multi-user permissions and public OAuth flows are deferred.
+
+### Tradeoff: bearer-header fetch streams vs query-token SSE
+
+- Chose: browser log tailing uses `fetch` plus a `ReadableStream` reader with
+  the normal `Authorization: Bearer ...` header.
+- Reason: `EventSource` cannot set authorization headers, and query tokens
+  would add a second credential path plus put secrets in URLs/logs.
+- Consequence: dashboard log streaming needs a fetch-stream client helper; the
+  API auth surface stays single-path and tokens stay out of URLs.
+
+### Tradeoff: pure-ASGI auth middleware vs `BaseHTTPMiddleware`
+
+- Chose: pure ASGI bearer middleware.
+- Reason: Starlette `BaseHTTPMiddleware` can wrap streaming responses in anyio
+  streams that buffer body chunks and delay client-disconnect propagation,
+  which is a bad fit for long-lived SSE log tails.
+- Consequence: auth policy stays default-deny and behavior-compatible, but the
+  middleware sits at the ASGI layer so SSE can pass through incrementally.
 
 ### Tradeoff: launchd environment config vs service CLI flags
 
@@ -81,7 +111,8 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
   complexity, while keeping HTTP behavior aligned with the tested CLI/core
   payloads.
 - Consequence: the dashboard can consume stable repo and task APIs; run,
-  question, log, auth, and UI behavior remain separate slices.
+  question, log, and auth behavior were added as separate slices, while UI
+  behavior remains separate dashboard work.
 
 ## Patterns in Use
 
@@ -114,6 +145,11 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 - Require explicit acknowledgement for any `blocked` task launch because the
   hub cannot reliably distinguish a resumable blocked session from a foreign
   manual-session `claimed-by` id.
+- Locate orchestrator logs from `RunRecord` fields only: `log_dir`, `task_id`,
+  and `started_ts`; never from client-supplied paths.
+- Treat missing or rotated logs as normal data states, not API errors.
+- Stream only complete newline-terminated log lines; keep partial trailing bytes
+  pending so split UTF-8 characters are not corrupted across reads.
 
 ## Anti-Patterns to Avoid
 
@@ -125,6 +161,8 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 - Making network calls from the orchestrator control channel.
 - Duplicating control-dir filename, validity, or stop-flag logic outside
   `orch_hub.control_dir`.
+- Duplicating orchestrator log filename attribution outside `orch_hub.logs`.
+- Passing bearer tokens in log-stream query strings.
 - Exposing the hub outside the tailnet.
 - Running multiple orchestrators against the same repo.
 - Adding watchdog or log-silence detection.
@@ -134,7 +172,8 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
 ## Open Design Items
 
 - Retention policy for run dirs and audit history under `ORCH_HUB_DATA_DIR`.
-- Exact route schema beyond the implemented health/repos/tasks API foundation.
+- Exact route schema beyond the implemented repo/task/run/escalation/log API surface.
 - Exact dashboard layout and frontend stack.
+- Dashboard browser token presentation for protected static/API routes.
 - Bark server packaging on the Mac.
 - Whether run history is file-backed JSONL, SQLite, or another lightweight store.

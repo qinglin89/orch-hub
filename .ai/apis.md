@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # APIs and Interfaces
@@ -91,6 +91,30 @@ verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 - Shape: `{"run_id": ..., "newly_requested": bool, "detail": ...}`; the detail
   surfaces the pending-question stop caveat.
 
+### `GET /api/runs/{run_id}/logs`
+
+- Purpose: retrieve a bounded recent tail of one run's orchestrator log.
+- Source: resolves `run_id` through `RunManager.get_run`, then locates and
+  reads the log from the run record's `log_dir`, `task_id`, and `started_ts`.
+  Clients never supply a filesystem path.
+- Shape: `{"run_id", "present", "lines", "truncated", "size", "detail"}`.
+  Missing, rotated, or unreadable logs are HTTP 200 with `present: false` and a
+  detail string. Unknown runs return HTTP 404.
+- Query: `tail` controls returned line count, clamped by the logs module.
+
+### `GET /api/runs/{run_id}/logs/stream`
+
+- Purpose: stream one run's orchestrator log as Server-Sent Events.
+- Source: resolves `run_id` through `RunManager.get_run`, emits a bounded
+  initial tail, follows appended complete lines, re-probes run liveness each
+  poll, and closes with `event: end` when the run ends or the log rotates away.
+- Shape: `text/event-stream`; ordinary log lines are `data:` events, idle
+  heartbeats are SSE comments, and stream termination is an `event: end`.
+  Unknown runs return HTTP 404.
+- Auth/client contract: standard `Authorization: Bearer <token>` only. Browser
+  clients use `fetch` plus a `ReadableStream` reader because `EventSource`
+  cannot set authorization headers; query-string tokens are not supported.
+
 ### `GET /api/escalations`
 
 - Purpose: list pending control-dir questions across live runs, with run/repo
@@ -110,7 +134,7 @@ Current HTTP behavior:
 
 - `create_app(config=None, *, run_manager=None)` captures `Config.from_env()`
   by default, is testable with an explicit `Config`, and holds one `RunManager`
-  instance for run/escalation routes.
+  instance for run, escalation, and log routes.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, and `ORCH_HUB_DATA_DIR`; surrounding whitespace is stripped
@@ -119,8 +143,10 @@ Current HTTP behavior:
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;
   explicit function arguments override the environment.
-- Default-deny middleware protects every path outside `/api/health`, including
-  `/docs`, `/openapi.json`, unknown paths, and future dashboard/run/log routes.
+- Default-deny pure-ASGI middleware protects every path outside `/api/health`,
+  including `/docs`, `/openapi.json`, unknown paths, and future dashboard
+  routes. Pure ASGI is used instead of `BaseHTTPMiddleware` so streaming
+  responses are not buffered and disconnects propagate.
 - Missing or malformed credentials return HTTP 401 with
   `WWW-Authenticate: Bearer` and `{"detail": "missing bearer token"}`; wrong
   credentials return HTTP 401 with `{"detail": "invalid bearer token"}`.
@@ -135,16 +161,6 @@ Current HTTP behavior:
   `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
   empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
   `BlockedTaskError` includes `acknowledge_required: true`.
-
-## Future HTTP API
-
-### `GET /api/runs/{run_id}/logs`
-
-- Purpose: retrieve recent log text.
-
-### `GET /api/runs/{run_id}/logs/stream`
-
-- Purpose: SSE stream for log tailing.
 
 ## Internal Interfaces
 
@@ -207,6 +223,21 @@ Malformed answers keep the question pending and can be repaired with
 an empty `stop.flag` and requires the run dir to exist; `stop_requested` and
 `stop_answered` are read helpers for run classification.
 
+### Log Store
+
+Input: run record.
+
+Output: `LogSnapshot` for bounded recent reads and async SSE frames for live
+tailing.
+
+Behavior: file access is scoped to `RunRecord.log_dir` and `RunRecord.task_id`.
+Log files are located by the deployed orchestrator's
+`<utc-ts>-<task-id>.log` filename convention, with `floor(started_ts)` as the
+lower bound. Recent reads cap line and byte counts and return absent snapshots
+for missing/rotated logs. Live tails emit only complete newline-terminated
+lines, use byte offsets to avoid duplicate initial/follow output, and terminate
+gracefully when the run ends or the located file disappears.
+
 ### Notifier
 
 Input: notification event.
@@ -241,3 +272,6 @@ commands live in `docs/launchd.md`.
 - API/run handlers should reuse `orch_hub.runs.RunManager` for launch gates,
   per-repo serialization, stop requests, and end classification instead of
   rebuilding subprocess or run-dir behavior in route code.
+- API/log handlers should reuse `orch_hub.logs` for log location, bounded
+  reads, and SSE framing instead of accepting client paths or rebuilding the
+  orchestrator filename convention in route code.

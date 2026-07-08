@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # Features
@@ -15,7 +15,7 @@ verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
 | Human question relay | API implemented; UI/notifications planned | control_dir, runs, api, notifications | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
-| Log viewing | planned | logs, runs, api | future `GET /api/runs/{id}/logs`, SSE stream |
+| Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
 | Mobile dashboard | planned | api, web | future web routes and API calls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
@@ -202,13 +202,39 @@ history/audit views.
 
 ### Log Viewing
 
-Status: planned
+Status: implemented
 
-Description: Show task/run logs in the dashboard and support live tailing through SSE.
+Description: Read and live-tail deployed orchestrator logs for known runs while keeping filesystem access scoped to persisted run records.
 
 Modules: logs, runs, api.
 
-APIs: future log endpoints.
+APIs: `GET /api/runs/{run_id}/logs`,
+`GET /api/runs/{run_id}/logs/stream`.
+
+Implemented behavior:
+
+- Run records carry `log_dir`, `task_id`, and `started_ts`, not the exact log
+  filename. `logs.locate_log(record)` matches
+  `<utc-ts>-<task_id>.log` under the recorded log dir and returns the earliest
+  stamp at or after `floor(started_ts)`; broken records with no usable
+  `started_ts` fall back to the newest matching file.
+- `RunManager.start_run` stamps `started_ts` just before spawning, so the
+  child orchestrator's later second-precision log stamp is at or after the
+  floored start. This avoids hiding logs when launch crosses a second boundary
+  while still rejecting fast re-run logs from earlier runs. Same-wall-clock-
+  second re-runs of one task remain indistinguishable by the orchestrator's
+  second-precision filenames.
+- `GET /api/runs/{run_id}/logs` returns a bounded recent tail: default 200
+  lines, hard-capped to 10k lines and a 1 MiB byte window. Missing, rotated, or
+  unreadable logs return `present: false` with `detail`, not an HTTP error.
+- `GET /api/runs/{run_id}/logs/stream` returns `text/event-stream`: a bounded
+  initial tail, one `data:` event per completed appended line, heartbeat
+  comments while idle, and terminal `event: end` on run end or log rotation.
+  The tailer uses byte offsets and a raw-bytes pending buffer so a UTF-8
+  character split across reads is not corrupted.
+- Browser clients must stream with `fetch` plus a `ReadableStream` reader under
+  the standard `Authorization: Bearer ...` header. The hub does not accept log
+  stream credentials in query strings.
 
 ### Mobile Dashboard
 
@@ -218,7 +244,9 @@ Description: Web UI for repo list, task list, task detail, active/waiting status
 
 Modules: api, web.
 
-APIs: all protected HTTP APIs plus the public health route.
+APIs: all protected HTTP APIs plus the public health route. Log streaming uses
+the bearer-authenticated SSE endpoint through `fetch`/ReadableStream, not
+browser `EventSource`.
 
 ### Auth and Private Access
 
@@ -234,6 +262,8 @@ Implemented behavior:
   count as unset.
 - Every HTTP path except `/api/health` requires `Authorization: Bearer <token>`
   when configured.
+- The middleware is pure ASGI rather than Starlette `BaseHTTPMiddleware` so
+  streaming responses are not buffered and client disconnects propagate.
 - Protected routes fail closed with HTTP 503 when the token is unset; there is
   no unauthenticated mode.
 - Auth error responses are static and never echo presented credentials.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # AI Knowledge Router
@@ -57,6 +57,8 @@ Load only what the current task needs.
 - Question file: `NNN-question.json` written by orchestrator when human input is needed.
 - Answer file: `NNN-answer.json` written by orch-hub after the remote user answers.
 - `stop.flag`: control-dir file requesting graceful stop at a session boundary, or abort while an answer is pending.
+- Log snapshot: bounded recent tail read from the orchestrator log located through one `RunRecord`; absent/rotated logs are represented as data, not errors.
+- Log stream: SSE tail of a run's located orchestrator log, authenticated with the normal bearer header and consumed by browsers through `fetch`/ReadableStream.
 - Readiness: pre-launch checks proving a managed repo has required deployed files, task index, clean git state, and a passing `aii-2 status`.
 - Launchd service: resident macOS user agent that runs `orch-hub-api` from the repo venv.
 - Deployment template: checked-in operational artifact such as `deploy/launchd/com.qinglin89.orch-hub.plist`.

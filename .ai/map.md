@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # Project Map
@@ -15,9 +15,9 @@ verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch, external run dirs, file-backed `run.json`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
 | Human question relay | control_dir, runs, api, notifications, models | API implemented over live run control dirs; answers are audited via control-dir files; dashboard and notification surfacing remain separate |
-| Log viewing | logs, runs, api | tail orchestrator log files; SSE for live stream |
+| Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | mobile-first single-page v1 |
-| Auth and private access | api, config | implemented bearer-token middleware; Tailscale-only/private exposure remains required; no public exposure |
+| Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, control_dir, runs | Bark first; notifier interface for later backends |
 | Launchd service | config, api, docs, deploy | implemented resident Mac service packaging |
 | Run history and audit | runs, control_dir, models | preserve answer and run event history |
@@ -32,7 +32,7 @@ verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 | Control-dir file channel | internal `list_questions`, `pending_questions`, `write_answer`, `request_stop` |
 | Run lifecycle | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, `POST /api/runs/{run_id}/stop` |
 | Human question relay | `GET /api/escalations`, `POST /api/runs/{run_id}/escalations/{seq}/answer` |
-| Log viewing | future `GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream` |
+| Log viewing | `GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream` |
 | Mobile dashboard | future web routes using protected HTTP APIs plus public health |
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
 | Notifications | internal notifier interface |
@@ -52,8 +52,8 @@ verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 | task_store | Parse `.ai-tasks` indexes and task frontmatter into repo task inventories |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, and classify live/end status |
 | control_dir | Implement question/answer/stop file-channel handling |
-| logs | Read and stream orchestrator logs |
-| api | FastAPI app factory, bearer auth middleware, health/repo/task/run/escalation route wiring, uvicorn entry point, future log routes |
+| logs | Locate, read, and stream orchestrator logs from run records |
+| api | FastAPI app factory, pure-ASGI bearer auth middleware, health/repo/task/run/escalation/log route wiring, uvicorn entry point |
 | notifications | Bark and future notification backends |
 | web | Mobile dashboard assets |
 | docs | Launchd operator documentation |

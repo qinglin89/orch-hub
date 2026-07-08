@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # Architecture
@@ -82,10 +82,12 @@ It creates a fresh external run dir per run:
 ```
 
 `run.json` records run id, repo/task identity, pid, started timestamp, control
-dir, log dir, argv, optional ended timestamp, and optional exit code. A
-resident manager keeps `Popen` handles only to capture exit codes; a fresh
-manager reattaches by scanning run dirs and probing pid liveness. Cross-repo
-parallelism is allowed; same-repo live runs are not.
+dir, log dir, argv, optional ended timestamp, and optional exit code. The
+started timestamp is captured just before spawning so it is a sound lower bound
+for the child orchestrator's second-precision log filename. A resident manager
+keeps `Popen` handles only to capture exit codes; a fresh manager reattaches by
+scanning run dirs and probing pid liveness. Cross-repo parallelism is allowed;
+same-repo live runs are not.
 
 ### Control Dir Store
 
@@ -103,16 +105,21 @@ web/API/subprocess ownership.
 
 ### API Service
 
-Implemented FastAPI service exposing health, repo readiness, and task inventory
-endpoints behind bearer-token auth. The current route set is
-`GET /api/health`, `GET /api/repos`, `GET /api/tasks`, and
-`GET /api/repos/{repo_id}/tasks`; run, escalation, log, and dashboard routes
-remain future work. `GET /api/health` is the only public route and returns only
+Implemented FastAPI service exposing health, repo readiness, task inventory,
+run, escalation, and log endpoints behind bearer-token auth. The current route
+set includes `GET /api/health`, `GET /api/repos`, `GET /api/tasks`,
+`GET /api/repos/{repo_id}/tasks`, run start/list/get/stop routes, escalation
+list/answer routes, `GET /api/runs/{run_id}/logs`, and
+`GET /api/runs/{run_id}/logs/stream`; dashboard routes remain future work.
+`GET /api/health` is the only public route and returns only
 `{"status": "ok"}`. Every other path, including docs/OpenAPI and unknown future
 paths, requires `Authorization: Bearer <ORCH_HUB_TOKEN>` when the token is
 configured; if no token is configured, protected routes fail closed with HTTP
-503. The API calls the same registry/readiness/task functions used by the CLI
-and keeps route handlers thin over shared application services.
+503. The auth middleware is pure ASGI rather than Starlette
+`BaseHTTPMiddleware` so SSE responses stream incrementally and disconnects
+propagate. The API calls the same registry/readiness/task/run/control/log
+functions used by the CLI and core tests and keeps route handlers thin over
+shared application services.
 
 ### Launchd Service Packaging
 
@@ -171,10 +178,12 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
    `Config.host` / `Config.port` from `ORCH_HUB_HOST` and `ORCH_HUB_PORT`
    (`127.0.0.1:8765` when unset); private-network exposure must stay
    Tailscale-only.
-4. A default-deny HTTP middleware allows public access only to `/api/health`.
-   Missing/malformed credentials return 401 plus `WWW-Authenticate: Bearer`,
-   invalid credentials return 401, and an unset token returns 503 for protected
-   routes.
+4. A default-deny pure-ASGI HTTP middleware allows public access only to
+   `/api/health`. Missing/malformed credentials return 401 plus
+   `WWW-Authenticate: Bearer`, invalid credentials return 401, and an unset
+   token returns 503 for protected routes. Pure ASGI is required for long-lived
+   SSE log streams; `BaseHTTPMiddleware` can buffer streaming responses and
+   delay disconnect propagation.
 5. `RegistryError` maps to HTTP 500; unknown repo ids on per-repo task lookup
    map to HTTP 404. Ordinary readiness failures stay inside 200 payloads as
    `ready: false` with failure reasons.
@@ -213,6 +222,22 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 1. User requests stop.
 2. Hub writes `stop.flag` with `request_stop` for graceful stop at a session boundary.
 3. If a hard kill is ever exposed, it must warn that the repo may be dirty and children may be orphaned.
+
+### Log Access
+
+1. Client requests recent or streamed logs for a known `run_id`.
+2. API resolves the run through `RunManager.get_run`; unknown/path-escaping ids
+   return HTTP 404.
+3. `orch_hub.logs` locates `<utc-ts>-<task-id>.log` under the run record's
+   `log_dir`, using `task_id` and `floor(started_ts)` for attribution. A later
+   re-run gets a later stamp; records with no usable `started_ts` fall back to
+   newest matching task log.
+4. Recent retrieval returns bounded lines with graceful `present: false`
+   details for missing, rotated, or unreadable logs.
+5. SSE streaming emits a bounded initial tail, then appended complete lines,
+   heartbeat comments while idle, and `event: end` on run end or log rotation.
+   Browser clients use `fetch` plus a stream reader with the standard bearer
+   header; the hub does not accept query-string log stream credentials.
 
 ### Run State Refresh
 
@@ -257,4 +282,5 @@ extend that hub-owned data area.
 - Same target repo cannot have two active orchestrator runs.
 - Run dirs must stay outside target repo working trees and be fresh per run.
 - Human answers are auditable.
+- Log access is scoped to known run records; clients never supply log paths.
 - Readiness must fail closed; missing deploy pieces, dirty trees, or failed `aii-2 status` should block launch.

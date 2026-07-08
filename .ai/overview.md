@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # Project Overview
@@ -12,14 +12,16 @@ orch-hub is intended to be a long-lived local control plane for AI coding orches
 The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
-and the run manager: read the ai-native-development local registry, list
-managed repos, report launch readiness, parse each repo's `.ai-tasks/` index
-plus task frontmatter, expose those payloads through HTTP, require
-`ORCH_HUB_TOKEN` on every non-health HTTP path, provide a launchd user-agent
-template for resident macOS operation, read/write orchestrator question,
-answer, and stop files, and launch/list/stop/reattach orchestrator subprocess
-runs with per-repo serialization. Later slices add run/escalation HTTP routes,
-UI human-question relay, logs, notifications, and a mobile dashboard.
+the run manager, run/escalation HTTP routes, and log viewing: read the
+ai-native-development local registry, list managed repos, report launch
+readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
+those payloads through HTTP, require `ORCH_HUB_TOKEN` on every non-health HTTP
+path, provide a launchd user-agent template for resident macOS operation,
+read/write orchestrator question, answer, and stop files,
+launch/list/stop/reattach orchestrator subprocess runs with per-repo
+serialization, answer waiting questions remotely, and retrieve or stream run
+logs. Later slices add dashboard UI, notifications, run history/audit views,
+remote intake-task, and IM bot control.
 
 ## Users
 
@@ -76,6 +78,7 @@ orch_hub/
   registry.py
   readiness.py
   runs.py
+  logs.py
   subprocess_utils.py
   task_store.py
   control_dir.py
@@ -84,8 +87,10 @@ tests/
   test_cli.py
   test_config.py
   test_control_dir.py
+  test_logs.py
   test_registry.py
   test_readiness.py
+  test_runs.py
   test_task_store.py
 deploy/
   launchd/
@@ -98,7 +103,6 @@ Later service work may add:
 
 ```text
 orch_hub/
-  logs.py
   notifications.py
   web/
 ```

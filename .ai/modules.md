@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
+verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 ---
 
 # Modules
@@ -18,8 +18,8 @@ verified-against: 47fec18e915bb6e0e73f624c41725bd8dac0adb9
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md` and task frontmatter |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
-| Logs | `orch_hub/logs.py` | Future log tailing and SSE support |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed bearer middleware, health/repo/task/run/escalation routes, and uvicorn entry point |
+| Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, health/repo/task/run/escalation/log routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
 | Web UI | `orch_hub/web/` | Future mobile-first dashboard assets |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
@@ -110,17 +110,22 @@ Location: `orch_hub/api.py`
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None)` builds an app with a default-deny bearer-token middleware,
-public `GET /api/health`, protected repo/task routes, and protected run and
-escalation routes over one `RunManager` instance. Implemented run routes are
-`POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
+public `GET /api/health`, protected repo/task routes, and protected run,
+escalation, and log routes over one `RunManager` instance. Implemented run
+routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/stop`; implemented escalation routes are
 `GET /api/escalations` and
-`POST /api/runs/{run_id}/escalations/{seq}/answer`. Module-level `app` supports
+`POST /api/runs/{run_id}/escalations/{seq}/answer`; implemented log routes are
+`GET /api/runs/{run_id}/logs` and
+`GET /api/runs/{run_id}/logs/stream`. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
 console script serve locally by default and read host/port from environment
-when arguments are omitted. `RegistryError` returns HTTP 500; unknown repo/task
-lookups and unknown runs return HTTP 404; launch/run state conflicts return
-HTTP 409 with structured details where useful.
+when arguments are omitted. The bearer middleware is pure ASGI, not
+`BaseHTTPMiddleware`, so SSE streaming is not buffered and client disconnects
+propagate. Browser log tailing uses `fetch`/ReadableStream with the standard
+bearer header, not `EventSource` or query tokens. `RegistryError` returns HTTP
+500; unknown repo/task lookups and unknown runs return HTTP 404; launch/run
+state conflicts return HTTP 409 with structured details where useful.
 
 ### Run Manager
 
@@ -165,6 +170,27 @@ responder="orch-hub")` atomically writes the mirrored `NNN-answer.json` with
 classification. Existing valid answers raise `DuplicateAnswerError`; malformed
 answers can be repaired by atomic rewrite.
 
+### Logs
+
+Location: `orch_hub/logs.py`
+
+Responsibility: locate and read/stream deployed orchestrator logs for known
+runs. The module receives `RunRecord` values from the run manager and never
+accepts a client-supplied path. It matches the orchestrator filename convention
+`<utc-ts>-<task-id>.log` under the record's `log_dir`, using
+`floor(started_ts)` as the lower bound and returning the earliest matching file
+for correct re-run attribution. Records with no usable `started_ts` fall back
+to the newest matching task log.
+
+`read_recent(record, max_lines=...)` returns a `LogSnapshot` with bounded tail
+lines, a `truncated` flag, current size, and graceful absent details for
+missing/rotated/unreadable logs. `tail_events(record, is_live=...)` is an async
+SSE generator: it waits for the log to appear, emits a bounded initial tail,
+follows appended complete lines with byte offsets and a raw-bytes pending
+buffer, sends idle heartbeat comments, and ends with `event: end` on run death
+or log rotation. File reads run inline on the event loop in v1; move them to a
+thread only if connection count grows.
+
 ## Boundary Rules
 
 - Registry code does not perform readiness checks.
@@ -172,5 +198,6 @@ answers can be repaired by atomic rewrite.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
 - Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
+- Logs locate/read/stream files only from run records; API/UI callers never pass log paths.
 - API and CLI should be thin adapters over application functions.
 - No module imports deployed orchestrator code.
