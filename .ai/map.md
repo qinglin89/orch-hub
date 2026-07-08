@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
+verified-against: e6909681ed003d16cb03b7670151501af7248250
 ---
 
 # Project Map
@@ -19,7 +19,7 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 | Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, run history, and recent/live log views |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, control_dir, runs | Bark first; notifier interface for later backends |
-| Launchd service | config, api, docs, deploy | implemented resident Mac service packaging |
+| Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging and operations CLI; plist template is source of truth; lifecycle commands manage only the fixed service label, not orchestrator runs |
 | Run history and audit | history, runs, api, models, control_dir | implemented; per-run `events.jsonl`, launch-time task status on run records, lifecycle/stop/answer metadata events, no answer text copied into history |
 
 ## Feature -> APIs
@@ -36,7 +36,7 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 | Mobile dashboard | `GET /`, `GET /app.js`, `GET /styles.css`; protected repo/task/run/escalation/log/history APIs |
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
 | Notifications | internal notifier interface |
-| Launchd service | `orch-hub-api`, `deploy/launchd/com.qinglin89.orch-hub.plist`, `docs/launchd.md` |
+| Launchd service | CLI `orch-hub launchd deploy|update|start|stop|restart|status`, `orch-hub-api`, `deploy/launchd/com.qinglin89.orch-hub.plist`, `docs/launchd.md` |
 | Run history and audit | `GET /api/history/runs` |
 
 ## Module -> Key Responsibilities
@@ -48,7 +48,8 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 | registry | Discover managed repos from `aii-2` or registry file |
 | readiness | Validate target repo launch readiness with seven fail-closed checks |
 | subprocess_utils | Run external commands consistently and surface missing executables distinctly |
-| cli | Human and JSON repo readiness output |
+| cli | Human and JSON repo readiness output; launchd command dispatch |
+| launchd | Resolve launchd deployment settings, render/install plist from template, install/update package, run launchctl lifecycle commands, and probe service status |
 | task_store | Parse `.ai-tasks` indexes and task frontmatter into repo task inventories |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, and append run history events |
 | history | Append/read per-run JSONL audit/history events without storing answer text |

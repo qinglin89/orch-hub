@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
+verified-against: e6909681ed003d16cb03b7670151501af7248250
 ---
 
 # Modules
@@ -9,8 +9,9 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 
 | Module | Location | Description |
 |---|---|---|
-| CLI | `orch_hub/cli.py` | Implemented `repos` command for discovery/readiness output |
+| CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output and launchd operations dispatch |
 | Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, data-dir setting, and derived `aii-2`/registry paths |
+| Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers |
 | Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory, question, and run models plus payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
@@ -33,14 +34,43 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 
 Location: `orch_hub/cli.py`
 
-Responsibility: expose user-facing commands. The implemented first command lists repos and readiness:
+Responsibility: expose user-facing commands. Repo commands list managed repos
+and readiness:
 
 ```bash
 python -m orch_hub.cli repos
 python -m orch_hub.cli repos --json
 ```
 
-Dependencies: config, registry, readiness, models.
+Launchd commands dispatch to `orch_hub.launchd` for service deployment and
+lifecycle operations:
+
+```bash
+orch-hub launchd deploy|update|start|stop|restart|status
+```
+
+Dependencies: config, registry, readiness, models, launchd.
+
+### Launchd Operations
+
+Location: `orch_hub/launchd.py`
+
+Responsibility: manage the singleton macOS launchd user agent
+`com.qinglin89.orch-hub`. `deploy_service` / `update` resolve the checkout,
+ai-native-development path, token, host/port/data dir, plist path, log dir, and
+`PATH`; render the installed plist from
+`deploy/launchd/com.qinglin89.orch-hub.plist`; install/update the checkout
+`.venv` package; validate with `plutil`; boot out any loaded service; and
+bootstrap through `launchctl`. Token precedence is explicit option, env var,
+existing plist, then generated token.
+
+`start_service`, `stop_service`, and `restart_service` are launchd lifecycle
+helpers only. They bootstrap or boot out the fixed label and deliberately do
+not call `RunManager`, write control-dir stop files, inspect run records, or
+signal detached orchestrator subprocesses. `status_service` combines
+`launchctl print`, installed plist parsing, and a public `/api/health` probe.
+
+Dependencies: config, subprocess_utils, plistlib, urllib.
 
 ### Config
 
@@ -239,6 +269,8 @@ thread only if connection count grows.
 - Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
 - Logs locate/read/stream files only from run records; API/UI callers never pass log paths.
 - API and CLI should be thin adapters over application functions.
+- Launchd operations manage only the fixed hub service label; run stop
+  semantics stay in the run API/control-dir flow.
 - Web UI callers should consume protected HTTP APIs and must not parse managed
   repo files directly.
 - No module imports deployed orchestrator code.

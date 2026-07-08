@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
+verified-against: e6909681ed003d16cb03b7670151501af7248250
 ---
 
 # APIs and Interfaces
@@ -38,6 +38,40 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ```
 
 `readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture.
+
+### `orch-hub launchd deploy|update`
+
+- Purpose: install or refresh the resident macOS launchd service from the
+  current checkout.
+- Source: `orch_hub.cli` delegates to `orch_hub.launchd.deploy_service`.
+- Behavior: resolve deployment settings, optionally create/update `.venv`,
+  run local `pip install`, render the installed plist from the checked-in
+  template, write it mode `600`, validate it with `plutil`, boot out the fixed
+  label if loaded, and bootstrap it.
+- Configuration precedence: CLI flag, environment, default for paths/host/port;
+  bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
+  installed plist token, then generated token printed once.
+- Errors: operational failures return exit 1 with `error: ...`; missing or
+  invalid templates fail before venv/pip work.
+
+### `orch-hub launchd start|stop|restart`
+
+- Purpose: manage the installed launchd user-agent lifecycle without
+  reinstalling package code or rewriting the plist.
+- Scope: commands target only `gui/$UID/com.qinglin89.orch-hub`.
+- Semantics: `start` bootstraps the installed plist when unloaded; `stop`
+  bootouts the fixed label and treats an absent job as already stopped;
+  `restart` is stop then start.
+- Non-goal: these commands do not call run APIs, write run `stop.flag` files,
+  inspect run records, or signal detached orchestrator subprocesses.
+
+### `orch-hub launchd status`
+
+- Purpose: report launchd label/config hints and service health without manual
+  launchctl commands.
+- Output: fixed label, installed plist path/presence, loaded state, program
+  path when readable, dashboard URL, plist parse error when present, launchctl
+  output when unloaded, and the public `/api/health` probe result.
 
 ## HTTP API
 

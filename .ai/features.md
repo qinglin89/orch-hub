@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
+verified-against: e6909681ed003d16cb03b7670151501af7248250
 ---
 
 # Features
@@ -19,7 +19,7 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 | Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history APIs |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
-| Launchd service | implemented | config, api, docs, deploy | `orch-hub-api`, launchd plist/docs |
+| Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
 | Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs` |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
 | IM bot control | future | notifications or bot adapter, api | future bot callback interface |
@@ -309,23 +309,41 @@ Modules: notifications, control_dir, runs.
 
 Status: implemented
 
-Description: Package/document the hub as a long-lived launchd agent on macOS.
+Description: Package, install, update, manage, and document the hub as a
+long-lived launchd agent on macOS.
 
-Modules: config, api, docs, deploy.
+Modules: launchd, cli, config, api, docs, deploy.
+
+APIs: CLI `orch-hub launchd deploy|update|start|stop|restart|status`;
+`orch-hub-api`; launchd plist template/docs.
 
 Implemented behavior:
 
-- `deploy/launchd/com.qinglin89.orch-hub.plist` is a launchd user-agent
-  template that runs the installed `orch-hub-api` console script.
-- The plist sets `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`, `ORCH_HUB_PORT`,
-  `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_DATA_DIR`, and an explicit
-  `PATH`; token replacement is required because protected routes fail closed
-  when the token is unset or blank.
+- `orch-hub launchd deploy` and `update` resolve deployment settings, install
+  or refresh the checkout `.venv` package, render the installed plist from the
+  checked-in template, validate it, boot out any loaded singleton label, and
+  bootstrap the service. The template is parsed before venv/pip work.
+- Token resolution is explicit `--token`, then `ORCH_HUB_TOKEN`, then an
+  existing installed plist token, then a generated token printed once. The
+  installed plist is written mode `600` because it embeds the bearer token.
+- `deploy/launchd/com.qinglin89.orch-hub.plist` is the plist-structure source
+  of truth. Placeholders cover the checkout, token, host/port,
+  ai-native-development checkout, data dir, log dir, and `PATH`; deployment
+  fails if any `REPLACE-...` placeholder remains.
 - `RunAtLoad` and `KeepAlive` keep the service resident; stdout/stderr go to
   `~/Library/Logs/orch-hub/`.
-- `docs/launchd.md` documents manual run-first verification, installation,
-  `launchctl bootstrap` / `kickstart -k` / `bootout`, plist reloads, log
-  inspection, and Tailscale-only exposure assumptions.
+- `start` bootstraps the installed plist if the job is unloaded; `stop` boots
+  out the fixed `com.qinglin89.orch-hub` user-agent label; `restart` is stop
+  then start without package reinstall or plist rewrite.
+- Launchd lifecycle operations are scoped to the hub service only: they do not
+  call run APIs, write run `stop.flag` files, inspect run records, or signal
+  detached orchestrator subprocesses.
+- `status` reports the fixed label, installed plist path/presence, load state,
+  configured dashboard URL, program path when readable, plist parse errors,
+  launchctl output when unloaded, and the public `/api/health` probe result.
+- `docs/launchd.md` documents the integrated deploy/update/lifecycle flow,
+  singleton service cardinality, template ownership, token behavior, manual
+  fallback commands, log inspection, and Tailscale-only exposure assumptions.
 
 ### Run History and Audit
 
