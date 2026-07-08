@@ -23,6 +23,8 @@ from orch_hub.control_dir import (
     list_questions,
     pending_questions,
     request_stop,
+    stop_answered,
+    stop_requested,
     write_answer,
 )
 from orch_hub.models import Question
@@ -152,6 +154,24 @@ def test_valid_answer_marks_question_answered(tmp_path):
     assert question.answered is True
     assert question.pending is False
     assert question.answer_error is None
+    assert question.answer == "proceed"
+
+
+def test_answer_text_is_stripped_like_the_orchestrator_reads_it(tmp_path):
+    write_question(tmp_path, 1)
+    write_answer_file(tmp_path, 1, json.dumps({"answer": "  merge it \n"}))
+    assert only_question(tmp_path).answer == "merge it"
+
+
+def test_unanswered_and_malformed_answers_carry_no_answer_text(tmp_path):
+    write_question(tmp_path, 1)
+    write_question(tmp_path, 2)
+    write_answer_file(tmp_path, 2, "{ not json")
+
+    first, second = list_questions(tmp_path)
+
+    assert first.answer is None
+    assert second.answer is None
 
 
 @pytest.mark.parametrize(
@@ -302,6 +322,41 @@ def test_request_stop_requires_existing_control_dir(tmp_path):
         request_stop(tmp_path / "no-such-run")
 
 
+def test_stop_requested_reflects_flag_presence(tmp_path):
+    assert stop_requested(tmp_path) is False
+    assert stop_requested(tmp_path / "never-created") is False
+
+    request_stop(tmp_path)
+
+    assert stop_requested(tmp_path) is True
+
+
+@pytest.mark.parametrize(
+    ("answer_text", "expected"),
+    [
+        ("stop", True),
+        ("  Stop \n", True),  # orchestrator compares answer.lower() == "stop"
+        ("STOP", True),
+        ("stop the presses", False),
+        ("proceed", False),
+    ],
+)
+def test_stop_answered_mirrors_orchestrator_comparison(
+    tmp_path, answer_text, expected
+):
+    write_question(tmp_path, 1)
+    write_answer_file(tmp_path, 1, json.dumps({"answer": answer_text}))
+    assert stop_answered(tmp_path) is expected
+
+
+def test_stop_answered_ignores_malformed_and_absent_answers(tmp_path):
+    assert stop_answered(tmp_path / "never-created") is False
+    write_question(tmp_path, 1)
+    assert stop_answered(tmp_path) is False
+    write_answer_file(tmp_path, 1, '{"answer": ""}')  # invalid, never consumed
+    assert stop_answered(tmp_path) is False
+
+
 # -- Question model -----------------------------------------------------------
 
 
@@ -317,5 +372,6 @@ def test_question_to_dict_is_stable_and_excludes_path(tmp_path):
         "message": "Plan OK?",
         "error": None,
         "answered": False,
+        "answer": None,
         "answer_error": None,
     }

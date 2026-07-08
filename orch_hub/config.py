@@ -19,7 +19,7 @@ DEFAULT_PORT = 8765
 """Default HTTP port."""
 
 DEFAULT_DATA_DIR = Path.home() / ".orch-hub"
-"""Default data directory, reserved for future run dirs and audit history."""
+"""Default data directory: run dirs live under ``<data_dir>/runs/``."""
 
 AI_NATIVE_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
 """Environment variable overriding the ai-native-development path."""
@@ -76,11 +76,12 @@ class Config:
     """HTTP port."""
 
     data_dir: Path = DEFAULT_DATA_DIR
-    """Directory reserved for future run dirs and audit history.
+    """Directory holding hub-owned run state (and future audit history).
 
-    Nothing writes here yet: the setting exists so service deployments
-    (launchd) pin a location up front. The default may still change while the
-    directory is unconsumed (open design item).
+    The run manager creates one ``<data_dir>/runs/<run_id>/`` dir per
+    orchestrator run — deliberately outside every target repo working tree,
+    since an in-repo control dir would dirty the tree and fail the
+    orchestrator's post-checks.
     """
 
     @classmethod

@@ -118,7 +118,7 @@ def write_answer(
     if not text:
         raise ValueError("answer must be a non-empty string")
     answer_path = _answer_path_for(question.path)
-    if answer_path.exists() and _answer_error(answer_path) is None:
+    if answer_path.exists() and _read_answer(answer_path)[1] is None:
         raise DuplicateAnswerError(
             f"{answer_path.name} already holds a valid answer"
         )
@@ -151,6 +151,30 @@ def request_stop(control_dir: Path) -> bool:
     return True
 
 
+def stop_requested(control_dir: Path) -> bool:
+    """Return whether ``control_dir`` carries a ``stop.flag``.
+
+    A missing control dir means no stop was requested (mirroring
+    :func:`list_questions`' tolerance, since callers probe dirs that may not
+    exist anymore).
+    """
+    return (control_dir / STOP_FLAG_NAME).is_file()
+
+
+def stop_answered(control_dir: Path) -> bool:
+    """Return whether any question was answered ``stop``.
+
+    Mirrors the orchestrator's own comparison (``answer.lower() == "stop"``
+    after stripping): such an answer aborts the whole run with a nonzero
+    exit, so callers classifying a finished run can tell a human-requested
+    stop from an error.
+    """
+    return any(
+        q.answer is not None and q.answer.lower() == "stop"
+        for q in list_questions(control_dir)
+    )
+
+
 def _load_question(seq: int, path: Path, answer_paths: list[Path]) -> Question:
     """Build a :class:`Question` from one question file plus its answer state."""
     error: str | None = None
@@ -164,7 +188,7 @@ def _load_question(seq: int, path: Path, answer_paths: list[Path]) -> Question:
             data = raw
         else:
             error = "not a JSON object"
-    answered, answer_error = _answer_state(answer_paths)
+    answered, answer, answer_error = _answer_state(answer_paths)
     return Question(
         seq=seq,
         path=path,
@@ -174,6 +198,7 @@ def _load_question(seq: int, path: Path, answer_paths: list[Path]) -> Question:
         message=_string_field(data, "message"),
         error=error,
         answered=answered,
+        answer=answer,
         answer_error=answer_error,
     )
 
@@ -186,39 +211,42 @@ def _string_field(data: dict, key: str) -> str | None:
     return None
 
 
-def _answer_state(answer_paths: list[Path]) -> tuple[bool, str | None]:
+def _answer_state(
+    answer_paths: list[Path],
+) -> tuple[bool, str | None, str | None]:
     """Classify a question's same-seq answer files.
 
-    Returns ``(answered, answer_error)``: answered when any file holds a valid
-    answer; otherwise the first (name-ordered) file's validation error, or
-    ``(False, None)`` when no answer file exists yet.
+    Returns ``(answered, answer, answer_error)``: the first (name-ordered)
+    valid file's stripped answer text when one exists; otherwise the first
+    file's validation error, or ``(False, None, None)`` when no answer file
+    exists yet.
     """
     first_error: str | None = None
     for path in sorted(answer_paths):
-        error = _answer_error(path)
+        answer, error = _read_answer(path)
         if error is None:
-            return True, None
+            return True, answer, None
         if first_error is None:
             first_error = error
-    return False, first_error
+    return False, None, first_error
 
 
-def _answer_error(path: Path) -> str | None:
-    """Validate an answer file exactly as the orchestrator does.
+def _read_answer(path: Path) -> tuple[str | None, str | None]:
+    """Read an answer file, validating exactly as the orchestrator does.
 
     Mirrors ``_control_ask``: a JSON object with a non-empty string ``answer``
     is valid; everything else is described in the orchestrator's own error
-    vocabulary.
+    vocabulary. Returns ``(stripped answer, None)`` or ``(None, error)``.
     """
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as err:
-        return f"unreadable JSON ({err})"
+        return None, f"unreadable JSON ({err})"
     if not isinstance(data, dict):
-        return "not a JSON object"
+        return None, "not a JSON object"
     if not isinstance(data.get("answer"), str) or not data["answer"].strip():
-        return "missing/empty `answer` string"
-    return None
+        return None, "missing/empty `answer` string"
+    return data["answer"].strip(), None
 
 
 def _answer_path_for(question_path: Path) -> Path:

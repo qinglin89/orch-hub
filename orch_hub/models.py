@@ -147,6 +147,8 @@ class Question:
     ``answer``). A present-but-malformed answer file keeps the question pending
     — the orchestrator re-reads it each tick, never consumes it — and is
     described by ``answer_error`` so callers can repair it by rewriting.
+    ``answer`` carries the stripped text of the valid answer when answered
+    (the same value the orchestrator consumes; ``"stop"`` aborts the run).
     """
 
     seq: int
@@ -157,6 +159,7 @@ class Question:
     message: str | None = None
     error: str | None = None
     answered: bool = False
+    answer: str | None = None
     answer_error: str | None = None
 
     @property
@@ -174,5 +177,78 @@ class Question:
             "message": self.message,
             "error": self.error,
             "answered": self.answered,
+            "answer": self.answer,
             "answer_error": self.answer_error,
+        }
+
+
+@dataclass(frozen=True)
+class RunRecord:
+    """One orchestrator run, as persisted in its run dir's ``run.json``.
+
+    The record — not hub memory — is the source of truth for a run: a fresh
+    run manager reattaches by loading records and probing pid liveness. ``pid``
+    is the ``caffeinate`` wrapper's pid, which tracks the orchestrator (it
+    exits when the orchestrator exits and forwards its exit code).
+
+    ``ended_ts``/``exit_code`` stay ``None`` while the run is alive.
+    ``ended_ts`` is when the hub *observed* the end, not the exact exit time;
+    ``exit_code`` remains ``None`` on a run that ended while the hub was down
+    (a reattached process is no longer our child, so its status is gone).
+    ``error`` is never persisted: it is set only on stub records built from an
+    unreadable ``run.json``, so a broken dir cannot hide a run. Stubs carry
+    ``None`` placeholders for the unknown fields.
+    """
+
+    run_id: str
+    repo_name: str = ""
+    repo_path: Path | None = None
+    task_id: str = ""
+    control_dir: Path | None = None
+    log_dir: Path | None = None
+    argv: tuple[str, ...] = ()
+    pid: int | None = None
+    started_ts: str | None = None
+    ended_ts: str | None = None
+    exit_code: int | None = None
+    error: str | None = None
+
+    def to_dict(self) -> dict:
+        # ``control_dir``, ``log_dir``, and ``argv`` are deliberately internal
+        # (filesystem detail the UI does not need); they stay in ``run.json``.
+        return {
+            "run_id": self.run_id,
+            "repo_name": self.repo_name,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "task_id": self.task_id,
+            "pid": self.pid,
+            "started_ts": self.started_ts,
+            "ended_ts": self.ended_ts,
+            "exit_code": self.exit_code,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class RunStatus:
+    """A run record paired with its computed live/end state.
+
+    ``state`` is a run-overlay label, deliberately distinct from task
+    frontmatter statuses: ``active``/``waiting`` while the process is alive
+    (``waiting`` = a control-dir question is pending a human answer), and
+    ``completed``/``stopped``/``error``/``ended`` for finished runs.
+    ``pending`` counts unanswered control-dir questions.
+    """
+
+    record: RunRecord
+    state: str
+    detail: str | None = None
+    pending: int = 0
+
+    def to_dict(self) -> dict:
+        return {
+            **self.record.to_dict(),
+            "state": self.state,
+            "detail": self.detail,
+            "pending_questions": self.pending,
         }
