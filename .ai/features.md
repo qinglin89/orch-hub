@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: e6909681ed003d16cb03b7670151501af7248250
+last-updated: 2026-07-09
+verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
 ---
 
 # Features
@@ -16,7 +16,7 @@ verified-against: e6909681ed003d16cb03b7670151501af7248250
 | Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
 | Human question relay | API + dashboard answering implemented; notifications planned | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
-| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history APIs |
+| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history APIs, including run start/stop controls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
@@ -247,8 +247,8 @@ Implemented behavior:
 
 Status: implemented
 
-Description: Mobile-first web UI for repo/task inspection, run observation,
-answering waiting questions, run history, and logs.
+Description: Mobile-first web UI for repo/task inspection, run start/stop,
+run observation, answering waiting questions, run history, and logs.
 
 Modules: api, web.
 
@@ -271,6 +271,14 @@ Implemented behavior:
 - Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
   content, shows current/most-recent run state, links to logs, and renders
   answer forms for waiting questions from `/api/escalations`.
+- Task detail offers Start through `POST /api/runs` for launchable task
+  statuses and Stop through `POST /api/runs/{run_id}/stop` for active/waiting
+  runs on that task. `blocked` tasks require an explicit acknowledgement
+  checkbox; stale/raced starts render the backend 409 response instead of
+  trusting frontend state.
+- Start is hidden or replaced with an explanation when the dashboard already
+  sees a live run for the repo, the task file is missing/unknown or otherwise
+  non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
 - Run history uses `GET /api/history/runs` newest-first.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. SSE heartbeats are skipped, blank data log lines are preserved,

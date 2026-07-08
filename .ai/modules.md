@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: e6909681ed003d16cb03b7670151501af7248250
+last-updated: 2026-07-09
+verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
 ---
 
 # Modules
@@ -23,7 +23,7 @@ verified-against: e6909681ed003d16cb03b7670151501af7248250
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, public dashboard shell, health/repo/task/run/escalation/log/history routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including task-detail run controls |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
@@ -170,11 +170,18 @@ Location: `orch_hub/web/`
 Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
 defines the static app container and bottom navigation; `app.js` owns token
 entry/localStorage, bearer `fetch` calls, hash routing, repo/task/detail/run
-views, waiting-question answer forms, run history, and recent/live log views;
-`styles.css` holds the mobile layout. The dashboard reads only HTTP payloads,
-uses `fetch` + `ReadableStream.getReader()` for SSE log streaming so the bearer
-header is present, aborts active streams on navigation/reload/pause, and writes
-untrusted log/task data as escaped HTML or text nodes.
+views, task-detail Start/Stop run controls, waiting-question answer forms, run
+history, and recent/live log views; `styles.css` holds the mobile layout. The
+dashboard reads only HTTP payloads, uses `fetch` +
+`ReadableStream.getReader()` for SSE log streaming so the bearer header is
+present, aborts active streams on navigation/reload/pause, and writes untrusted
+log/task data as escaped HTML or text nodes.
+
+Run controls stay frontend-only over the existing API: Start posts
+`{repo_id, task_id, acknowledge_blocked}` to `POST /api/runs`, Stop posts to
+`POST /api/runs/{run_id}/stop`, and launch refusal UI renders structured 409
+details such as readiness `reasons`, repo-busy `run_id`, or blocked-task
+`acknowledge_required`.
 
 ### Run Manager
 

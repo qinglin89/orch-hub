@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: e6909681ed003d16cb03b7670151501af7248250
+last-updated: 2026-07-09
+verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
 ---
 
 # APIs and Interfaces
@@ -227,6 +227,11 @@ Current HTTP behavior:
   `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
   empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
   `BlockedTaskError` includes `acknowledge_required: true`.
+- The dashboard task-detail run controls consume these existing run APIs
+  directly: Start sends `{repo_id, task_id, acknowledge_blocked}` to
+  `POST /api/runs`, Stop sends `POST /api/runs/{run_id}/stop`, and frontend
+  error rendering preserves structured 409 fields instead of flattening every
+  refusal to `detail`.
 
 ## Internal Interfaces
 
