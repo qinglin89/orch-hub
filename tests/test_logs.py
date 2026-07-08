@@ -106,6 +106,20 @@ def test_locate_attributes_each_rerun_to_its_own_log(tmp_path):
     assert locate_log(late) == third
 
 
+def test_locate_fast_rerun_one_second_apart_attributes_later_log(tmp_path):
+    logdir = tmp_path / "logs"
+    # A fast --once/error/retry re-run: an earlier run stamped 03:00:00 and this
+    # run stamped 03:00:01, only one second later. Per-repo serialization blocks
+    # concurrent *live* runs but enforces no time gap after one ends, so this is
+    # reachable. This run started at 03:00:01, so its own log is the 03:00:01
+    # file; any pre-start slack would re-admit the 03:00:00 file and, as the
+    # earliest match, mis-attribute the earlier run's log to this run.
+    write_log(logdir, "20260708T030000Z", ["earlier run"])
+    mine = write_log(logdir, "20260708T030001Z", ["this run"])
+    rec = make_record(logdir, started_ts="2026-07-08T03:00:01+00:00")
+    assert locate_log(rec) == mine
+
+
 def test_locate_tolerates_subsecond_start_floor(tmp_path):
     logdir = tmp_path / "logs"
     mine = write_log(logdir, RUN_STAMP, ["x"])  # stamped 03:00:00 (second)

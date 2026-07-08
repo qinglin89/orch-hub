@@ -36,16 +36,6 @@ from .models import RunRecord
 STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 """Orchestrator log-filename timestamp format (matches ``runs._RUN_ID_TS``)."""
 
-_START_SKEW = dt.timedelta(seconds=2)
-"""Tolerance when treating a log stamp as at-or-after the run start.
-
-The orchestrator stamps its filename to the second while ``started_ts`` keeps
-sub-second precision; flooring ``started_ts`` already covers that truncation,
-and this small extra slack absorbs minor same-machine clock adjustment. It can
-never mis-attribute a re-run: per-repo serialization keeps successive runs of
-one task minutes apart, far beyond this window.
-"""
-
 DEFAULT_TAIL_LINES = 200
 """Recent-log lines returned when the caller does not ask for a specific tail."""
 
@@ -93,11 +83,22 @@ def locate_log(record: RunRecord) -> Path | None:
     """Return the log file this run wrote, or ``None`` if none is found.
 
     Matches ``<utc-ts>-<task_id>.log`` files in the record's ``log_dir`` whose
-    ts prefix parses and is not before the run started, then returns the
-    earliest such file — the run's own log (a later re-run of the same task
-    stamps a strictly later ts). With no usable ``started_ts`` (broken record)
-    the lower bound is dropped and the newest matching file is returned as a
-    best-effort "most recent log for this task".
+    ts prefix parses and is at or after the run's floored start, then returns
+    the earliest such file — the run's own log (a later re-run of the same task
+    stamps a strictly later ts). The lower bound is exactly
+    ``floor(started_ts)``, with no pre-start slack: because the orchestrator
+    stamps its filename *after* the hub records ``started_ts`` on the same
+    machine (:mod:`orch_hub.runs` writes ``started_ts`` after the spawn returns),
+    a file stamped before the floored start belongs to an earlier run, not this
+    one. Any pre-start tolerance would re-admit that earlier run's file and, as
+    the earliest match, mis-attribute it. With no usable ``started_ts`` (broken
+    record) the lower bound is dropped and the newest matching file is returned
+    as a best-effort "most recent log for this task".
+
+    Residual limit: two runs of one task that start within the same wall-clock
+    second cannot be told apart by these second-precision stamps; the earlier
+    file is returned for both. Per-repo serialization plus real orchestrator
+    startup cost makes a genuine same-second re-run of the same task unlikely.
     """
     log_dir = record.log_dir
     task_id = record.task_id
@@ -114,8 +115,8 @@ def locate_log(record: RunRecord) -> Path | None:
         stamp = _parse_stamp(name[: -len(suffix)])
         if stamp is None:
             continue
-        if lower_bound is not None and stamp < lower_bound - _START_SKEW:
-            continue  # from an earlier run of this same task
+        if lower_bound is not None and stamp < lower_bound:
+            continue  # stamped before this run started: an earlier run's log
         matches.append((stamp, entry))
     if not matches:
         return None
