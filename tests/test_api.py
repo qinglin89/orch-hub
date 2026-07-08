@@ -7,6 +7,9 @@ touching real repos, subprocesses, or the ai-native-development registry.
 
 from __future__ import annotations
 
+import datetime as dt
+import itertools
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -21,6 +24,7 @@ from orch_hub.models import (
     TaskSummary,
 )
 from orch_hub.registry import RegistryError
+from orch_hub.runs import RunManager
 from orch_hub.task_store import STATUS_MISSING
 
 TOKEN = "test-token"
@@ -339,3 +343,422 @@ def test_run_explicit_args_override_env(monkeypatch):
     monkeypatch.setenv(PORT_ENV, "9000")
     api.run(host="127.0.0.1", port=8123)
     assert captured == {"host": "127.0.0.1", "port": 8123}
+
+
+# --- run and escalation routes -----------------------------------------------
+#
+# These drive a *real* RunManager over fake run dirs in ``tmp_path`` with an
+# injected spawner/clock/pid-probe: no real subprocess is started and no
+# orchestrator code is imported. Repo resolution still monkeypatches
+# ``discover_repos`` (as above); the escalation flow uses real control-dir files
+# so the answer write goes end-to-end through ``orch_hub.control_dir``.
+
+RUN_TASK_ID = "2026-07-05-feature-x"
+FIXED_NOW = dt.datetime(2026, 7, 8, 3, 0, 0, tzinfo=dt.timezone.utc)
+
+
+class FakeProc:
+    """The ``ProcessHandle`` slice: a test ends a run by setting ``returncode``."""
+
+    def __init__(self, pid: int):
+        self.pid = pid
+        self.returncode: int | None = None
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+
+class FakeSpawner:
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.procs: list[FakeProc] = []
+        self._pids = itertools.count(5000)
+
+    def __call__(self, argv, *, cwd, stdout, start_new_session):
+        proc = FakeProc(next(self._pids))
+        self.calls.append({"argv": tuple(argv), "cwd": Path(cwd)})
+        self.procs.append(proc)
+        return proc
+
+
+def passing_readiness(repo, config) -> ReadinessReport:
+    return ReadinessReport((ReadinessCheck("all", True, "ok"),))
+
+
+def failing_readiness(repo, config) -> ReadinessReport:
+    return ReadinessReport(
+        (ReadinessCheck("git_clean", False, "working tree has uncommitted changes"),)
+    )
+
+
+def write_task_index(repo_path: Path, task_ids: list[str]) -> None:
+    rows = "\n".join(f"| {tid} | x | Summary of {tid} |" for tid in task_ids)
+    (repo_path / ".ai-tasks" / "index.md").write_text(
+        "# Active tasks\n\n| Task | Status | Summary |\n|---|---|---|\n" + rows + "\n",
+        encoding="utf-8",
+    )
+
+
+def write_task_file(
+    repo_path: Path, task_id: str, status: str = "in_progress", blockers: str | None = None
+) -> None:
+    lines = ["---", f"id: {task_id}", f"status: {status}"]
+    if blockers is not None:
+        lines.append(f"blockers: {blockers}")
+    lines += ["---", "", "# Task", ""]
+    (repo_path / ".ai-tasks" / f"{task_id}.md").write_text(
+        "\n".join(lines), encoding="utf-8"
+    )
+
+
+def make_run_repo(
+    tmp_path: Path,
+    name: str = "repo-a",
+    *,
+    task_status: str = "in_progress",
+    blockers: str | None = None,
+) -> ManagedRepo:
+    path = tmp_path / "repos" / name
+    (path / ".ai-tasks").mkdir(parents=True)
+    write_task_index(path, [RUN_TASK_ID])
+    write_task_file(path, RUN_TASK_ID, status=task_status, blockers=blockers)
+    return ManagedRepo(name=name, path=path, manifest=path / ".ai-deploy-manifest.json")
+
+
+def run_config(tmp_path: Path) -> Config:
+    return Config(
+        ai_native_path=tmp_path / "ai-native",
+        token=TOKEN,
+        data_dir=tmp_path / "hub-data",
+    )
+
+
+def make_run_manager(tmp_path: Path, *, readiness=passing_readiness) -> tuple[RunManager, FakeSpawner]:
+    spawner = FakeSpawner()
+    manager = RunManager(
+        run_config(tmp_path),
+        readiness_checker=readiness,
+        spawner=spawner,
+        pid_probe=lambda pid: True,
+        clock=lambda: FIXED_NOW,
+    )
+    return manager, spawner
+
+
+def make_run_client(
+    tmp_path,
+    monkeypatch,
+    *,
+    repo: ManagedRepo | None = None,
+    readiness=passing_readiness,
+) -> tuple[TestClient, RunManager, FakeSpawner, ManagedRepo]:
+    repo = repo if repo is not None else make_run_repo(tmp_path)
+    manager, spawner = make_run_manager(tmp_path, readiness=readiness)
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    client = TestClient(api.create_app(run_config(tmp_path), run_manager=manager))
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    return client, manager, spawner, repo
+
+
+def start_a_run(client: TestClient, repo: ManagedRepo, **body) -> dict:
+    resp = client.post(
+        "/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID, **body}
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+def control_dir_of(manager: RunManager, run_id: str) -> Path:
+    return manager.get_run(run_id).record.control_dir
+
+
+def write_question(control: Path, seq: int = 1, **fields) -> None:
+    (control / f"{seq:03d}-question.json").write_text(
+        json.dumps({"seq": seq, **fields}), encoding="utf-8"
+    )
+
+
+# -- start run -----------------------------------------------------------------
+
+
+def test_start_run_spawns_and_returns_active_status(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+
+    body = start_a_run(client, repo)
+
+    assert body["task_id"] == RUN_TASK_ID
+    assert body["repo_name"] == repo.name
+    assert body["state"] == "active"
+    assert body["pending_questions"] == 0
+    assert len(spawner.calls) == 1
+    # The started run is immediately retrievable by the returned id.
+    assert manager.get_run(body["run_id"]).record.task_id == RUN_TASK_ID
+
+
+def test_start_run_forwards_extra_args(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+
+    start_a_run(client, repo, extra_args=["--plan-gate", "--backend", "cc-codex"])
+
+    assert spawner.calls[0]["argv"][-3:] == ("--plan-gate", "--backend", "cc-codex")
+
+
+def test_start_run_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+
+    resp = client.post("/api/runs", json={"repo_id": "ghost", "task_id": RUN_TASK_ID})
+    assert resp.status_code == 404
+    assert "ghost" in resp.json()["detail"]
+    assert spawner.calls == []
+
+
+def test_start_run_repo_busy_is_409(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    first = start_a_run(client, repo)
+
+    resp = client.post("/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID})
+    assert resp.status_code == 409
+    assert resp.json()["run_id"] == first["run_id"]
+    assert len(spawner.calls) == 1  # the second launch never spawned
+
+
+def test_start_run_launch_blocked_is_409_with_reasons(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(
+        tmp_path, monkeypatch, readiness=failing_readiness
+    )
+
+    resp = client.post("/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID})
+    assert resp.status_code == 409
+    assert resp.json()["reasons"] == [
+        "git_clean: working tree has uncommitted changes"
+    ]
+    assert spawner.calls == []
+
+
+def test_start_run_blocked_task_requires_acknowledgement(tmp_path, monkeypatch):
+    repo = make_run_repo(tmp_path, task_status="blocked", blockers="[external:need ruling]")
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch, repo=repo)
+
+    refused = client.post(
+        "/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID}
+    )
+    assert refused.status_code == 409
+    assert refused.json()["acknowledge_required"] is True
+    assert "external:need ruling" in refused.json()["detail"]
+    assert spawner.calls == []
+
+    acked = start_a_run(client, repo, acknowledge_blocked=True)
+    assert acked["state"] == "active"
+    assert len(spawner.calls) == 1
+
+
+def test_start_run_missing_body_fields_is_422(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    # Pydantic validation (task_id absent) → FastAPI 422, before any launch.
+    resp = client.post("/api/runs", json={"repo_id": repo.name})
+    assert resp.status_code == 422
+    assert spawner.calls == []
+
+
+# -- list / get ----------------------------------------------------------------
+
+
+def test_list_runs_returns_statuses(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+
+    resp = client.get("/api/runs")
+    assert resp.status_code == 200
+    runs = resp.json()["runs"]
+    assert len(runs) == 1
+    assert runs[0]["run_id"] == started["run_id"]
+    assert runs[0]["state"] == "active"
+
+
+def test_get_run_returns_status_and_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+
+    ok = client.get(f"/api/runs/{started['run_id']}")
+    assert ok.status_code == 200
+    assert ok.json()["run_id"] == started["run_id"]
+
+    missing = client.get("/api/runs/20990101T000000Z-nope-x")
+    assert missing.status_code == 404
+
+
+# -- stop ----------------------------------------------------------------------
+
+
+def test_stop_run_writes_flag_and_is_idempotent(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+
+    first = client.post(f"/api/runs/{started['run_id']}/stop")
+    assert first.status_code == 200
+    assert first.json()["newly_requested"] is True
+    assert (control_dir_of(manager, started["run_id"]) / "stop.flag").is_file()
+
+    again = client.post(f"/api/runs/{started['run_id']}/stop")
+    assert again.json()["newly_requested"] is False
+    # A stop is a request, not a kill: the run is still alive.
+    assert client.get(f"/api/runs/{started['run_id']}").json()["state"] == "active"
+
+
+def test_stop_run_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.post("/api/runs/20990101T000000Z-nope-x/stop")
+    assert resp.status_code == 404
+
+
+def test_stop_run_ended_is_409(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    spawner.procs[0].returncode = 3  # the run ends
+
+    resp = client.post(f"/api/runs/{started['run_id']}/stop")
+    assert resp.status_code == 409
+
+
+# -- escalations: list ---------------------------------------------------------
+
+
+def test_escalations_list_pending_questions_with_context(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_question(
+        control_dir_of(manager, started["run_id"]),
+        kind="blocked",
+        banner="need a ruling",
+    )
+
+    resp = client.get("/api/escalations")
+    assert resp.status_code == 200
+    escalations = resp.json()["escalations"]
+    assert len(escalations) == 1
+    entry = escalations[0]
+    assert entry["run_id"] == started["run_id"]
+    assert entry["repo_name"] == repo.name
+    assert entry["task_id"] == RUN_TASK_ID
+    assert entry["question"]["seq"] == 1
+    assert entry["question"]["banner"] == "need a ruling"
+    assert entry["question"]["answered"] is False
+
+
+def test_escalations_empty_without_pending_questions(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_a_run(client, repo)
+    assert client.get("/api/escalations").json() == {"escalations": []}
+
+
+def test_escalations_skip_ended_runs(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_question(control_dir_of(manager, started["run_id"]), banner="?")
+    spawner.procs[0].returncode = 0  # run ends with the question still pending
+
+    # A question on a finished run cannot unblock anything, so it is excluded.
+    assert client.get("/api/escalations").json() == {"escalations": []}
+
+
+# -- escalations: answer -------------------------------------------------------
+
+
+def test_answer_escalation_writes_answer_file(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="?")
+
+    resp = client.post(
+        f"/api/runs/{started['run_id']}/escalations/1/answer",
+        json={"answer": "  proceed  ", "responder": "iphone"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body == {
+        "run_id": started["run_id"],
+        "seq": 1,
+        "answered": True,
+        "responder": "iphone",
+        "answer": "proceed",
+    }
+    # The write went through control_dir: a valid, audited answer file exists.
+    written = json.loads((control / "001-answer.json").read_text(encoding="utf-8"))
+    assert written["answer"] == "proceed"
+    assert written["responder"] == "iphone"
+    assert written["seq"] == 1
+    # The question is no longer an escalation.
+    assert client.get("/api/escalations").json()["escalations"] == []
+
+
+def test_answer_escalation_defaults_responder_to_orch_hub(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_question(control_dir_of(manager, started["run_id"]), banner="?")
+
+    resp = client.post(
+        f"/api/runs/{started['run_id']}/escalations/1/answer", json={"answer": "go"}
+    )
+    assert resp.json()["responder"] == "orch-hub"
+
+
+def test_answer_escalation_unknown_run_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.post(
+        "/api/runs/20990101T000000Z-nope-x/escalations/1/answer", json={"answer": "go"}
+    )
+    assert resp.status_code == 404
+
+
+def test_answer_escalation_unknown_seq_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)  # no question files written
+
+    resp = client.post(
+        f"/api/runs/{started['run_id']}/escalations/9/answer", json={"answer": "go"}
+    )
+    assert resp.status_code == 404
+    assert "seq 9" in resp.json()["detail"]
+
+
+def test_answer_escalation_duplicate_is_409(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_question(control_dir_of(manager, started["run_id"]), banner="?")
+    url = f"/api/runs/{started['run_id']}/escalations/1/answer"
+
+    assert client.post(url, json={"answer": "first"}).status_code == 200
+    dup = client.post(url, json={"answer": "second"})
+    assert dup.status_code == 409  # existing valid answer is never overwritten
+
+
+def test_answer_escalation_empty_answer_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_question(control_dir_of(manager, started["run_id"]), banner="?")
+
+    resp = client.post(
+        f"/api/runs/{started['run_id']}/escalations/1/answer", json={"answer": "   "}
+    )
+    assert resp.status_code == 400
+
+
+# -- auth ----------------------------------------------------------------------
+
+
+def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
+    # The default-deny middleware covers the new routes with no per-route
+    # exception: an unauthenticated caller is 401 on every one of them.
+    manager, _ = make_run_manager(tmp_path)
+    unauthed = TestClient(api.create_app(run_config(tmp_path), run_manager=manager))
+    assert unauthed.post(
+        "/api/runs", json={"repo_id": "r", "task_id": RUN_TASK_ID}
+    ).status_code == 401
+    assert unauthed.get("/api/runs").status_code == 401
+    assert unauthed.get("/api/runs/anything").status_code == 401
+    assert unauthed.post("/api/runs/anything/stop").status_code == 401
+    assert unauthed.get("/api/escalations").status_code == 401
+    assert unauthed.post(
+        "/api/runs/anything/escalations/1/answer", json={"answer": "go"}
+    ).status_code == 401

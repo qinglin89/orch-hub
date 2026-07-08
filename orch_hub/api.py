@@ -30,11 +30,27 @@ import secrets
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 from .config import TOKEN_ENV, Config
+from .control_dir import (
+    DEFAULT_RESPONDER,
+    DuplicateAnswerError,
+    list_questions,
+    pending_questions,
+    write_answer,
+)
 from .models import repos_payload, tasks_payload
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
+from .runs import (
+    BlockedTaskError,
+    LaunchBlockedError,
+    RepoBusyError,
+    RunEndedError,
+    RunManager,
+    UnknownRunError,
+)
 from .task_store import list_repo_tasks, list_tasks
 
 PUBLIC_PATHS = frozenset({"/api/health"})
@@ -47,15 +63,49 @@ requires the token.
 """
 
 
-def create_app(config: Config | None = None) -> FastAPI:
+class StartRunRequest(BaseModel):
+    """Body for ``POST /api/runs``.
+
+    ``repo_id`` is the managed-repo name (resolved through registry discovery,
+    like ``GET /api/repos/{repo_id}/tasks``). ``extra_args`` are appended to the
+    orchestrator argv; ``acknowledge_blocked`` opts into launching a ``blocked``
+    task despite the §5.4 resume caveat.
+    """
+
+    repo_id: str
+    task_id: str
+    extra_args: list[str] = Field(default_factory=list)
+    acknowledge_blocked: bool = False
+
+
+class AnswerRequest(BaseModel):
+    """Body for answering an escalation (a pending orchestrator question).
+
+    ``responder`` is recorded in the answer file's audit fields; it defaults to
+    the control-dir adapter's ``orch-hub`` when the client sends nothing.
+    """
+
+    answer: str
+    responder: str | None = None
+
+
+def create_app(
+    config: Config | None = None, *, run_manager: RunManager | None = None
+) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
 
     ``config`` is captured once per app instance; tests pass an explicit
     :class:`~orch_hub.config.Config` to stay hermetic. The core functions are
     referenced as module globals so tests can monkeypatch them (mirroring the
     CLI tests) without threading fakes through the routes.
+
+    ``run_manager`` is the single :class:`~orch_hub.runs.RunManager` the run and
+    escalation routes drive; it is built from ``resolved`` by default, and tests
+    inject one wired with fake spawner/clock over a temp data dir so no real
+    subprocess is ever started.
     """
     resolved = config if config is not None else Config.from_env()
+    manager = run_manager if run_manager is not None else RunManager(resolved)
     app = FastAPI(
         title="orch-hub",
         description="Local control plane for AI coding orchestrators.",
@@ -67,6 +117,50 @@ def create_app(config: Config | None = None) -> FastAPI:
         # Malformed registry data is an upstream/operational failure, not a
         # client error; surface it as 500 with the concise reason.
         return JSONResponse(status_code=500, content={"detail": str(exc)})
+
+    # Run-manager errors map to their HTTP shapes here (not in each handler) so
+    # every run/escalation route reuses one mapping. 404 = no such run; 409 =
+    # a state conflict the caller can act on (busy repo, blocked task needing
+    # acknowledgement, refused launch gate, ended run, duplicate answer).
+    @app.exception_handler(UnknownRunError)
+    async def _unknown_run(request: Request, exc: UnknownRunError) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(RepoBusyError)
+    async def _repo_busy(request: Request, exc: RepoBusyError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409, content={"detail": str(exc), "run_id": exc.run_id}
+        )
+
+    @app.exception_handler(RunEndedError)
+    async def _run_ended(request: Request, exc: RunEndedError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    @app.exception_handler(BlockedTaskError)
+    async def _blocked_task(request: Request, exc: BlockedTaskError) -> JSONResponse:
+        # The client can retry with acknowledge_blocked=true; the §5.4 caveat
+        # is spelled out in the message.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": str(exc), "acknowledge_required": True},
+        )
+
+    @app.exception_handler(LaunchBlockedError)
+    async def _launch_blocked(
+        request: Request, exc: LaunchBlockedError
+    ) -> JSONResponse:
+        # The failed fail-closed gates (readiness reasons, bad task status, ...)
+        # ride along as a list for the UI to render.
+        return JSONResponse(
+            status_code=409,
+            content={"detail": str(exc), "reasons": list(exc.reasons)},
+        )
+
+    @app.exception_handler(DuplicateAnswerError)
+    async def _duplicate_answer(
+        request: Request, exc: DuplicateAnswerError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     @app.middleware("http")
     async def require_bearer_token(request: Request, call_next):
@@ -138,6 +232,127 @@ def create_app(config: Config | None = None) -> FastAPI:
             if repo.name == repo_id:
                 return tasks_payload([list_repo_tasks(repo)])
         raise HTTPException(status_code=404, detail=f"unknown repo: {repo_id}")
+
+    @app.post("/api/runs", status_code=201)
+    def start_run(req: StartRunRequest) -> dict:
+        """Start an orchestrator run, resolving ``repo_id`` by managed-repo name.
+
+        The run manager applies the fail-closed launch gates (per-repo single
+        run, task inventory/status, readiness) and spawns the deployed
+        orchestrator subprocess; gate refusals surface as the mapped 4xx
+        responses above. An unknown ``repo_id`` is a 404. The response is the
+        new run's :class:`RunStatus` (``active`` with no pending questions),
+        the same shape as ``GET /api/runs/{run_id}``.
+        """
+        repos = discover_repos(resolved)
+        repo = next((r for r in repos if r.name == req.repo_id), None)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown repo: {req.repo_id}")
+        record = manager.start_run(
+            repo,
+            req.task_id,
+            extra_args=req.extra_args,
+            acknowledge_blocked=req.acknowledge_blocked,
+        )
+        return manager.get_run(record.run_id).to_dict()
+
+    @app.get("/api/runs")
+    def list_runs() -> dict:
+        """List every known run (oldest first) with its computed live/end state."""
+        return {"runs": [status.to_dict() for status in manager.list_runs()]}
+
+    @app.get("/api/runs/{run_id}")
+    def get_run(run_id: str) -> dict:
+        """Return one run's current :class:`RunStatus`; unknown ids are 404."""
+        return manager.get_run(run_id).to_dict()
+
+    @app.post("/api/runs/{run_id}/stop")
+    def stop_run(run_id: str) -> dict:
+        """Request a graceful stop by writing the run's ``stop.flag``.
+
+        The stop lands at the orchestrator's next session boundary; if a
+        question is pending it aborts the wait and discards any pending
+        convergence-budget/dispute-unresolved ruling (README §5.5).
+        ``newly_requested`` is False when a stop was already requested (the
+        write is idempotent). Unknown ids are 404; an already-ended run is 409.
+        """
+        newly = manager.stop_run(run_id)
+        return {
+            "run_id": run_id,
+            "newly_requested": newly,
+            "detail": (
+                "stop.flag written; the orchestrator stops at its next session"
+                " boundary. If a question is pending, the stop aborts the wait"
+                " and discards any pending convergence-budget/dispute-unresolved"
+                " ruling (README §5.5)."
+            ),
+        }
+
+    @app.get("/api/escalations")
+    def list_escalations() -> dict:
+        """List pending human questions across live runs, with run/repo context.
+
+        Only live runs are scanned — a question on a finished run cannot unblock
+        anything. Each entry carries the ``run_id`` plus the ``question`` (whose
+        ``seq`` addresses the answer route
+        ``POST /api/runs/{run_id}/escalations/{seq}/answer``).
+        """
+        escalations = []
+        for status in manager.list_runs():
+            record = status.record
+            if (
+                record.ended_ts is not None
+                or record.error is not None
+                or record.control_dir is None
+            ):
+                continue
+            for question in pending_questions(record.control_dir):
+                escalations.append(
+                    {
+                        "run_id": record.run_id,
+                        "repo_name": record.repo_name,
+                        "task_id": record.task_id,
+                        "question": question.to_dict(),
+                    }
+                )
+        return {"escalations": escalations}
+
+    @app.post("/api/runs/{run_id}/escalations/{seq}/answer")
+    def answer_escalation(run_id: str, seq: int, req: AnswerRequest) -> dict:
+        """Write the answer file for one pending question, auditing the responder.
+
+        The run is located by ``run_id`` (unknown → 404) and the question by
+        ``seq`` within its control dir (unknown → 404). The write goes through
+        :func:`orch_hub.control_dir.write_answer`, so a pre-existing valid
+        answer is refused (409) and an empty/whitespace answer is rejected
+        (400); ``"stop"`` is a legitimate answer that aborts the run.
+        """
+        status = manager.get_run(run_id)
+        control_dir = status.record.control_dir
+        if control_dir is None:
+            raise HTTPException(
+                status_code=404, detail=f"run {run_id} has no control dir"
+            )
+        question = next(
+            (q for q in list_questions(control_dir) if q.seq == seq), None
+        )
+        if question is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"run {run_id!r} has no question with seq {seq}",
+            )
+        responder = req.responder or DEFAULT_RESPONDER
+        try:
+            write_answer(question, req.answer, responder=responder)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "run_id": run_id,
+            "seq": seq,
+            "answered": True,
+            "responder": responder,
+            "answer": req.answer.strip(),
+        }
 
     return app
 
