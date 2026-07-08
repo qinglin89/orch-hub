@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ---
 
 # APIs and Interfaces
@@ -47,6 +47,13 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 - Shape: `{"status": "ok"}`.
 - Auth: public by design; it must not disclose deployment configuration.
 
+### `GET /`, `GET /app.js`, `GET /styles.css`
+
+- Purpose: serve the public dashboard shell assets.
+- Auth: public by design because browser navigation cannot attach an
+  `Authorization` header. These assets contain no secrets; every dashboard data
+  request still uses protected HTTP APIs with `Authorization: Bearer <token>`.
+
 ### `GET /api/repos`
 
 - Purpose: list managed repos with readiness.
@@ -58,6 +65,17 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 - Purpose: list tasks for one repo, where `repo_id` is the managed-repo name.
 - Shape: `tasks_payload([inventory])`, the same `{"repos": [...]}` envelope as
   all-repo task inventory with a single repo entry.
+
+### `GET /api/repos/{repo_id}/tasks/{task_id}`
+
+- Purpose: fetch one listed task's frontmatter-authoritative inventory fields
+  plus raw markdown body for the dashboard task-detail view.
+- Source: resolves `repo_id` through registry discovery, gets status/summary/
+  blockers through `list_repo_tasks`, gates `task_id` on index membership, then
+  reads `.ai-tasks/<task_id>.md` through `read_task_content`.
+- Shape: `TaskSummary.to_dict()` plus `{"present": bool, "content": str|null}`.
+  Listed-but-absent task files return HTTP 200 with `present: false` and
+  `content: null`; unknown repos or unlisted task ids return HTTP 404.
 
 ### `GET /api/tasks`
 
@@ -156,10 +174,11 @@ Current HTTP behavior:
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;
   explicit function arguments override the environment.
-- Default-deny pure-ASGI middleware protects every path outside `/api/health`,
-  including `/docs`, `/openapi.json`, unknown paths, and future dashboard
-  routes. Pure ASGI is used instead of `BaseHTTPMiddleware` so streaming
-  responses are not buffered and disconnects propagate.
+- Default-deny pure-ASGI middleware protects every path outside `/api/health`
+  and the enumerated dashboard shell paths (`/`, `/app.js`, `/styles.css`),
+  including `/docs`, `/openapi.json`, unknown paths, and future data routes.
+  Pure ASGI is used instead of `BaseHTTPMiddleware` so streaming responses are
+  not buffered and disconnects propagate.
 - Missing or malformed credentials return HTTP 401 with
   `WWW-Authenticate: Bearer` and `{"detail": "missing bearer token"}`; wrong
   credentials return HTTP 401 with `{"detail": "invalid bearer token"}`.
@@ -197,9 +216,12 @@ Behavior: pure inspection and subprocess checks only; no mutation. Missing repo 
 
 Input: repo path.
 
-Output: `RepoTaskInventory` values containing repo fields, `index_present`, and ordered `TaskSummary` rows.
+Output: `RepoTaskInventory` values containing repo fields, `index_present`, ordered `TaskSummary` rows, and optional raw task content for one listed task.
 
 Behavior: parse `.ai-tasks/index.md` and task frontmatter locally. The index supplies active task ids and summaries; task frontmatter supplies authoritative status and blockers. The reusable `tasks_payload(inventories)` helper serializes as `{"repos": [...]}` for future CLI/API adapters.
+`read_task_content(repo, task_id)` is the only raw-body reader: it rejects
+non-bare filenames, requires the file target to resolve under the resolved
+`.ai-tasks` directory, and returns `None` for absent or unsafe content.
 
 ### Run Manager
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ---
 
 # Architecture
@@ -118,17 +118,17 @@ web/API/subprocess ownership.
 ### API Service
 
 Implemented FastAPI service exposing health, repo readiness, task inventory,
-run, escalation, log, and history endpoints behind bearer-token auth. The
-current route set includes `GET /api/health`, `GET /api/repos`,
-`GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, run start/list/get/stop
-routes, escalation list/answer routes, `GET /api/runs/{run_id}/logs`,
-`GET /api/runs/{run_id}/logs/stream`, and `GET /api/history/runs`; dashboard
-routes remain future work.
-`GET /api/health` is the only public route and returns only
-`{"status": "ok"}`. Every other path, including docs/OpenAPI and unknown future
-paths, requires `Authorization: Bearer <ORCH_HUB_TOKEN>` when the token is
-configured; if no token is configured, protected routes fail closed with HTTP
-503. The auth middleware is pure ASGI rather than Starlette
+task content, run, escalation, log, history, and dashboard shell endpoints. The
+current route set includes public `GET /`, `GET /app.js`, `GET /styles.css`,
+and `GET /api/health`, plus protected `GET /api/repos`, `GET /api/tasks`,
+`GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}`,
+run start/list/get/stop routes, escalation list/answer routes,
+`GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream`, and
+`GET /api/history/runs`.
+The public shell assets contain no secrets; every data path, docs/OpenAPI, and
+unknown future path requires `Authorization: Bearer <ORCH_HUB_TOKEN>` when the
+token is configured. If no token is configured, protected routes fail closed
+with HTTP 503. The auth middleware is pure ASGI rather than Starlette
 `BaseHTTPMiddleware` so SSE responses stream incrementally and disconnects
 propagate. The API calls the same registry/readiness/task/run/control/log
 functions used by the CLI and core tests and keeps route handlers thin over
@@ -147,12 +147,21 @@ The token is embedded in the user-agent plist, so installs should keep it
 
 ### Dashboard
 
-Future mobile-first web UI. Main views:
+Implemented mobile-first, build-stepless SPA under `orch_hub/web/`. It is
+served as an explicit public shell (`/`, `/app.js`, `/styles.css`) because plain
+browser navigation cannot attach a bearer header. The browser stores the token
+in `localStorage` and adds `Authorization: Bearer ...` to every data `fetch`,
+including the log stream. Main views:
 
-- All repos with readiness and run badges.
-- All tasks, filterable by repo and state.
-- Repo detail with task filters.
-- Task detail showing task file content, run state/logs, and answer input when waiting.
+- All repos with readiness from `/api/repos` and live run badges from `/api/runs`.
+- All tasks from `/api/tasks`, filterable by repo and frontmatter status.
+- Repo detail with task filters and the missing-index state.
+- Task detail showing task file content, run state, answer input when waiting,
+  and a link to logs.
+- Run history from `GET /api/history/runs`.
+- Run log tail: finished runs use `GET /api/runs/{run_id}/logs`; live runs use
+  `GET /api/runs/{run_id}/logs/stream` through `fetch` plus
+  `ReadableStream.getReader()`, not `EventSource`.
 
 ### Notification Adapter
 
@@ -192,14 +201,14 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
    (`127.0.0.1:8765` when unset); private-network exposure must stay
    Tailscale-only.
 4. A default-deny pure-ASGI HTTP middleware allows public access only to
-   `/api/health`. Missing/malformed credentials return 401 plus
-   `WWW-Authenticate: Bearer`, invalid credentials return 401, and an unset
-   token returns 503 for protected routes. Pure ASGI is required for long-lived
-   SSE log streams; `BaseHTTPMiddleware` can buffer streaming responses and
-   delay disconnect propagation.
-5. `RegistryError` maps to HTTP 500; unknown repo ids on per-repo task lookup
-   map to HTTP 404. Ordinary readiness failures stay inside 200 payloads as
-   `ready: false` with failure reasons.
+   `/api/health` and the three dashboard shell asset paths. Missing/malformed
+   credentials return 401 plus `WWW-Authenticate: Bearer`, invalid credentials
+   return 401, and an unset token returns 503 for protected data routes. Pure
+   ASGI is required for long-lived SSE log streams; `BaseHTTPMiddleware` can
+   buffer streaming responses and delay disconnect propagation.
+5. `RegistryError` maps to HTTP 500; unknown repo ids or unlisted task ids on
+   per-repo task lookup/detail routes map to HTTP 404. Ordinary readiness
+   failures stay inside 200 payloads as `ready: false` with failure reasons.
 
 ### Task Inventory
 
@@ -208,6 +217,9 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 3. Parse task ids and summaries from the index table without trusting the index Status column.
 4. Read each listed `.ai-tasks/<task-id>.md` frontmatter for authoritative `status` and `blockers`.
 5. Return `RepoTaskInventory` values that can be serialized directly for future task APIs.
+6. The single-task content endpoint gates on index membership, rejects unsafe
+   task ids in the reader, and resolves the candidate file target to ensure raw
+   content stays under the resolved `.ai-tasks` directory.
 
 ### Start Run
 

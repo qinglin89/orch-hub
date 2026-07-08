@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ---
 
 # Project Map
@@ -10,13 +10,13 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 | Feature | Modules | Key Decisions |
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, subprocess_utils, cli, api, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only |
-| Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries, task frontmatter supplies authoritative status/blockers; run overlay is supplied by runs |
-| HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; non-health paths are bearer-protected |
+| Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries, task frontmatter supplies authoritative status/blockers; single-task content reads are index-gated and contained under `.ai-tasks`; run overlay is supplied by runs |
+| HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch, external run dirs, file-backed `run.json`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
-| Human question relay | control_dir, runs, api, notifications, models | API implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; dashboard and notification surfacing remain separate |
+| Human question relay | control_dir, runs, api, notifications, models, web | API and dashboard answer UI implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; notification surfacing remains separate |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, and stream SSE with bearer-header auth |
-| Mobile dashboard | api, web | mobile-first single-page v1 |
+| Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, run history, and recent/live log views |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, control_dir, runs | Bark first; notifier interface for later backends |
 | Launchd service | config, api, docs, deploy | implemented resident Mac service packaging |
@@ -27,13 +27,13 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 | Feature | APIs |
 |---|---|
 | Repo discovery and readiness | CLI `repos`, CLI `repos --json`, `GET /api/repos` |
-| Task inventory | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
-| HTTP API foundation | `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `orch-hub-api` |
+| Task inventory | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
+| HTTP API foundation | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs, `orch-hub-api` |
 | Control-dir file channel | internal `list_questions`, `pending_questions`, `write_answer`, `request_stop` |
 | Run lifecycle | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, `POST /api/runs/{run_id}/stop` |
 | Human question relay | `GET /api/escalations`, `POST /api/runs/{run_id}/escalations/{seq}/answer` |
 | Log viewing | `GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream` |
-| Mobile dashboard | future web routes using protected HTTP APIs plus public health |
+| Mobile dashboard | `GET /`, `GET /app.js`, `GET /styles.css`; protected repo/task/run/escalation/log/history APIs |
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
 | Notifications | internal notifier interface |
 | Launchd service | `orch-hub-api`, `deploy/launchd/com.qinglin89.orch-hub.plist`, `docs/launchd.md` |
@@ -54,9 +54,9 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 | history | Append/read per-run JSONL audit/history events without storing answer text |
 | control_dir | Implement question/answer/stop file-channel handling |
 | logs | Locate, read, and stream orchestrator logs from run records |
-| api | FastAPI app factory, pure-ASGI bearer auth middleware, health/repo/task/run/escalation/log/history route wiring, uvicorn entry point |
+| api | FastAPI app factory, pure-ASGI bearer auth middleware, public dashboard shell, health/repo/task/run/escalation/log/history route wiring, uvicorn entry point |
 | notifications | Bark and future notification backends |
-| web | Mobile dashboard assets |
+| web | Mobile dashboard SPA assets |
 | docs | Launchd operator documentation |
 | deploy | Launchd plist template and future deployment templates |
 

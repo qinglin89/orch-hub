@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ---
 
 # Features
@@ -10,13 +10,13 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|
 | Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos` |
-| Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
-| HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | `GET /api/health`, `GET /api/repos`, `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks` |
+| Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
+| HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
-| Human question relay | API implemented; UI/notifications planned | control_dir, runs, api, notifications | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
+| Human question relay | API + dashboard answering implemented; notifications planned | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
-| Mobile dashboard | planned | api, web | future web routes and API calls |
+| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history APIs |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
 | Launchd service | implemented | config, api, docs, deploy | `orch-hub-api`, launchd plist/docs |
@@ -53,7 +53,8 @@ Description: Read `.ai-tasks/index.md` and task frontmatter in managed repos. Di
 
 Modules: task_store, api, models.
 
-APIs: `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`.
+APIs: `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`,
+`GET /api/repos/{repo_id}/tasks/{task_id}`.
 
 Implemented behavior:
 
@@ -62,6 +63,10 @@ Implemented behavior:
 - Missing `.ai-tasks/index.md` is represented as `index_present=False` with no task rows, distinct from a present-but-empty index.
 - Missing listed task files use status `missing`; files with no parseable status use `unknown`.
 - `TaskSummary`, `RepoTaskInventory`, and `tasks_payload` provide reusable data shapes for future CLI/API adapters.
+- The single-task detail endpoint returns frontmatter-authoritative fields plus
+  `present` and raw `content`; raw reads require index membership and resolved
+  containment under `.ai-tasks`, so symlinked files outside the task dir are
+  not disclosed.
 
 ### HTTP API Foundation
 
@@ -73,9 +78,9 @@ auth on every non-health path.
 
 Modules: api, config, registry, readiness, task_store, models.
 
-APIs: `GET /api/health`, `GET /api/repos`, `GET /api/tasks`,
-`GET /api/repos/{repo_id}/tasks`; `python -m orch_hub.api`; `orch-hub-api`;
-`uvicorn orch_hub.api:app`.
+APIs: `GET /`, `GET /app.js`, `GET /styles.css`, `GET /api/health`,
+repo/task/run/escalation/log/history data routes; `python -m orch_hub.api`;
+`orch-hub-api`; `uvicorn orch_hub.api:app`.
 
 Implemented behavior:
 
@@ -90,9 +95,9 @@ Implemented behavior:
   lookup map to HTTP 404.
 - `GET /api/health` is public and minimal (`{"status": "ok"}`); it no longer
   exposes deployment paths.
-- A default-deny middleware protects every other path, including OpenAPI docs,
-  unknown paths, and future routes. Missing/malformed or invalid credentials
-  return 401; unset `ORCH_HUB_TOKEN` returns 503 on protected routes.
+- A default-deny middleware protects every path except `/api/health` and the
+  three dashboard shell assets. Missing/malformed or invalid credentials return
+  401; unset `ORCH_HUB_TOKEN` returns 503 on protected data routes.
 - `run()` and `orch-hub-api` read `ORCH_HUB_HOST` / `ORCH_HUB_PORT` and bind
   to `127.0.0.1:8765` by default; any private exposure should remain
   Tailscale-only.
@@ -178,7 +183,7 @@ Implemented behavior:
 
 ### Human Question Relay
 
-Status: API implemented; UI/notifications planned
+Status: API + dashboard answering implemented; notifications planned
 
 Description: Detect pending control-dir question files, list them remotely with
 run/repo context, accept answers, write answer files, and audit the responder.
@@ -196,8 +201,11 @@ Implemented behavior:
 - The answer route identifies questions by `(run_id, seq)` and writes through
   `control_dir.write_answer`, preserving duplicate-answer protection, malformed
   answer repair, empty-answer rejection, and responder audit fields.
+- The dashboard task detail view renders inline answer boxes for waiting runs,
+  submits with responder `"dashboard"`, and re-renders after the answer file is
+  written.
 
-Remaining slices: dashboard rendering and notifications.
+Remaining slices: notifications.
 
 ### Log Viewing
 
@@ -237,15 +245,37 @@ Implemented behavior:
 
 ### Mobile Dashboard
 
-Status: planned
+Status: implemented
 
-Description: Web UI for repo list, task list, task detail, active/waiting status, answer input, and logs. It should be mobile-first and usable from iPhone/iPad.
+Description: Mobile-first web UI for repo/task inspection, run observation,
+answering waiting questions, run history, and logs.
 
 Modules: api, web.
 
-APIs: all protected HTTP APIs plus the public health route. Log streaming uses
-the bearer-authenticated SSE endpoint through `fetch`/ReadableStream, not
-browser `EventSource`.
+APIs: public `GET /`, `GET /app.js`, `GET /styles.css`; protected
+repo/task/run/escalation/log/history HTTP APIs. Log streaming uses the
+bearer-authenticated SSE endpoint through `fetch`/ReadableStream, not browser
+`EventSource`.
+
+Implemented behavior:
+
+- The dashboard is a vanilla, build-stepless SPA served as an explicit public
+  shell. It stores the bearer token in `localStorage`, attaches
+  `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
+  and uses no cookie or query-token credential path.
+- Repo list renders readiness from `/api/repos` and active/waiting badges from
+  `/api/runs`; it never recomputes readiness in the browser.
+- All-task and repo-detail views render task inventory from `/api/tasks` and
+  `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
+  `index_present`, and `missing`/`unknown` sentinel semantics.
+- Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
+  content, shows current/most-recent run state, links to logs, and renders
+  answer forms for waiting questions from `/api/escalations`.
+- Run history uses `GET /api/history/runs` newest-first.
+- Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
+  live runs. SSE heartbeats are skipped, blank data log lines are preserved,
+  `event: end` closes the stream, navigation/reload/pause aborts the active
+  stream, and untrusted log content is appended as text nodes.
 
 ### Auth and Private Access
 
@@ -259,8 +289,8 @@ Implemented behavior:
 
 - `Config.token` is loaded from `ORCH_HUB_TOKEN`; empty/whitespace-only values
   count as unset.
-- Every HTTP path except `/api/health` requires `Authorization: Bearer <token>`
-  when configured.
+- Every HTTP path except `/api/health` and the public dashboard shell assets
+  requires `Authorization: Bearer <token>` when configured.
 - The middleware is pure ASGI rather than Starlette `BaseHTTPMiddleware` so
   streaming responses are not buffered and client disconnects propagate.
 - Protected routes fail closed with HTTP 503 when the token is unset; there is

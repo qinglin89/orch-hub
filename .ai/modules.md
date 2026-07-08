@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ---
 
 # Modules
@@ -15,14 +15,14 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
-| Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md` and task frontmatter |
+| Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, task frontmatter, and contained raw task-content reads |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
 | History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, health/repo/task/run/escalation/log routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, public dashboard shell, health/repo/task/run/escalation/log/history routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
-| Web UI | `orch_hub/web/` | Future mobile-first dashboard assets |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
@@ -105,7 +105,7 @@ and redirect output.
 
 Location: `orch_hub/task_store.py`
 
-Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`.
+Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view; it rejects non-bare filenames, resolves the task file target, and only returns raw content whose resolved path remains under the resolved `.ai-tasks` directory.
 
 ### API
 
@@ -114,8 +114,9 @@ Location: `orch_hub/api.py`
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None)` builds an app with a default-deny bearer-token middleware,
-public `GET /api/health`, protected repo/task routes, and protected run,
-escalation, log, and history routes over one `RunManager` instance. Implemented run
+public `GET /api/health`, public dashboard shell routes, protected repo/task
+routes, and protected run, escalation, log, and history routes over one
+`RunManager` instance. Implemented run
 routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/stop`; implemented escalation routes are
 `GET /api/escalations` and
@@ -131,6 +132,19 @@ propagate. Browser log tailing uses `fetch`/ReadableStream with the standard
 bearer header, not `EventSource` or query tokens. `RegistryError` returns HTTP
 500; unknown repo/task lookups and unknown runs return HTTP 404; launch/run
 state conflicts return HTTP 409 with structured details where useful.
+
+### Web UI
+
+Location: `orch_hub/web/`
+
+Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
+defines the static app container and bottom navigation; `app.js` owns token
+entry/localStorage, bearer `fetch` calls, hash routing, repo/task/detail/run
+views, waiting-question answer forms, run history, and recent/live log views;
+`styles.css` holds the mobile layout. The dashboard reads only HTTP payloads,
+uses `fetch` + `ReadableStream.getReader()` for SSE log streaming so the bearer
+header is present, aborts active streams on navigation/reload/pause, and writes
+untrusted log/task data as escaped HTML or text nodes.
 
 ### Run Manager
 
@@ -225,4 +239,6 @@ thread only if connection count grows.
 - Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
 - Logs locate/read/stream files only from run records; API/UI callers never pass log paths.
 - API and CLI should be thin adapters over application functions.
+- Web UI callers should consume protected HTTP APIs and must not parse managed
+  repo files directly.
 - No module imports deployed orchestrator code.

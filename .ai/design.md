@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
 ---
 
 # Design Principles and Decisions
@@ -93,6 +93,17 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 - Consequence: dashboard log streaming needs a fetch-stream client helper; the
   API auth surface stays single-path and tokens stay out of URLs.
 
+### Tradeoff: public dashboard shell vs cookie/token exchange
+
+- Chose: explicitly public shell assets (`/`, `/app.js`, `/styles.css`) plus
+  browser `localStorage` for the bearer token.
+- Reason: a browser cannot attach `Authorization` on plain navigation, while a
+  cookie or query-token exchange would add a second credential path. The shell
+  is static client code with no embedded secret; all data routes still require
+  the normal bearer header.
+- Consequence: the public allowlist must stay tiny and explicit, and the SPA
+  owns token entry, storage, sign-out, and 401 re-login behavior.
+
 ### Tradeoff: pure-ASGI auth middleware vs `BaseHTTPMiddleware`
 
 - Chose: pure ASGI bearer middleware.
@@ -120,8 +131,8 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
   complexity, while keeping HTTP behavior aligned with the tested CLI/core
   payloads.
 - Consequence: the dashboard can consume stable repo and task APIs; run,
-  question, log, and auth behavior were added as separate slices, while UI
-  behavior remains separate dashboard work.
+  question, log, and auth behavior were added as separate slices, and the v1
+  dashboard now uses those APIs without adding frontend build tooling.
 
 ## Patterns in Use
 
@@ -164,6 +175,14 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 - Treat missing or rotated logs as normal data states, not API errors.
 - Stream only complete newline-terminated log lines; keep partial trailing bytes
   pending so split UTF-8 characters are not corrupted across reads.
+- Keep dashboard data access behind the API: the SPA renders readiness,
+  task-store sentinel states, task content, run state, answers, history, and
+  logs from HTTP payloads rather than reading repo files or recomputing checks.
+- Serve dashboard shell assets through an enumerated allowlist rather than a
+  broad static mount; every non-shell data route stays bearer-protected.
+- For raw task content, gate on task-index membership and resolve the task file
+  target under the resolved `.ai-tasks` directory so symlinked files cannot
+  disclose content outside the task dir.
 
 ## Anti-Patterns to Avoid
 
@@ -178,6 +197,7 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 - Duplicating orchestrator log filename attribution outside `orch_hub.logs`.
 - Copying human answer text into history/audit records.
 - Passing bearer tokens in log-stream query strings.
+- Adding a cookie or query-token credential path for the dashboard shell.
 - Exposing the hub outside the tailnet.
 - Running multiple orchestrators against the same repo.
 - Adding watchdog or log-silence detection.
@@ -188,7 +208,6 @@ verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 
 - Retention policy for run dirs and per-run `events.jsonl` history under
   `ORCH_HUB_DATA_DIR`.
-- Exact route schema beyond the implemented repo/task/run/escalation/log API surface.
-- Exact dashboard layout and frontend stack.
-- Dashboard browser token presentation for protected static/API routes.
+- Exact route schema beyond the implemented repo/task/run/escalation/log/history
+  and dashboard-shell API surface.
 - Bark server packaging on the Mac.
