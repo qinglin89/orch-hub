@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # Project Map
@@ -14,13 +14,13 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; non-health paths are bearer-protected |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch, external run dirs, file-backed `run.json`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
-| Human question relay | control_dir, runs, api, notifications, models | API implemented over live run control dirs; answers are audited via control-dir files; dashboard and notification surfacing remain separate |
+| Human question relay | control_dir, runs, api, notifications, models | API implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; dashboard and notification surfacing remain separate |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | mobile-first single-page v1 |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, control_dir, runs | Bark first; notifier interface for later backends |
 | Launchd service | config, api, docs, deploy | implemented resident Mac service packaging |
-| Run history and audit | runs, control_dir, models | preserve answer and run event history |
+| Run history and audit | history, runs, api, models, control_dir | implemented; per-run `events.jsonl`, launch-time task status on run records, lifecycle/stop/answer metadata events, no answer text copied into history |
 
 ## Feature -> APIs
 
@@ -37,23 +37,24 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
 | Notifications | internal notifier interface |
 | Launchd service | `orch-hub-api`, `deploy/launchd/com.qinglin89.orch-hub.plist`, `docs/launchd.md` |
-| Run history and audit | future run history endpoints |
+| Run history and audit | `GET /api/history/runs` |
 
 ## Module -> Key Responsibilities
 
 | Module | Responsibilities |
 |---|---|
 | config | Environment overrides, default ai-native-development path, bearer token loading, host/port/data-dir service settings, derived `aii-2` and registry-file paths |
-| models | Stable repo/readiness/task inventory/question/run data structures shared by CLI/API/tests |
+| models | Stable repo/readiness/task inventory/question/run/history data structures shared by CLI/API/tests |
 | registry | Discover managed repos from `aii-2` or registry file |
 | readiness | Validate target repo launch readiness with seven fail-closed checks |
 | subprocess_utils | Run external commands consistently and surface missing executables distinctly |
 | cli | Human and JSON repo readiness output |
 | task_store | Parse `.ai-tasks` indexes and task frontmatter into repo task inventories |
-| runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, and classify live/end status |
+| runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, and append run history events |
+| history | Append/read per-run JSONL audit/history events without storing answer text |
 | control_dir | Implement question/answer/stop file-channel handling |
 | logs | Locate, read, and stream orchestrator logs from run records |
-| api | FastAPI app factory, pure-ASGI bearer auth middleware, health/repo/task/run/escalation/log route wiring, uvicorn entry point |
+| api | FastAPI app factory, pure-ASGI bearer auth middleware, health/repo/task/run/escalation/log/history route wiring, uvicorn entry point |
 | notifications | Bark and future notification backends |
 | web | Mobile dashboard assets |
 | docs | Launchd operator documentation |

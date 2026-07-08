@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # APIs and Interfaces
@@ -79,6 +79,16 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 - Purpose: list known runs with live/waiting/end-state overlays.
 - Shape: `{"runs": [RunStatus.to_dict(), ...]}`.
 
+### `GET /api/history/runs`
+
+- Purpose: list recent runs newest-first with computed run status and persisted
+  audit/history events.
+- Source: delegates to `RunManager.recent_runs(limit=...)`, which refreshes
+  run state and reads each run's `events.jsonl`.
+- Shape: `{"runs": [RunHistoryEntry.to_dict(), ...]}` where each entry embeds
+  the normal `RunStatus` fields plus `events`.
+- Query: `limit` defaults to 50 and is clamped to `0..200`.
+
 ### `GET /api/runs/{run_id}`
 
 - Purpose: fetch one run's serialized `RunStatus`.
@@ -125,10 +135,13 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 
 - Purpose: write an answer file for one run/question sequence, auditing the
   responder.
-- Source: locates the question with `control_dir.list_questions` and writes via
-  `control_dir.write_answer`; no orchestrator code is imported.
+- Source: locates the question with `control_dir.list_questions`, writes via
+  `control_dir.write_answer`, then records answer-audit metadata through
+  `RunManager.audit_answer`; no orchestrator code is imported.
 - Shape: `{"run_id": ..., "seq": ..., "answered": true, "responder": ...,
   "answer": ...}`.
+  The response echoes the submitted answer for the immediate caller, but
+  persisted history deliberately excludes answer text.
 
 Current HTTP behavior:
 
@@ -195,17 +208,23 @@ Input: repo id, task id, start flags.
 Output: `RunRecord` from `start_run`, `RunStatus` from list/get operations,
 and idempotent stop-request results.
 
-Behavior: implemented subprocess lifecycle and per-repo serialization.
+Behavior: implemented subprocess lifecycle, per-repo serialization, and history
+event ownership.
 `RunManager` receives a `ManagedRepo` plus task id, rejects launches when the
 repo already has a live run, when task inventory is missing/unlisted or reports
 `missing`/`unknown`/unrecognized statuses, when a `blocked` task is not
 explicitly acknowledged, or when readiness fails. A successful launch creates a
 fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
 deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
-persists `run.json`, and records stdout/stderr in `spawn.out`. `list_runs` and
-`get_run` refresh live/end state and support reattach from disk by pid probe.
-`stop_run` delegates to `control_dir.request_stop` and refuses ended or broken
-runs so a post-mortem flag cannot rewrite end classification.
+persists `run.json` with launch-time task status, appends `run_started`, and
+records stdout/stderr in `spawn.out`. `list_runs` and `get_run` refresh
+live/end state and support reattach from disk by pid probe; observed ends append
+`run_ended`. `stop_run` delegates to `control_dir.request_stop`, appends
+`stop_requested` only on the first idempotent write, and refuses ended or
+broken runs so a post-mortem flag cannot rewrite end classification.
+`audit_answer` appends responder/question metadata after a control-dir answer
+write, without copying answer text. `recent_runs` returns newest-first
+`RunHistoryEntry` values from run records plus `events.jsonl`.
 
 ### Control Dir Store
 
@@ -237,6 +256,17 @@ lower bound. Recent reads cap line and byte counts and return absent snapshots
 for missing/rotated logs. Live tails emit only complete newline-terminated
 lines, use byte offsets to avoid duplicate initial/follow output, and terminate
 gracefully when the run ends or the located file disappears.
+
+### History Store
+
+Input: run dir and `RunEvent` values.
+
+Output: append-only `events.jsonl` plus `RunEvent` readback.
+
+Behavior: `append_event` writes one JSON object per line. `read_events` returns
+an empty tuple for missing history and `history_error` events for corrupt or
+unreadable history lines. History is metadata-only; answer text remains in the
+control-dir answer file, not in `events.jsonl`.
 
 ### Notifier
 
@@ -275,3 +305,5 @@ commands live in `docs/launchd.md`.
 - API/log handlers should reuse `orch_hub.logs` for log location, bounded
   reads, and SSE framing instead of accepting client paths or rebuilding the
   orchestrator filename convention in route code.
+- API/history handlers should reuse `RunManager.recent_runs` /
+  `orch_hub.history` rather than reading run dirs directly in route code.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # Project Overview
@@ -12,16 +12,16 @@ orch-hub is intended to be a long-lived local control plane for AI coding orches
 The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
-the run manager, run/escalation HTTP routes, and log viewing: read the
-ai-native-development local registry, list managed repos, report launch
-readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
-those payloads through HTTP, require `ORCH_HUB_TOKEN` on every non-health HTTP
-path, provide a launchd user-agent template for resident macOS operation,
-read/write orchestrator question, answer, and stop files,
+the run manager, run/escalation HTTP routes, log viewing, and run
+history/audit: read the ai-native-development local registry, list managed
+repos, report launch readiness, parse each repo's `.ai-tasks/` index plus task
+frontmatter, expose those payloads through HTTP, require `ORCH_HUB_TOKEN` on
+every non-health HTTP path, provide a launchd user-agent template for resident
+macOS operation, read/write orchestrator question, answer, and stop files,
 launch/list/stop/reattach orchestrator subprocess runs with per-repo
-serialization, answer waiting questions remotely, and retrieve or stream run
-logs. Later slices add dashboard UI, notifications, run history/audit views,
-remote intake-task, and IM bot control.
+serialization, answer waiting questions remotely, retrieve or stream run logs,
+and persist run lifecycle plus answer-audit metadata. Later slices add
+dashboard UI, notifications, remote intake-task, and IM bot control.
 
 ## Users
 
@@ -37,6 +37,7 @@ remote intake-task, and IM bot control.
 - Launch and supervise one orchestrator run per repo at a time, each run attached to one `.ai-tasks/<task-id>.md` task.
 - Surface orchestrator human input requests remotely, collect answers, and deliver them back through the implemented control-dir file channel.
 - Stream or tail orchestrator logs to the dashboard.
+- Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.
@@ -74,6 +75,7 @@ orch_hub/
   api.py
   cli.py
   config.py
+  history.py
   models.py
   registry.py
   readiness.py
@@ -87,6 +89,7 @@ tests/
   test_cli.py
   test_config.py
   test_control_dir.py
+  test_history.py
   test_logs.py
   test_registry.py
   test_readiness.py

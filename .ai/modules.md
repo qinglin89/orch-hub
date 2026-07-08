@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # Modules
@@ -17,6 +17,7 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md` and task frontmatter |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
+| History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, health/repo/task/run/escalation/log routes, and uvicorn entry point |
@@ -66,15 +67,18 @@ notifier settings and storage-specific options.
 Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
-task inventory, control-dir questions, and run state. `TaskSummary` carries
-`task_id`, task-file `status`, optional index summary, and blockers;
+task inventory, control-dir questions, run state, and run history.
+`TaskSummary` carries `task_id`, task-file `status`, optional index summary,
+and blockers;
 `RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered
 tasks. `Question` carries filename-authoritative `seq`, display/audit fields,
 parse error, answered state, stripped valid `answer`, and answer repair error;
 `to_dict()` deliberately excludes the local path. `RunRecord` is the persisted
-run shape; `RunStatus` overlays active/waiting/completed/stopped/error/ended
-state plus pending question count. Public readiness payloads contain `ready`
-plus failed check reasons only.
+run shape and carries launch-time `task_status`; `RunStatus` overlays
+active/waiting/completed/stopped/error/ended state plus pending question count.
+`RunEvent` stores metadata-only history events and `RunHistoryEntry` combines a
+computed run status with its persisted events. Public readiness payloads
+contain `ready` plus failed check reasons only.
 
 ### Registry
 
@@ -111,13 +115,14 @@ Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None)` builds an app with a default-deny bearer-token middleware,
 public `GET /api/health`, protected repo/task routes, and protected run,
-escalation, and log routes over one `RunManager` instance. Implemented run
+escalation, log, and history routes over one `RunManager` instance. Implemented run
 routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/stop`; implemented escalation routes are
 `GET /api/escalations` and
 `POST /api/runs/{run_id}/escalations/{seq}/answer`; implemented log routes are
 `GET /api/runs/{run_id}/logs` and
-`GET /api/runs/{run_id}/logs/stream`. Module-level `app` supports
+`GET /api/runs/{run_id}/logs/stream`; implemented history route is
+`GET /api/history/runs`. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
 console script serve locally by default and read host/port from environment
 when arguments are omitted. The bearer middleware is pure ASGI, not
@@ -139,21 +144,39 @@ inventory/status from `list_repo_tasks`, then readiness from `check_readiness`.
 `blocked` tasks require explicit acknowledgement before launch; `missing`,
 `unknown`, and unrecognized task statuses are rejected.
 
-Run dirs live under `<data_dir>/runs/<run_id>/` with `run.json`, `control/`,
-and `spawn.out`; each run gets a fresh external control dir. Launch uses
+Run dirs live under `<data_dir>/runs/<run_id>/` with `run.json`,
+`events.jsonl`, `control/`, and `spawn.out`; each run gets a fresh external
+control dir. Launch uses
 `/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
 <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
 <run>/control [extra args]`, `cwd=<repo>`, stdin from devnull, stdout/stderr to
-`spawn.out`, and `start_new_session=True`. `run.json` is the source of truth
-and is rewritten atomically; in-memory `Popen` handles exist only to capture
-exit codes for runs that end while the hub process is alive.
+`spawn.out`, and `start_new_session=True`. `run.json` is the source of truth,
+stores launch-time task frontmatter status, and is rewritten atomically;
+in-memory `Popen` handles exist only to capture exit codes for runs that end
+while the hub process is alive.
 
 Reattach scans run dirs, loads records, and probes pid liveness with
 `os.kill(pid, 0)`. If a run ended while the hub was down, `ended_ts` is
 recorded with `exit_code=None`. End classification prefers task completion or
 archival evidence, then hub stop evidence (`stop.flag` or a valid `"stop"`
 answer), then bare exit code. Broken run dirs surface as `error` states and do
-not block repo launches when no repo attribution is available.
+not block repo launches when no repo attribution is available. The manager
+appends `run_started`, `run_ended`, `stop_requested`, and `answer_recorded`
+events and exposes newest-first `recent_runs(limit=...)` history entries.
+
+### History
+
+Location: `orch_hub/history.py`
+
+Responsibility: append and read metadata-only run history events in
+`<data_dir>/runs/<run_id>/events.jsonl`. `append_event(run_dir, event)` writes
+one sorted-key JSON object per line. `read_events(run_dir)` returns
+`RunEvent` records, tolerates missing history as empty, and returns
+`history_error` events for unreadable files, invalid JSON lines, or non-object
+lines.
+
+The module is storage-only: it does not parse task files, inspect control-dir
+answers, decide event timing, or store human answer text.
 
 ### Control Dir
 
@@ -197,6 +220,8 @@ thread only if connection count grows.
 - Readiness code does not launch orchestrators.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
+- History serializes run/audit metadata only; `RunManager` decides when events
+  are written.
 - Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
 - Logs locate/read/stream files only from run records; API/UI callers never pass log paths.
 - API and CLI should be thin adapters over application functions.

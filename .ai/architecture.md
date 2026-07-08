@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # Architecture
@@ -77,17 +77,29 @@ It creates a fresh external run dir per run:
 ```text
 <data_dir>/runs/<run_id>/
   run.json
+  events.jsonl
   control/
   spawn.out
 ```
 
-`run.json` records run id, repo/task identity, pid, started timestamp, control
-dir, log dir, argv, optional ended timestamp, and optional exit code. The
-started timestamp is captured just before spawning so it is a sound lower bound
-for the child orchestrator's second-precision log filename. A resident manager
-keeps `Popen` handles only to capture exit codes; a fresh manager reattaches by
-scanning run dirs and probing pid liveness. Cross-repo parallelism is allowed;
-same-repo live runs are not.
+`run.json` records run id, repo/task identity, launch-time task-store status,
+pid, started timestamp, control dir, log dir, argv, optional ended timestamp,
+and optional exit code. `events.jsonl` records run lifecycle, stop-request, and
+answer-audit metadata events. The started timestamp is captured just before
+spawning so it is a sound lower bound for the child orchestrator's
+second-precision log filename. A resident manager keeps `Popen` handles only to
+capture exit codes; a fresh manager reattaches by scanning run dirs and probing
+pid liveness. Cross-repo parallelism is allowed; same-repo live runs are not.
+
+### Run History Store
+
+Implemented file-backed history extends each run dir with append-only
+`events.jsonl`. `orch_hub.history` serializes `RunEvent` records and returns
+`history_error` events for unreadable or malformed history lines instead of
+hiding them. `RunManager` appends `run_started`, `run_ended`,
+`stop_requested`, and `answer_recorded` events; answer audit events include
+responder and question metadata but deliberately do not copy answer text out of
+the control-dir answer file.
 
 ### Control Dir Store
 
@@ -106,11 +118,12 @@ web/API/subprocess ownership.
 ### API Service
 
 Implemented FastAPI service exposing health, repo readiness, task inventory,
-run, escalation, and log endpoints behind bearer-token auth. The current route
-set includes `GET /api/health`, `GET /api/repos`, `GET /api/tasks`,
-`GET /api/repos/{repo_id}/tasks`, run start/list/get/stop routes, escalation
-list/answer routes, `GET /api/runs/{run_id}/logs`, and
-`GET /api/runs/{run_id}/logs/stream`; dashboard routes remain future work.
+run, escalation, log, and history endpoints behind bearer-token auth. The
+current route set includes `GET /api/health`, `GET /api/repos`,
+`GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, run start/list/get/stop
+routes, escalation list/answer routes, `GET /api/runs/{run_id}/logs`,
+`GET /api/runs/{run_id}/logs/stream`, and `GET /api/history/runs`; dashboard
+routes remain future work.
 `GET /api/health` is the only public route and returns only
 `{"status": "ok"}`. Every other path, including docs/OpenAPI and unknown future
 paths, requires `Authorization: Bearer <ORCH_HUB_TOKEN>` when the token is
@@ -150,7 +163,7 @@ Future notifier interface with Bark as v1 backend. Notification triggers are esc
 ```text
 UI/API/CLI
   calls
-Application services: discovery, readiness, task inventory, run control
+Application services: discovery, readiness, task inventory, run control, history
   call
 Adapters: aii-2 command, registry file, git subprocess, orchestrator subprocess, control-dir files
   operate on
@@ -207,7 +220,9 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 5. Hub creates a fresh run dir outside the target repo.
 6. Hub starts the deployed orchestrator subprocess with `--control-dir`.
 7. Hub records pid, repo, task, control dir, log dir, start time, argv, and
-   later observed end state in `run.json`.
+   later observed end state in `run.json`, including the launch-time task
+   frontmatter status from `TaskSummary`.
+8. Hub appends a `run_started` history event.
 
 ### Human Answer
 
@@ -221,7 +236,8 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 
 1. User requests stop.
 2. Hub writes `stop.flag` with `request_stop` for graceful stop at a session boundary.
-3. If a hard kill is ever exposed, it must warn that the repo may be dirty and children may be orphaned.
+3. Hub records a `stop_requested` event only for the first idempotent stop write.
+4. If a hard kill is ever exposed, it must warn that the repo may be dirty and children may be orphaned.
 
 ### Log Access
 
@@ -250,6 +266,18 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
    `active`.
 5. End classification prefers task completion/archival evidence, then stop
    evidence (`stop.flag` or a valid `"stop"` answer), then bare exit code.
+6. When the hub observes an end, it rewrites `run.json` and appends a
+   `run_ended` event with the observed exit code when available.
+
+### Run History Access
+
+1. Client requests recent history through `GET /api/history/runs`.
+2. API asks `RunManager.recent_runs(limit=...)`, which clamps the limit to
+   `0..200`, scans run dirs newest-first, refreshes computed run status, and
+   loads each run's `events.jsonl`.
+3. Response embeds each run's current serialized `RunStatus` plus persisted
+   event records. History parsing failures are represented as events rather
+   than route failures.
 
 ## External Dependencies
 
@@ -269,9 +297,8 @@ template should run `orch-hub-api` from the repo venv, set a nonblank
 `ORCH_HUB_TOKEN`, and listen only on localhost behind Tailscale Serve or on a
 private Tailscale IP. Simple bearer-token auth is required for all protected
 HTTP routes even on the tailnet; tailnet membership remains the primary
-boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; run dirs are stored
-under `<data_dir>/runs/<run_id>/`, and future audit/history storage should
-extend that hub-owned data area.
+boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; run dirs and
+`events.jsonl` history are stored under `<data_dir>/runs/<run_id>/`.
 
 ## Invariants
 
@@ -281,6 +308,6 @@ extend that hub-owned data area.
 - Control-dir adapter code stays file-channel only; API/UI/run-manager code calls it instead of duplicating file writes.
 - Same target repo cannot have two active orchestrator runs.
 - Run dirs must stay outside target repo working trees and be fresh per run.
-- Human answers are auditable.
+- Human answers are auditable, but history must not duplicate answer text.
 - Log access is scoped to known run records; clients never supply log paths.
 - Readiness must fail closed; missing deploy pieces, dirty trees, or failed `aii-2 status` should block launch.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # Design Principles and Decisions
@@ -50,6 +50,15 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 - Consequence: a hub crash in the tiny post-spawn/pre-write window leaves an
   unattributed broken run dir that surfaces as `error` but cannot block repo
   launches.
+
+### Tradeoff: per-run JSONL history vs SQLite
+
+- Chose: append-only `events.jsonl` in each existing run dir.
+- Reason: v1 history is local, per-run, and naturally colocated with
+  `run.json`; JSONL keeps the storage inspectable and avoids a second
+  database/retention substrate before dashboard needs prove it out.
+- Consequence: recent-run history scans run directories and history errors are
+  surfaced as synthetic events; retention remains a run-dir policy question.
 
 ### Tradeoff: pre-spawn `started_ts` vs post-spawn timestamp
 
@@ -140,6 +149,11 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
   stale `stop.flag` files would stop reused runs immediately.
 - Treat `run.json` as the source of truth for run state; in-memory process
   handles are only an optimization for observing exit codes.
+- Store launch-time task frontmatter status on `RunRecord.task_status`; history
+  code should not re-parse task files to reconstruct run context.
+- Keep run history metadata-only: answer audit records responder and question
+  metadata, while exact human answer text remains only in the control-dir
+  answer file consumed by the orchestrator.
 - Classify finished runs from stable evidence in order: task
   completed/archived, hub stop evidence, then exit code.
 - Require explicit acknowledgement for any `blocked` task launch because the
@@ -162,6 +176,7 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 - Duplicating control-dir filename, validity, or stop-flag logic outside
   `orch_hub.control_dir`.
 - Duplicating orchestrator log filename attribution outside `orch_hub.logs`.
+- Copying human answer text into history/audit records.
 - Passing bearer tokens in log-stream query strings.
 - Exposing the hub outside the tailnet.
 - Running multiple orchestrators against the same repo.
@@ -171,9 +186,9 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 
 ## Open Design Items
 
-- Retention policy for run dirs and audit history under `ORCH_HUB_DATA_DIR`.
+- Retention policy for run dirs and per-run `events.jsonl` history under
+  `ORCH_HUB_DATA_DIR`.
 - Exact route schema beyond the implemented repo/task/run/escalation/log API surface.
 - Exact dashboard layout and frontend stack.
 - Dashboard browser token presentation for protected static/API routes.
 - Bark server packaging on the Mac.
-- Whether run history is file-backed JSONL, SQLite, or another lightweight store.

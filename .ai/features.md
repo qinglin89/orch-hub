@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-08
-verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
+verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
 ---
 
 # Features
@@ -20,7 +20,7 @@ verified-against: 14538c4c9330256566453d0f757dad3acd35a2f6
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
 | Launchd service | implemented | config, api, docs, deploy | `orch-hub-api`, launchd plist/docs |
-| Run history and audit | planned | runs, control_dir, notifications | future history endpoints |
+| Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs` |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
 | IM bot control | future | notifications or bot adapter, api | future bot callback interface |
 
@@ -197,8 +197,7 @@ Implemented behavior:
   `control_dir.write_answer`, preserving duplicate-answer protection, malformed
   answer repair, empty-answer rejection, and responder audit fields.
 
-Remaining slices: dashboard rendering, notifications, and persistent
-history/audit views.
+Remaining slices: dashboard rendering and notifications.
 
 ### Log Viewing
 
@@ -300,16 +299,34 @@ Implemented behavior:
 
 ### Run History and Audit
 
-Status: planned
+Status: implemented
 
-Description: Persist run events, human answers, stop requests, and end states for later inspection.
+Description: Persist run lifecycle, stop request, and human answer-audit
+metadata for later inspection without copying human answer text into history.
 
-Modules: runs, control_dir, models.
+Modules: history, runs, api, models, control_dir.
 
-Dependency: the implemented run manager already persists per-run `run.json`
-under `<data_dir>/runs/<run_id>/` with repo/task identity, pid, control dir,
-log dir, argv, `started_ts`, hub-observed `ended_ts`, and optional `exit_code`;
-history/audit storage can extend that substrate.
+APIs: `GET /api/history/runs`.
+
+Implemented behavior:
+
+- Per-run history is append-only JSONL at
+  `<data_dir>/runs/<run_id>/events.jsonl`, colocated with `run.json`,
+  `control/`, and `spawn.out`.
+- `RunRecord.task_status` stores the launch-time task-store/frontmatter status
+  from `TaskSummary`, so history records carry task context without re-parsing
+  task files.
+- `RunManager` appends `run_started`, `run_ended`, `stop_requested`, and
+  `answer_recorded` events. Stop events are written only for the first
+  idempotent stop request; end events include the observed exit code when the
+  hub has it.
+- Answer audit events record responder and question metadata (`seq`, question
+  timestamp/kind/banner/message) but deliberately exclude the answer text.
+- `GET /api/history/runs` returns recent runs newest-first with the normal
+  serialized run status plus embedded persisted events; `limit` defaults to 50
+  and is clamped to `0..200`.
+- History readback treats missing `events.jsonl` as empty history and surfaces
+  unreadable or malformed event lines as `history_error` events.
 
 ### Remote Intake-Task
 
