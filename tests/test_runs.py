@@ -16,6 +16,12 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import Config
+from orch_hub.history import (
+    KIND_RUN_ENDED,
+    KIND_RUN_STARTED,
+    KIND_STOP_REQUESTED,
+    read_events,
+)
 from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.runs import (
     CAFFEINATE,
@@ -223,6 +229,7 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
         "repo_name": "repo-a",
         "repo_path": str(repo.path),
         "task_id": TASK_ID,
+        "task_status": "in_progress",
         "control_dir": str(run_dir / "control"),
         "log_dir": str(repo.path / ".cursor" / "orchestrator" / "logs"),
         "argv": list(spawner.calls[0]["argv"]),
@@ -232,6 +239,31 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
         "exit_code": None,
     }
     assert not list(run_dir.glob("*.tmp"))
+
+
+def test_run_record_carries_launch_time_task_status(tmp_path):
+    repo = make_repo(tmp_path, task_status="final_review")
+    manager, _, _ = make_manager(tmp_path)
+
+    record = manager.start_run(repo, TASK_ID)
+
+    assert record.task_status == "final_review"
+    assert read_record(manager, record.run_id)["task_status"] == "final_review"
+
+
+def test_run_started_event_is_persisted(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+
+    record = manager.start_run(repo, TASK_ID)
+
+    events = read_events(manager.runs_dir / record.run_id)
+    assert len(events) == 1
+    assert events[0].kind == KIND_RUN_STARTED
+    assert events[0].run_id == record.run_id
+    assert events[0].repo_name == "repo-a"
+    assert events[0].task_id == TASK_ID
+    assert events[0].task_status == "in_progress"
 
 
 def test_started_ts_is_stamped_before_the_spawn(tmp_path):
@@ -480,6 +512,8 @@ def test_stop_run_writes_the_stop_flag_once(tmp_path):
     assert manager.stop_run(record.run_id) is True
     assert (record.control_dir / "stop.flag").is_file()
     assert manager.stop_run(record.run_id) is False  # idempotent
+    events = read_events(manager.runs_dir / record.run_id)
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_STOP_REQUESTED]
 
     # A stop is a request, not a kill: the run stays alive until the
     # orchestrator honors the flag.
@@ -554,6 +588,29 @@ def test_get_run_returns_single_status(tmp_path):
         manager.get_run("20990101T000000Z-nope-x")
     with pytest.raises(UnknownRunError):
         manager.get_run("../../etc")
+
+
+def test_recent_runs_returns_newest_first_with_events(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, clock = make_manager(tmp_path)
+    first = manager.start_run(repo, TASK_ID)
+    spawner.procs[0].returncode = 0
+    manager.list_runs()  # observe first end
+    clock.tick()
+    second = manager.start_run(repo, TASK_ID)
+
+    entries = manager.recent_runs(limit=2)
+
+    assert [entry.status.record.run_id for entry in entries] == [
+        second.run_id,
+        first.run_id,
+    ]
+    assert [event.kind for event in entries[0].events] == [KIND_RUN_STARTED]
+    assert [event.kind for event in entries[1].events] == [
+        KIND_RUN_STARTED,
+        KIND_RUN_ENDED,
+    ]
+    assert manager.recent_runs(limit=1)[0].status.record.run_id == second.run_id
 
 
 # -- end-of-run classification ----------------------------------------------------
@@ -695,6 +752,9 @@ def test_observed_exit_code_is_persisted_for_later_managers(tmp_path):
     manager_a.list_runs()  # observes and persists the exit
 
     assert read_record(manager_a, record.run_id)["exit_code"] == 5
+    events = read_events(manager_a.runs_dir / record.run_id)
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_RUN_ENDED]
+    assert events[-1].exit_code == 5
 
     # A later manager classifies purely from the persisted record.
     manager_b, _, _ = make_manager(tmp_path, pid_probe=lambda pid: True)

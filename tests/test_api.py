@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from orch_hub import api
 from orch_hub.config import HOST_ENV, PORT_ENV, Config
+from orch_hub.history import KIND_ANSWER_RECORDED, KIND_RUN_STARTED, read_events
 from orch_hub.models import (
     ManagedRepo,
     ReadinessCheck,
@@ -592,6 +593,24 @@ def test_list_runs_returns_statuses(tmp_path, monkeypatch):
     assert runs[0]["state"] == "active"
 
 
+def test_history_runs_returns_recent_runs_with_events(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    first = start_a_run(client, repo)
+    spawner.procs[0].returncode = 0
+    client.get("/api/runs")  # observe first end and free the repo
+    second = start_a_run(client, repo)
+
+    resp = client.get("/api/history/runs?limit=1")
+
+    assert resp.status_code == 200
+    runs = resp.json()["runs"]
+    assert len(runs) == 1
+    assert runs[0]["run_id"] == second["run_id"]
+    assert runs[0]["task_status"] == "in_progress"
+    assert [event["kind"] for event in runs[0]["events"]] == [KIND_RUN_STARTED]
+    assert first["run_id"] not in {run["run_id"] for run in runs}
+
+
 def test_get_run_returns_status_and_unknown_is_404(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     started = start_a_run(client, repo)
@@ -705,6 +724,14 @@ def test_answer_escalation_writes_answer_file(tmp_path, monkeypatch):
     assert written["answer"] == "proceed"
     assert written["responder"] == "iphone"
     assert written["seq"] == 1
+    events = read_events(manager.runs_dir / started["run_id"])
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_ANSWER_RECORDED]
+    audit = events[-1].to_dict()
+    assert audit["seq"] == 1
+    assert audit["question_banner"] == "?"
+    assert audit["responder"] == "iphone"
+    assert "answer" not in audit
+    assert "proceed" not in json.dumps(audit)
     # The question is no longer an escalation.
     assert client.get("/api/escalations").json()["escalations"] == []
 
@@ -874,6 +901,7 @@ def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
         "/api/runs", json={"repo_id": "r", "task_id": RUN_TASK_ID}
     ).status_code == 401
     assert unauthed.get("/api/runs").status_code == 401
+    assert unauthed.get("/api/history/runs").status_code == 401
     assert unauthed.get("/api/runs/anything").status_code == 401
     assert unauthed.post("/api/runs/anything/stop").status_code == 401
     assert unauthed.get("/api/runs/anything/logs").status_code == 401

@@ -60,10 +60,21 @@ from typing import BinaryIO, Protocol
 
 from .config import Config
 from .control_dir import pending_questions, request_stop, stop_answered, stop_requested
+from .history import (
+    KIND_ANSWER_RECORDED,
+    KIND_RUN_ENDED,
+    KIND_RUN_STARTED,
+    KIND_STOP_REQUESTED,
+    append_event,
+    read_events,
+)
 from .models import (
     ManagedRepo,
+    Question,
     ReadinessReport,
     RepoTaskInventory,
+    RunEvent,
+    RunHistoryEntry,
     RunRecord,
     RunStatus,
 )
@@ -246,7 +257,7 @@ class RunManager:
         """
         with self._lock:
             self._ensure_repo_free(repo)
-            self._gate_task(repo, task_id, acknowledge_blocked)
+            task_status = self._gate_task(repo, task_id, acknowledge_blocked)
             self._gate_readiness(repo)
             run_dir, run_id = self._create_run_dir(repo.name, task_id)
             control_dir = run_dir / CONTROL_SUBDIR
@@ -286,6 +297,7 @@ class RunManager:
                 repo_name=repo.name,
                 repo_path=repo.path,
                 task_id=task_id,
+                task_status=task_status,
                 control_dir=control_dir,
                 log_dir=repo.path / ORCHESTRATOR_LOG_DIR,
                 argv=argv,
@@ -293,6 +305,15 @@ class RunManager:
                 started_ts=started_ts,
             )
             _write_record(run_dir, record)
+            append_event(
+                run_dir,
+                _run_event(
+                    record,
+                    KIND_RUN_STARTED,
+                    ts=record.started_ts,
+                    task_status=task_status,
+                ),
+            )
             self._procs[run_id] = proc
             return record
 
@@ -306,7 +327,7 @@ class RunManager:
 
     def _gate_task(
         self, repo: ManagedRepo, task_id: str, acknowledge_blocked: bool
-    ) -> None:
+    ) -> str:
         inventory = self._task_lister(repo)
         if not inventory.index_present:
             raise LaunchBlockedError(
@@ -341,6 +362,7 @@ class RunManager:
             raise LaunchBlockedError(
                 [f"task {task_id!r} has unrecognized status {task.status!r}"]
             )
+        return task.status
 
     def _gate_readiness(self, repo: ManagedRepo) -> None:
         report = self._readiness_checker(repo, self._config)
@@ -381,6 +403,21 @@ class RunManager:
                 for run_dir in self._run_dirs()
             ]
 
+    def recent_runs(self, limit: int = 50) -> list[RunHistoryEntry]:
+        """Return recent runs newest-first with persisted audit events."""
+        bounded = max(0, min(limit, 200))
+        with self._lock:
+            entries = [
+                RunHistoryEntry(
+                    status=self._status(
+                        run_dir, self._refresh(run_dir, _load_record(run_dir))
+                    ),
+                    events=read_events(run_dir),
+                )
+                for run_dir in reversed(self._run_dirs())
+            ]
+            return entries[:bounded]
+
     def get_run(self, run_id: str) -> RunStatus:
         """Return one run's current status; unknown ids raise."""
         with self._lock:
@@ -407,7 +444,47 @@ class RunManager:
             if record.ended_ts is not None:
                 raise RunEndedError(f"run {run_id} already ended")
             assert record.control_dir is not None
-            return request_stop(record.control_dir)
+            newly_requested = request_stop(record.control_dir)
+            if newly_requested:
+                append_event(
+                    run_dir,
+                    _run_event(
+                        record,
+                        KIND_STOP_REQUESTED,
+                        ts=self._clock().isoformat(),
+                        detail="stop.flag written",
+                    ),
+                )
+            return newly_requested
+
+    def audit_answer(
+        self, run_id: str, question: Question, *, responder: str
+    ) -> None:
+        """Persist answer audit metadata after a control-dir answer is written.
+
+        The answer text is intentionally excluded: the control-dir answer file
+        is the consumed contract artifact, while history keeps metadata for
+        later inspection without copying potentially sensitive content.
+        """
+        with self._lock:
+            run_dir = self._run_dir_for(run_id)
+            record = _load_record(run_dir)
+            if record.error:
+                raise UnknownRunError(f"run {run_id!r} has no readable record")
+            append_event(
+                run_dir,
+                _run_event(
+                    record,
+                    KIND_ANSWER_RECORDED,
+                    ts=self._clock().isoformat(),
+                    seq=question.seq,
+                    question_ts=question.ts,
+                    question_kind=question.kind,
+                    question_banner=question.banner,
+                    question_message=question.message,
+                    responder=responder,
+                ),
+            )
 
     # -- internals ------------------------------------------------------------
 
@@ -443,6 +520,15 @@ class RunManager:
             # the exit status is unrecoverable, only the end itself is known.
             updated = replace(record, ended_ts=self._clock().isoformat())
         _write_record(run_dir, updated)
+        append_event(
+            run_dir,
+            _run_event(
+                updated,
+                KIND_RUN_ENDED,
+                ts=updated.ended_ts,
+                exit_code=updated.exit_code,
+            ),
+        )
         return updated
 
     def _status(self, run_dir: Path, record: RunRecord) -> RunStatus:
@@ -526,6 +612,7 @@ def _write_record(run_dir: Path, record: RunRecord) -> None:
         "repo_name": record.repo_name,
         "repo_path": str(record.repo_path) if record.repo_path else None,
         "task_id": record.task_id,
+        "task_status": record.task_status,
         "control_dir": str(record.control_dir) if record.control_dir else None,
         "log_dir": str(record.log_dir) if record.log_dir else None,
         "argv": list(record.argv),
@@ -562,6 +649,7 @@ def _load_record(run_dir: Path) -> RunRecord:
         repo_name=_str_field(data, "repo_name") or "",
         repo_path=_path_field(data, "repo_path"),
         task_id=_str_field(data, "task_id") or "",
+        task_status=_str_field(data, "task_status"),
         control_dir=_path_field(data, "control_dir") or run_dir / CONTROL_SUBDIR,
         log_dir=_path_field(data, "log_dir"),
         argv=tuple(str(a) for a in argv) if isinstance(argv, list) else (),
@@ -593,3 +681,40 @@ def _path_field(data: dict, key: str) -> Path | None:
 def _int_field(data: dict, key: str) -> int | None:
     value = data.get(key)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _run_event(
+    record: RunRecord,
+    kind: str,
+    *,
+    ts: str | None,
+    task_status: str | None = None,
+    state: str | None = None,
+    detail: str | None = None,
+    exit_code: int | None = None,
+    seq: int | None = None,
+    question_ts: str | None = None,
+    question_kind: str | None = None,
+    question_banner: str | None = None,
+    question_message: str | None = None,
+    responder: str | None = None,
+) -> RunEvent:
+    """Build an audit event from persisted run identity."""
+    return RunEvent(
+        ts=ts or "",
+        kind=kind,
+        run_id=record.run_id,
+        repo_name=record.repo_name,
+        repo_path=record.repo_path,
+        task_id=record.task_id,
+        task_status=task_status if task_status is not None else record.task_status,
+        state=state,
+        detail=detail,
+        exit_code=exit_code,
+        seq=seq,
+        question_ts=question_ts,
+        question_kind=question_kind,
+        question_banner=question_banner,
+        question_message=question_message,
+        responder=responder,
+    )

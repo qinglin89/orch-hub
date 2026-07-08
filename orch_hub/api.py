@@ -293,6 +293,11 @@ def create_app(
         """List every known run (oldest first) with its computed live/end state."""
         return {"runs": [status.to_dict() for status in manager.list_runs()]}
 
+    @app.get("/api/history/runs")
+    def list_run_history(limit: int = 50) -> dict:
+        """Return recent runs newest-first with persisted audit events."""
+        return {"runs": [entry.to_dict() for entry in manager.recent_runs(limit=limit)]}
+
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
         """Return one run's current :class:`RunStatus`; unknown ids are 404."""
@@ -426,6 +431,7 @@ def create_app(
             write_answer(question, req.answer, responder=responder)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        manager.audit_answer(run_id, question, responder=responder)
         return {
             "run_id": run_id,
             "seq": seq,

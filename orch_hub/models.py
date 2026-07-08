@@ -204,6 +204,7 @@ class RunRecord:
     repo_name: str = ""
     repo_path: Path | None = None
     task_id: str = ""
+    task_status: str | None = None
     control_dir: Path | None = None
     log_dir: Path | None = None
     argv: tuple[str, ...] = ()
@@ -221,6 +222,7 @@ class RunRecord:
             "repo_name": self.repo_name,
             "repo_path": str(self.repo_path) if self.repo_path else None,
             "task_id": self.task_id,
+            "task_status": self.task_status,
             "pid": self.pid,
             "started_ts": self.started_ts,
             "ended_ts": self.ended_ts,
@@ -251,4 +253,65 @@ class RunStatus:
             "state": self.state,
             "detail": self.detail,
             "pending_questions": self.pending,
+        }
+
+
+@dataclass(frozen=True)
+class RunEvent:
+    """One persisted audit/history event for a run.
+
+    Event files deliberately store metadata only. Human answer text is not part
+    of this model; the control-dir answer file is the contract artifact that
+    contains the exact answer consumed by the orchestrator.
+    """
+
+    ts: str
+    kind: str
+    run_id: str
+    repo_name: str = ""
+    repo_path: Path | None = None
+    task_id: str = ""
+    task_status: str | None = None
+    state: str | None = None
+    detail: str | None = None
+    exit_code: int | None = None
+    seq: int | None = None
+    question_ts: str | None = None
+    question_kind: str | None = None
+    question_banner: str | None = None
+    question_message: str | None = None
+    responder: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts,
+            "kind": self.kind,
+            "run_id": self.run_id,
+            "repo_name": self.repo_name,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "task_id": self.task_id,
+            "task_status": self.task_status,
+            "state": self.state,
+            "detail": self.detail,
+            "exit_code": self.exit_code,
+            "seq": self.seq,
+            "question_ts": self.question_ts,
+            "question_kind": self.question_kind,
+            "question_banner": self.question_banner,
+            "question_message": self.question_message,
+            "responder": self.responder,
+        }
+
+
+@dataclass(frozen=True)
+class RunHistoryEntry:
+    """Recent-run read model: current status plus persisted audit events."""
+
+    status: RunStatus
+    events: tuple[RunEvent, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            **self.status.to_dict(),
+            "events": [event.to_dict() for event in self.events],
         }
