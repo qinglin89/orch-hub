@@ -3,18 +3,23 @@
  * orch-hub mobile dashboard — vanilla SPA, no build step.
  *
  * Auth model: this shell is served publicly (client code, no secrets). The
- * bearer token lives only in this browser's localStorage; every data fetch
- * attaches `Authorization: Bearer <token>`. This keeps the API on a single
- * credential path (no cookies, no query tokens), matching the SSE log stream
- * design. A 401 clears the stored token and returns to the login gate.
+ * bearer token lives only in this browser's localStorage; every data fetch —
+ * including the SSE log stream — attaches `Authorization: Bearer <token>`. The
+ * log stream is read with fetch + a ReadableStream reader rather than
+ * `EventSource`, which cannot set that header, so the API keeps a single
+ * credential path (no cookies, no query tokens). A 401 clears the stored token
+ * and returns to the login gate.
  *
- * Session-1 scope: login gate + repo list + all-task list. Repo/task detail,
- * answers, and logs land in later sessions; the router already tolerates the
- * not-yet-built routes by falling back to the repo list.
+ * Views: login gate; repo list + repo detail; all-task list + task detail
+ * (with an inline answer box for waiting questions); run history; and a live/
+ * recent log tail per run. The hash router tolerates unknown routes by falling
+ * back to the repo list.
  */
 (function () {
   const TOKEN_KEY = "orch-hub-token";
   const LIVE_STATES = new Set(["active", "waiting"]); // run states that badge a repo
+  const DEFAULT_LOG_TAIL = 200; // initial log lines to request (matches the API default)
+  let activeStream = null; // AbortController for the in-flight SSE log stream, if any
   // Known task-file statuses in protocol order; the sentinels are data
   // problems (file missing / status unparseable), not runnable states.
   const KNOWN_STATUSES = [
@@ -41,14 +46,19 @@
     }
   }
 
+  // Bearer header for every hub request — the single credential path. Empty
+  // when no token is stored (the request then 401s and re-gates).
+  function authHeaders() {
+    const token = getToken();
+    return token ? { Authorization: "Bearer " + token } : {};
+  }
+
   // GET by default; pass { method, body } to POST JSON (e.g. answering a
   // question). The bearer header is attached to every call — the single
   // credential path the whole SPA relies on.
   async function api(path, options) {
     const opts = options || {};
-    const token = getToken();
-    const headers = {};
-    if (token) headers["Authorization"] = "Bearer " + token;
+    const headers = authHeaders();
     const init = { method: opts.method || "GET", headers };
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";
@@ -106,10 +116,16 @@
   const badge = (label, kind) =>
     `<span class="badge ${kind || ""}">${escapeHtml(label)}</span>`;
 
-  // A run-state badge: `waiting` warns (needs a human), other live/end states
-  // ride the neutral "run" colour.
-  const runBadge = (state) =>
-    badge(state, state === "waiting" ? "warn" : "run");
+  // A run-state badge, coloured by state: `waiting` warns (needs a human),
+  // `active` rides the "run" colour, and finished states map to ok/bad/neutral.
+  function runBadgeKind(state) {
+    if (state === "waiting") return "warn";
+    if (state === "active") return "run";
+    if (state === "completed") return "ok";
+    if (state === "error") return "bad";
+    return ""; // stopped / ended: neutral
+  }
+  const runBadge = (state) => badge(state, runBadgeKind(state));
 
   const centerHtml = (text) => `<p class="center">${escapeHtml(text)}</p>`;
 
@@ -118,6 +134,7 @@
   const repoHash = (repo) => "#/repos/" + encodeURIComponent(repo);
   const taskHash = (repo, taskId) =>
     "#/tasks/" + encodeURIComponent(repo) + "/" + encodeURIComponent(taskId);
+  const logsHash = (runId) => "#/runs/" + encodeURIComponent(runId) + "/logs";
 
   function showChrome(authed) {
     document.getElementById("signout-btn").hidden = !authed;
@@ -125,7 +142,9 @@
   }
 
   function setActiveTab(path) {
-    const tab = path.startsWith("/tasks") ? "/tasks" : "/repos";
+    let tab = "/repos";
+    if (path.startsWith("/tasks")) tab = "/tasks";
+    else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
       a.classList.toggle("active", a.dataset.tab === tab);
     });
@@ -519,6 +538,7 @@
       <dl class="kv">${kv}</dl>
       ${run.detail ? `<p class="muted">${escapeHtml(run.detail)}</p>` : ""}
       ${run.error ? `<p class="error-text">${escapeHtml(run.error)}</p>` : ""}
+      <p><a class="text-link" href="${logsHash(run.run_id)}">View logs →</a></p>
     </section>`;
   }
 
@@ -664,6 +684,245 @@
     wireAnswerForms();
   }
 
+  // ---- run history ----
+  function runMetaKv(run) {
+    const rows = [];
+    if (run.started_ts) rows.push(["started", run.started_ts]);
+    if (run.ended_ts) rows.push(["ended", run.ended_ts]);
+    if (run.exit_code !== null && run.exit_code !== undefined)
+      rows.push(["exit code", String(run.exit_code)]);
+    if (run.pending_questions)
+      rows.push(["pending questions", String(run.pending_questions)]);
+    return rows
+      .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`)
+      .join("");
+  }
+
+  function historyRunCard(run) {
+    const meta = [run.repo_name, run.task_id]
+      .filter(Boolean)
+      .map(escapeHtml)
+      .join(" · ");
+    const kv = runMetaKv(run);
+    return `
+      <li class="card run">
+        <a class="card-link" href="${logsHash(run.run_id)}">
+          <div class="card-head">
+            <span class="run-id">${escapeHtml(run.run_id)}</span>
+            <span class="badges">${runBadge(run.state)}</span>
+          </div>
+          ${meta ? `<div class="muted">${meta}</div>` : ""}
+          ${kv ? `<dl class="kv">${kv}</dl>` : ""}
+        </a>
+      </li>`;
+  }
+
+  // Run history: recent runs newest-first from the history endpoint. Each run
+  // taps through to its log tail.
+  async function renderRuns() {
+    view().innerHTML = centerHtml("Loading runs…");
+    const data = await api("/api/history/runs");
+    const runs = data.runs || [];
+    if (!runs.length) {
+      view().innerHTML = centerHtml("No runs recorded yet.");
+      return;
+    }
+    view().innerHTML =
+      `<ul class="list">` + runs.map(historyRunCard).join("") + `</ul>`;
+  }
+
+  // ---- run logs (recent tail + live SSE stream) ----
+
+  // Parse one SSE event block (the text between blank-line separators) per the
+  // event-stream wire format: ":"-prefixed lines are comments (our heartbeat),
+  // a field's single leading space is stripped, and `event:`/`data:` are the
+  // only fields the log stream uses. `hasData` distinguishes a real (possibly
+  // empty) log line from a comment-only heartbeat block.
+  function parseSseBlock(block) {
+    let event = "message";
+    const data = [];
+    for (const line of block.split("\n")) {
+      if (line === "" || line[0] === ":") continue;
+      const idx = line.indexOf(":");
+      const field = idx === -1 ? line : line.slice(0, idx);
+      let value = idx === -1 ? "" : line.slice(idx + 1);
+      if (value[0] === " ") value = value.slice(1);
+      if (field === "event") event = value;
+      else if (field === "data") data.push(value);
+    }
+    return { event, data: data.join("\n"), hasData: data.length > 0 };
+  }
+
+  // Tail a run's log over the bearer-authenticated SSE endpoint with fetch + a
+  // ReadableStream reader — never `EventSource`, which cannot set the
+  // Authorization header. Invokes handlers.onLine(text) per completed log line
+  // and handlers.onEnd(reason) once (terminal `event: end`, or the connection
+  // closing). handlers.signal aborts the read when the view is left; a 401
+  // re-gates exactly like api().
+  async function streamLog(runId, tail, handlers) {
+    const resp = await fetch(
+      "/api/runs/" + encodeURIComponent(runId) + "/logs/stream?tail=" + tail,
+      { headers: authHeaders(), signal: handlers.signal }
+    );
+    if (resp.status === 401) {
+      setToken("");
+      renderLogin("That token was rejected. Enter a valid one.");
+      throw new ApiError("unauthorized", 401);
+    }
+    if (!resp.ok || !resp.body) {
+      throw new ApiError(
+        "Log stream failed (" + resp.status + ").",
+        resp.status
+      );
+    }
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let sep;
+      while ((sep = buffer.indexOf("\n\n")) !== -1) {
+        const evt = parseSseBlock(buffer.slice(0, sep));
+        buffer = buffer.slice(sep + 2);
+        if (evt.event === "end") {
+          handlers.onEnd(evt.data || "stream ended");
+          return;
+        }
+        if (evt.hasData) handlers.onLine(evt.data);
+      }
+    }
+    handlers.onEnd(null); // connection closed without an explicit end frame
+  }
+
+  // Append log lines as text nodes (log content is untrusted — never HTML) and
+  // keep the view pinned to the bottom only when the user was already there.
+  function appendLogLines(pre, lines) {
+    const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+    const frag = document.createDocumentFragment();
+    for (const line of lines)
+      frag.appendChild(document.createTextNode(line + "\n"));
+    pre.appendChild(frag);
+    if (atBottom) pre.scrollTop = pre.scrollHeight;
+  }
+
+  // Finished run: a static recent tail, no held connection.
+  async function loadRecentLog(runId, pre, statusEl) {
+    statusEl.textContent = "Loading…";
+    statusEl.classList.remove("error-text");
+    let snap;
+    try {
+      snap = await api(
+        "/api/runs/" +
+          encodeURIComponent(runId) +
+          "/logs?tail=" +
+          DEFAULT_LOG_TAIL
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      statusEl.textContent =
+        err instanceof ApiError ? err.message : "Failed to load log.";
+      statusEl.classList.add("error-text");
+      return;
+    }
+    if (!snap.present) {
+      statusEl.textContent = snap.detail || "No log file for this run.";
+      return;
+    }
+    pre.textContent = "";
+    const lines = snap.lines || [];
+    appendLogLines(pre, lines);
+    statusEl.textContent = snap.truncated
+      ? "Showing the last " + lines.length + " lines (truncated)."
+      : lines.length + (lines.length === 1 ? " line." : " lines.");
+  }
+
+  async function renderRunLogs(runId) {
+    // Leaving or reloading this view aborts any prior in-flight stream first.
+    if (activeStream) {
+      activeStream.abort();
+      activeStream = null;
+    }
+    view().innerHTML = centerHtml("Loading run…");
+    const run = await api("/api/runs/" + encodeURIComponent(runId)); // unknown → 404
+    const live = LIVE_STATES.has(run.state);
+    const back =
+      run.repo_name && run.task_id
+        ? `<a class="back-link" href="${taskHash(
+            run.repo_name,
+            run.task_id
+          )}">← ${escapeHtml(run.task_id)}</a>`
+        : `<a class="back-link" href="#/runs">← Runs</a>`;
+    view().innerHTML = `
+      ${back}
+      <div class="detail-head">
+        <span class="run-id big">${escapeHtml(run.run_id)}</span>
+        ${runBadge(run.state)}
+      </div>
+      <div class="muted">${escapeHtml(
+        [run.repo_name, run.task_id].filter(Boolean).join(" · ")
+      )}</div>
+      <div class="log-toolbar">
+        <span id="log-status" class="muted"></span>
+        <span class="log-actions">
+          ${
+            live
+              ? `<button id="log-pause" class="btn-secondary" type="button">Pause</button>`
+              : ""
+          }
+          <button id="log-reload" class="btn-secondary" type="button">Reload</button>
+        </span>
+      </div>
+      <pre id="log-output" class="log-output"></pre>`;
+
+    const pre = document.getElementById("log-output");
+    const statusEl = document.getElementById("log-status");
+    document.getElementById("log-reload").addEventListener("click", () => {
+      renderRunLogs(runId).catch((err) => {
+        if (err instanceof ApiError && err.status === 401) return; // login shown
+        renderError(err);
+      });
+    });
+
+    if (!live) {
+      await loadRecentLog(runId, pre, statusEl);
+      return;
+    }
+
+    // Live run: follow via SSE. The controller is module-level so the router
+    // (or a Reload) aborts the in-flight stream when the view is left.
+    const controller = new AbortController();
+    activeStream = controller;
+    const pauseBtn = document.getElementById("log-pause");
+    pauseBtn.addEventListener("click", () => {
+      controller.abort();
+      if (activeStream === controller) activeStream = null;
+      pauseBtn.hidden = true;
+      statusEl.textContent = "Paused — Reload to resume.";
+    });
+    statusEl.textContent = "Following live…";
+    streamLog(runId, DEFAULT_LOG_TAIL, {
+      signal: controller.signal,
+      onLine: (line) => appendLogLines(pre, [line]),
+      onEnd: (reason) => {
+        if (activeStream === controller) activeStream = null;
+        pauseBtn.hidden = true;
+        statusEl.textContent = reason
+          ? "Stream ended: " + reason
+          : "Stream closed.";
+      },
+    }).catch((err) => {
+      if (controller.signal.aborted) return; // navigated away or paused
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (activeStream === controller) activeStream = null;
+      pauseBtn.hidden = true;
+      statusEl.textContent =
+        err instanceof ApiError ? err.message : "Log stream error.";
+      statusEl.classList.add("error-text");
+    });
+  }
+
   // ---- router ----
   function currentPath() {
     return location.hash.replace(/^#/, "") || "/repos";
@@ -683,6 +942,11 @@
           return s;
         }
       });
+    if (seg[0] === "runs") {
+      if (seg.length >= 3 && seg[2] === "logs")
+        return () => renderRunLogs(seg[1]);
+      return renderRuns;
+    }
     if (seg[0] === "tasks")
       return seg.length >= 3
         ? () => renderTaskDetail(seg[1], seg[2])
@@ -693,6 +957,11 @@
   }
 
   async function router() {
+    // Leaving any view aborts an in-flight log stream so it stops reading.
+    if (activeStream) {
+      activeStream.abort();
+      activeStream = null;
+    }
     if (!getToken()) {
       renderLogin();
       return;

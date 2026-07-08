@@ -43,6 +43,19 @@ def test_shell_script_is_public_javascript():
     assert "Bearer" in resp.text
 
 
+def test_shell_script_tails_logs_via_fetch_not_eventsource():
+    # Session-3 decision: the SSE log stream is consumed with fetch + a
+    # ReadableStream reader under the bearer header, never EventSource (which
+    # cannot set Authorization). Pin all three at the served-asset boundary so a
+    # regression to EventSource / a query-token stream is caught here.
+    body = unauthed_client().get("/app.js").text
+    assert "/logs/stream" in body  # it does tail the SSE endpoint
+    assert "getReader" in body  # via a ReadableStream reader
+    # Never *construct* the header-less EventSource (the comment may name it to
+    # explain the decision; what must not appear is an actual instantiation).
+    assert "new EventSource" not in body
+
+
 def test_shell_styles_are_public_css():
     resp = unauthed_client().get("/styles.css")
     assert resp.status_code == 200

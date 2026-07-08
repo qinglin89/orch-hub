@@ -161,9 +161,11 @@ as follows:
   header on plain navigation, so the bootstrap page must load unauthenticated.
 - The SPA prompts for the bearer token once and keeps it **only in the
   browser's `localStorage`**, attaching `Authorization: Bearer <token>` to every
-  data `fetch` (and, later, the SSE log stream). No cookies and no query-string
-  tokens: the API stays on a single credential path and secrets stay out of URLs
-  and server logs. A `401` clears the stored token and returns to the login gate.
+  data `fetch` — including the SSE log stream, which is read with `fetch` + a
+  `ReadableStream` reader rather than `EventSource` (which cannot set the
+  header). No cookies and no query-string tokens: the API stays on a single
+  credential path and secrets stay out of URLs and server logs. A `401` clears
+  the stored token and returns to the login gate.
 - Every data route stays protected; only the three shell assets are on the auth
   allowlist (alongside `GET /api/health`).
 
@@ -177,12 +179,16 @@ Current views:
 - **Repo detail** — the repo's tasks with a status filter, live run badges, and
   the missing-index (`index_present == false`) state made explicit.
 - **Task detail** — the task's frontmatter status/summary/blockers, its current
-  run status, the raw task-file body (from
+  run status (with a **View logs** link), the raw task-file body (from
   `GET /api/repos/{repo_id}/tasks/{task_id}`), and — when the run is `waiting` —
   an inline answer box that writes the answer via
   `POST /api/runs/{run_id}/escalations/{seq}/answer` (`"stop"` ends the run).
-
-In-browser log tailing lands in the next slice.
+- **Run history** — recent runs newest-first from `GET /api/history/runs`, each
+  with its lifecycle state and timestamps; tap through to its log tail.
+- **Log tail** — one run's orchestrator log. A finished run shows a bounded
+  recent tail (`GET /api/runs/{run_id}/logs`); a live run follows the
+  bearer-authenticated SSE stream (`GET /api/runs/{run_id}/logs/stream`) via
+  `fetch` + a `ReadableStream` reader, with Pause/Reload controls.
 
 ### Deployment assumptions (private network only)
 
@@ -220,9 +226,6 @@ never touch real repos or the real ai-native-development registry.
 
 ## Not implemented yet (by design)
 
-- In-browser log tailing in the dashboard — the shell, repo/task lists, repo
-  and task detail, and answering waiting questions are in place; see
-  [Dashboard](#dashboard).
 - Bark notifications; remote intake-task; IM bot control.
 
 The core functions (`discover_repos`, `check_readiness`) are written to be

@@ -168,9 +168,15 @@ code {
   word-break: break-word;
 }
 
-.card-head .task-id {
+.card-head .task-id,
+.card-head .run-id {
   font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   font-size: 13px;
+}
+
+.card-head .run-id {
+  font-size: 12px;
+  word-break: break-all;
 }
 
 .muted {
@@ -376,6 +382,12 @@ code {
   font-size: 15px;
 }
 
+.detail-head .run-id.big {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+
 .section {
   margin-top: 18px;
 }
@@ -490,4 +502,64 @@ code {
 
 .answer-status {
   margin: 0;
+}
+
+/* ---- inline text link (e.g. "View logs") ---- */
+
+.text-link {
+  display: inline-block;
+  margin-top: 4px;
+  color: var(--accent);
+  text-decoration: none;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+/* ---- run log tail ---- */
+
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.log-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-secondary {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-secondary[hidden] {
+  display: none;
+}
+
+.log-output {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow: auto;
+  max-height: 70vh;
+  min-height: 40vh;
 }
