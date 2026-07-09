@@ -167,10 +167,11 @@ def question_notification(
 ) -> Notification:
     """Format the notification for a newly observed pending question.
 
-    The run-manager wiring that fires this (per-question, de-duplicated so a
-    single question notifies once) is a later slice; the formatter lives here now
-    so both the terminal-state and question surfaces share one notification
-    shape.
+    The run manager fires this from its status scan when it first sees a pending
+    control-dir question, de-duplicated per ``(run_id, seq)`` so a single
+    question notifies once. It shares the terminal-state shape: ``title`` names
+    the repo, ``body`` is the task id plus the question prompt, and ``group``
+    clusters a repo's notifications into one device thread.
     """
     repo = repo_name or "?"
     prompt = question.message or question.banner or f"question #{question.seq}"

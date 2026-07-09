@@ -22,6 +22,7 @@ from pathlib import Path
 
 from .config import (
     AI_NATIVE_PATH_ENV,
+    BARK_URL_ENV,
     DATA_DIR_ENV,
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
@@ -78,6 +79,8 @@ class Deployment:
     plist_path: Path
     log_dir: Path
     path_env: str
+    bark_url: str | None = None
+    """Optional Bark push endpoint written into the plist; ``None`` = push off."""
 
     @property
     def venv_dir(self) -> Path:
@@ -196,6 +199,9 @@ def resolve_deployment(
         existing=existing,
         token_generator=token_generator or (lambda: secrets.token_hex(32)),
     )
+    bark_url = _resolve_bark_url(
+        config.bark_url, _plist_env(existing).get(BARK_URL_ENV)
+    )
     port = options.port if options.port is not None else config.port
     if not 1 <= port <= 65535:
         raise LaunchdError(f"{PORT_ENV} must be in 1-65535, got {port}")
@@ -214,6 +220,7 @@ def resolve_deployment(
         plist_path=plist_path,
         log_dir=(options.log_dir or default_log_dir()).expanduser(),
         path_env=options.path_env,
+        bark_url=bark_url,
     )
 
 
@@ -380,6 +387,9 @@ def _render_plist_from_template(deployment: Deployment) -> dict:
             "REPLACE-ORCH-HUB-PORT": str(deployment.port),
             "REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT": str(deployment.ai_native_path),
             "REPLACE-ORCH-HUB-DATA-DIR": str(deployment.data_dir),
+            # Optional; an unset Bark URL renders as the empty string, which
+            # Config.from_env reads as "push disabled" (never left as REPLACE-).
+            "REPLACE-ORCH-HUB-BARK-URL": deployment.bark_url or "",
             "REPLACE-ORCH-HUB-LOG-DIR": str(deployment.log_dir),
             "REPLACE-PATH": deployment.path_env,
         },
@@ -491,6 +501,23 @@ def _resolve_token(
         if token:
             return token, source
     return token_generator(), "generated"
+
+
+def _resolve_bark_url(env_value: str | None, existing: str | None) -> str | None:
+    """Resolve the optional Bark push URL: environment first, then existing plist.
+
+    Unlike the token there is no generated fallback and no CLI flag — Bark is
+    optional config (unset = push disabled), and the URL embeds a device-key
+    secret best supplied through the environment (``ORCH_HUB_BARK_URL``).
+    Preferring an already-installed value means an ``update`` that forgets to
+    re-export the variable keeps pushing instead of silently going dark, the
+    same preservation the token gets.
+    """
+    for raw in (env_value, existing):
+        value = (raw or "").strip()
+        if value:
+            return value
+    return None
 
 
 def _bootout(runner: Runner) -> CommandResult:

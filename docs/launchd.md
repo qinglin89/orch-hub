@@ -45,6 +45,7 @@ the `orch-hub-api` service console script takes no arguments, so the plist's
 | `ORCH_HUB_PORT` | `8765` | Bind port. A malformed value fails startup instead of binding a default silently. |
 | `ORCH_HUB_AI_NATIVE_DEPLOYMENT` | `/Users/linqing/workplace/github.com/qinglin89/ai-native-development` | ai-native-development checkout that owns the managed-repo registry. |
 | `ORCH_HUB_DATA_DIR` | `~/.orch-hub` | Hub-owned run dirs and audit history. |
+| `ORCH_HUB_BARK_URL` | unset → push disabled | Optional [Bark](https://github.com/Finb/Bark) push endpoint (server + device key, e.g. `https://api.day.app/<device-key>`) for run-lifecycle and pending-question notifications. Embeds a device-key secret — keep the plist `chmod 600`. |
 | `PATH` | launchd's minimal default | Readiness checks invoke `git`; `aii-2` may need Homebrew tooling. The template sets a sane explicit PATH. |
 
 Empty or whitespace-only values count as unset. In the plist, write absolute
@@ -95,6 +96,7 @@ After code changes, run the same flow again, or use the explicit alias:
 | ai-native checkout | `--ai-native`, then `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then built-in default |
 | Host/port/data dir | corresponding flags, then environment, then defaults |
 | Plist/log paths | `--plist-path` / `--log-dir`, then `~/Library/...` defaults |
+| Bark push URL | `ORCH_HUB_BARK_URL`, then the value already in the installed plist (optional; unset = push disabled). No flag — the secret is supplied through the environment. |
 
 Common examples:
 
@@ -107,6 +109,11 @@ Common examples:
 
 # Bind directly to the Mac's Tailscale IP instead of loopback.
 .venv/bin/orch-hub launchd deploy --host "$(tailscale ip -4)"
+
+# Enable Bark push (run lifecycle + pending questions). Supplied through the
+# environment, not a flag, since the URL embeds a device-key secret; a later
+# `update` without it re-exported preserves the value already in the plist.
+ORCH_HUB_BARK_URL="https://api.day.app/<device-key>" .venv/bin/orch-hub launchd deploy
 ```
 
 The generated plist is written with mode `600` because it embeds the bearer
@@ -223,3 +230,8 @@ tail -f ~/Library/Logs/orch-hub/orch-hub.err.log   # startup + errors
 - **Empty repo list / readiness errors** — verify
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT` points at a real checkout and that `git` is
   reachable through the plist's `PATH`.
+- **No push notifications** — confirm `ORCH_HUB_BARK_URL` is present and
+  non-blank in the installed plist's `EnvironmentVariables` (`orch-hub launchd
+  deploy` prints `bark push: enabled` when it is set). Delivery is best-effort:
+  a bad URL or unreachable Bark server drops the notification and is logged
+  (without the URL) but never affects run state.

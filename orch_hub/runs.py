@@ -79,7 +79,12 @@ from .models import (
     RunRecord,
     RunStatus,
 )
-from .notifications import Notification, Notifier, run_end_notification
+from .notifications import (
+    Notification,
+    Notifier,
+    question_notification,
+    run_end_notification,
+)
 from .readiness import check_readiness
 from .task_store import STATUS_MISSING, STATUS_UNKNOWN, list_repo_tasks
 
@@ -293,9 +298,11 @@ class RunManager:
     ``clock`` must return timezone-aware UTC datetimes.
 
     ``notifier`` is the optional push backend (``None`` disables notifications
-    with no delivery work at all); it fires when a run reaches a terminal state.
-    ``notify_dispatch`` runs each delivery — a daemon thread by default so a slow
-    backend never stalls run operations; tests inject a synchronous dispatch.
+    with no delivery work at all); it fires when a run reaches a terminal state
+    and when a run's pending question is first observed (de-duplicated per
+    ``(run_id, seq)``). ``notify_dispatch`` runs each delivery — a daemon thread
+    by default so a slow backend never stalls run operations; tests inject a
+    synchronous dispatch.
     """
 
     def __init__(
@@ -320,6 +327,9 @@ class RunManager:
         self._notify_dispatch = notify_dispatch
         self._lock = threading.Lock()
         self._procs: dict[str, ProcessHandle] = {}
+        # In-memory (run_id, seq) set of questions already pushed, so a pending
+        # question notifies once per hub process; see _notify_new_questions.
+        self._notified_questions: set[tuple[str, int]] = set()
 
     @property
     def runs_dir(self) -> Path:
@@ -656,12 +666,45 @@ class RunManager:
 
         self._notify_dispatch(deliver)
 
+    def _notify_new_questions(
+        self, record: RunRecord, pending: Sequence[Question]
+    ) -> None:
+        """Push a ``needs input`` notification for each newly seen question.
+
+        Observed here because ``_status`` already scans ``pending_questions`` to
+        decide active vs waiting — the notification rides that existing scan
+        instead of adding a second watcher (the hub deliberately runs no
+        background poll). Firing is therefore driven by whatever queries run
+        status (``/api/runs``, ``/api/escalations``, ``/api/history/runs``),
+        exactly like the terminal-state push in ``_refresh``.
+
+        De-dup is the in-memory ``(run_id, seq)`` set, mutated only here and only
+        under the run-manager lock every ``_status`` caller holds, so a question
+        notifies once per hub process. It is intentionally not persisted: after a
+        restart a *still-open* question re-notifies once — an answered question
+        is no longer pending, so it never re-fires — a useful reminder rather
+        than a broken guarantee. The set only holds seqs actually observed (a
+        handful per run) and is dropped on restart, so it needs no reclamation.
+        A ``None`` notifier short-circuits so a disabled hub does no bookkeeping.
+        """
+        if self._notifier is None:
+            return
+        for question in pending:
+            key = (record.run_id, question.seq)
+            if key in self._notified_questions:
+                continue
+            self._notified_questions.add(key)
+            self._emit(
+                question_notification(record.repo_name, record.task_id, question)
+            )
+
     def _status(self, run_dir: Path, record: RunRecord) -> RunStatus:
         if record.error:
             return RunStatus(record=record, state=STATE_ERROR, detail=record.error)
         assert record.control_dir is not None
         if record.ended_ts is None:
             pending = pending_questions(record.control_dir)
+            self._notify_new_questions(record, pending)
             return RunStatus(
                 record=record,
                 state=STATE_WAITING if pending else STATE_ACTIVE,

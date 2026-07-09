@@ -974,3 +974,132 @@ def test_no_notifier_configured_is_a_silent_no_op(tmp_path):
     status = only_status(manager)  # no notifier, no error
 
     assert status.state == "ended"
+
+
+# -- pending-question notifications ----------------------------------------------
+
+
+def write_question(control_dir: Path, seq: int, **fields) -> None:
+    """Drop a control-dir question file the way the orchestrator would."""
+    control_dir.joinpath(f"{seq:03d}-question.json").write_text(
+        json.dumps({"seq": seq, **fields}), encoding="utf-8"
+    )
+
+
+def test_pending_question_fires_a_needs_input_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    write_question(record.control_dir, 1, kind="blocked", banner="Pick A or B?")
+    status = only_status(manager)  # observe the question -> fires
+
+    assert status.state == "waiting"
+    note = notifier.notifications[0]
+    assert len(notifier.notifications) == 1
+    assert note.title == "repo-a: needs input"
+    assert note.group == "repo-a"
+    assert TASK_ID in note.body
+    assert "Pick A or B?" in note.body
+
+
+def test_pending_question_notifies_once_per_seq_across_rescans(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+    write_question(record.control_dir, 1, banner="ruling?")
+
+    manager.list_runs()
+    manager.get_run(record.run_id)
+    manager.recent_runs()
+    manager.list_runs()
+
+    assert len(notifier.notifications) == 1
+
+
+def test_a_second_question_seq_fires_a_second_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    write_question(record.control_dir, 1, banner="first?")
+    manager.list_runs()
+    write_question(record.control_dir, 2, banner="second?")
+    manager.list_runs()
+
+    assert [n.title for n in notifier.notifications] == [
+        "repo-a: needs input",
+        "repo-a: needs input",
+    ]
+    assert "second?" in notifier.notifications[1].body
+
+
+def test_answered_question_never_notifies(tmp_path):
+    # pending_questions filters answered questions, so one answered before the
+    # hub ever scans it never pushes.
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    write_question(record.control_dir, 1, banner="ruling?")
+    record.control_dir.joinpath("001-answer.json").write_text(
+        json.dumps({"answer": "proceed"}), encoding="utf-8"
+    )
+    manager.list_runs()
+
+    assert notifier.notifications == []
+
+
+def test_question_notifier_failure_is_isolated(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RaisingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+    write_question(record.control_dir, 1, banner="ruling?")
+
+    status = only_status(manager)  # must not raise despite delivery failing
+
+    assert notifier.calls == 1
+    assert status.state == "waiting"
+    assert status.pending == 1
+
+
+def test_no_notifier_configured_skips_question_push(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)  # notifier=None
+    record = manager.start_run(repo, TASK_ID)
+    write_question(record.control_dir, 1, banner="ruling?")
+
+    status = only_status(manager)  # no notifier, no error, state still computed
+
+    assert status.state == "waiting"
+    assert status.pending == 1
+
+
+def test_fresh_manager_re_notifies_a_still_open_question(tmp_path):
+    # The de-dup set is in-memory (per hub process). A restart re-notifies a
+    # still-pending question exactly once — an accepted reminder, not a persisted
+    # guarantee (an answered question is no longer pending, so it never re-fires).
+    repo = make_repo(tmp_path)
+    spawner = FakeSpawner()
+    notifier_a = RecordingNotifier()
+    manager_a, _, _ = make_manager(tmp_path, spawner=spawner, notifier=notifier_a)
+    record = manager_a.start_run(repo, TASK_ID)
+    live_pid = spawner.procs[0].pid
+    write_question(record.control_dir, 1, banner="ruling?")
+
+    manager_a.list_runs()
+    manager_a.list_runs()
+    assert len(notifier_a.notifications) == 1  # once within the process
+
+    notifier_b = RecordingNotifier()
+    manager_b, _, _ = make_manager(
+        tmp_path, pid_probe=lambda pid: pid == live_pid, notifier=notifier_b
+    )
+    manager_b.list_runs()  # fresh process, empty de-dup set
+
+    assert len(notifier_b.notifications) == 1  # re-notifies the still-open question

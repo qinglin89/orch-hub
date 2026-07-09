@@ -218,6 +218,8 @@ def _cmd_launchd_deploy(args: argparse.Namespace) -> int:
         print(f"generated ORCH_HUB_TOKEN: {deployment.token}")
     else:
         print(f"token: {deployment.token_source}")
+    # Never echo the Bark URL: it embeds a device-key secret.
+    print(f"bark push: {'enabled' if deployment.bark_url else 'disabled'}")
     print(
         "stop semantics: launchd stop unloads the hub service only; detached "
         "orchestrator runs are not signaled."

@@ -16,6 +16,7 @@ import pytest
 
 from orch_hub.config import (
     AI_NATIVE_PATH_ENV,
+    BARK_URL_ENV,
     DATA_DIR_ENV,
     HOST_ENV,
     PORT_ENV,
@@ -144,6 +145,81 @@ def test_deploy_preserves_existing_plist_token(tmp_path):
     assert result.generated_token is False
     assert result.deployment.token_source == "existing plist"
     assert read_plist(plist_path)["EnvironmentVariables"][TOKEN_ENV] == "old-token"
+
+
+BARK_URL = "https://bark.example/DEVICEKEY"
+
+
+def test_deploy_writes_bark_url_from_environment(tmp_path):
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / "LaunchAgents" / PLIST_NAME
+
+    result = deploy_service(
+        DeployOptions(
+            checkout=checkout,
+            plist_path=plist_path,
+            log_dir=tmp_path / "logs",
+            install_package=False,
+        ),
+        runner=FakeRunner(),
+        environ={BARK_URL_ENV: BARK_URL},
+        token_generator=lambda: "t",
+    )
+
+    assert result.deployment.bark_url == BARK_URL
+    assert read_plist(plist_path)["EnvironmentVariables"][BARK_URL_ENV] == BARK_URL
+
+
+def test_deploy_renders_blank_bark_url_when_unset(tmp_path):
+    # Optional: an unset Bark URL renders as an empty string (push disabled),
+    # never a leftover REPLACE- placeholder.
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / "LaunchAgents" / PLIST_NAME
+
+    result = deploy_service(
+        DeployOptions(
+            checkout=checkout,
+            plist_path=plist_path,
+            log_dir=tmp_path / "logs",
+            install_package=False,
+        ),
+        runner=FakeRunner(),
+        environ={},
+        token_generator=lambda: "t",
+    )
+
+    assert result.deployment.bark_url is None
+    assert read_plist(plist_path)["EnvironmentVariables"][BARK_URL_ENV] == ""
+    assert "REPLACE-" not in plist_path.read_text(encoding="utf-8")
+
+
+def test_deploy_preserves_existing_plist_bark_url(tmp_path):
+    # Like the token: an update that forgets to re-export ORCH_HUB_BARK_URL keeps
+    # the value already installed rather than silently disabling push.
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.parent.mkdir(parents=True, exist_ok=True)
+    with plist_path.open("wb") as fh:
+        plistlib.dump(
+            {"EnvironmentVariables": {TOKEN_ENV: "tok", BARK_URL_ENV: BARK_URL}},
+            fh,
+            fmt=plistlib.FMT_XML,
+        )
+
+    result = deploy_service(
+        DeployOptions(
+            checkout=checkout,
+            plist_path=plist_path,
+            log_dir=tmp_path / "logs",
+            install_package=False,
+        ),
+        runner=FakeRunner(),
+        environ={},  # no ORCH_HUB_BARK_URL in env -> preserve the installed value
+        token_generator=lambda: "unused",
+    )
+
+    assert result.deployment.bark_url == BARK_URL
+    assert read_plist(plist_path)["EnvironmentVariables"][BARK_URL_ENV] == BARK_URL
 
 
 def test_deploy_installs_package_when_requested(tmp_path):

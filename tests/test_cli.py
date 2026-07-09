@@ -239,6 +239,7 @@ def test_launchd_deploy_cli(monkeypatch, capsys):
         dashboard_url="http://127.0.0.1:8765/",
         token="generated",
         token_source="generated",
+        bark_url=None,
     )
     monkeypatch.setattr(
         cli,
@@ -254,3 +255,4 @@ def test_launchd_deploy_cli(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "launchd deploy ok" in out
     assert "generated ORCH_HUB_TOKEN: generated" in out
+    assert "bark push: disabled" in out

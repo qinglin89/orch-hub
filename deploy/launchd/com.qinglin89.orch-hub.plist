@@ -43,6 +43,14 @@
     <key>ORCH_HUB_DATA_DIR</key>
     <string>REPLACE-ORCH-HUB-DATA-DIR</string>
 
+    <!-- Optional. Bark push endpoint (server + device key) for run-lifecycle
+         and pending-question notifications; blank disables push. The device
+         key is a secret, so keep the installed plist chmod 600. deploy/update
+         read it from ORCH_HUB_BARK_URL in the environment (or preserve the
+         value already installed). -->
+    <key>ORCH_HUB_BARK_URL</key>
+    <string>REPLACE-ORCH-HUB-BARK-URL</string>
+
     <!-- launchd agents get a minimal PATH. Readiness checks invoke `git`,
          and aii-2 may need Homebrew-installed tooling. -->
     <key>PATH</key>
