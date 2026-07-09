@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from .models import ManagedRepo, RepoTaskInventory, TaskSummary
 
@@ -28,6 +28,9 @@ STATUS_UNKNOWN = "unknown"
 """Sentinel status: a task file exists but carries no parseable status."""
 
 _SEPARATOR_CELL = re.compile(r"^:?-+:?$")
+
+_MARKDOWN_LINK = re.compile(r"^\[[^\]]*\]\((?P<target>[^)]*)\)$")
+"""A full-cell Markdown link ``[text](target)`` with no nested ``]``/``)``."""
 
 
 def list_repo_tasks(repo: ManagedRepo) -> RepoTaskInventory:
@@ -123,8 +126,32 @@ def _parse_index(text: str) -> list[tuple[str, str | None]]:
         if cells[0].lower() == "task":
             continue
         summary = cells[2] if len(cells) > 2 and cells[2] else None
-        rows.append((cells[0], summary))
+        rows.append((_normalize_task_id(cells[0]), summary))
     return rows
+
+
+def _normalize_task_id(cell: str) -> str:
+    """Reduce an index ``Task`` cell to the bare task id used for file lookup.
+
+    Managed repos differ in how they render the ``Task`` column: some list a
+    bare id (``2026-07-05-alpha``), others a Markdown link (quantx uses
+    ``[2026-04-13-golden-family-a](2026-04-13-golden-family-a.md)``). A bare cell
+    is returned unchanged; a Markdown-link cell resolves to its link target's
+    filename stem so the id maps to the real ``.ai-tasks/<id>.md`` file.
+
+    Only the target's basename is used, so directory components (``../``,
+    ``dir/``) are discarded and a link can never steer the lookup outside
+    ``.ai-tasks``. A cell that is not a well-formed link, or whose target yields
+    no stem, is returned verbatim, so its behavior is identical to a bare id and
+    a genuinely absent file still reports ``missing``.
+    """
+    match = _MARKDOWN_LINK.match(cell)
+    if match is None:
+        return cell
+    stem = PurePosixPath(match.group("target").strip()).name
+    if stem.endswith(".md"):
+        stem = stem[: -len(".md")]
+    return stem or cell
 
 
 def _parse_frontmatter(text: str) -> dict[str, str]:

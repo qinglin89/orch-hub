@@ -170,6 +170,68 @@ def test_index_row_without_summary_cell(tmp_path):
     assert inv.tasks[0].status == "pending"
 
 
+def test_markdown_link_index_row_resolves_task_file(tmp_path):
+    # quantx-style index: the Task cell is a Markdown link, not a bare id. It
+    # must resolve to the real <id>.md and report the frontmatter status.
+    task_id = "2026-04-13-golden-family-a"
+    repo, tasks_dir = make_repo_with_index(
+        tmp_path,
+        [(f"[{task_id}]({task_id}.md)", "pending", "Golden family")],
+    )
+    write_task(tasks_dir, task_id, "in_progress")
+    inv = list_repo_tasks(repo)
+    assert inv.tasks[0].task_id == task_id
+    assert inv.tasks[0].status == "in_progress"
+    assert inv.tasks[0].summary == "Golden family"
+
+
+def test_markdown_link_index_row_missing_file_is_missing(tmp_path):
+    # A link row whose resolved <id>.md is genuinely absent still reports the
+    # missing sentinel, exactly as a bare-id row would.
+    task_id = "2026-04-13-golden-family-a"
+    repo, _ = make_repo_with_index(
+        tmp_path, [(f"[{task_id}]({task_id}.md)", "pending", "Golden")]
+    )
+    inv = list_repo_tasks(repo)
+    assert inv.tasks[0].task_id == task_id
+    assert inv.tasks[0].status == STATUS_MISSING
+    assert inv.tasks[0].summary == "Golden"
+
+
+def test_index_mixes_bare_and_markdown_link_rows(tmp_path):
+    # Bare-id rows keep behaving exactly as today alongside link rows.
+    repo, tasks_dir = make_repo_with_index(
+        tmp_path,
+        [
+            ("2026-07-05-bare", "pending", "Bare"),
+            ("[2026-04-13-linked](2026-04-13-linked.md)", "pending", "Linked"),
+        ],
+    )
+    write_task(tasks_dir, "2026-07-05-bare", "pending")
+    write_task(tasks_dir, "2026-04-13-linked", "final_review")
+    inv = list_repo_tasks(repo)
+    assert [t.task_id for t in inv.tasks] == ["2026-07-05-bare", "2026-04-13-linked"]
+    by_id = {t.task_id: t for t in inv.tasks}
+    assert by_id["2026-07-05-bare"].status == "pending"
+    assert by_id["2026-04-13-linked"].status == "final_review"
+
+
+def test_markdown_link_target_basename_prevents_traversal(tmp_path):
+    # A link target with a traversal prefix must not read a file outside
+    # .ai-tasks. Only the target's basename is used, so [x](../secret.md)
+    # resolves to .ai-tasks/secret.md (absent here), never the repo-root file.
+    repo, tasks_dir = make_repo_with_index(
+        tmp_path, [("[golden](../secret.md)", "pending", "Golden")]
+    )
+    (repo.path / "secret.md").write_text(
+        "---\nid: secret\nstatus: leaked\n---\n", encoding="utf-8"
+    )
+    inv = list_repo_tasks(repo)
+    # Normalized to the bare basename, and the outside file is never read.
+    assert inv.tasks[0].task_id == "secret"
+    assert inv.tasks[0].status == STATUS_MISSING
+
+
 def test_list_tasks_covers_all_repos(tmp_path):
     repo_a, dir_a = make_repo_with_index(
         tmp_path, [("2026-07-05-a", "pending", "A")], name="a"

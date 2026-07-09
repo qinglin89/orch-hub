@@ -361,6 +361,39 @@ def test_repo_task_detail_missing_file_reports_absent(monkeypatch):
     assert body["content"] is None
 
 
+def test_repo_task_detail_reads_markdown_link_index_end_to_end(tmp_path, monkeypatch):
+    # End-to-end over the real task store (no store mocking): a quantx-style
+    # Markdown-link index row must be reachable by its bare id through the HTTP
+    # route, gate on membership, and return the frontmatter-authoritative body.
+    repo_path = tmp_path / "quantx"
+    tasks_dir = repo_path / ".ai-tasks"
+    tasks_dir.mkdir(parents=True)
+    task_id = "2026-04-13-golden-family-a"
+    (tasks_dir / "index.md").write_text(
+        "# Active tasks\n\n| Task | Status | Summary |\n|---|---|---|\n"
+        f"| [{task_id}]({task_id}.md) | in_progress | Golden family |\n",
+        encoding="utf-8",
+    )
+    (tasks_dir / f"{task_id}.md").write_text(
+        f"---\nid: {task_id}\nstatus: final_review\n---\n\n# {task_id}\n\nbody\n",
+        encoding="utf-8",
+    )
+    repo = ManagedRepo(
+        name="quantx",
+        path=repo_path,
+        manifest=repo_path / ".ai-deploy-manifest.json",
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+
+    resp = build_client().get(f"/api/repos/quantx/tasks/{task_id}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["task_id"] == task_id
+    assert body["status"] == "final_review"  # frontmatter is authoritative
+    assert body["present"] is True
+    assert "status: final_review" in body["content"]
+
+
 def test_module_level_app_is_fastapi():
     from fastapi import FastAPI
 
