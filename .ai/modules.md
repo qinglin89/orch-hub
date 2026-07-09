@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
+verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 ---
 
 # Modules
@@ -12,18 +12,19 @@ verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 | CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output and launchd operations dispatch |
 | Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, data-dir setting, and derived `aii-2`/registry paths |
 | Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, task inventory, question, and run models plus payload helpers |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, and run models plus payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
+| Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent commit reads for dashboard/API display |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, task frontmatter, and contained raw task-content reads |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
 | History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, public dashboard shell, health/repo/task/run/escalation/log/history routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, public dashboard shell, health/repo/commit/task/run/escalation/log/history routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including task-detail run controls |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including status layout, recent commits, and task-detail run controls |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
@@ -35,7 +36,7 @@ verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 Location: `orch_hub/cli.py`
 
 Responsibility: expose user-facing commands. Repo commands list managed repos
-and readiness:
+and readiness; JSON output also carries best-effort latest commit metadata:
 
 ```bash
 python -m orch_hub.cli repos
@@ -97,7 +98,12 @@ notifier settings and storage-specific options.
 Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
-task inventory, control-dir questions, run state, and run history.
+commit metadata, task inventory, control-dir questions, run state, and run
+history.
+`CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
+`repos_payload` accepts `(repo, report)` or `(repo, report, commit)` so CLI
+JSON and `GET /api/repos` stay identical and always include `commit` (`null`
+when unavailable).
 `TaskSummary` carries `task_id`, task-file `status`, optional index summary,
 and blockers;
 `RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered
@@ -121,6 +127,19 @@ Responsibility: prefer `<ai-native-development>/aii-2 registry list --json`; if 
 Location: `orch_hub/readiness.py`
 
 Responsibility: check repo filesystem, deployed manifest, orchestrator script, venv Python, task index, clean git tree, and `aii-2 status <repo>`. Reports keep all seven checks internally and fail closed when paths or tools are missing.
+
+### Git Metadata
+
+Location: `orch_hub/git_meta.py`
+
+Responsibility: read display-only git commit metadata for managed repos without
+participating in launch readiness. `latest_commit(repo)` returns the newest
+`CommitInfo` or `None`; `read_commits(repo, limit=...)` returns
+`CommitLog(available, commits)` newest-first with the limit clamped to `1..50`.
+It invokes `git log` in the repo, parses `%H`, `%h`, `%cI`, and `%s` using an
+ASCII unit-separator field delimiter, and degrades to unavailable on missing
+git, non-git dirs, missing paths, or non-zero exit. Commit lookup failure must
+not hide repo/task content.
 
 ### Subprocess Utilities
 
@@ -153,7 +172,10 @@ routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/escalations/{seq}/answer`; implemented log routes are
 `GET /api/runs/{run_id}/logs` and
 `GET /api/runs/{run_id}/logs/stream`; implemented history route is
-`GET /api/history/runs`. The recent-log route adds a nested `diagnostic` from
+`GET /api/history/runs`; implemented commit route is
+`GET /api/repos/{repo_id}/commits`. `GET /api/repos` includes a best-effort
+`commit` field shared with CLI JSON; recent commit lookup failures return
+`available:false` rather than raising. The recent-log route adds a nested `diagnostic` from
 `spawn.out` only when the orchestrator log is absent and the capture is
 non-empty. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
@@ -172,12 +194,19 @@ Location: `orch_hub/web/`
 Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
 defines the static app container and bottom navigation; `app.js` owns token
 entry/localStorage, bearer `fetch` calls, hash routing, repo/task/detail/run
-views, task-detail Start/Stop run controls, waiting-question answer forms, run
-history, and recent/live log views; `styles.css` holds the mobile layout. The
+views, repo/task run-state signals, recent commits, task-detail Start/Stop run
+controls, waiting-question answer forms, run history, and recent/live log
+views; `styles.css` holds the mobile layout. The
 dashboard reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.
+
+Repo cards show readiness plus a separate run signal (yellow waiting, green
+active, gray idle); ready cards add latest commit time and active task count
+from task inventory. Task cards use left-border/dot run accents distinct from
+frontmatter status badges. Repo detail adds a recent-commits section with
+unavailable and empty-history states.
 
 Run controls stay frontend-only over the existing API: Start posts
 `{repo_id, task_id, acknowledge_blocked, extra_args}` to `POST /api/runs` from a
@@ -280,6 +309,7 @@ thread only if connection count grows.
 
 - Registry code does not perform readiness checks.
 - Readiness code does not launch orchestrators.
+- Git metadata is display-only and never gates readiness or run launch.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
 - History serializes run/audit metadata only; `RunManager` decides when events

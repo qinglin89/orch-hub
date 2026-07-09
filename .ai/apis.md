@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
+verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 ---
 
 # APIs and Interfaces
@@ -31,13 +31,19 @@ verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
       "readiness": {
         "ready": true,
         "checks": []
+      },
+      "commit": {
+        "hash": "0123456789abcdef0123456789abcdef01234567",
+        "short_hash": "0123456",
+        "committed_ts": "2026-07-09T16:25:00+08:00",
+        "subject": "feat(example): update dashboard"
       }
     }
   ]
 }
 ```
 
-`readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture.
+`readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture. `commit` is the latest commit or `null` when git metadata is unavailable; this field is best-effort and does not affect readiness.
 
 ### `orch-hub launchd deploy|update`
 
@@ -92,7 +98,19 @@ verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 
 - Purpose: list managed repos with readiness.
 - Source: same functions as CLI `repos --json`.
-- Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`.
+- Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`, including best-effort `commit`.
+
+### `GET /api/repos/{repo_id}/commits`
+
+- Purpose: list one repo's recent commits newest-first for the dashboard detail
+  view.
+- Source: resolves `repo_id` through registry discovery, then delegates to
+  `git_meta.read_commits`.
+- Shape: `{"repo": "quantx", "available": true, "commits": [CommitInfo...]}`.
+  Each commit is `{hash, short_hash, committed_ts, subject}`.
+- Query: `limit` defaults to 10 and is clamped by `git_meta` to `1..50`.
+- Errors: unknown repos return HTTP 404; git lookup failure returns HTTP 200
+  with `available: false` and `commits: []` so repo/task content stays visible.
 
 ### `GET /api/repos/{repo_id}/tasks`
 
@@ -233,6 +251,11 @@ Current HTTP behavior:
   `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
   empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
   `BlockedTaskError` includes `acknowledge_required: true`.
+- The dashboard repo/task status layout consumes these APIs directly: repo
+  cards use `/api/repos` for readiness/latest commit, `/api/runs` for the
+  tri-state run signal, and `/api/tasks` for active task counts; repo detail
+  uses `/api/repos/{repo_id}/commits` for recent commits and treats
+  `available:false` as a graceful unavailable state.
 - The dashboard task-detail run controls consume these existing run APIs
   directly: Start sends `{repo_id, task_id, acknowledge_blocked, extra_args}`
   to `POST /api/runs` with fixed `--backend cc-codex` and optional cc-codex

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
+verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 ---
 
 # Features
@@ -9,14 +9,14 @@ verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|
-| Repo discovery and readiness | implemented | config, registry, readiness, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos` |
+| Repo discovery and readiness | implemented | config, registry, readiness, git_meta, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
 | Human question relay | API + dashboard answering implemented; notifications planned | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
-| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history APIs, including run start/stop controls |
+| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including run start/stop controls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
@@ -32,10 +32,10 @@ Status: implemented
 
 Description: Load managed repos from ai-native-development and report whether each is ready for orchestration. This validates the registry and target-repo deployment assumptions before service/UI work.
 
-Modules: config, registry, readiness, models, subprocess_utils, cli.
+Modules: config, registry, readiness, git_meta, models, subprocess_utils, cli.
 
 APIs: `python -m orch_hub.cli repos`, `python -m orch_hub.cli repos --json`,
-`GET /api/repos`.
+`GET /api/repos`, `GET /api/repos/{repo_id}/commits`.
 
 Implemented behavior:
 
@@ -43,6 +43,17 @@ Implemented behavior:
 - Registry data is a JSON array of `{name, path, manifest}`. Missing fallback file means no repos; invalid JSON or malformed entries raise an operational error.
 - Readiness runs seven checks in stable order: repo path, manifest, deployed orchestrator script, orchestrator venv Python, `.ai-tasks/index.md`, clean `git status --porcelain`, and passing `aii-2 status <repo>`.
 - Public readiness JSON serializes `ready` and only failed checks as `{name, message}` reasons; ready repos have `checks: []`.
+- `git_meta` reads display-only commit history separately from readiness:
+  `latest_commit(repo)` returns `CommitInfo | None`, and `read_commits(repo,
+  limit)` returns `CommitLog(available, commits)` newest-first with `limit`
+  clamped to `1..50`. Missing git, non-git dirs, missing paths, and failed
+  `git log` degrade to unavailable/`None` rather than hiding repo content.
+- CLI `repos --json` and `GET /api/repos` share `repos_payload`; each repo now
+  includes `commit: null` or `{hash, short_hash, committed_ts, subject}`. Human
+  CLI output remains unchanged.
+- `GET /api/repos/{repo_id}/commits` returns recent commits for repo detail;
+  unknown repos are 404, but commit lookup failure is HTTP 200 with
+  `available: false` and an empty list.
 - Tests cover registry parsing/fallbacks, every requested missing-piece readiness failure, dirty git state, `aii-2 status` failure, config, and CLI output.
 
 ### Task Inventory
@@ -87,12 +98,14 @@ Implemented behavior:
 - `create_app(config=None)` builds a FastAPI app, capturing explicit config for
   tests or `Config.from_env()` by default.
 - `GET /api/repos` returns the same shape as CLI `repos --json`, including
-  readiness failure reasons.
+  readiness failure reasons and best-effort latest commit metadata.
 - Task endpoints return the `tasks_payload` envelope, preserving
   `index_present`, ordered tasks, frontmatter-authoritative status/blockers,
   and task-store sentinel statuses.
 - Malformed registry data maps to HTTP 500; unknown repo ids on per-repo task
   lookup map to HTTP 404.
+- Per-repo commit history lookup failure returns data (`available:false`), not
+  a route error, so repo/task views stay visible when git metadata is absent.
 - `GET /api/health` is public and minimal (`{"status": "ok"}`); it no longer
   exposes deployment paths.
 - A default-deny middleware protects every path except `/api/health` and the
@@ -270,11 +283,20 @@ Implemented behavior:
   shell. It stores the bearer token in `localStorage`, attaches
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
-- Repo list renders readiness from `/api/repos` and active/waiting badges from
-  `/api/runs`; it never recomputes readiness in the browser.
+- Repo list renders readiness from `/api/repos` and a tri-state run signal from
+  `/api/runs`: yellow waiting, green active non-waiting, gray idle. Ready cards
+  add latest commit time from the shared repo `commit` field plus active task
+  count from `/api/tasks` task-inventory rows; not-ready cards keep readiness
+  failure reasons.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
   `index_present`, and `missing`/`unknown` sentinel semantics.
+- Task cards show live run state as a left-border accent plus dot signal
+  (yellow waiting, green active), kept distinct from the frontmatter status
+  badge so protocol `blocked` is not confused with runtime `waiting`.
+- Repo detail renders a recent-commits section from
+  `GET /api/repos/{repo_id}/commits`; unreadable git shows "Commit history
+  unavailable" and readable empty history shows "No commits found".
 - Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
   content, shows current/most-recent run state, links to logs, and renders
   answer forms for waiting questions from `/api/escalations`.
