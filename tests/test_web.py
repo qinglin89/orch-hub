@@ -229,3 +229,58 @@ def test_log_view_renders_spawn_out_startup_diagnostic():
     # ...names the capture in the user-facing status note...
     assert "startup diagnostics" in body
     assert "spawn.out" in body
+
+
+# ---- repo/task status layout (session-2 of dashboard-status-layout) ----------
+#
+# Frontend-only slice: a tri-state repo run signal, ready-repo metadata (latest
+# commit + active task count), a task-card run-state accent kept distinct from
+# the status badge, and a recent-commits section with a graceful unavailable
+# state. Asserted at the served-asset boundary (no JS runtime in this suite),
+# matching the run-control / log-stream checks above; each maps to a scope line.
+
+
+def test_repo_card_shows_tristate_run_signal():
+    body = app_js()
+    # A repo-level run signal distinct from the status pills, collapsing the
+    # repo's live run to one tri-state: yellow=waiting, green=active, gray=idle.
+    assert "run-signal" in body
+    assert "runSignal" in body
+    assert "repoRunState" in body  # collapses the repo's live runs to one state
+    for kind in ("waiting", "active", "idle"):
+        assert kind in body  # all three signal states are handled
+
+
+def test_ready_repo_card_shows_commit_and_active_task_count():
+    body = app_js()
+    # Ready cards surface the latest commit time (from the /api/repos `commit`)
+    # and the active task count. The count is the task-inventory size, sourced
+    # from /api/tasks — explicitly not a raw `.ai-tasks/` directory file count.
+    assert "repoMetaLine" in body
+    assert "committed_ts" in body
+    assert "taskCountsByRepo" in body
+    assert '"/api/tasks"' in body  # the count's source
+    assert "active task" in body
+
+
+def test_task_card_run_accent_is_distinct_from_status_badge():
+    body = app_js()
+    # Run-state is a left-border accent + dot signal, never another status pill,
+    # so a runtime `waiting` is not confused with a protocol `blocked` badge.
+    assert "run-waiting" in body
+    assert "run-active" in body
+    assert "task-run" in body  # the run signal's own wrapper, under the head
+    # The frontmatter status still drives the pill via statusBadgeKind — the
+    # separate channel that keeps status and run-state visually distinct.
+    assert "statusBadgeKind" in body
+
+
+def test_repo_detail_shows_recent_commits_with_graceful_unavailable():
+    body = app_js()
+    # A recent-commits section at the bottom of repo detail, fed by the commits
+    # route, degrading to a graceful note when git can't be read.
+    assert "commitsSection" in body
+    assert "/commits" in body
+    assert "Recent commits" in body
+    assert "available" in body  # distinguishes unreadable git from empty history
+    assert "unavailable" in body.lower()

@@ -143,6 +143,67 @@
   }
   const runBadge = (state) => badge(state, runBadgeKind(state));
 
+  // A run-state *signal* (coloured dot + label), deliberately NOT a `.badge`
+  // pill: run-state and protocol status share warm colours (`waiting` and a
+  // `blocked` status are both yellow), so giving run-state its own visual form
+  // keeps the two apart at a glance. Colour: yellow=waiting, green=active
+  // (non-waiting), gray=idle. `state` is a live run state ("waiting"/"active")
+  // or null (idle). Run states are mutually exclusive, so "active" already means
+  // non-waiting.
+  function runSignalKind(state) {
+    if (state === "waiting") return "waiting";
+    if (state === "active") return "active";
+    return "idle";
+  }
+  function runSignalLabel(kind) {
+    if (kind === "waiting") return "waiting";
+    if (kind === "active") return "running";
+    return "idle";
+  }
+  // `showIdle` renders the gray idle signal: repo cards want the always-on
+  // tri-state signal (idle included), while task cards omit it so an idle task
+  // carries no run marker at all.
+  function runSignal(state, showIdle) {
+    const kind = runSignalKind(state);
+    if (kind === "idle" && !showIdle) return "";
+    return (
+      `<span class="run-signal ${kind}"><span class="dot"></span>` +
+      `${runSignalLabel(kind)}</span>`
+    );
+  }
+
+  // Collapse a repo's live runs to a single signal state. Per-repo serialization
+  // allows only one live run, but this handles an array defensively; waiting
+  // outranks active. Returns "waiting"/"active", or null when nothing is live.
+  function repoRunState(liveRuns) {
+    let state = null;
+    for (const run of liveRuns || []) {
+      if (run.state === "waiting") return "waiting";
+      if (run.state === "active") state = "active";
+    }
+    return state;
+  }
+
+  // Format a commit's strict-ISO `committed_ts` (git's %cI, passed verbatim by
+  // the hub) for at-a-glance display: a compact relative age for recent commits,
+  // falling back to the calendar date for older ones and to the raw string if it
+  // can't be parsed — trust the hub's value, but never render "NaN".
+  function formatCommitTime(iso) {
+    if (!iso) return "";
+    const then = new Date(iso);
+    if (isNaN(then.getTime())) return iso;
+    const secs = Math.floor((Date.now() - then.getTime()) / 1000);
+    if (secs < 0) return then.toLocaleDateString();
+    if (secs < 60) return "just now";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m ago";
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return hrs + "h ago";
+    const days = Math.floor(hrs / 24);
+    if (days < 7) return days + "d ago";
+    return then.toLocaleDateString();
+  }
+
   const centerHtml = (text) => `<p class="center">${escapeHtml(text)}</p>`;
 
   // Build an in-app hash link. Each dynamic segment is encoded so a repo name
@@ -225,6 +286,21 @@
     return map;
   }
 
+  // Nested live-run lookup for the all-tasks list: repoName -> task_id -> live
+  // run (waiting wins over active). Lets that multi-repo view paint run-state
+  // accents from one /api/runs fetch instead of a per-card lookup.
+  function liveRunsByRepoTask(runs) {
+    const map = {};
+    for (const run of runs || []) {
+      if (!LIVE_STATES.has(run.state)) continue;
+      const byTask = (map[run.repo_name] = map[run.repo_name] || {});
+      const cur = byTask[run.task_id];
+      if (!cur || (run.state === "waiting" && cur.state !== "waiting"))
+        byTask[run.task_id] = run;
+    }
+    return map;
+  }
+
   // The run to surface on a task-detail view: a live run wins; otherwise the
   // most recent finished one (list_runs is oldest-first, so the last match).
   function pickRunForTask(runs, repoName, taskId) {
@@ -243,12 +319,32 @@
      <div class="error-text">no <code>.ai-tasks/index.md</code> — task inventory unavailable</div>
      </li>`;
 
-  function repoCard(repo, liveRuns) {
+  // The ready-repo metadata line: latest commit time + active task count. Each
+  // part is best-effort and optional — a null commit (git unread) or an absent
+  // count simply drops out, and an empty line renders nothing. `taskCount` is
+  // the task-inventory size (index rows), NOT a raw `.ai-tasks/` file count.
+  function repoMetaLine(commit, taskCount) {
+    const parts = [];
+    if (commit && commit.committed_ts) {
+      const when = formatCommitTime(commit.committed_ts);
+      if (when) parts.push("last commit " + escapeHtml(when));
+    }
+    if (typeof taskCount === "number")
+      parts.push(
+        taskCount + (taskCount === 1 ? " active task" : " active tasks")
+      );
+    if (!parts.length) return "";
+    return `<div class="repo-meta muted">${parts.join(" · ")}</div>`;
+  }
+
+  function repoCard(repo, liveRuns, taskCount) {
     const readiness = repo.readiness || { ready: false, checks: [] };
-    const badges = [
-      readiness.ready ? badge("ready", "ok") : badge("not ready", "bad"),
-    ];
-    for (const run of liveRuns || []) badges.push(runBadge(run.state));
+    // A tri-state run signal (yellow=waiting / green=active / gray=idle) rides
+    // next to the readiness badge, always present so "no live run" reads as an
+    // explicit gray idle rather than an absence.
+    const badges =
+      (readiness.ready ? badge("ready", "ok") : badge("not ready", "bad")) +
+      runSignal(repoRunState(liveRuns), true);
     const reasons = readiness.ready
       ? ""
       : `<ul class="reasons">${(readiness.checks || [])
@@ -259,17 +355,29 @@
               )}</li>`
           )
           .join("")}</ul>`;
+    // Ready repos surface at-a-glance metadata (latest commit + active task
+    // count); not-ready repos keep their failure reasons instead.
+    const meta = readiness.ready ? repoMetaLine(repo.commit, taskCount) : "";
     return `
       <li class="card repo">
         <a class="card-link" href="${repoHash(repo.name)}">
           <div class="card-head">
             <span class="name">${escapeHtml(repo.name)}</span>
-            <span class="badges">${badges.join("")}</span>
+            <span class="badges">${badges}</span>
           </div>
           <div class="path muted">${escapeHtml(repo.path)}</div>
+          ${meta}
           ${reasons}
         </a>
       </li>`;
+  }
+
+  // Active task count per repo from the task-inventory payload: the number of
+  // index-listed task rows, NOT a raw `.ai-tasks/` directory file count.
+  function taskCountsByRepo(repos) {
+    const map = {};
+    for (const repo of repos || []) map[repo.name] = (repo.tasks || []).length;
+    return map;
   }
 
   async function renderRepos() {
@@ -282,7 +390,17 @@
       runsByRepo = groupLiveRunsByRepo(runsData.runs);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
-      // Run badges are best-effort; a runs failure must not hide the repo list.
+      // Run signals are best-effort; a runs failure must not hide the repo list.
+    }
+    // Best-effort active-task counts for the ready-repo metadata line, from the
+    // task-inventory payload. Like the run overlay, a tasks failure degrades the
+    // count (dropped from the line) rather than hiding the repo list.
+    let taskCountByRepo = {};
+    try {
+      const tasksData = await api("/api/tasks");
+      taskCountByRepo = taskCountsByRepo(tasksData.repos);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
     }
     if (!repos.length) {
       view().innerHTML = centerHtml("No managed repos discovered.");
@@ -290,7 +408,9 @@
     }
     view().innerHTML =
       `<ul class="list">` +
-      repos.map((r) => repoCard(r, runsByRepo[r.name])).join("") +
+      repos
+        .map((r) => repoCard(r, runsByRepo[r.name], taskCountByRepo[r.name]))
+        .join("") +
       `</ul>`;
   }
 
@@ -321,16 +441,30 @@
             .map(escapeHtml)
             .join(", ")}</div>`
         : "";
-    const badges =
-      (liveRun ? runBadge(liveRun.state) : "") +
-      badge(task.status, statusBadgeKind(task.status));
+    // Run-state is a left-border accent + a dot signal, kept distinct from the
+    // status pill so a runtime `waiting` is never read as a protocol `blocked`
+    // status (both warm-coloured). Idle tasks get neither accent nor signal.
+    const runState = liveRun ? liveRun.state : null;
+    const accent =
+      runState === "waiting"
+        ? " run-waiting"
+        : runState === "active"
+        ? " run-active"
+        : "";
+    const signal = runState
+      ? `<div class="task-run">${runSignal(runState, false)}</div>`
+      : "";
     return `
-      <li class="card task ${sentinel ? "problem" : ""}">
+      <li class="card task${sentinel ? " problem" : ""}${accent}">
         <a class="card-link" href="${taskHash(repoName, task.task_id)}">
           <div class="card-head">
             <span class="task-id">${escapeHtml(task.task_id)}</span>
-            <span class="badges">${badges}</span>
+            <span class="badges">${badge(
+              task.status,
+              statusBadgeKind(task.status)
+            )}</span>
           </div>
+          ${signal}
           <div class="repo-name muted">${escapeHtml(repoName)}</div>
           ${task.summary ? `<div class="summary">${escapeHtml(task.summary)}</div>` : ""}
           ${blockers}
@@ -382,16 +516,17 @@
   // longer matches the repo's task statuses.
   let repoDetailStatus = "";
 
-  function renderTaskList(repos) {
+  function renderTaskList(repos, liveByRepoTask) {
     const selectedRepos = taskFilters.repo
       ? repos.filter((r) => r.name === taskFilters.repo)
       : repos;
     const cards = [];
     for (const repo of selectedRepos) {
       if (!repo.index_present) cards.push(missingIndexCard(repo.name));
+      const byTask = (liveByRepoTask && liveByRepoTask[repo.name]) || {};
       for (const task of repo.tasks || []) {
         if (taskFilters.status && task.status !== taskFilters.status) continue;
-        cards.push(taskCard(task, repo.name));
+        cards.push(taskCard(task, repo.name, byTask[task.task_id]));
       }
     }
     const list = document.getElementById("task-list");
@@ -404,6 +539,15 @@
     view().innerHTML = centerHtml("Loading tasks…");
     const data = await api("/api/tasks");
     const repos = data.repos || [];
+    // Best-effort run overlay so task cards show run-state accents here too; a
+    // runs failure must not hide the task list (a 401 still re-gates).
+    let liveByRepoTask = {};
+    try {
+      const runsData = await api("/api/runs");
+      liveByRepoTask = liveRunsByRepoTask(runsData.runs);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
     const repoNames = repos.map((r) => r.name);
     const statuses = orderedStatuses(repos);
     if (taskFilters.repo && !repoNames.includes(taskFilters.repo))
@@ -430,16 +574,44 @@
       <ul id="task-list" class="list"></ul>`;
     document.getElementById("f-repo").addEventListener("change", (ev) => {
       taskFilters.repo = ev.target.value;
-      renderTaskList(repos);
+      renderTaskList(repos, liveByRepoTask);
     });
     document.getElementById("f-status").addEventListener("change", (ev) => {
       taskFilters.status = ev.target.value;
-      renderTaskList(repos);
+      renderTaskList(repos, liveByRepoTask);
     });
-    renderTaskList(repos);
+    renderTaskList(repos, liveByRepoTask);
   }
 
   // ---- repo detail ----
+
+  // One recent-commit row: short hash, subject, and a formatted commit time.
+  function commitRow(commit) {
+    const when = formatCommitTime(commit.committed_ts);
+    return `<li class="commit">
+      <div class="commit-line">
+        <code class="commit-hash">${escapeHtml(commit.short_hash)}</code>
+        <span class="commit-subject">${escapeHtml(commit.subject)}</span>
+      </div>
+      ${when ? `<div class="commit-time muted">${escapeHtml(when)}</div>` : ""}
+    </li>`;
+  }
+
+  // Recent commits at the bottom of repo detail. Best-effort: a null log (fetch
+  // failed) or an `available: false` log (git unreadable) degrades to a graceful
+  // "unavailable" note. `available` distinguishes an unreadable repo from a
+  // readable one with no matching history ("no commits").
+  function commitsSection(commitLog) {
+    const head = `<section class="section"><h2>Recent commits</h2>`;
+    const foot = `</section>`;
+    if (!commitLog || !commitLog.available)
+      return head + `<p class="muted">Commit history unavailable.</p>` + foot;
+    const commits = commitLog.commits || [];
+    if (!commits.length)
+      return head + `<p class="muted">No commits found.</p>` + foot;
+    return head + `<ul class="commits">${commits.map(commitRow).join("")}</ul>` + foot;
+  }
+
   async function renderRepoDetail(repoName) {
     view().innerHTML = centerHtml("Loading " + repoName + "…");
     // Required: this repo's task inventory (single-repo envelope). An unknown
@@ -471,6 +643,17 @@
     try {
       const runsData = await api("/api/runs");
       liveByTask = liveRunsByTask(runsData.runs, repoName);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
+    // Best-effort recent commits for the bottom-of-detail section. A fetch
+    // failure leaves `commitLog` null; the section renders "unavailable" rather
+    // than hiding the repo or its tasks (a 401 still re-gates).
+    let commitLog = null;
+    try {
+      commitLog = await api(
+        "/api/repos/" + encodeURIComponent(repoName) + "/commits"
+      );
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
@@ -516,7 +699,8 @@
             </label></div>
             <ul id="repo-task-list" class="list"></ul>`
           : `<ul class="list">${missingIndexCard(repoName)}</ul>`
-      }`;
+      }
+      ${commitsSection(commitLog)}`;
 
     if (!entry.index_present) return;
 
