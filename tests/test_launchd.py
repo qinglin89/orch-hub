@@ -32,6 +32,7 @@ from orch_hub.launchd import (
     TEMPLATE_RELATIVE_PATH,
     UNLOAD_POLL_INTERVAL,
     _is_transient_bootstrap_failure,
+    _resolve_leftover_placeholders,
     deploy_service,
     restart_service,
     service_domain,
@@ -259,6 +260,86 @@ def test_deploy_preserves_existing_plist_bark_url(tmp_path):
 
     assert result.deployment.bark_url == BARK_URL
     assert read_plist(plist_path)["EnvironmentVariables"][BARK_URL_ENV] == BARK_URL
+
+
+def test_resolve_leftover_placeholders_blanks_unknown_but_fails_required():
+    # The reported update skew: an older installed CLI renders a newer template
+    # carrying REPLACE-ORCH-HUB-BARK-URL it does not know. Treated as unknown
+    # (not in the required set), an optional placeholder is blanked, not fatal.
+    required = frozenset({"REPLACE-BEARER-TOKEN"})
+    blanked = _resolve_leftover_placeholders(
+        {"EnvironmentVariables": {"ORCH_HUB_BARK_URL": "REPLACE-ORCH-HUB-BARK-URL"}},
+        required=required,
+    )
+    assert blanked["EnvironmentVariables"]["ORCH_HUB_BARK_URL"] == ""
+
+    # A leftover REQUIRED placeholder still fails loudly.
+    with pytest.raises(
+        LaunchdError, match="unreplaced launchd template placeholder: REPLACE-BEARER-TOKEN"
+    ):
+        _resolve_leftover_placeholders(
+            ["prefix REPLACE-BEARER-TOKEN suffix"], required=required
+        )
+
+
+def test_deploy_tolerates_unknown_optional_template_placeholder(tmp_path):
+    # Old-code / new-template skew end to end: a checkout whose launchd template
+    # adds an optional env placeholder the installed code predates (the reported
+    # case was REPLACE-ORCH-HUB-BARK-URL). Rendering blanks it and the deploy
+    # still bootstraps instead of aborting with "unreplaced launchd template
+    # placeholder".
+    checkout = make_checkout(tmp_path)
+    template = checkout / TEMPLATE_RELATIVE_PATH
+    data = read_plist(template)
+    data["EnvironmentVariables"]["ORCH_HUB_FUTURE_OPTION"] = (
+        "REPLACE-ORCH-HUB-FUTURE-OPTION"
+    )
+    with template.open("wb") as fh:
+        plistlib.dump(data, fh, fmt=plistlib.FMT_XML)
+    plist_path = tmp_path / "LaunchAgents" / PLIST_NAME
+    runner = FakeRunner()
+
+    deploy_service(
+        _deploy_options(checkout, plist_path, tmp_path),
+        runner=runner,
+        environ={},
+        token_generator=lambda: "t",
+    )
+
+    rendered = read_plist(plist_path)
+    assert rendered["EnvironmentVariables"]["ORCH_HUB_FUTURE_OPTION"] == ""
+    assert "REPLACE-" not in plist_path.read_text(encoding="utf-8")
+    assert (
+        "launchctl",
+        "bootstrap",
+        service_domain(os.getuid()),
+        str(plist_path),
+    ) in runner.calls
+
+
+def test_deploy_fails_on_required_placeholder_before_writing(tmp_path, monkeypatch):
+    # If a required substitution does not happen (simulated by neutralizing the
+    # replacement pass), rendering fails loudly BEFORE the plist is written or
+    # any plutil/launchctl/pip command runs.
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / "LaunchAgents" / PLIST_NAME
+    runner = FakeRunner()
+    monkeypatch.setattr(
+        "orch_hub.launchd._replace_placeholders", lambda value, replacements: value
+    )
+
+    with pytest.raises(
+        LaunchdError, match="unreplaced launchd template placeholder"
+    ):
+        deploy_service(
+            _deploy_options(checkout, plist_path, tmp_path),
+            runner=runner,
+            environ={},
+            token_generator=lambda: "t",
+        )
+
+    assert not plist_path.exists()
+    assert runner.calls == []
 
 
 def test_deploy_installs_package_when_requested(tmp_path):

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import plistlib
+import re
 import secrets
 import sys
 import time
@@ -44,6 +45,13 @@ LABEL = "com.qinglin89.orch-hub"
 PLIST_NAME = f"{LABEL}.plist"
 DEFAULT_PATH_ENV = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TEMPLATE_RELATIVE_PATH = Path("deploy") / "launchd" / PLIST_NAME
+
+# Template placeholders look like ``REPLACE-ORCH-HUB-BARK-URL``: the ``REPLACE-``
+# marker followed by an uppercase, hyphen-separated token. Matching one token at
+# a time lets rendering classify any placeholder still present after
+# substitution — a required one fails loudly, an unknown (newer-template) one is
+# blanked so an older installed CLI can still update a newer checkout.
+_PLACEHOLDER_RE = re.compile(r"REPLACE-[A-Z0-9-]+")
 
 # launchd removes a booted-out job asynchronously; bootstrapping into a domain
 # that still lists the label fails transiently with exit 5 (EIO). After an
@@ -393,24 +401,27 @@ def _install_package(deployment: Deployment, runner: Runner) -> list[CommandResu
 
 def _render_plist_from_template(deployment: Deployment) -> dict:
     template = _load_template(deployment.template_path)
-    data = _replace_placeholders(
-        template,
-        {
-            "REPLACE-ORCH-HUB-CHECKOUT": str(deployment.checkout),
-            "REPLACE-BEARER-TOKEN": deployment.token,
-            "REPLACE-ORCH-HUB-HOST": deployment.host,
-            "REPLACE-ORCH-HUB-PORT": str(deployment.port),
-            "REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT": str(deployment.ai_native_path),
-            "REPLACE-ORCH-HUB-DATA-DIR": str(deployment.data_dir),
-            # Optional; an unset Bark URL renders as the empty string, which
-            # Config.from_env reads as "push disabled" (never left as REPLACE-).
-            "REPLACE-ORCH-HUB-BARK-URL": deployment.bark_url or "",
-            "REPLACE-ORCH-HUB-LOG-DIR": str(deployment.log_dir),
-            "REPLACE-PATH": deployment.path_env,
-        },
-    )
-    _require_no_placeholders(data)
-    return data
+    # Required substitutions. A leftover of any of these keys after rendering is
+    # a template/version integrity error — the plist would carry an invalid or
+    # empty required field — so it fails loudly before anything is written.
+    required = {
+        "REPLACE-ORCH-HUB-CHECKOUT": str(deployment.checkout),
+        "REPLACE-BEARER-TOKEN": deployment.token,
+        "REPLACE-ORCH-HUB-HOST": deployment.host,
+        "REPLACE-ORCH-HUB-PORT": str(deployment.port),
+        "REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT": str(deployment.ai_native_path),
+        "REPLACE-ORCH-HUB-DATA-DIR": str(deployment.data_dir),
+        "REPLACE-ORCH-HUB-LOG-DIR": str(deployment.log_dir),
+        "REPLACE-PATH": deployment.path_env,
+    }
+    # Optional substitutions render empty when unset ("" = disabled). An unset
+    # Bark URL never survives as REPLACE-; it is the same forward-compatible
+    # handling any unknown newer-template placeholder gets below.
+    optional = {
+        "REPLACE-ORCH-HUB-BARK-URL": deployment.bark_url or "",
+    }
+    data = _replace_placeholders(template, {**required, **optional})
+    return _resolve_leftover_placeholders(data, required=frozenset(required))
 
 
 def _write_plist(path: Path, data: dict) -> None:
@@ -450,18 +461,39 @@ def _replace_placeholders(value, replacements: Mapping[str, str]):
     return value
 
 
-def _require_no_placeholders(value) -> None:
+def _resolve_leftover_placeholders(value, *, required: frozenset[str]):
+    """Fail on leftover required placeholders; blank unknown optional ones.
+
+    After the known substitutions run, any ``REPLACE-...`` token still present
+    was introduced by a launchd template newer than this installed code. This is
+    the ``orch-hub launchd update`` version skew where an older
+    ``.venv/bin/orch-hub`` renders a checkout whose template added a placeholder
+    it predates (the reported case was ``REPLACE-ORCH-HUB-BARK-URL``).
+
+    A leftover token in ``required`` is a hard error: a required field must be
+    substituted before the plist is written or loaded. Any other leftover token
+    is treated as an optional entry this older code does not recognize and is
+    blanked to ``""`` — the same "empty = unset/disabled" contract the optional
+    Bark URL already uses — so a forward-compatible optional field does not abort
+    the whole update.
+    """
     if isinstance(value, str):
-        if "REPLACE-" in value:
-            raise LaunchdError(f"unreplaced launchd template placeholder: {value}")
-        return
+        for token in _PLACEHOLDER_RE.findall(value):
+            if token in required:
+                raise LaunchdError(
+                    f"unreplaced launchd template placeholder: {token}"
+                )
+        return _PLACEHOLDER_RE.sub("", value)
     if isinstance(value, list):
-        for item in value:
-            _require_no_placeholders(item)
-        return
+        return [
+            _resolve_leftover_placeholders(item, required=required) for item in value
+        ]
     if isinstance(value, dict):
-        for item in value.values():
-            _require_no_placeholders(item)
+        return {
+            key: _resolve_leftover_placeholders(item, required=required)
+            for key, item in value.items()
+        }
+    return value
 
 
 def _read_plist(path: Path) -> dict | None:
