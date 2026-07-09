@@ -1,0 +1,43 @@
+---
+last-updated: 2026-07-10
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+---
+
+# Glossary
+
+## Product Terms
+
+- orch-hub: the resident local control plane built in this repository.
+- Hub: short name for orch-hub service, CLI, and dashboard.
+- ai-native-development: sibling canonical deployment/protocol repository at `/Users/linqing/workplace/github.com/qinglin89/ai-native-development`.
+- aii-2: command from ai-native-development used to deploy/status managed repos and list the local registry.
+- Managed repo: a target repository registered by ai-native-development, discovered from `aii-2 registry list --json` or `.registry/repos.local.json`.
+- Target repo: a managed repo where an orchestrator may be launched.
+- Deployed orchestrator: target repo copy of `.cursor/orchestrator/orchestrator.py`.
+
+## Run Terms
+
+- Run: one orchestrator subprocess attached to one target repo and one `.ai-tasks/<task-id>.md` task.
+- Run manager: hub application service in `orch_hub.runs` that starts, lists,
+  gets, stops, reattaches, persists, and classifies runs.
+- Run record: `run.json` under `<ORCH_HUB_DATA_DIR>/runs/<run_id>/`, the
+  file-backed source of truth for one run.
+- Active task: a task with an attached running orchestrator process.
+- Waiting task: an active task whose orchestrator has emitted a human question and is awaiting an answer.
+- Pending task: a task whose frontmatter status is `pending`.
+- Blocked task: a task whose frontmatter status is `blocked`.
+
+## Control and Log Terms
+
+- Control dir: per-run directory shared between orch-hub and orchestrator for question/answer files and stop requests.
+- Question file: `NNN-question.json` written by orchestrator when human input is needed.
+- Answer file: `NNN-answer.json` written by orch-hub after the remote user answers.
+- `stop.flag`: control-dir file requesting graceful stop at a session boundary, or abort while an answer is pending.
+- Log snapshot: bounded recent tail read from the orchestrator log located through one `RunRecord`; absent/rotated logs are represented as data, not errors.
+- Log stream: SSE tail of a run's located orchestrator log, authenticated with the normal bearer header and consumed by browsers through `fetch`/ReadableStream.
+
+## Deployment Terms
+
+- Readiness: pre-launch checks proving a managed repo has required deployed files, task index, clean git state, and a passing `aii-2 status`.
+- Launchd service: resident macOS user agent that runs `orch-hub-api` from the repo venv.
+- Deployment template: checked-in operational artifact such as `deploy/launchd/com.qinglin89.orch-hub.plist`.

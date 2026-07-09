@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: f8e01ba090fe5bd6a047c99de62f7ca93f8986c0
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Modules: Core
 
-## Module Details
-
-### CLI
+## CLI
 
 Location: `orch_hub/cli.py`
 
@@ -39,7 +37,7 @@ printing the secret endpoint.
 
 Dependencies: config, registry, readiness, models, launchd, notifications.
 
-### Config
+## Config
 
 Location: `orch_hub/config.py`
 
@@ -61,7 +59,7 @@ whitespace-only values count as unset; a malformed or out-of-range
 Bark endpoint including device key; empty or whitespace-only values disable
 push notifications.
 
-### Models
+## Models
 
 Location: `orch_hub/models.py`
 
@@ -84,19 +82,19 @@ active/waiting/completed/stopped/error/ended state plus pending question count.
 computed run status with its persisted events. Public readiness payloads
 contain `ready` plus failed check reasons only.
 
-### Registry
+## Registry
 
 Location: `orch_hub/registry.py`
 
 Responsibility: prefer `<ai-native-development>/aii-2 registry list --json`; if unavailable or failing, fallback to `<ai-native-development>/.registry/repos.local.json`. Validate and normalize JSON-array entries into `ManagedRepo`.
 
-### Readiness
+## Readiness
 
 Location: `orch_hub/readiness.py`
 
 Responsibility: check repo filesystem, deployed manifest, orchestrator script, venv Python, task index, clean git tree, and `aii-2 status <repo>`. Reports keep all seven checks internally and fail closed when paths or tools are missing.
 
-### Git Metadata
+## Git Metadata
 
 Location: `orch_hub/git_meta.py`
 
@@ -109,7 +107,7 @@ ASCII unit-separator field delimiter, and degrades to unavailable on missing
 git, non-git dirs, missing paths, or non-zero exit. Commit lookup failure must
 not hide repo/task content.
 
-### Subprocess Utilities
+## Subprocess Utilities
 
 Location: `orch_hub/subprocess_utils.py`
 
@@ -118,7 +116,7 @@ The detached orchestrator launch is not routed through this blocking wrapper;
 `RunManager` uses `subprocess.Popen` directly so it can keep a process handle
 and redirect output.
 
-### Task Inventory
+## Task Inventory
 
 Location: `orch_hub/task_store.py`
 

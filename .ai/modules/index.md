@@ -1,11 +1,9 @@
 ---
 last-updated: 2026-07-10
-verified-against: f8e01ba090fe5bd6a047c99de62f7ca93f8986c0
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Modules
-
-## Module Index
 
 | Module | Location | Description |
 |---|---|---|
@@ -36,8 +34,7 @@ verified-against: f8e01ba090fe5bd6a047c99de62f7ca93f8986c0
 |---|---|
 | core.md | CLI, config, models, registry, readiness, git metadata, subprocess utilities, task inventory |
 | runtime.md | Run manager, monitor, history, control-dir, logs, notifications |
-| web.md | API and web UI |
-| operations.md | Launchd operations |
+| web.md | API, web UI, and launchd operations |
 
 ## Boundary Rules
 

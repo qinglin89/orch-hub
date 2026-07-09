@@ -1,11 +1,9 @@
 ---
 last-updated: 2026-07-10
-verified-against: 3c6da44b4a90ac6e3c3d3730308604007148ff5d
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Design: Patterns
-
-## Patterns in Use
 
 - Prefer small, reusable application functions behind both CLI and API routes.
 - Represent repo, readiness, task, run, and escalation data with typed Python models.

@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: 2a3b9de41aaf52d608246fa97123002ed126b2ee
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Features: Run Control
 
-## Feature Details
-
-### Run Lifecycle
+## Run Lifecycle
 
 Status: implemented
 
@@ -53,7 +51,7 @@ Implemented behavior:
   manager errors to 4xx JSON responses (`RepoBusyError` and ended/blocked
   states use 409; unknown runs use 404).
 
-### Control-dir File Channel
+## Control-dir File Channel
 
 Status: implemented
 
@@ -89,7 +87,7 @@ Implemented behavior:
   files, duplicate answer refusal, repair rewrite, stop flag writes, and
   `Question.to_dict()` path exclusion.
 
-### Human Question Relay
+## Human Question Relay
 
 Status: implemented
 
@@ -118,7 +116,7 @@ Implemented behavior:
   each `(run_id, seq)`. Dedup is in-memory, so rescans do not duplicate pushes
   in one hub process and a restart re-notifies a still-open question once.
 
-### Log Viewing
+## Log Viewing
 
 Status: implemented
 
@@ -158,7 +156,7 @@ Implemented behavior:
   the standard `Authorization: Bearer ...` header. The hub does not accept log
   stream credentials in query strings.
 
-### Run History and Audit
+## Run History and Audit
 
 Status: implemented
 

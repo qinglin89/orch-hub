@@ -1,11 +1,9 @@
 ---
 last-updated: 2026-07-10
-verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # APIs and Interfaces
-
-## Detail Files
 
 | File | Contains |
 |---|---|

@@ -1,17 +1,15 @@
 ---
 last-updated: 2026-07-10
-verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Architecture: Components
 
-## Components
-
-### Registry Adapter
+## Registry Adapter
 
 Discovers managed repos from ai-native-development. Preferred source is `aii-2 registry list --json`; fallback is `<ai-native-development>/.registry/repos.local.json`. The adapter normalizes entries into local models containing at least repo name, path, and manifest path.
 
-### Readiness Checker
+## Readiness Checker
 
 Determines whether a managed repo is safe to offer as launchable. Initial readiness checks:
 
@@ -25,11 +23,11 @@ Determines whether a managed repo is safe to offer as launchable. Initial readin
 
 Each failure should produce a concise machine-readable reason and a human-readable message.
 
-### Task Inventory
+## Task Inventory
 
 Reads `.ai-tasks/index.md` and individual task frontmatter from managed repos. The implemented `task_store` slice treats the index as the active task-id set plus human summary, and treats each `.ai-tasks/<id>.md` frontmatter as the source of truth for status and blockers. It classifies task-file statuses such as `pending`, `in_progress`, `final_review`, `completed`, and `blocked`, with parser sentinels for missing task files or missing status. Future run-manager data will overlay active/waiting run state without replacing the task-file status.
 
-### Run Manager
+## Run Manager
 
 Implemented component that launches each target repo's deployed orchestrator as
 a detached subprocess and persists hub-owned run state:
@@ -64,7 +62,7 @@ second-precision log filename. A resident manager keeps `Popen` handles only to
 capture exit codes; a fresh manager reattaches by scanning run dirs and probing
 pid liveness. Cross-repo parallelism is allowed; same-repo live runs are not.
 
-### Run History Store
+## Run History Store
 
 Implemented file-backed history extends each run dir with append-only
 `events.jsonl`. `orch_hub.history` serializes `RunEvent` records and returns
@@ -74,7 +72,7 @@ hiding them. `RunManager` appends `run_started`, `run_ended`,
 responder and question metadata but deliberately do not copy answer text out of
 the control-dir answer file.
 
-### Control Dir Store
+## Control Dir Store
 
 Implemented file-channel adapter for orchestrator questions, answers, and stop
 requests. `list_questions` and `pending_questions` read `NNN-question.json`
@@ -88,7 +86,7 @@ malformed answer by atomic rewrite. `request_stop` writes an idempotent empty
 `stop.flag` in an existing run dir. The module is file-channel only and has no
 web/API/subprocess ownership.
 
-### API Service
+## API Service
 
 Implemented FastAPI service exposing health, repo readiness, task inventory,
 task content, run, escalation, log, history, and dashboard shell endpoints. The
@@ -107,7 +105,7 @@ propagate. The API calls the same registry/readiness/task/run/control/log
 functions used by the CLI and core tests and keeps route handlers thin over
 shared application services.
 
-### Launchd Service Packaging
+## Launchd Service Packaging
 
 Implemented macOS launchd user-agent packaging lives in
 `deploy/launchd/com.qinglin89.orch-hub.plist`, with operator docs in
@@ -121,7 +119,7 @@ Bark URL are embedded in the user-agent plist, so installs should keep it
 unknown optional placeholders from newer templates are blanked so old installed
 CLIs can refresh a newer checkout when empty means unset/disabled.
 
-### Dashboard
+## Dashboard
 
 Implemented mobile-first, build-stepless SPA under `orch_hub/web/`. It is
 served as an explicit public shell (`/`, `/app.js`, `/styles.css`) because plain
@@ -139,7 +137,7 @@ including the log stream. Main views:
   `GET /api/runs/{run_id}/logs/stream` through `fetch` plus
   `ReadableStream.getReader()`, not `EventSource`.
 
-### Notification Adapter
+## Notification Adapter
 
 Implemented notifier interface with Bark as v1 backend. `Config.bark_url`
 comes from `ORCH_HUB_BARK_URL`; blank/unset disables notifications. The

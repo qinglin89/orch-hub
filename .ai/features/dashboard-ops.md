@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: 2a3b9de41aaf52d608246fa97123002ed126b2ee
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Features: Dashboard Ops
 
-## Feature Details
-
-### Mobile Dashboard
+## Mobile Dashboard
 
 Status: implemented
 
@@ -64,7 +62,7 @@ Implemented behavior:
   lines are preserved, `event: end` closes the stream, navigation/reload/pause
   aborts the active stream, and untrusted log content is appended as text nodes.
 
-### Notifications
+## Notifications
 
 Status: implemented
 
@@ -108,7 +106,7 @@ Implemented behavior:
   preserve an existing installed value when the environment omits it, render a
   blank string when disabled, and print only `bark push: enabled/disabled`.
 
-### Launchd Service
+## Launchd Service
 
 Status: implemented
 
@@ -157,13 +155,13 @@ Implemented behavior:
   fallback commands, log inspection, optional Bark URL config, push delivery
   checks through `notify test`, and Tailscale-only exposure assumptions.
 
-### Remote Intake-Task
+## Remote Intake-Task
 
 Status: future
 
 Description: Let the user type a request remotely and have the hub run a one-shot agent session to invoke `/intake-task`, producing a pending task that can then be orchestrated.
 
-### IM Bot Control
+## IM Bot Control
 
 Status: future
 

@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: 2a3b9de41aaf52d608246fa97123002ed126b2ee
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Features: Core
 
-## Feature Details
-
-### Repo Discovery and Readiness
+## Repo Discovery and Readiness
 
 Status: implemented
 
@@ -37,7 +35,7 @@ Implemented behavior:
   `available: false` and an empty list.
 - Tests cover registry parsing/fallbacks, every requested missing-piece readiness failure, dirty git state, `aii-2 status` failure, config, and CLI output.
 
-### Task Inventory
+## Task Inventory
 
 Status: implemented
 
@@ -64,7 +62,7 @@ Implemented behavior:
   and resolved containment under `.ai-tasks`, so symlinked files outside the
   task dir are not disclosed.
 
-### HTTP API Foundation
+## HTTP API Foundation
 
 Status: implemented
 
@@ -103,7 +101,7 @@ Implemented behavior:
   to `127.0.0.1:8765` by default; any private exposure should remain
   Tailscale-only.
 
-### Auth and Private Access
+## Auth and Private Access
 
 Status: implemented
 

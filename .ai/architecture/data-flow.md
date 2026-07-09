@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Architecture: Data Flow
 
-## Data Flow
-
-### Discovery and Readiness
+## Discovery and Readiness
 
 1. Load config, including ai-native-development path.
 2. Try `aii-2 registry list --json`.
@@ -15,7 +13,7 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
 4. For each repo entry, run readiness checks.
 5. Return stable JSON for CLI and API responses.
 
-### HTTP Foundation
+## HTTP Foundation
 
 1. `create_app(config=None)` captures a `Config` value once per FastAPI app,
    including `ORCH_HUB_TOKEN` from `Config.token`.
@@ -34,7 +32,7 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
    per-repo task lookup/detail routes map to HTTP 404. Ordinary readiness
    failures stay inside 200 payloads as `ready: false` with failure reasons.
 
-### Task Inventory
+## Task Inventory
 
 1. Receive `ManagedRepo` values from registry discovery or a caller-provided filter.
 2. For each repo, read `.ai-tasks/index.md`; missing indexes return `index_present=false` with no tasks so callers can surface the repo-level issue.
@@ -45,7 +43,7 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
    task ids in the reader, and resolves the candidate file target to ensure raw
    content stays under the resolved `.ai-tasks` directory.
 
-### Start Run
+## Start Run
 
 1. Client selects repo and task.
 2. Hub enforces the per-repo single-live-run rule.
@@ -60,7 +58,7 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
    frontmatter status from `TaskSummary`.
 8. Hub appends a `run_started` history event.
 
-### Human Answer
+## Human Answer
 
 1. Orchestrator writes a question file in the control dir.
 2. Hub lists it as waiting with `pending_questions` and notifies the user once
@@ -69,14 +67,14 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
 4. Hub writes the answer file with `write_answer` and records an audit event.
 5. Orchestrator consumes the answer and continues.
 
-### Stop
+## Stop
 
 1. User requests stop.
 2. Hub writes `stop.flag` with `request_stop` for graceful stop at a session boundary.
 3. Hub records a `stop_requested` event only for the first idempotent stop write.
 4. If a hard kill is ever exposed, it must warn that the repo may be dirty and children may be orphaned.
 
-### Log Access
+## Log Access
 
 1. Client requests recent or streamed logs for a known `run_id`.
 2. API resolves the run through `RunManager.get_run`; unknown/path-escaping ids
@@ -92,7 +90,7 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
    Browser clients use `fetch` plus a stream reader with the standard bearer
    header; the hub does not accept query-string log stream credentials.
 
-### Run State Refresh
+## Run State Refresh
 
 1. Hub lists run dirs under `<data_dir>/runs/`.
 2. For a run with an in-memory `Popen`, `poll()` captures exit code when it
@@ -109,7 +107,7 @@ verified-against: 3c614a80ca0d3514395a306a983a40760d6f7150
    the configured notifier, without changing run-state writes if delivery
    fails.
 
-### Run History Access
+## Run History Access
 
 1. Client requests recent history through `GET /api/history/runs`.
 2. API asks `RunManager.recent_runs(limit=...)`, which clamps the limit to

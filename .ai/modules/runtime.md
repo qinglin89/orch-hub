@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: f8e01ba090fe5bd6a047c99de62f7ca93f8986c0
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Modules: Runtime
 
-## Module Details
-
-### Run Manager
+## Run Manager
 
 Location: `orch_hub/runs.py`
 
@@ -53,7 +51,7 @@ hub process and a restart re-notifies a still-open question once. Delivery goes
 through `_emit`, which dispatches best-effort work off the lock by default and
 swallows backend exceptions so notification failures cannot corrupt run state.
 
-### Run Monitor
+## Run Monitor
 
 Location: `orch_hub/monitor.py`
 
@@ -68,7 +66,7 @@ environment setting.
 The monitor owns no run state, event state, notification formatting, or
 de-duplication; it only schedules the existing run-manager status scan.
 
-### History
+## History
 
 Location: `orch_hub/history.py`
 
@@ -82,7 +80,7 @@ lines.
 The module is storage-only: it does not parse task files, inspect control-dir
 answers, decide event timing, or store human answer text.
 
-### Control Dir
+## Control Dir
 
 Location: `orch_hub/control_dir.py`
 
@@ -97,7 +95,7 @@ responder="orch-hub")` atomically writes the mirrored `NNN-answer.json` with
 classification. Existing valid answers raise `DuplicateAnswerError`; malformed
 answers can be repaired by atomic rewrite.
 
-### Logs
+## Logs
 
 Location: `orch_hub/logs.py`
 
@@ -120,7 +118,7 @@ buffer, sends idle heartbeat comments, and ends with `event: end` on run death
 or log rotation. File reads run inline on the event loop in v1; move them to a
 thread only if connection count grows.
 
-### Notifications
+## Notifications
 
 Location: `orch_hub/notifications.py`
 

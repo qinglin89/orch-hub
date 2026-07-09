@@ -1,19 +1,17 @@
 ---
 last-updated: 2026-07-10
-verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # APIs: HTTP
 
-## HTTP API
-
-### `GET /api/health`
+## `GET /api/health`
 
 - Purpose: minimal public service liveness.
 - Shape: `{"status": "ok"}`.
 - Auth: public by design; it must not disclose deployment configuration.
 
-### `GET /`, `GET /app.js`, `GET /styles.css`
+## `GET /`, `GET /app.js`, `GET /styles.css`
 
 - Purpose: serve the public dashboard shell assets.
 - Auth: public by design because browser navigation cannot attach an
@@ -23,13 +21,13 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   the current shell after service updates rather than serving stale JS/CSS from
   heuristic cache.
 
-### `GET /api/repos`
+## `GET /api/repos`
 
 - Purpose: list managed repos with readiness.
 - Source: same functions as CLI `repos --json`.
 - Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`, including best-effort `commit`.
 
-### `GET /api/repos/{repo_id}/commits`
+## `GET /api/repos/{repo_id}/commits`
 
 - Purpose: list one repo's recent commits newest-first for the dashboard detail
   view.
@@ -41,14 +39,14 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
 - Errors: unknown repos return HTTP 404; git lookup failure returns HTTP 200
   with `available: false` and `commits: []` so repo/task content stays visible.
 
-### `GET /api/repos/{repo_id}/tasks`
+## `GET /api/repos/{repo_id}/tasks`
 
 - Purpose: list tasks for one repo, where `repo_id` is the managed-repo name.
 - Shape: `tasks_payload([inventory])`, the same `{"repos": [...]}` envelope as
   all-repo task inventory with a single repo entry. Task ids are normalized
   bare ids even when the source index uses Markdown-link Task cells.
 
-### `GET /api/repos/{repo_id}/tasks/{task_id}`
+## `GET /api/repos/{repo_id}/tasks/{task_id}`
 
 - Purpose: fetch one listed task's frontmatter-authoritative inventory fields
   plus raw markdown body for the dashboard task-detail view.
@@ -59,14 +57,14 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   Listed-but-absent task files return HTTP 200 with `present: false` and
   `content: null`; unknown repos or unlisted task ids return HTTP 404.
 
-### `GET /api/tasks`
+## `GET /api/tasks`
 
 - Purpose: list tasks across discovered repos.
 - Shape: `tasks_payload(list_tasks(repos))`, preserving `index_present`,
   ordered tasks, frontmatter-authoritative status/blockers, and `missing` /
   `unknown` sentinel statuses.
 
-### `POST /api/runs`
+## `POST /api/runs`
 
 - Purpose: start an orchestrator run for `{repo_id, task_id, extra_args,
   acknowledge_blocked}`.
@@ -77,12 +75,12 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   fields; the dashboard does not expose a backend selector.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
 
-### `GET /api/runs`
+## `GET /api/runs`
 
 - Purpose: list known runs with live/waiting/end-state overlays.
 - Shape: `{"runs": [RunStatus.to_dict(), ...]}`.
 
-### `GET /api/history/runs`
+## `GET /api/history/runs`
 
 - Purpose: list recent runs newest-first with computed run status and persisted
   audit/history events.
@@ -92,19 +90,19 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   the normal `RunStatus` fields plus `events`.
 - Query: `limit` defaults to 50 and is clamped to `0..200`.
 
-### `GET /api/runs/{run_id}`
+## `GET /api/runs/{run_id}`
 
 - Purpose: fetch one run's serialized `RunStatus`.
 - Errors: unknown run id returns HTTP 404.
 
-### `POST /api/runs/{run_id}/stop`
+## `POST /api/runs/{run_id}/stop`
 
 - Purpose: request graceful stop by delegating to `RunManager.stop_run`, which
   writes `stop.flag` through `control_dir.request_stop`.
 - Shape: `{"run_id": ..., "newly_requested": bool, "detail": ...}`; the detail
   surfaces the pending-question stop caveat.
 
-### `GET /api/runs/{run_id}/logs`
+## `GET /api/runs/{run_id}/logs`
 
 - Purpose: retrieve a bounded recent tail of one run's orchestrator log.
 - Source: resolves `run_id` through `RunManager.get_run`, then locates and
@@ -118,7 +116,7 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   `"source": "spawn.out"`. Unknown runs return HTTP 404.
 - Query: `tail` controls returned line count, clamped by the logs module.
 
-### `GET /api/runs/{run_id}/logs/stream`
+## `GET /api/runs/{run_id}/logs/stream`
 
 - Purpose: stream one run's orchestrator log as Server-Sent Events.
 - Source: resolves `run_id` through `RunManager.get_run`, emits a bounded
@@ -131,13 +129,13 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   clients use `fetch` plus a `ReadableStream` reader because `EventSource`
   cannot set authorization headers; query-string tokens are not supported.
 
-### `GET /api/escalations`
+## `GET /api/escalations`
 
 - Purpose: list pending control-dir questions across live runs, with run/repo
   context.
 - Shape: `{"escalations": [{"run_id", "repo_name", "task_id", "question"}]}`.
 
-### `POST /api/runs/{run_id}/escalations/{seq}/answer`
+## `POST /api/runs/{run_id}/escalations/{seq}/answer`
 
 - Purpose: write an answer file for one run/question sequence, auditing the
   responder.
@@ -149,7 +147,8 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   The response echoes the submitted answer for the immediate caller, but
   persisted history deliberately excludes answer text.
 
-Current HTTP behavior:
+## Current HTTP Behavior
+
 
 - `create_app(config=None, *, run_manager=None)` captures `Config.from_env()`
   by default, is testable with an explicit `Config`, and holds one `RunManager`

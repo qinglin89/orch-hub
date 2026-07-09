@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # APIs: Internal Interfaces
 
-## Internal Interfaces
-
-### Registry Provider
+## Registry Provider
 
 Input: config with ai-native-development path.
 
@@ -15,7 +13,7 @@ Output: list of managed repo models.
 
 Behavior: command source first, registry-file fallback second. An exit-0 command with invalid JSON raises `RegistryError`; command missing/non-zero falls back; missing fallback file returns an empty list.
 
-### Readiness Checker
+## Readiness Checker
 
 Input: managed repo model.
 
@@ -23,7 +21,7 @@ Output: readiness report with boolean `ready` and list of failed checks.
 
 Behavior: pure inspection and subprocess checks only; no mutation. Missing repo path skips subprocess execution but records `git_clean` and `aii_status` as failed so launch readiness still fails closed.
 
-### Task Store
+## Task Store
 
 Input: repo path.
 
@@ -34,7 +32,7 @@ Behavior: parse `.ai-tasks/index.md` and task frontmatter locally. The index sup
 non-bare filenames, requires the file target to resolve under the resolved
 `.ai-tasks` directory, and returns `None` for absent or unsafe content.
 
-### Run Manager
+## Run Manager
 
 Input: repo id, task id, start flags.
 
@@ -61,7 +59,7 @@ broken runs so a post-mortem flag cannot rewrite end classification.
 write, without copying answer text. `recent_runs` returns newest-first
 `RunHistoryEntry` values from run records plus `events.jsonl`.
 
-### Control Dir Store
+## Control Dir Store
 
 Input: run dir.
 
@@ -77,7 +75,7 @@ Malformed answers keep the question pending and can be repaired with
 an empty `stop.flag` and requires the run dir to exist; `stop_requested` and
 `stop_answered` are read helpers for run classification.
 
-### Log Store
+## Log Store
 
 Input: run record.
 
@@ -94,7 +92,7 @@ captures. Live tails emit only complete newline-terminated lines, use byte
 offsets to avoid duplicate initial/follow output, and terminate gracefully when
 the run ends or the located file disappears.
 
-### History Store
+## History Store
 
 Input: run dir and `RunEvent` values.
 
@@ -105,7 +103,7 @@ an empty tuple for missing history and `history_error` events for corrupt or
 unreadable history lines. History is metadata-only; answer text remains in the
 control-dir answer file, not in `events.jsonl`.
 
-### Notifier
+## Notifier
 
 Input: `Notification` event with title, body, and optional group.
 
@@ -121,7 +119,7 @@ changing run records, history, or control-dir files. `orch-hub notify test`
 delivers a probe directly through the same notifier factory so delivery failure
 is visible to the CLI exit code while remaining outside run state.
 
-### Launchd Service Template
+## Launchd Service Template
 
 Input: environment variables in
 `deploy/launchd/com.qinglin89.orch-hub.plist`.

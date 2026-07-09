@@ -1,11 +1,9 @@
 ---
 last-updated: 2026-07-10
-verified-against: 2a3b9de41aaf52d608246fa97123002ed126b2ee
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # Features
-
-## Feature Index
 
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|

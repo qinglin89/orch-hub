@@ -1,13 +1,11 @@
 ---
 last-updated: 2026-07-10
-verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
+verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 ---
 
 # APIs: CLI
 
-## Public CLI
-
-### `python -m orch_hub.cli repos`
+## `python -m orch_hub.cli repos`
 
 - Purpose: list managed repos discovered from ai-native-development with readiness.
 - Output: human-readable status lines, followed by failed readiness reasons for non-ready repos.
@@ -16,7 +14,7 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
 - Operational errors, including malformed config such as a non-integer
   `ORCH_HUB_PORT`, return exit 1 with `error: ...` on stderr.
 
-### `python -m orch_hub.cli repos --json`
+## `python -m orch_hub.cli repos --json`
 
 - Purpose: stable JSON form for automation and future FastAPI reuse.
 - Stable shape:
@@ -45,7 +43,7 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
 
 `readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture. `commit` is the latest commit or `null` when git metadata is unavailable; this field is best-effort and does not affect readiness.
 
-### `orch-hub launchd deploy|update`
+## `orch-hub launchd deploy|update`
 
 - Purpose: install or refresh the resident macOS launchd service from the
   current checkout.
@@ -68,7 +66,7 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   bootout/bootstrap failures are not retried, and missing or invalid templates
   fail before venv/pip work.
 
-### `orch-hub launchd start|stop|restart`
+## `orch-hub launchd start|stop|restart`
 
 - Purpose: manage the installed launchd user-agent lifecycle without
   reinstalling package code or rewriting the plist.
@@ -79,7 +77,7 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
 - Non-goal: these commands do not call run APIs, write run `stop.flag` files,
   inspect run records, or signal detached orchestrator subprocesses.
 
-### `orch-hub launchd status`
+## `orch-hub launchd status`
 
 - Purpose: report launchd label/config hints and service health without manual
   launchctl commands.
@@ -87,7 +85,7 @@ verified-against: 29a10e84360d2aae3e243d9d0eab4f4cf81eee07
   path when readable, dashboard URL, plist parse error when present, launchctl
   output when unloaded, and the public `/api/health` probe result.
 
-### `orch-hub notify test`
+## `orch-hub notify test`
 
 - Purpose: verify push delivery, not merely that a Bark URL is configured.
 - Source: `orch_hub.cli` resolves config, then delivers through
