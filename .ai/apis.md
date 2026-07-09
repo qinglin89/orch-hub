@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
 ---
 
 # APIs and Interfaces
@@ -229,7 +229,10 @@ Current HTTP behavior:
 
 - `create_app(config=None, *, run_manager=None)` captures `Config.from_env()`
   by default, is testable with an explicit `Config`, and holds one `RunManager`
-  instance for run, escalation, and log routes.
+  instance for run, escalation, log, and background-monitor scans.
+- The app constructs a `RunMonitor` over that manager, exposes it as
+  `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
+  stops it during shutdown; app construction alone starts no worker thread.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, and `ORCH_HUB_BARK_URL`; surrounding

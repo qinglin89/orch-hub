@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
 ---
 
 # Modules
@@ -19,10 +19,11 @@ verified-against: 98194a7b5c814f85807bb897298db131bc593900
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, task frontmatter, and contained raw task-content reads |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
+| Run monitor | `orch_hub/monitor.py` | Implemented resident daemon-thread status scanner for proactive notification delivery |
 | History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, public dashboard shell, health/repo/commit/task/run/escalation/log/history routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/escalation/log/history routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and notification formatters |
 | Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including status layout, recent commits, and task-detail run controls |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
@@ -170,7 +171,7 @@ run_manager=None)` builds an app with a default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
 escalation, log, and history routes over one
-`RunManager` instance. Implemented run
+`RunManager` instance plus a lifespan-owned `RunMonitor`. Implemented run
 routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/stop`; implemented escalation routes are
 `GET /api/escalations` and
@@ -263,11 +264,27 @@ The manager also owns notification trigger timing when a notifier is
 configured: run-end notifications fire once at the observed live-to-ended
 transition using the same end classification shown by the dashboard, and
 pending-question notifications fire from `_status` when the existing
-`pending_questions` scan first sees a question. Question push dedup is an
+`pending_questions` scan first sees a question. API reads and the resident
+`RunMonitor` both drive this same status path. Question push dedup is an
 in-memory `(run_id, seq)` set, so rescans do not duplicate pushes within one
 hub process and a restart re-notifies a still-open question once. Delivery goes
 through `_emit`, which dispatches best-effort work off the lock by default and
 swallows backend exceptions so notification failures cannot corrupt run state.
+
+### Run Monitor
+
+Location: `orch_hub/monitor.py`
+
+Responsibility: run one resident daemon thread that periodically calls a
+scanner's `list_runs()` method, normally the app's single `RunManager`, so
+run-ended and pending-question notifications fire without dashboard/API
+polling. `RunMonitor.start()` and `stop()` are idempotent; `stop()` uses a
+bounded join, and scan failures are logged and swallowed so the service keeps
+running. The default interval is 30 seconds and intentionally not an
+environment setting.
+
+The monitor owns no run state, event state, notification formatting, or
+de-duplication; it only schedules the existing run-manager status scan.
 
 ### History
 
@@ -350,6 +367,8 @@ decide when notifications fire; `RunManager` owns trigger policy and isolation.
   are written.
 - Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
 - Logs locate/read/stream files only from run records; API/UI callers never pass log paths.
+- Run monitor schedules `RunManager.list_runs()` only; it must not own run
+  state, notification policy, or de-duplication.
 - API and CLI should be thin adapters over application functions.
 - Launchd operations manage only the fixed hub service label; run stop
   semantics stay in the run API/control-dir flow.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
 ---
 
 # Features
@@ -18,7 +18,7 @@ verified-against: 98194a7b5c814f85807bb897298db131bc593900
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
 | Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including run start/stop controls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
-| Notifications | implemented | notifications, config, runs, launchd, api | Bark delivery backend; `ORCH_HUB_BARK_URL` |
+| Notifications | implemented | notifications, config, runs, monitor, launchd, api | Bark delivery backend; `ORCH_HUB_BARK_URL` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
 | Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs` |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
@@ -351,7 +351,7 @@ Status: implemented
 Description: Notify when a pending question is first observed and when a run
 reaches a terminal state. Bark is the v1 backend.
 
-Modules: notifications, config, runs, launchd, api.
+Modules: notifications, config, runs, monitor, launchd, api.
 
 Implemented behavior:
 
@@ -364,6 +364,9 @@ Implemented behavior:
 - The API app builds the default `RunManager` with `build_notifier(config)`.
   Production delivery uses the run manager's daemon-thread dispatch; tests can
   inject synchronous dispatch.
+- The FastAPI lifespan starts a resident `RunMonitor` over the app's
+  `RunManager`; it calls `list_runs()` on a 30s interval, is created without
+  starting a thread at app construction, and stops cleanly on shutdown.
 - `RunManager._emit` wraps backend delivery so every failure is best-effort:
   exceptions are swallowed after logging only exception type and notification
   title, and run/control-dir/history state is unchanged.
@@ -375,6 +378,8 @@ Implemented behavior:
   reusing the existing `pending_questions` scan. Each question is de-duped by
   in-memory `(run_id, seq)`; answered questions are filtered out before
   notification and never fire.
+- API/dashboard reads still refresh run status, but they are no longer required
+  for timely pushes because the resident monitor drives the same status path.
 - Launchd deploy/update surface `ORCH_HUB_BARK_URL` into the installed plist,
   preserve an existing installed value when the environment omits it, render a
   blank string when disabled, and print only `bark push: enabled/disabled`.
