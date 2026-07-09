@@ -14,6 +14,7 @@ import os
 import plistlib
 import secrets
 import sys
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
@@ -43,6 +44,16 @@ LABEL = "com.qinglin89.orch-hub"
 PLIST_NAME = f"{LABEL}.plist"
 DEFAULT_PATH_ENV = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TEMPLATE_RELATIVE_PATH = Path("deploy") / "launchd" / PLIST_NAME
+
+# launchd removes a booted-out job asynchronously; bootstrapping into a domain
+# that still lists the label fails transiently with exit 5 (EIO). After an
+# actual unload, poll ``launchctl print`` for the label to disappear, then
+# retry bootstrap on transient exit-5 / input-output failures with a short
+# bounded backoff so ``orch-hub launchd update`` does not require a manual rerun.
+UNLOAD_MAX_ATTEMPTS = 10
+UNLOAD_POLL_INTERVAL = 0.3
+BOOTSTRAP_MAX_ATTEMPTS = 5
+BOOTSTRAP_RETRY_INTERVAL = 0.5
 
 
 class LaunchdError(RuntimeError):
@@ -230,11 +241,16 @@ def deploy_service(
     runner: Runner = run_command,
     environ: Mapping[str, str] | None = None,
     token_generator: Callable[[], str] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
 ) -> DeployResult:
     """Install/update the package, rewrite plist, and bootstrap the service.
 
     The operation is idempotent: existing launchd jobs are booted out first;
-    an absent job is treated as already stopped.
+    an absent job is treated as already stopped. When a live service is
+    actually unloaded, the deploy waits for launchd to drop the label before
+    bootstrapping and retries a transient post-bootout bootstrap failure
+    (exit 5 / input-output error) with a short bounded backoff, so an update
+    does not require the operator to rerun ``orch-hub launchd update``.
     """
     deployment = resolve_deployment(
         options, environ=environ, token_generator=token_generator
@@ -258,13 +274,12 @@ def deploy_service(
     commands.append(bootout)
     if not bootout.ok and not _is_not_loaded(bootout):
         raise LaunchdError(_format_failure("stop existing launchd service", bootout))
-    commands.append(
-        _run_required(
-            runner,
-            ["launchctl", "bootstrap", service_domain(), deployment.plist_path],
-            "bootstrap launchd service",
-        )
-    )
+    if bootout.ok:
+        # A live service was actually unloaded. launchd removes the job
+        # asynchronously, so bootstrapping immediately can race the teardown
+        # and fail with a transient exit 5; wait for the label to drop first.
+        commands.extend(_wait_for_unload(runner, sleeper))
+    commands.extend(_bootstrap_with_retry(runner, deployment, sleeper))
     return DeployResult(
         deployment=deployment,
         generated_token=deployment.token_source == "generated",
@@ -526,6 +541,74 @@ def _bootout(runner: Runner) -> CommandResult:
 
 def _print_service(runner: Runner) -> CommandResult:
     return _run(runner, ["launchctl", "print", service_target()])
+
+
+def _wait_for_unload(
+    runner: Runner, sleeper: Callable[[float], None]
+) -> list[CommandResult]:
+    """Poll ``launchctl print`` until the booted-out label is gone.
+
+    ``launchctl bootout`` returns before launchd has finished removing the job.
+    A successful ``print`` means the label is still in the domain, so we wait
+    and re-probe; a failing ``print`` means it is gone and bootstrap is safe.
+    The fast path costs nothing: if the label is already absent the first probe
+    breaks with no sleep. The poll is bounded — if the label lingers, the
+    bootstrap retry is the backstop rather than failing the whole deploy.
+    """
+    results: list[CommandResult] = []
+    for attempt in range(UNLOAD_MAX_ATTEMPTS):
+        printed = _print_service(runner)
+        results.append(printed)
+        if not printed.ok:
+            break
+        if attempt + 1 < UNLOAD_MAX_ATTEMPTS:
+            sleeper(UNLOAD_POLL_INTERVAL)
+    return results
+
+
+def _bootstrap_with_retry(
+    runner: Runner,
+    deployment: Deployment,
+    sleeper: Callable[[float], None],
+) -> list[CommandResult]:
+    """Bootstrap the installed plist, retrying transient launchd failures.
+
+    Immediately after bootout, ``launchctl bootstrap`` can fail with a
+    transient exit 5 (``Input/output error``) while the domain still holds the
+    label. Those are retried with a short bounded backoff; non-transient
+    failures (bad plist, permissions) raise at once, and exhausting the retries
+    raises the last failure so the CLI still reports a clear non-zero error.
+    """
+    results: list[CommandResult] = []
+    args: list[str | Path] = [
+        "launchctl",
+        "bootstrap",
+        service_domain(),
+        deployment.plist_path,
+    ]
+    for attempt in range(BOOTSTRAP_MAX_ATTEMPTS):
+        result = _run(runner, args)
+        results.append(result)
+        if result.ok:
+            return results
+        last_attempt = attempt + 1 >= BOOTSTRAP_MAX_ATTEMPTS
+        if last_attempt or not _is_transient_bootstrap_failure(result):
+            raise LaunchdError(_format_failure("bootstrap launchd service", result))
+        sleeper(BOOTSTRAP_RETRY_INTERVAL)
+    return results  # pragma: no cover - loop returns ok or raises above
+
+
+def _is_transient_bootstrap_failure(result: CommandResult) -> bool:
+    """Recognize launchd's retryable post-bootout bootstrap failure.
+
+    Bootstrapping a domain that still holds the just-booted-out label fails
+    with exit 5 (``Input/output error``). That is transient; other failures are
+    not retried.
+    """
+    if result.returncode == 5:
+        return True
+    text = f"{result.stdout}\n{result.stderr}".lower()
+    return "input/output error" in text
 
 
 def _run_required(
