@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: 8547d083ef9ca6131d0341f524ea24fb349402f2
+last-updated: 2026-07-09
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # Project Overview
@@ -12,16 +12,17 @@ orch-hub is intended to be a long-lived local control plane for AI coding orches
 The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
-the run manager, run/escalation HTTP routes, log viewing, and run
-history/audit: read the ai-native-development local registry, list managed
-repos, report launch readiness, parse each repo's `.ai-tasks/` index plus task
-frontmatter, expose those payloads through HTTP, require `ORCH_HUB_TOKEN` on
-every non-health HTTP path, provide a launchd user-agent template for resident
-macOS operation, read/write orchestrator question, answer, and stop files,
-launch/list/stop/reattach orchestrator subprocess runs with per-repo
-serialization, answer waiting questions remotely, retrieve or stream run logs,
-and persist run lifecycle plus answer-audit metadata. Later slices add
-dashboard UI, notifications, remote intake-task, and IM bot control.
+the run manager, run/escalation HTTP routes, log viewing, run history/audit,
+the mobile dashboard, and Bark notifications: read the ai-native-development
+local registry, list managed repos, report launch readiness, parse each repo's
+`.ai-tasks/` index plus task frontmatter, expose those payloads through HTTP,
+require `ORCH_HUB_TOKEN` on every non-health HTTP path, provide a launchd
+user-agent template for resident macOS operation, read/write orchestrator
+question, answer, and stop files, launch/list/stop/reattach orchestrator
+subprocess runs with per-repo serialization, answer waiting questions remotely,
+retrieve or stream run logs, persist run lifecycle plus answer-audit metadata,
+serve the dashboard, and push Bark notifications for pending questions and
+terminal run states. Later slices add remote intake-task and IM bot control.
 
 ## Users
 
@@ -38,6 +39,8 @@ dashboard UI, notifications, remote intake-task, and IM bot control.
 - Surface orchestrator human input requests remotely, collect answers, and deliver them back through the implemented control-dir file channel.
 - Stream or tail orchestrator logs to the dashboard.
 - Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
+- Push mobile notifications for pending questions and terminal run states via
+  Bark when `ORCH_HUB_BARK_URL` is configured.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.
@@ -59,10 +62,10 @@ dashboard UI, notifications, remote intake-task, and IM bot control.
 - First implementation: package plus CLI, using pytest tests and stdlib subprocess/path/json primitives where practical.
 - HTTP service: FastAPI and uvicorn, with a localhost-default entry point,
   environment-configured host/port, and fail-closed bearer-token middleware.
-- Future UI: mobile-first web dashboard served by the hub.
+- UI: mobile-first web dashboard served by the hub.
 - Local deployment: launchd user-agent template and docs on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
-- Notifications: Bark is the preferred v1 push path; IM bots are later.
+- Notifications: Bark is the implemented v1 push path; IM bots are later.
 - External command source: `aii-2` from ai-native-development.
 
 ## Repository Structure
@@ -81,9 +84,11 @@ orch_hub/
   readiness.py
   runs.py
   logs.py
+  notifications.py
   subprocess_utils.py
   task_store.py
   control_dir.py
+  web/
 tests/
   test_api.py
   test_cli.py
@@ -100,14 +105,6 @@ deploy/
     com.qinglin89.orch-hub.plist
 docs/
   launchd.md
-```
-
-Later service work may add:
-
-```text
-orch_hub/
-  notifications.py
-  web/
 ```
 
 ## External Project Facts

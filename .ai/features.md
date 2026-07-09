@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # Features
@@ -14,11 +14,11 @@ verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
-| Human question relay | API + dashboard answering implemented; notifications planned | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
+| Human question relay | implemented | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
 | Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including run start/stop controls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
-| Notifications | planned | notifications, control_dir, runs | Bark delivery backend |
+| Notifications | implemented | notifications, config, runs, launchd, api | Bark delivery backend; `ORCH_HUB_BARK_URL` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
 | Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs` |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
@@ -202,10 +202,11 @@ Implemented behavior:
 
 ### Human Question Relay
 
-Status: API + dashboard answering implemented; notifications planned
+Status: implemented
 
 Description: Detect pending control-dir question files, list them remotely with
-run/repo context, accept answers, write answer files, and audit the responder.
+run/repo context, notify the user, accept answers, write answer files, and
+audit the responder.
 
 Modules: control_dir, runs, api, notifications, models.
 
@@ -223,8 +224,10 @@ Implemented behavior:
 - The dashboard task detail view renders inline answer boxes for waiting runs,
   submits with responder `"dashboard"`, and re-renders after the answer file is
   written.
-
-Remaining slices: notifications.
+- When a notifier is configured, `RunManager._status` fires a Bark `needs
+  input` notification the first time its live-run `pending_questions` scan sees
+  each `(run_id, seq)`. Dedup is in-memory, so rescans do not duplicate pushes
+  in one hub process and a restart re-notifies a still-open question once.
 
 ### Log Viewing
 
@@ -343,11 +346,38 @@ Implemented behavior:
 
 ### Notifications
 
-Status: planned
+Status: implemented
 
-Description: Notify when an escalation is created, a run ends/errors, or close-out completes. Bark is the v1 backend.
+Description: Notify when a pending question is first observed and when a run
+reaches a terminal state. Bark is the v1 backend.
 
-Modules: notifications, control_dir, runs.
+Modules: notifications, config, runs, launchd, api.
+
+Implemented behavior:
+
+- `ORCH_HUB_BARK_URL` configures the full Bark endpoint including device key;
+  unset or whitespace-only values disable notifications. `build_notifier`
+  returns `BarkNotifier` or `None`, with `None` as the only disabled signal.
+- `Notification` carries title/body/optional group. `BarkNotifier` sends JSON
+  to the configured endpoint with a bounded timeout and injectable transport;
+  the URL is treated as secret and is never logged.
+- The API app builds the default `RunManager` with `build_notifier(config)`.
+  Production delivery uses the run manager's daemon-thread dispatch; tests can
+  inject synchronous dispatch.
+- `RunManager._emit` wraps backend delivery so every failure is best-effort:
+  exceptions are swallowed after logging only exception type and notification
+  title, and run/control-dir/history state is unchanged.
+- Terminal notifications fire exactly once when `_refresh` observes a
+  live-to-ended transition. The message uses the same `_classify_end` state and
+  detail as the dashboard; close-out completion is represented by the
+  `completed` classification detail for task completion or archival.
+- Pending-question notifications fire from `_status` while the run is live,
+  reusing the existing `pending_questions` scan. Each question is de-duped by
+  in-memory `(run_id, seq)`; answered questions are filtered out before
+  notification and never fire.
+- Launchd deploy/update surface `ORCH_HUB_BARK_URL` into the installed plist,
+  preserve an existing installed value when the environment omits it, render a
+  blank string when disabled, and print only `bark push: enabled/disabled`.
 
 ### Launchd Service
 
@@ -370,10 +400,13 @@ Implemented behavior:
 - Token resolution is explicit `--token`, then `ORCH_HUB_TOKEN`, then an
   existing installed plist token, then a generated token printed once. The
   installed plist is written mode `600` because it embeds the bearer token.
+- Bark URL resolution is `ORCH_HUB_BARK_URL`, then the existing installed-plist
+  value, then disabled. It has no CLI flag; CLI output prints only whether Bark
+  push is enabled because the URL embeds a device-key secret.
 - `deploy/launchd/com.qinglin89.orch-hub.plist` is the plist-structure source
   of truth. Placeholders cover the checkout, token, host/port,
-  ai-native-development checkout, data dir, log dir, and `PATH`; deployment
-  fails if any `REPLACE-...` placeholder remains.
+  ai-native-development checkout, data dir, optional Bark URL, log dir, and
+  `PATH`; deployment fails if any `REPLACE-...` placeholder remains.
 - `RunAtLoad` and `KeepAlive` keep the service resident; stdout/stderr go to
   `~/Library/Logs/orch-hub/`.
 - `start` bootstraps the installed plist if the job is unloaded; `stop` boots
@@ -387,7 +420,8 @@ Implemented behavior:
   launchctl output when unloaded, and the public `/api/health` probe result.
 - `docs/launchd.md` documents the integrated deploy/update/lifecycle flow,
   singleton service cardinality, template ownership, token behavior, manual
-  fallback commands, log inspection, and Tailscale-only exposure assumptions.
+  fallback commands, log inspection, optional Bark URL config, and
+  Tailscale-only exposure assumptions.
 
 ### Run History and Audit
 

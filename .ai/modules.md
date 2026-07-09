@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # Modules
@@ -10,8 +10,8 @@ verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output and launchd operations dispatch |
-| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token loading, data-dir setting, and derived `aii-2`/registry paths |
-| Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers |
+| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token and Bark URL loading, data-dir setting, and derived `aii-2`/registry paths |
+| Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing |
 | Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, and run models plus payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
@@ -23,7 +23,7 @@ verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, public dashboard shell, health/repo/commit/task/run/escalation/log/history routes, and uvicorn entry point |
-| Notifications | `orch_hub/notifications.py` | Future notifier interface and Bark adapter |
+| Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and notification formatters |
 | Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including status layout, recent commits, and task-detail run controls |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
@@ -58,12 +58,14 @@ Location: `orch_hub/launchd.py`
 
 Responsibility: manage the singleton macOS launchd user agent
 `com.qinglin89.orch-hub`. `deploy_service` / `update` resolve the checkout,
-ai-native-development path, token, host/port/data dir, plist path, log dir, and
-`PATH`; render the installed plist from
+ai-native-development path, token, host/port/data dir, plist path, log dir,
+`PATH`, and optional Bark URL; render the installed plist from
 `deploy/launchd/com.qinglin89.orch-hub.plist`; install/update the checkout
 `.venv` package; validate with `plutil`; boot out any loaded service; and
 bootstrap through `launchctl`. Token precedence is explicit option, env var,
-existing plist, then generated token.
+existing plist, then generated token. Bark URL precedence is
+`ORCH_HUB_BARK_URL`, then existing installed-plist value, then disabled; it has
+no CLI flag and is never echoed because the URL embeds a device-key secret.
 
 `start_service`, `stop_service`, and `restart_service` are launchd lifecycle
 helpers only. They bootstrap or boot out the fixed label and deliberately do
@@ -79,7 +81,8 @@ Location: `orch_hub/config.py`
 
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
-`ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, and derived
+`ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
+and derived
 `aii-2`/registry file paths:
 
 ```text
@@ -90,8 +93,9 @@ All current environment variables strip surrounding whitespace. Empty or
 whitespace-only values count as unset; a malformed or out-of-range
 `ORCH_HUB_PORT` raises `ValueError` instead of silently binding the default.
 `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; the run manager writes
-`<data_dir>/runs/<run_id>/` directories there. Future config belongs here too:
-notifier settings and storage-specific options.
+`<data_dir>/runs/<run_id>/` directories there. `ORCH_HUB_BARK_URL` is the full
+Bark endpoint including device key; empty or whitespace-only values disable
+push notifications.
 
 ### Models
 
@@ -255,6 +259,16 @@ not block repo launches when no repo attribution is available. The manager
 appends `run_started`, `run_ended`, `stop_requested`, and `answer_recorded`
 events and exposes newest-first `recent_runs(limit=...)` history entries.
 
+The manager also owns notification trigger timing when a notifier is
+configured: run-end notifications fire once at the observed live-to-ended
+transition using the same end classification shown by the dashboard, and
+pending-question notifications fire from `_status` when the existing
+`pending_questions` scan first sees a question. Question push dedup is an
+in-memory `(run_id, seq)` set, so rescans do not duplicate pushes within one
+hub process and a restart re-notifies a still-open question once. Delivery goes
+through `_emit`, which dispatches best-effort work off the lock by default and
+swallows backend exceptions so notification failures cannot corrupt run state.
+
 ### History
 
 Location: `orch_hub/history.py`
@@ -306,6 +320,24 @@ follows appended complete lines with byte offsets and a raw-bytes pending
 buffer, sends idle heartbeat comments, and ends with `event: end` on run death
 or log rotation. File reads run inline on the event loop in v1; move them to a
 thread only if connection count grows.
+
+### Notifications
+
+Location: `orch_hub/notifications.py`
+
+Responsibility: define backend-agnostic notification payloads, the `Notifier`
+protocol, the Bark backend, and shared event formatters. `Notification`
+contains title, body, and optional group; `to_dict()` maps to the Bark JSON
+payload. `BarkNotifier` POSTs JSON to the configured full Bark endpoint with a
+bounded timeout and an injectable transport for tests. `build_notifier(config)`
+returns `BarkNotifier` when `Config.bark_url` is set and `None` when push is
+disabled.
+
+Formatters are pure: `run_end_notification(record, state, detail)` turns the
+run manager's completed/stopped/error/ended classification into device text,
+and `question_notification(repo_name, task_id, question)` formats a newly
+observed pending control-dir question as `needs input`. The module does not
+decide when notifications fire; `RunManager` owns trigger policy and isolation.
 
 ## Boundary Rules
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # Project Map
@@ -14,11 +14,11 @@ verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
-| Human question relay | control_dir, runs, api, notifications, models, web | API and dashboard answer UI implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; notification surfacing remains separate |
+| Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; Bark pending-question push fires once per observed `(run_id, seq)` |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, repo/task run-state status layout, cc-codex Start dialog, run history, recent commits, and recent/live log views |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
-| Notifications | notifications, control_dir, runs | Bark first; notifier interface for later backends |
+| Notifications | notifications, config, runs, launchd, api | implemented Bark backend; `ORCH_HUB_BARK_URL` config; run manager owns terminal and pending-question triggers, isolation, and in-memory question dedup |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging and operations CLI; plist template is source of truth; lifecycle commands manage only the fixed service label, not orchestrator runs |
 | Run history and audit | history, runs, api, models, control_dir | implemented; per-run `events.jsonl`, launch-time task status on run records, lifecycle/stop/answer metadata events, no answer text copied into history |
 
@@ -35,7 +35,7 @@ verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 | Log viewing | `GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream` |
 | Mobile dashboard | `GET /`, `GET /app.js`, `GET /styles.css`; protected repo/task/run/escalation/log/history/commit APIs |
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
-| Notifications | internal notifier interface |
+| Notifications | internal notifier interface, `ORCH_HUB_BARK_URL`, Bark POST backend |
 | Launchd service | CLI `orch-hub launchd deploy|update|start|stop|restart|status`, `orch-hub-api`, `deploy/launchd/com.qinglin89.orch-hub.plist`, `docs/launchd.md` |
 | Run history and audit | `GET /api/history/runs` |
 
@@ -43,21 +43,21 @@ verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 
 | Module | Responsibilities |
 |---|---|
-| config | Environment overrides, default ai-native-development path, bearer token loading, host/port/data-dir service settings, derived `aii-2` and registry-file paths |
+| config | Environment overrides, default ai-native-development path, bearer token and Bark URL loading, host/port/data-dir service settings, derived `aii-2` and registry-file paths |
 | models | Stable repo/readiness/task inventory/question/run/history data structures shared by CLI/API/tests |
 | registry | Discover managed repos from `aii-2` or registry file |
 | readiness | Validate target repo launch readiness with seven fail-closed checks |
 | git_meta | Read latest/recent git commit metadata for display, degrading to unavailable instead of gating repo content |
 | subprocess_utils | Run external commands consistently and surface missing executables distinctly |
 | cli | Human and JSON repo readiness output; launchd command dispatch |
-| launchd | Resolve launchd deployment settings, render/install plist from template, install/update package, run launchctl lifecycle commands, and probe service status |
+| launchd | Resolve launchd deployment settings including optional Bark URL, render/install plist from template, install/update package, run launchctl lifecycle commands, and probe service status |
 | task_store | Parse `.ai-tasks` indexes and task frontmatter into repo task inventories |
-| runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, and append run history events |
+| runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, append run history events, and trigger isolated notifications |
 | history | Append/read per-run JSONL audit/history events without storing answer text |
 | control_dir | Implement question/answer/stop file-channel handling |
 | logs | Locate, read, and stream orchestrator logs from run records |
 | api | FastAPI app factory, pure-ASGI bearer auth middleware, public dashboard shell, health/repo/task/run/escalation/log/history route wiring, uvicorn entry point |
-| notifications | Bark and future notification backends |
+| notifications | Backend-agnostic notification payloads, Bark backend, notifier protocol, and run/question formatters |
 | web | Mobile dashboard SPA assets |
 | docs | Launchd operator documentation |
 | deploy | Launchd plist template and future deployment templates |

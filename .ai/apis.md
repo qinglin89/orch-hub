@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # APIs and Interfaces
@@ -56,7 +56,10 @@ verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
   label if loaded, and bootstrap it.
 - Configuration precedence: CLI flag, environment, default for paths/host/port;
   bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
-  installed plist token, then generated token printed once.
+  installed plist token, then generated token printed once. Bark URL resolves
+  as `ORCH_HUB_BARK_URL`, then existing installed plist value, then disabled;
+  it has no CLI flag, and CLI output reports only `bark push:
+  enabled/disabled` because the URL embeds a device-key secret.
 - Errors: operational failures return exit 1 with `error: ...`; missing or
   invalid templates fail before venv/pip work.
 
@@ -229,8 +232,8 @@ Current HTTP behavior:
   instance for run, escalation, and log routes.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
-  `ORCH_HUB_PORT`, and `ORCH_HUB_DATA_DIR`; surrounding whitespace is stripped
-  and empty/whitespace-only values count as unset.
+  `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, and `ORCH_HUB_BARK_URL`; surrounding
+  whitespace is stripped and empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;
@@ -370,11 +373,17 @@ control-dir answer file, not in `events.jsonl`.
 
 ### Notifier
 
-Input: notification event.
+Input: `Notification` event with title, body, and optional group.
 
-Output: delivery result.
+Output: best-effort delivery through a configured backend.
 
-Behavior: fan-out capable; Bark is the expected first implementation.
+Behavior: `build_notifier(config)` returns `BarkNotifier` when
+`Config.bark_url` is set, otherwise `None`. Bark sends JSON to the configured
+full endpoint, which includes the device key and must not be logged. The run
+manager owns trigger timing and isolation: terminal notifications fire at the
+observed live-to-ended transition, pending-question notifications fire once per
+observed `(run_id, seq)`, and backend exceptions are swallowed without changing
+run records, history, or control-dir files.
 
 ### Launchd Service Template
 
@@ -384,10 +393,10 @@ Input: environment variables in
 Output: resident `orch-hub-api` process managed by launchd, with stdout/stderr
 logs under `~/Library/Logs/orch-hub/`.
 
-Behavior: user-agent template sets all current `ORCH_HUB_*` variables and an
-explicit `PATH`, starts at login, restarts on exit, and requires the operator
-to replace placeholders before bootstrapping. Install/start/stop/reload/log
-commands live in `docs/launchd.md`.
+Behavior: user-agent template sets all current `ORCH_HUB_*` variables
+including optional `ORCH_HUB_BARK_URL`, plus an explicit `PATH`, starts at
+login, restarts on exit, and requires all placeholders to be resolved before
+bootstrapping. Install/start/stop/reload/log commands live in `docs/launchd.md`.
 
 ## API Conventions
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
+last-updated: 2026-07-09
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # Architecture
@@ -140,9 +140,10 @@ Implemented macOS launchd user-agent packaging lives in
 `deploy/launchd/com.qinglin89.orch-hub.plist`, with operator docs in
 `docs/launchd.md`. The plist runs the installed `orch-hub-api` console script,
 sets `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`, `ORCH_HUB_PORT`,
-`ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_DATA_DIR`, and an explicit `PATH`,
-uses `RunAtLoad` plus `KeepAlive`, and logs to `~/Library/Logs/orch-hub/`.
-The token is embedded in the user-agent plist, so installs should keep it
+`ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_DATA_DIR`, optional
+`ORCH_HUB_BARK_URL`, and an explicit `PATH`, uses `RunAtLoad` plus
+`KeepAlive`, and logs to `~/Library/Logs/orch-hub/`. The token and optional
+Bark URL are embedded in the user-agent plist, so installs should keep it
 `chmod 600`.
 
 ### Dashboard
@@ -165,7 +166,23 @@ including the log stream. Main views:
 
 ### Notification Adapter
 
-Future notifier interface with Bark as v1 backend. Notification triggers are escalation created, run ended/errored, and close-out done.
+Implemented notifier interface with Bark as v1 backend. `Config.bark_url`
+comes from `ORCH_HUB_BARK_URL`; blank/unset disables notifications. The
+production API app builds `RunManager(..., notifier=build_notifier(config))`.
+`BarkNotifier` posts JSON (`title`, `body`, optional `group`) to the configured
+full Bark endpoint, which includes the device key and must never be logged.
+`RunManager._emit` isolates delivery: the default dispatch starts a daemon
+thread, backend exceptions are swallowed after logging only exception type and
+notification title, and notification failure cannot corrupt `run.json`,
+`events.jsonl`, or control-dir files.
+
+Triggers live in `RunManager`: terminal-state notifications fire exactly once
+when `_refresh` observes the live-to-ended transition and use the same
+`_classify_end` result as the dashboard (`completed` covers task completion or
+close-out archival); pending-question notifications fire from `_status` when a
+live run's existing `pending_questions` scan first observes a question.
+Question dedup is an in-memory `(run_id, seq)` set, so a hub restart re-notifies
+a still-open question once and answered questions never re-fire.
 
 ## Layers
 
@@ -239,7 +256,8 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 ### Human Answer
 
 1. Orchestrator writes a question file in the control dir.
-2. Hub lists it as waiting with `pending_questions` and notifies the user.
+2. Hub lists it as waiting with `pending_questions` and notifies the user once
+   per `(run_id, seq)` when Bark is configured.
 3. User submits an answer through the dashboard or future bot.
 4. Hub writes the answer file with `write_answer` and records an audit event.
 5. Orchestrator consumes the answer and continues.
@@ -280,6 +298,9 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
    evidence (`stop.flag` or a valid `"stop"` answer), then bare exit code.
 6. When the hub observes an end, it rewrites `run.json` and appends a
    `run_ended` event with the observed exit code when available.
+7. The same observed end fires one best-effort terminal notification through
+   the configured notifier, without changing run-state writes if delivery
+   fails.
 
 ### Run History Access
 
@@ -300,7 +321,8 @@ Core application services are independent from FastAPI so CLI and HTTP routes ca
 - Python virtual environment inside each target repo's `.cursor/orchestrator/.venv`.
 - FastAPI and uvicorn for the HTTP foundation.
 - launchd for resident macOS service operation.
-- Future: Bark and Tailscale service exposure.
+- Bark push endpoint when `ORCH_HUB_BARK_URL` is configured.
+- Tailscale service exposure.
 
 ## Deployment
 
@@ -311,6 +333,8 @@ private Tailscale IP. Simple bearer-token auth is required for all protected
 HTTP routes even on the tailnet; tailnet membership remains the primary
 boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; run dirs and
 `events.jsonl` history are stored under `<data_dir>/runs/<run_id>/`.
+`ORCH_HUB_BARK_URL` is optional launchd environment config; deploy/update can
+read it from the environment and preserve an existing installed-plist value.
 
 ## Invariants
 
@@ -323,3 +347,5 @@ boundary. `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; run dirs and
 - Human answers are auditable, but history must not duplicate answer text.
 - Log access is scoped to known run records; clients never supply log paths.
 - Readiness must fail closed; missing deploy pieces, dirty trees, or failed `aii-2 status` should block launch.
+- Notification delivery is best-effort and must never corrupt run/control-dir
+  state; Bark URLs embed device-key secrets and must not be logged.

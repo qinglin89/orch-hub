@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
+last-updated: 2026-07-09
+verified-against: 98194a7b5c814f85807bb897298db131bc593900
 ---
 
 # Design Principles and Decisions
@@ -123,6 +123,25 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
   operational CLI errors; the plist embeds `ORCH_HUB_TOKEN` and must be kept
   permission-restricted.
 
+### Tradeoff: best-effort notifier boundary vs notification-owned run state
+
+- Chose: `RunManager` owns trigger timing and isolates delivery through `_emit`.
+- Reason: notification failure must not affect `run.json`, `events.jsonl`, or
+  the control-dir channel, and run/end/question classification already belongs
+  in the run manager.
+- Consequence: `BarkNotifier` may raise for direct callers, but production
+  delivery runs off the lock through an injected dispatch and logs only
+  exception type plus non-secret notification title.
+
+### Tradeoff: in-memory question dedup vs persisted notification ledger
+
+- Chose: in-memory `(run_id, seq)` dedup for pending-question pushes.
+- Reason: the hub only needs to suppress duplicate pushes during normal status
+  rescans; persisting a notification ledger would add storage and cleanup for a
+  small per-process reminder mechanism.
+- Consequence: a hub restart re-notifies a still-open question once; an answered
+  question is no longer pending, so it never re-fires.
+
 ### Tradeoff: shared core before dashboard
 
 - Chose: CLI/shared-core slices before dashboard, then a thin FastAPI
@@ -167,6 +186,14 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
   answer file consumed by the orchestrator.
 - Classify finished runs from stable evidence in order: task
   completed/archived, hub stop evidence, then exit code.
+- Keep notification trigger policy in `RunManager`: terminal notifications fire
+  at the live-to-ended transition, and pending-question notifications ride the
+  existing `_status` scan of `pending_questions`.
+- Treat `None` as the only disabled-notification mechanism; do not add a
+  parallel null-object flag. A configured notifier receives `Notification`
+  objects with title/body/group.
+- Never log a Bark URL or transport detail that could contain the device key;
+  log only exception type plus non-secret notification title.
 - Require explicit acknowledgement for any `blocked` task launch because the
   hub cannot reliably distinguish a resumable blocked session from a foreign
   manual-session `claimed-by` id.
@@ -196,6 +223,9 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
   `orch_hub.control_dir`.
 - Duplicating orchestrator log filename attribution outside `orch_hub.logs`.
 - Copying human answer text into history/audit records.
+- Letting notification delivery failures affect run records, history, or
+  control-dir state.
+- Logging Bark endpoint URLs or device keys.
 - Passing bearer tokens in log-stream query strings.
 - Adding a cookie or query-token credential path for the dashboard shell.
 - Exposing the hub outside the tailnet.
@@ -210,4 +240,3 @@ verified-against: a79ba11724a2cccbd750f719d351b803c6fcda9d
   `ORCH_HUB_DATA_DIR`.
 - Exact route schema beyond the implemented repo/task/run/escalation/log/history
   and dashboard-shell API surface.
-- Bark server packaging on the Mac.
