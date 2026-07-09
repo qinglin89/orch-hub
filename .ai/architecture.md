@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
 ---
 
 # Architecture
@@ -144,7 +144,9 @@ sets `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`, `ORCH_HUB_PORT`,
 `ORCH_HUB_BARK_URL`, and an explicit `PATH`, uses `RunAtLoad` plus
 `KeepAlive`, and logs to `~/Library/Logs/orch-hub/`. The token and optional
 Bark URL are embedded in the user-agent plist, so installs should keep it
-`chmod 600`.
+`chmod 600`. Deploy/update fail on unresolved required template placeholders;
+unknown optional placeholders from newer templates are blanked so old installed
+CLIs can refresh a newer checkout when empty means unset/disabled.
 
 ### Dashboard
 

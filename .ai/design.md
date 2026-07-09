@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
 ---
 
 # Design Principles and Decisions
@@ -122,6 +122,17 @@ verified-against: 98194a7b5c814f85807bb897298db131bc593900
 - Consequence: malformed env values must fail explicitly or be reported as
   operational CLI errors; the plist embeds `ORCH_HUB_TOKEN` and must be kept
   permission-restricted.
+
+### Tradeoff: launchd placeholder tolerance vs self re-exec
+
+- Chose: keep render-before-install ordering and tolerate unknown optional
+  `REPLACE-...` placeholders by rendering them as `""`.
+- Reason: `orch-hub launchd update` runs the old installed CLI; installing the
+  package first would not reload already-imported Python modules, while a true
+  re-exec adds recursion and token-precedence complexity.
+- Consequence: new optional launchd template fields are forward-compatible when
+  empty means disabled; new required fields are a breaking change that requires
+  updating the installed CLI first.
 
 ### Tradeoff: best-effort notifier boundary vs notification-owned run state
 

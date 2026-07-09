@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 7aeeee1df0f406e07b823c81e021964747272e41
+verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
 ---
 
 # Features
@@ -414,7 +414,9 @@ Implemented behavior:
 - `deploy/launchd/com.qinglin89.orch-hub.plist` is the plist-structure source
   of truth. Placeholders cover the checkout, token, host/port,
   ai-native-development checkout, data dir, optional Bark URL, log dir, and
-  `PATH`; deployment fails if any `REPLACE-...` placeholder remains.
+  `PATH`. Required placeholders fail loudly before writing/loading; unknown
+  optional `REPLACE-...` placeholders from a newer template render as `""` so
+  an older installed CLI can update a newer checkout when empty means disabled.
 - `RunAtLoad` and `KeepAlive` keep the service resident; stdout/stderr go to
   `~/Library/Logs/orch-hub/`.
 - `start` bootstraps the installed plist if the job is unloaded; `stop` boots

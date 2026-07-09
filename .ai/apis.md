@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 7aeeee1df0f406e07b823c81e021964747272e41
+verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
 ---
 
 # APIs and Interfaces
@@ -55,7 +55,9 @@ verified-against: 7aeeee1df0f406e07b823c81e021964747272e41
   template, write it mode `600`, validate it with `plutil`, boot out the fixed
   label if loaded, wait for a successful bootout to leave the launchd domain,
   and bootstrap it with bounded retry for transient exit-5/input-output
-  failures.
+  failures. Rendering still happens before install/write; required leftovers
+  fail before side effects, while unknown optional placeholders render empty for
+  old-CLI/new-template compatibility.
 - Configuration precedence: CLI flag, environment, default for paths/host/port;
   bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
   installed plist token, then generated token printed once. Bark URL resolves
@@ -401,8 +403,10 @@ logs under `~/Library/Logs/orch-hub/`.
 
 Behavior: user-agent template sets all current `ORCH_HUB_*` variables
 including optional `ORCH_HUB_BARK_URL`, plus an explicit `PATH`, starts at
-login, restarts on exit, and requires all placeholders to be resolved before
-bootstrapping. Install/start/stop/reload/log commands live in `docs/launchd.md`.
+login, and restarts on exit. Required placeholders must resolve before writing
+or bootstrapping; unknown optional placeholders are blanked for forward
+compatibility with newer templates. Install/start/stop/reload/log commands live
+in `docs/launchd.md`.
 
 ## API Conventions
 
