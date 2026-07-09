@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
+verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
 ---
 
 # Features
@@ -111,6 +111,9 @@ Implemented behavior:
 - A default-deny middleware protects every path except `/api/health` and the
   three dashboard shell assets. Missing/malformed or invalid credentials return
   401; unset `ORCH_HUB_TOKEN` returns 503 on protected data routes.
+- The three dashboard shell assets (`/`, `/app.js`, `/styles.css`) are served
+  with `Cache-Control: no-store` so browser heuristic caching cannot hide a new
+  build after `orch-hub launchd update`.
 - `run()` and `orch-hub-api` read `ORCH_HUB_HOST` / `ORCH_HUB_PORT` and bind
   to `127.0.0.1:8765` by default; any private exposure should remain
   Tailscale-only.

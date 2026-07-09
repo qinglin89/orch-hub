@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
+verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
 ---
 
 # APIs and Interfaces
@@ -93,6 +93,9 @@ verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
 - Auth: public by design because browser navigation cannot attach an
   `Authorization` header. These assets contain no secrets; every dashboard data
   request still uses protected HTTP APIs with `Authorization: Bearer <token>`.
+- Cache: each response sends `Cache-Control: no-store` so mobile browsers fetch
+  the current shell after service updates rather than serving stale JS/CSS from
+  heuristic cache.
 
 ### `GET /api/repos`
 
@@ -237,6 +240,8 @@ Current HTTP behavior:
   including `/docs`, `/openapi.json`, unknown paths, and future data routes.
   Pure ASGI is used instead of `BaseHTTPMiddleware` so streaming responses are
   not buffered and disconnects propagate.
+- The enumerated dashboard shell paths are public but uncached:
+  `Cache-Control: no-store` is attached to each shell `FileResponse`.
 - Missing or malformed credentials return HTTP 401 with
   `WWW-Authenticate: Bearer` and `{"detail": "missing bearer token"}`; wrong
   credentials return HTTP 401 with `{"detail": "invalid bearer token"}`.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 62668b07e35f9b9523ca53d52c99f69c19c0c7f8
+verified-against: 7d1006496f69bd6522d219f5a0a420c4903fbad8
 ---
 
 # Modules
@@ -163,8 +163,9 @@ Location: `orch_hub/api.py`
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None)` builds an app with a default-deny bearer-token middleware,
-public `GET /api/health`, public dashboard shell routes, protected repo/task
-routes, and protected run, escalation, log, and history routes over one
+public `GET /api/health`, public dashboard shell routes served with
+`Cache-Control: no-store`, protected repo/task routes, and protected run,
+escalation, log, and history routes over one
 `RunManager` instance. Implemented run
 routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/stop`; implemented escalation routes are
@@ -192,11 +193,12 @@ state conflicts return HTTP 409 with structured details where useful.
 Location: `orch_hub/web/`
 
 Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
-defines the static app container and bottom navigation; `app.js` owns token
-entry/localStorage, bearer `fetch` calls, hash routing, repo/task/detail/run
-views, repo/task run-state signals, recent commits, task-detail Start/Stop run
-controls, waiting-question answer forms, run history, and recent/live log
-views; `styles.css` holds the mobile layout. The
+defines the static app container and bottom navigation; the shell assets are
+served uncached by the API so updates reach browsers on the next load. `app.js`
+owns token entry/localStorage, bearer `fetch` calls, hash routing,
+repo/task/detail/run views, repo/task run-state signals, recent commits,
+task-detail Start/Stop run controls, waiting-question answer forms, run
+history, and recent/live log views; `styles.css` holds the mobile layout. The
 dashboard reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
