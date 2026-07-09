@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
+verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 ---
 
 # Features
@@ -129,7 +129,9 @@ Implemented behavior:
 - Launch command is `/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
   <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
   <run>/control [extra args]`, with `cwd=<repo>`, stdin from devnull,
-  stdout/stderr redirected to `spawn.out`, and `start_new_session=True`.
+  stdout/stderr redirected to `spawn.out`, `start_new_session=True`, and an
+  explicit `PATH` that includes common user-installed agent CLI directories
+  before the inherited and baseline macOS paths.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
   it persists the internal `spawn_out` path so reattached runs and pre-field
   records can still surface startup diagnostics. In-memory `Popen` handles only

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
+verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 ---
 
 # APIs and Interfaces
@@ -284,8 +284,9 @@ repo already has a live run, when task inventory is missing/unlisted or reports
 explicitly acknowledged, or when readiness fails. A successful launch creates a
 fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
 deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
-persists `run.json` with launch-time task status and the internal `spawn_out`
-path, appends `run_started`, and records stdout/stderr in `spawn.out`.
+an explicit subprocess `PATH` for user-installed agent CLIs, persists
+`run.json` with launch-time task status and the internal `spawn_out` path,
+appends `run_started`, and records stdout/stderr in `spawn.out`.
 `list_runs` and `get_run` refresh
 live/end state and support reattach from disk by pid probe; observed ends append
 `run_ended`. `stop_run` delegates to `control_dir.request_stop`, appends

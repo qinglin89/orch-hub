@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
+verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 ---
 
 # Project Map
@@ -13,7 +13,7 @@ verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
 | Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries, task frontmatter supplies authoritative status/blockers; single-task content reads are index-gated and contained under `.ai-tasks`; run overlay is supplied by runs |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
-| Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
+| Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
 | Human question relay | control_dir, runs, api, notifications, models, web | API and dashboard answer UI implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; notification surfacing remains separate |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, cc-codex Start dialog, run history, and recent/live log views |

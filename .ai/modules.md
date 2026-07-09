@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
+verified-against: 94dfcef899f685999a5e899d036dff2b6e4cd6e6
 ---
 
 # Modules
@@ -207,7 +207,10 @@ control dir. Launch uses
 `/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
 <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
 <run>/control [extra args]`, `cwd=<repo>`, stdin from devnull, stdout/stderr to
-`spawn.out`, and `start_new_session=True`. `run.json` is the source of truth,
+`spawn.out`, `start_new_session=True`, and an explicit environment whose `PATH`
+prepends common user agent-CLI locations (`~/.local/bin`, `~/.claude/local`,
+`~/.npm-global/bin`, `~/.cargo/bin`) while preserving the inherited environment
+and baseline macOS paths. `run.json` is the source of truth,
 stores launch-time task frontmatter status plus the internal `spawn_out` path,
 and is rewritten atomically; in-memory `Popen` handles exist only to capture
 exit codes for runs that end while the hub process is alive.
