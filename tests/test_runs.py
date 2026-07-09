@@ -140,6 +140,7 @@ def make_manager(
     readiness=passing_readiness,
     pid_probe=None,
     clock: FakeClock | None = None,
+    notifier=None,
 ) -> tuple[RunManager, FakeSpawner, FakeClock]:
     spawner = spawner if spawner is not None else FakeSpawner()
     clock = clock if clock is not None else FakeClock()
@@ -150,6 +151,10 @@ def make_manager(
         spawner=spawner,
         pid_probe=pid_probe if pid_probe is not None else lambda pid: False,
         clock=clock,
+        notifier=notifier,
+        # Deliver inline (not on the production daemon thread) so notification
+        # assertions are deterministic; it is only invoked when a notifier is set.
+        notify_dispatch=lambda deliver: deliver(),
     )
     return manager, spawner, clock
 
@@ -860,3 +865,112 @@ def test_run_dir_without_record_is_surfaced_as_crashed_launch(tmp_path):
     assert "missing run.json" in status.detail
     with pytest.raises(RunEndedError):
         manager.stop_run("20260708T000000Z-repo-a-old")
+
+
+# -- terminal-state notifications ------------------------------------------------
+
+
+class RecordingNotifier:
+    """Captures every delivered notification (synchronous dispatch in tests)."""
+
+    def __init__(self):
+        self.notifications: list = []
+
+    def notify(self, notification) -> None:
+        self.notifications.append(notification)
+
+
+class RaisingNotifier:
+    """A backend that always fails, to prove failures are isolated."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def notify(self, notification) -> None:
+        self.calls += 1
+        raise OSError("bark unreachable")
+
+
+def test_run_end_fires_one_notification_with_the_classified_state(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, spawner, _ = make_manager(tmp_path, notifier=notifier)
+    manager.start_run(repo, TASK_ID)
+
+    write_task_file(repo.path, TASK_ID, status="completed")
+    end_run(spawner, 0)
+    manager.list_runs()  # observe the end -> fires
+
+    assert len(notifier.notifications) == 1
+    note = notifier.notifications[0]
+    assert note.title == "repo-a: run completed"
+    assert note.group == "repo-a"
+    assert TASK_ID in note.body
+
+
+def test_error_end_notifies_run_failed(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, spawner, _ = make_manager(tmp_path, notifier=notifier)
+    manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 3)  # nonzero exit, no stop evidence -> error
+    manager.list_runs()
+
+    assert [n.title for n in notifier.notifications] == ["repo-a: run failed"]
+
+
+def test_no_notification_while_the_run_is_live(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    manager.start_run(repo, TASK_ID)
+
+    manager.list_runs()  # still active
+
+    assert notifier.notifications == []
+
+
+def test_notification_fires_exactly_once_across_rescans(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, spawner, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # transition observed here
+    manager.list_runs()  # settled record: no re-fire
+    manager.get_run(record.run_id)
+    manager.recent_runs()
+
+    assert len(notifier.notifications) == 1
+
+
+def test_notifier_failure_does_not_corrupt_run_state(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RaisingNotifier()
+    manager, spawner, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    status = only_status(manager)  # must not raise despite delivery failing
+
+    assert notifier.calls == 1
+    assert status.state == "ended"
+    # The end is still recorded and audited exactly as without a notifier.
+    data = read_record(manager, record.run_id)
+    assert data["ended_ts"] is not None
+    assert data["exit_code"] == 0
+    events = read_events(manager.runs_dir / record.run_id)
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_RUN_ENDED]
+
+
+def test_no_notifier_configured_is_a_silent_no_op(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)  # notifier=None
+    manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    status = only_status(manager)  # no notifier, no error
+
+    assert status.state == "ended"

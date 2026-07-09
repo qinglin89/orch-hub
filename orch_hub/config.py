@@ -36,6 +36,13 @@ PORT_ENV = "ORCH_HUB_PORT"
 DATA_DIR_ENV = "ORCH_HUB_DATA_DIR"
 """Environment variable overriding the data directory."""
 
+BARK_URL_ENV = "ORCH_HUB_BARK_URL"
+"""Environment variable holding the Bark push endpoint (server + device key).
+
+The value is a full URL such as ``https://api.day.app/<device-key>``. It embeds
+a device key, so treat it as a secret and never log it. Unset (or blank)
+disables push notifications entirely."""
+
 
 def _parse_port(raw: str | None) -> int:
     """Parse ``PORT_ENV``: unset/blank means the default; malformed is an
@@ -84,6 +91,13 @@ class Config:
     orchestrator's post-checks.
     """
 
+    bark_url: str | None = None
+    """Bark push endpoint (``ORCH_HUB_BARK_URL``), or ``None`` when unset.
+
+    Full URL including the device key (a secret — never logged). ``None`` means
+    push notifications are disabled; there is no separate on/off flag.
+    """
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
@@ -100,12 +114,15 @@ class Config:
         raw_token = env.get(TOKEN_ENV)
         token = raw_token.strip() if raw_token else None
         raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()
+        raw_bark_url = env.get(BARK_URL_ENV)
+        bark_url = raw_bark_url.strip() if raw_bark_url else None
         return cls(
             ai_native_path=path,
             token=token or None,
             host=(env.get(HOST_ENV) or "").strip() or DEFAULT_HOST,
             port=_parse_port(env.get(PORT_ENV)),
             data_dir=Path(raw_data_dir).expanduser() if raw_data_dir else DEFAULT_DATA_DIR,
+            bark_url=bark_url or None,
         )
 
     @property

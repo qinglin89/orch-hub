@@ -12,6 +12,7 @@ import pytest
 
 from orch_hub.config import (
     AI_NATIVE_PATH_ENV,
+    BARK_URL_ENV,
     DATA_DIR_ENV,
     DEFAULT_AI_NATIVE_PATH,
     DEFAULT_DATA_DIR,
@@ -128,3 +129,18 @@ def test_data_dir_from_env_expands_user():
 def test_data_dir_empty_or_whitespace_counts_as_unset():
     assert Config.from_env({DATA_DIR_ENV: ""}).data_dir == DEFAULT_DATA_DIR
     assert Config.from_env({DATA_DIR_ENV: "   "}).data_dir == DEFAULT_DATA_DIR
+
+
+def test_bark_url_defaults_to_none():
+    assert Config.from_env({}).bark_url is None
+    assert Config(ai_native_path=Path("/root/ai-native")).bark_url is None
+
+
+def test_bark_url_from_env_strips_whitespace():
+    cfg = Config.from_env({BARK_URL_ENV: " https://bark.example/KEY \n"})
+    assert cfg.bark_url == "https://bark.example/KEY"
+
+
+def test_bark_url_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({BARK_URL_ENV: ""}).bark_url is None
+    assert Config.from_env({BARK_URL_ENV: "   "}).bark_url is None

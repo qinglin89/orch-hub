@@ -46,6 +46,7 @@ from .control_dir import (
 from .git_meta import DEFAULT_COMMIT_LIMIT, latest_commit, read_commits
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
+from .notifications import build_notifier
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
 from .runs import (
@@ -197,12 +198,18 @@ def create_app(
     CLI tests) without threading fakes through the routes.
 
     ``run_manager`` is the single :class:`~orch_hub.runs.RunManager` the run and
-    escalation routes drive; it is built from ``resolved`` by default, and tests
-    inject one wired with fake spawner/clock over a temp data dir so no real
-    subprocess is ever started.
+    escalation routes drive; it is built from ``resolved`` by default (with the
+    push notifier from :func:`~orch_hub.notifications.build_notifier`, i.e. Bark
+    when ``ORCH_HUB_BARK_URL`` is set, else disabled), and tests inject one wired
+    with fake spawner/clock over a temp data dir so no real subprocess is ever
+    started.
     """
     resolved = config if config is not None else Config.from_env()
-    manager = run_manager if run_manager is not None else RunManager(resolved)
+    manager = (
+        run_manager
+        if run_manager is not None
+        else RunManager(resolved, notifier=build_notifier(resolved))
+    )
     app = FastAPI(
         title="orch-hub",
         description="Local control plane for AI coding orchestrators.",

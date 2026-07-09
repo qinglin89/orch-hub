@@ -48,6 +48,7 @@ from __future__ import annotations
 import datetime as dt
 import itertools
 import json
+import logging
 import os
 import re
 import shutil
@@ -78,8 +79,11 @@ from .models import (
     RunRecord,
     RunStatus,
 )
+from .notifications import Notification, Notifier, run_end_notification
 from .readiness import check_readiness
 from .task_store import STATUS_MISSING, STATUS_UNKNOWN, list_repo_tasks
+
+_log = logging.getLogger(__name__)
 
 RUNS_SUBDIR = "runs"
 RUN_RECORD_NAME = "run.json"
@@ -263,6 +267,22 @@ def _slug(value: str) -> str:
     return _SLUG.sub("-", value).strip("-") or "x"
 
 
+NotifyDispatch = Callable[[Callable[[], None]], None]
+"""Runs a delivery callback. The default detaches it onto a daemon thread."""
+
+
+def _thread_dispatch(deliver: Callable[[], None]) -> None:
+    """Default dispatch: deliver on a short-lived daemon thread.
+
+    Notification delivery is fired from inside the run-manager lock, but a slow
+    or hung backend must never stall run operations, so delivery runs off the
+    critical path. The thread is daemon so it never blocks interpreter shutdown.
+    Tests inject a synchronous dispatch (``lambda deliver: deliver()``) for
+    deterministic assertions.
+    """
+    threading.Thread(target=deliver, daemon=True, name="orch-hub-notify").start()
+
+
 class RunManager:
     """Owns orchestrator subprocess lifecycle and per-repo serialization.
 
@@ -271,6 +291,11 @@ class RunManager:
     ``task_lister`` default to the real gates, ``spawner`` to a detached
     ``subprocess.Popen``, ``pid_probe`` to a ``kill(pid, 0)`` probe, and
     ``clock`` must return timezone-aware UTC datetimes.
+
+    ``notifier`` is the optional push backend (``None`` disables notifications
+    with no delivery work at all); it fires when a run reaches a terminal state.
+    ``notify_dispatch`` runs each delivery — a daemon thread by default so a slow
+    backend never stalls run operations; tests inject a synchronous dispatch.
     """
 
     def __init__(
@@ -282,6 +307,8 @@ class RunManager:
         spawner: Spawner = _default_spawner,
         pid_probe: Callable[[int], bool] = _pid_alive,
         clock: Callable[[], dt.datetime] = _utc_now,
+        notifier: Notifier | None = None,
+        notify_dispatch: NotifyDispatch = _thread_dispatch,
     ):
         self._config = config
         self._readiness_checker = readiness_checker
@@ -289,6 +316,8 @@ class RunManager:
         self._spawner = spawner
         self._pid_probe = pid_probe
         self._clock = clock
+        self._notifier = notifier
+        self._notify_dispatch = notify_dispatch
         self._lock = threading.Lock()
         self._procs: dict[str, ProcessHandle] = {}
 
@@ -589,7 +618,43 @@ class RunManager:
                 exit_code=updated.exit_code,
             ),
         )
+        # Fire exactly once, at the live->ended transition (this branch runs a
+        # single time per run; settled records return early above). Classify
+        # here so the notification carries the same completed/stopped/error/ended
+        # verdict the dashboard shows.
+        state, detail = self._classify_end(updated)
+        self._emit(run_end_notification(updated, state, detail))
         return updated
+
+    def _emit(self, notification: Notification) -> None:
+        """Deliver a notification best-effort; never raise into run state.
+
+        Isolation is the invariant: a backend failure (network down, bad Bark
+        key) must not corrupt run.json / events.jsonl / the control-dir channel.
+        Delivery runs through the injected dispatch (a daemon thread in
+        production) and the backend call is wrapped so any exception is logged,
+        not propagated. ``None`` notifier short-circuits — no dispatch work.
+        """
+        notifier = self._notifier
+        if notifier is None:
+            return
+
+        def deliver() -> None:
+            # Isolate every backend failure: delivery is best-effort and must
+            # never propagate into run state.
+            try:
+                notifier.notify(notification)
+            except Exception as exc:
+                # Log the exception *type* and the (non-secret) title only; a
+                # Bark URL embeds a device key, so never log the transport
+                # detail that could carry it.
+                _log.warning(
+                    "notification delivery failed (%s): %s",
+                    type(exc).__name__,
+                    notification.title,
+                )
+
+        self._notify_dispatch(deliver)
 
     def _status(self, run_dir: Path, record: RunRecord) -> RunStatus:
         if record.error:
