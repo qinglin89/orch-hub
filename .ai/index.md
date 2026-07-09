@@ -14,7 +14,7 @@ Load only what the current task needs.
 | Overview | overview.md | what orch-hub is, users, scope, non-goals, tech stack |
 | Architecture | architecture.md | service shape, components, data flow, external dependencies, deployment |
 | Design | design.md | principles, tradeoffs, patterns, anti-patterns |
-| Modules | modules.md | planned module ownership, responsibilities, dependencies, boundaries |
+| Modules | modules/index.md | planned module ownership, responsibilities, dependencies, boundaries |
 | APIs | apis.md | CLI, future HTTP routes, internal interfaces, API conventions |
 | Features | features/index.md | capabilities, status, cross-module behavior chains |
 | Conventions | conventions.md | code style, naming, error/logging, git workflow, testing, dependencies |
@@ -24,16 +24,16 @@ Load only what the current task needs.
 
 | Task Type | Load Order |
 |---|---|
-| New feature | map -> features/index.md -> modules -> apis |
-| API change | map -> apis -> modules -> architecture |
-| Bug / debugging | map -> modules -> code |
-| Architecture change | architecture -> design -> modules |
+| New feature | map -> features/index.md -> modules/index.md -> apis |
+| API change | map -> apis -> modules/index.md -> architecture |
+| Bug / debugging | map -> modules/index.md -> code |
+| Architecture change | architecture -> design -> modules/index.md |
 | Code review | map -> relevant docs -> code/tests |
 | Conventions question | conventions.md |
 | Onboarding | overview -> architecture -> map |
-| Orchestrator integration | architecture -> apis -> modules -> features |
-| Dashboard/UI work | features -> architecture -> design.md -> modules |
-| Deployment packaging | features -> architecture -> modules -> conventions |
+| Orchestrator integration | architecture -> apis -> modules/index.md -> features/index.md |
+| Dashboard/UI work | features/index.md -> architecture -> design.md -> modules/index.md |
+| Deployment packaging | features/index.md -> architecture -> modules/index.md -> conventions |
 
 ## Domain Vocabulary
 
