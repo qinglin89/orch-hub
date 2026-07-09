@@ -253,45 +253,30 @@ code {
   color: var(--run-fg);
 }
 
-/* ---- run signal (repo/task run-state) ---- */
+/* ---- run dot (repo run-state) ---- */
 
-/* A run-state signal: a coloured dot + label. Deliberately NOT a .badge pill —
-   run-state (waiting/active) and protocol status (blocked/…) share warm colours,
-   so a different visual form keeps them apart. */
-.run-signal {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  white-space: nowrap;
-}
-
-.run-signal .dot {
-  width: 8px;
-  height: 8px;
+/* Repo-level run signal: a compact coloured dot leading the repo name. Green
+   active, yellow waiting, grey idle. Deliberately a bare dot — not a .badge
+   pill and not a dot+word label — so run-state (which shares warm colours with
+   protocol status) reads at a glance without repeating the state as a word. */
+.run-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: middle;
   background: var(--muted);
-  flex-shrink: 0;
 }
 
-.run-signal.waiting {
-  color: var(--warn-fg);
-}
-.run-signal.waiting .dot {
+.run-dot.waiting {
   background: var(--warn-fg);
 }
-.run-signal.active {
-  color: var(--ok-fg);
-}
-.run-signal.active .dot {
+.run-dot.active {
   background: var(--ok-fg);
 }
-.run-signal.idle .dot {
-  background: var(--muted);
+.run-dot.idle {
+  background: var(--border);
 }
 
 /* Ready-repo metadata line (latest commit + active task count). */
@@ -299,13 +284,8 @@ code {
   margin-top: 6px;
 }
 
-/* The task run-state signal sits on its own line under the card head. */
-.task-run {
-  margin-top: 6px;
-}
-
-/* Task-card run-state accent: a left border colour-matched to the run signal,
-   kept visually separate from the status badge pill. */
+/* Task-card run-state accent: a colour-coded left border — the whole runtime
+   signal on a task card — kept visually separate from the status badge pill. */
 .card.task.run-waiting {
   border-left: 3px solid var(--warn-fg);
 }

@@ -255,15 +255,24 @@ def test_log_view_renders_spawn_out_startup_diagnostic():
 # matching the run-control / log-stream checks above; each maps to a scope line.
 
 
-def test_repo_card_shows_tristate_run_signal():
+def test_repo_card_run_signal_is_a_leading_dot_without_text():
     body = app_js()
-    # A repo-level run signal distinct from the status pills, collapsing the
-    # repo's live run to one tri-state: yellow=waiting, green=active, gray=idle.
-    assert "run-signal" in body
-    assert "runSignal" in body
-    assert "repoRunState" in body  # collapses the repo's live runs to one state
+    # The repo run-state is a compact colour-coded dot *leading the repo name*
+    # (yellow=waiting, green=active, gray=idle), matching the orch-hub-test
+    # presentation. It replaces the old right-side dot+word signal: the state
+    # word rides title/aria-label only, never as visible text.
+    assert "run-dot" in body  # the leading dot's class
+    assert "runDot" in body  # its builder
+    assert "repoRunState" in body  # still collapses the repo's live runs to one state
     for kind in ("waiting", "active", "idle"):
-        assert kind in body  # all three signal states are handled
+        assert kind in body  # all three dot states are handled
+    # The dot is built inside the .name span, before the escaped repo name, so
+    # it visually leads the name.
+    assert 'class="name">${runDot(' in body
+    # The old dot+word signal form is gone entirely (builder + class), which is
+    # what guarantees no visible run-state word rides beside the repo name.
+    assert "runSignal" not in body
+    assert "run-signal" not in body
 
 
 def test_ready_repo_card_shows_commit_and_active_task_count():
@@ -278,13 +287,15 @@ def test_ready_repo_card_shows_commit_and_active_task_count():
     assert "active task" in body
 
 
-def test_task_card_run_accent_is_distinct_from_status_badge():
+def test_task_card_run_accent_is_border_only():
     body = app_js()
-    # Run-state is a left-border accent + dot signal, never another status pill,
-    # so a runtime `waiting` is not confused with a protocol `blocked` badge.
+    # Run-state on a task card is ONLY a colour-coded left-border accent, never
+    # another status pill and no longer a separate dot/word row, so a runtime
+    # `waiting` is not confused with a protocol `blocked` badge and the run
+    # state is not redundantly repeated after the border already shows it.
     assert "run-waiting" in body
     assert "run-active" in body
-    assert "task-run" in body  # the run signal's own wrapper, under the head
+    assert "task-run" not in body  # no separate run-signal row under the head
     # The frontmatter status still drives the pill via statusBadgeKind — the
     # separate channel that keeps status and run-state visually distinct.
     assert "statusBadgeKind" in body

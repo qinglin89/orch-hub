@@ -143,32 +143,25 @@
   }
   const runBadge = (state) => badge(state, runBadgeKind(state));
 
-  // A run-state *signal* (coloured dot + label), deliberately NOT a `.badge`
-  // pill: run-state and protocol status share warm colours (`waiting` and a
-  // `blocked` status are both yellow), so giving run-state its own visual form
-  // keeps the two apart at a glance. Colour: yellow=waiting, green=active
-  // (non-waiting), gray=idle. `state` is a live run state ("waiting"/"active")
-  // or null (idle). Run states are mutually exclusive, so "active" already means
-  // non-waiting.
-  function runSignalKind(state) {
-    if (state === "waiting") return "waiting";
-    if (state === "active") return "active";
-    return "idle";
-  }
-  function runSignalLabel(kind) {
-    if (kind === "waiting") return "waiting";
-    if (kind === "active") return "running";
-    return "idle";
-  }
-  // `showIdle` renders the gray idle signal: repo cards want the always-on
-  // tri-state signal (idle included), while task cards omit it so an idle task
-  // carries no run marker at all.
-  function runSignal(state, showIdle) {
-    const kind = runSignalKind(state);
-    if (kind === "idle" && !showIdle) return "";
+  // A compact run-state *dot* that leads the repo name: colour-coded
+  // (yellow=waiting, green=active, gray=idle) with the state word carried only
+  // on title/aria-label, never as visible text. Run-state and protocol status
+  // share warm colours (`waiting` and a `blocked` status are both yellow), so a
+  // bare dot — not a `.badge` pill nor a dot+word label — keeps the two apart
+  // while never repeating the state as a visible word. `state` is a live run
+  // state ("waiting"/"active") or null (idle).
+  function runDot(state) {
+    const kind =
+      state === "waiting" ? "waiting" : state === "active" ? "active" : "idle";
+    const label =
+      kind === "waiting"
+        ? "waiting for an answer"
+        : kind === "active"
+        ? "running"
+        : "no live run";
     return (
-      `<span class="run-signal ${kind}"><span class="dot"></span>` +
-      `${runSignalLabel(kind)}</span>`
+      `<span class="run-dot ${kind}" title="${escapeHtml(label)}" ` +
+      `aria-label="run: ${escapeHtml(label)}"></span>`
     );
   }
 
@@ -339,12 +332,13 @@
 
   function repoCard(repo, liveRuns, taskCount) {
     const readiness = repo.readiness || { ready: false, checks: [] };
-    // A tri-state run signal (yellow=waiting / green=active / gray=idle) rides
-    // next to the readiness badge, always present so "no live run" reads as an
-    // explicit gray idle rather than an absence.
-    const badges =
-      (readiness.ready ? badge("ready", "ok") : badge("not ready", "bad")) +
-      runSignal(repoRunState(liveRuns), true);
+    // The tri-state run signal (yellow=waiting / green=active / gray=idle) is a
+    // compact dot leading the repo name (see the card head below), always
+    // present so "no live run" reads as an explicit gray idle rather than an
+    // absence. The readiness pill keeps the right of the head to itself.
+    const badges = readiness.ready
+      ? badge("ready", "ok")
+      : badge("not ready", "bad");
     const reasons = readiness.ready
       ? ""
       : `<ul class="reasons">${(readiness.checks || [])
@@ -362,7 +356,9 @@
       <li class="card repo">
         <a class="card-link" href="${repoHash(repo.name)}">
           <div class="card-head">
-            <span class="name">${escapeHtml(repo.name)}</span>
+            <span class="name">${runDot(
+              repoRunState(liveRuns)
+            )}${escapeHtml(repo.name)}</span>
             <span class="badges">${badges}</span>
           </div>
           <div class="path muted">${escapeHtml(repo.path)}</div>
@@ -441,9 +437,11 @@
             .map(escapeHtml)
             .join(", ")}</div>`
         : "";
-    // Run-state is a left-border accent + a dot signal, kept distinct from the
-    // status pill so a runtime `waiting` is never read as a protocol `blocked`
-    // status (both warm-coloured). Idle tasks get neither accent nor signal.
+    // Run-state shows only as a colour-coded left-border accent, kept distinct
+    // from the status pill so a runtime `waiting` is never read as a protocol
+    // `blocked` status (both warm-coloured). The border is the whole runtime
+    // signal on a task card — no separate dot/word row that would just repeat
+    // it. Idle tasks get no accent at all.
     const runState = liveRun ? liveRun.state : null;
     const accent =
       runState === "waiting"
@@ -451,9 +449,6 @@
         : runState === "active"
         ? " run-active"
         : "";
-    const signal = runState
-      ? `<div class="task-run">${runSignal(runState, false)}</div>`
-      : "";
     return `
       <li class="card task${sentinel ? " problem" : ""}${accent}">
         <a class="card-link" href="${taskHash(repoName, task.task_id)}">
@@ -464,7 +459,6 @@
               statusBadgeKind(task.status)
             )}</span>
           </div>
-          ${signal}
           <div class="repo-name muted">${escapeHtml(repoName)}</div>
           ${task.summary ? `<div class="summary">${escapeHtml(task.summary)}</div>` : ""}
           ${blockers}
