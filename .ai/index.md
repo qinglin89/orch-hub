@@ -15,7 +15,7 @@ Load only what the current task needs.
 | Architecture | architecture.md | service shape, components, data flow, external dependencies, deployment |
 | Design | design.md | principles, tradeoffs, patterns, anti-patterns |
 | Modules | modules/index.md | planned module ownership, responsibilities, dependencies, boundaries |
-| APIs | apis.md | CLI, future HTTP routes, internal interfaces, API conventions |
+| APIs | apis/index.md | CLI, future HTTP routes, internal interfaces, API conventions |
 | Features | features/index.md | capabilities, status, cross-module behavior chains |
 | Conventions | conventions.md | code style, naming, error/logging, git workflow, testing, dependencies |
 | Map | map.md | feature to module to API cross-reference; horizontal sync source for absorption |
@@ -24,14 +24,14 @@ Load only what the current task needs.
 
 | Task Type | Load Order |
 |---|---|
-| New feature | map -> features/index.md -> modules/index.md -> apis |
-| API change | map -> apis -> modules/index.md -> architecture |
+| New feature | map -> features/index.md -> modules/index.md -> apis/index.md |
+| API change | map -> apis/index.md -> modules/index.md -> architecture |
 | Bug / debugging | map -> modules/index.md -> code |
 | Architecture change | architecture -> design -> modules/index.md |
 | Code review | map -> relevant docs -> code/tests |
 | Conventions question | conventions.md |
 | Onboarding | overview -> architecture -> map |
-| Orchestrator integration | architecture -> apis -> modules/index.md -> features/index.md |
+| Orchestrator integration | architecture -> apis/index.md -> modules/index.md -> features/index.md |
 | Dashboard/UI work | features/index.md -> architecture -> design.md -> modules/index.md |
 | Deployment packaging | features/index.md -> architecture -> modules/index.md -> conventions |
 
