@@ -13,7 +13,7 @@ Load only what the current task needs.
 |---|---|---|
 | Overview | overview.md | what orch-hub is, users, scope, non-goals, tech stack |
 | Architecture | architecture/index.md | service shape, components, data flow, external dependencies, deployment |
-| Design | design.md | principles, tradeoffs, patterns, anti-patterns |
+| Design | design/index.md | principles, tradeoffs, patterns, anti-patterns |
 | Modules | modules/index.md | planned module ownership, responsibilities, dependencies, boundaries |
 | APIs | apis/index.md | CLI, future HTTP routes, internal interfaces, API conventions |
 | Features | features/index.md | capabilities, status, cross-module behavior chains |
@@ -27,12 +27,12 @@ Load only what the current task needs.
 | New feature | map -> features/index.md -> modules/index.md -> apis/index.md |
 | API change | map -> apis/index.md -> modules/index.md -> architecture/index.md |
 | Bug / debugging | map -> modules/index.md -> code |
-| Architecture change | architecture/index.md -> design -> modules/index.md |
+| Architecture change | architecture/index.md -> design/index.md -> modules/index.md |
 | Code review | map -> relevant docs -> code/tests |
 | Conventions question | conventions.md |
 | Onboarding | overview -> architecture/index.md -> map |
 | Orchestrator integration | architecture/index.md -> apis/index.md -> modules/index.md -> features/index.md |
-| Dashboard/UI work | features/index.md -> architecture/index.md -> design.md -> modules/index.md |
+| Dashboard/UI work | features/index.md -> architecture/index.md -> design/index.md -> modules/index.md |
 | Deployment packaging | features/index.md -> architecture/index.md -> modules/index.md -> conventions |
 
 ## Domain Vocabulary
