@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
+verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
 ---
 
 # APIs and Interfaces
@@ -124,6 +124,9 @@ verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
   acknowledge_blocked}`.
 - Source: resolves `repo_id` through registry discovery, then delegates launch
   gates and subprocess start to the app's single `RunManager`.
+- Dashboard caller: the task-detail Start dialog sends `extra_args` beginning
+  with fixed `["--backend", "cc-codex"]` plus only changed cc-codex override
+  fields; the dashboard does not expose a backend selector.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
 
 ### `GET /api/runs`
@@ -159,9 +162,12 @@ verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
 - Source: resolves `run_id` through `RunManager.get_run`, then locates and
   reads the log from the run record's `log_dir`, `task_id`, and `started_ts`.
   Clients never supply a filesystem path.
-- Shape: `{"run_id", "present", "lines", "truncated", "size", "detail"}`.
-  Missing, rotated, or unreadable logs are HTTP 200 with `present: false` and a
-  detail string. Unknown runs return HTTP 404.
+- Shape: `{"run_id", "present", "lines", "truncated", "size", "detail",
+  "diagnostic"}`. Missing, rotated, or unreadable logs are HTTP 200 with
+  `present: false` and a detail string. `diagnostic` is `null` unless no
+  orchestrator log is located and the run's bounded `spawn.out` tail is
+  non-empty; when present it is a normal log snapshot plus
+  `"source": "spawn.out"`. Unknown runs return HTTP 404.
 - Query: `tail` controls returned line count, clamped by the logs module.
 
 ### `GET /api/runs/{run_id}/logs/stream`
@@ -228,10 +234,11 @@ Current HTTP behavior:
   empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
   `BlockedTaskError` includes `acknowledge_required: true`.
 - The dashboard task-detail run controls consume these existing run APIs
-  directly: Start sends `{repo_id, task_id, acknowledge_blocked}` to
-  `POST /api/runs`, Stop sends `POST /api/runs/{run_id}/stop`, and frontend
-  error rendering preserves structured 409 fields instead of flattening every
-  refusal to `detail`.
+  directly: Start sends `{repo_id, task_id, acknowledge_blocked, extra_args}`
+  to `POST /api/runs` with fixed `--backend cc-codex` and optional cc-codex
+  overrides, Stop sends `POST /api/runs/{run_id}/stop`, and frontend error
+  rendering preserves structured 409 fields instead of flattening every refusal
+  to `detail`.
 
 ## Internal Interfaces
 
@@ -277,8 +284,9 @@ repo already has a live run, when task inventory is missing/unlisted or reports
 explicitly acknowledged, or when readiness fails. A successful launch creates a
 fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
 deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
-persists `run.json` with launch-time task status, appends `run_started`, and
-records stdout/stderr in `spawn.out`. `list_runs` and `get_run` refresh
+persists `run.json` with launch-time task status and the internal `spawn_out`
+path, appends `run_started`, and records stdout/stderr in `spawn.out`.
+`list_runs` and `get_run` refresh
 live/end state and support reattach from disk by pid probe; observed ends append
 `run_ended`. `stop_run` delegates to `control_dir.request_stop`, appends
 `stop_requested` only on the first idempotent write, and refuses ended or
@@ -314,9 +322,11 @@ Behavior: file access is scoped to `RunRecord.log_dir` and `RunRecord.task_id`.
 Log files are located by the deployed orchestrator's
 `<utc-ts>-<task-id>.log` filename convention, with `floor(started_ts)` as the
 lower bound. Recent reads cap line and byte counts and return absent snapshots
-for missing/rotated logs. Live tails emit only complete newline-terminated
-lines, use byte offsets to avoid duplicate initial/follow output, and terminate
-gracefully when the run ends or the located file disappears.
+for missing/rotated logs. Startup diagnostics read the persisted `spawn_out`
+path directly, returning absent snapshots for missing, empty, or blank-only
+captures. Live tails emit only complete newline-terminated lines, use byte
+offsets to avoid duplicate initial/follow output, and terminate gracefully when
+the run ends or the located file disappears.
 
 ### History Store
 

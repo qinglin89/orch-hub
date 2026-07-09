@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
+verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
 ---
 
 # Features
@@ -131,8 +131,9 @@ Implemented behavior:
   <run>/control [extra args]`, with `cwd=<repo>`, stdin from devnull,
   stdout/stderr redirected to `spawn.out`, and `start_new_session=True`.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
-  in-memory `Popen` handles only capture exit codes while the hub is the
-  parent process.
+  it persists the internal `spawn_out` path so reattached runs and pre-field
+  records can still surface startup diagnostics. In-memory `Popen` handles only
+  capture exit codes while the hub is the parent process.
 - Reattach scans run dirs and probes pid liveness. If a run ended while the hub
   was down, `ended_ts` is persisted with `exit_code=None`.
 - Live status is `active` or `waiting` based on pending control-dir questions.
@@ -234,6 +235,10 @@ Implemented behavior:
 - `GET /api/runs/{run_id}/logs` returns a bounded recent tail: default 200
   lines, hard-capped to 10k lines and a 1 MiB byte window. Missing, rotated, or
   unreadable logs return `present: false` with `detail`, not an HTTP error.
+- When no orchestrator log is located, `GET /api/runs/{run_id}/logs` may add a
+  nested `diagnostic` sourced from a bounded `spawn.out` tail. Empty or blank
+  captures stay `diagnostic: null`, and top-level `present`/`lines` remain
+  strictly orchestrator-log semantics.
 - `GET /api/runs/{run_id}/logs/stream` returns `text/event-stream`: a bounded
   initial tail, one `data:` event per completed appended line, heartbeat
   comments while idle, and terminal `event: end` on run end or log rotation.
@@ -271,19 +276,23 @@ Implemented behavior:
 - Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
   content, shows current/most-recent run state, links to logs, and renders
   answer forms for waiting questions from `/api/escalations`.
-- Task detail offers Start through `POST /api/runs` for launchable task
-  statuses and Stop through `POST /api/runs/{run_id}/stop` for active/waiting
-  runs on that task. `blocked` tasks require an explicit acknowledgement
-  checkbox; stale/raced starts render the backend 409 response instead of
-  trusting frontend state.
+- Task detail Start opens a cc-codex launch-options dialog and posts
+  `extra_args` with fixed `["--backend", "cc-codex"]` plus only changed
+  overrides for `--dev-agent`, `--dev-model`, `--dev-effort`,
+  `--review-model`, and `--review-effort`; no backend selector is exposed.
+  Stop posts to `POST /api/runs/{run_id}/stop`. `blocked` tasks require an
+  explicit acknowledgement checkbox; stale/raced starts render the backend 409
+  response instead of trusting frontend state.
 - Start is hidden or replaced with an explanation when the dashboard already
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
 - Run history uses `GET /api/history/runs` newest-first.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
-  live runs. SSE heartbeats are skipped, blank data log lines are preserved,
-  `event: end` closes the stream, navigation/reload/pause aborts the active
-  stream, and untrusted log content is appended as text nodes.
+  live runs. It renders the `spawn.out` diagnostic when the recent-log route has
+  no orchestrator log, and a live stream that ends before any log line falls
+  back to that recent-log diagnostic. SSE heartbeats are skipped, blank data log
+  lines are preserved, `event: end` closes the stream, navigation/reload/pause
+  aborts the active stream, and untrusted log content is appended as text nodes.
 
 ### Auth and Private Access
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 72fee874f65041e047c32d3634b0cfe7f19e6e63
+verified-against: 6f80b5b0995bd85cdecf4100a48c2f2c21af63bf
 ---
 
 # Modules
@@ -153,7 +153,9 @@ routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `POST /api/runs/{run_id}/escalations/{seq}/answer`; implemented log routes are
 `GET /api/runs/{run_id}/logs` and
 `GET /api/runs/{run_id}/logs/stream`; implemented history route is
-`GET /api/history/runs`. Module-level `app` supports
+`GET /api/history/runs`. The recent-log route adds a nested `diagnostic` from
+`spawn.out` only when the orchestrator log is absent and the capture is
+non-empty. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
 console script serve locally by default and read host/port from environment
 when arguments are omitted. The bearer middleware is pure ASGI, not
@@ -178,10 +180,14 @@ present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.
 
 Run controls stay frontend-only over the existing API: Start posts
-`{repo_id, task_id, acknowledge_blocked}` to `POST /api/runs`, Stop posts to
-`POST /api/runs/{run_id}/stop`, and launch refusal UI renders structured 409
-details such as readiness `reasons`, repo-busy `run_id`, or blocked-task
-`acknowledge_required`.
+`{repo_id, task_id, acknowledge_blocked, extra_args}` to `POST /api/runs` from a
+launch-options dialog whose first args are always `--backend cc-codex` plus
+only user-changed cc-codex overrides; it does not expose a backend selector.
+Stop posts to `POST /api/runs/{run_id}/stop`, and launch refusal UI renders
+structured 409 details such as readiness `reasons`, repo-busy `run_id`, or
+blocked-task `acknowledge_required`. The log view renders the recent-log
+route's `spawn.out` diagnostic and falls back to it when a live stream ends
+before any orchestrator log line is seen.
 
 ### Run Manager
 
@@ -202,9 +208,9 @@ control dir. Launch uses
 <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
 <run>/control [extra args]`, `cwd=<repo>`, stdin from devnull, stdout/stderr to
 `spawn.out`, and `start_new_session=True`. `run.json` is the source of truth,
-stores launch-time task frontmatter status, and is rewritten atomically;
-in-memory `Popen` handles exist only to capture exit codes for runs that end
-while the hub process is alive.
+stores launch-time task frontmatter status plus the internal `spawn_out` path,
+and is rewritten atomically; in-memory `Popen` handles exist only to capture
+exit codes for runs that end while the hub process is alive.
 
 Reattach scans run dirs, loads records, and probes pid liveness with
 `os.kill(pid, 0)`. If a run ended while the hub was down, `ended_ts` is
@@ -258,7 +264,9 @@ to the newest matching task log.
 
 `read_recent(record, max_lines=...)` returns a `LogSnapshot` with bounded tail
 lines, a `truncated` flag, current size, and graceful absent details for
-missing/rotated/unreadable logs. `tail_events(record, is_live=...)` is an async
+missing/rotated/unreadable logs. `read_spawn_out(record, max_lines=...)` reads
+the persisted startup capture path directly and treats missing, empty, or
+blank-only captures as absent. `tail_events(record, is_live=...)` is an async
 SSE generator: it waits for the log to appear, emits a bounded initial tail,
 follows appended complete lines with byte offsets and a raw-bytes pending
 buffer, sends idle heartbeat comments, and ends with `event: end` on run death
