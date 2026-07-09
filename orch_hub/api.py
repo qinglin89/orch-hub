@@ -76,6 +76,23 @@ Keeping the set explicit (not a ``StaticFiles`` mount) keeps default-deny tight:
 every public path is enumerated here and pinned by the auth tests.
 """
 
+SHELL_CACHE_CONTROL = "no-store"
+"""``Cache-Control`` sent with every dashboard shell asset.
+
+``FileResponse`` sets ``Last-Modified`` and ``ETag`` but no ``Cache-Control``,
+which leaves a browser free to apply *heuristic* freshness (RFC 9111 §4.2.2):
+with no explicit lifetime it may treat an asset as fresh for a fraction of the
+time since it was last modified. For an ``app.js`` / ``styles.css`` last touched
+hours or days ago that window is long enough that after ``orch-hub launchd
+update`` ships a new build, mobile Chrome/Safari keep serving the cached (stale)
+copy without revalidating — the incognito-mode / clear-site-data symptom this
+policy removes. ``no-store`` forbids caching outright, so every navigation
+re-fetches the current asset and a deploy is picked up on the next load. The
+shell is three tiny files served over a local/Tailscale link, so not caching
+them costs nothing meaningful; data routes are unaffected (this rides only on
+the enumerated shell responses).
+"""
+
 PUBLIC_PATHS = frozenset({"/api/health", *SHELL_ASSETS})
 """Paths served without authentication.
 
@@ -262,10 +279,16 @@ def create_app(
     # browser needs before it can attach the bearer token. A factory binds each
     # filename/media type so the loop variable is not captured late. They are
     # kept out of the OpenAPI schema (which is itself protected) and the auth
-    # middleware allows exactly these paths unauthenticated.
+    # middleware allows exactly these paths unauthenticated. Every response
+    # carries SHELL_CACHE_CONTROL so a new build ships to mobile browsers on the
+    # next load instead of being masked by heuristic caching (see the constant).
     def _make_shell_route(filename: str, media_type: str):
         def serve_shell_asset() -> FileResponse:
-            return FileResponse(WEB_DIR / filename, media_type=media_type)
+            return FileResponse(
+                WEB_DIR / filename,
+                media_type=media_type,
+                headers={"Cache-Control": SHELL_CACHE_CONTROL},
+            )
 
         return serve_shell_asset
 

@@ -76,6 +76,21 @@ def test_shell_assets_carry_no_server_token():
         assert TOKEN not in client.get(path).text
 
 
+def test_shell_assets_are_served_no_store():
+    # After `orch-hub launchd update` ships a new build, a mobile Chrome/Safari
+    # must load the fresh app.js/styles.css on the next request rather than
+    # serving a heuristically-cached stale copy (the incognito-mode symptom this
+    # task removes). Every shell asset carries an explicit no-store Cache-Control
+    # forbidding that caching; FileResponse's own Last-Modified/ETag are inert
+    # under no-store. Pinned to the literal policy so weakening it (e.g. to
+    # no-cache or a max-age) is caught here, not in the field after a deploy.
+    client = unauthed_client()
+    for path in SHELL_PATHS:
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert resp.headers["cache-control"] == "no-store"
+
+
 def test_data_routes_stay_protected_after_adding_shell():
     # Adding the public shell must not have opened any data route.
     client = unauthed_client()
