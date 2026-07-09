@@ -16,7 +16,7 @@ Load only what the current task needs.
 | Design | design.md | principles, tradeoffs, patterns, anti-patterns |
 | Modules | modules.md | planned module ownership, responsibilities, dependencies, boundaries |
 | APIs | apis.md | CLI, future HTTP routes, internal interfaces, API conventions |
-| Features | features.md | capabilities, status, cross-module behavior chains |
+| Features | features/index.md | capabilities, status, cross-module behavior chains |
 | Conventions | conventions.md | code style, naming, error/logging, git workflow, testing, dependencies |
 | Map | map.md | feature to module to API cross-reference; horizontal sync source for absorption |
 
@@ -24,7 +24,7 @@ Load only what the current task needs.
 
 | Task Type | Load Order |
 |---|---|
-| New feature | map -> features -> modules -> apis |
+| New feature | map -> features/index.md -> modules -> apis |
 | API change | map -> apis -> modules -> architecture |
 | Bug / debugging | map -> modules -> code |
 | Architecture change | architecture -> design -> modules |
