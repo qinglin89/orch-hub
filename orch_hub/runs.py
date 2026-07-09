@@ -673,10 +673,12 @@ class RunManager:
 
         Observed here because ``_status`` already scans ``pending_questions`` to
         decide active vs waiting — the notification rides that existing scan
-        instead of adding a second watcher (the hub deliberately runs no
-        background poll). Firing is therefore driven by whatever queries run
-        status (``/api/runs``, ``/api/escalations``, ``/api/history/runs``),
-        exactly like the terminal-state push in ``_refresh``.
+        instead of adding a second watcher. Firing is driven by whatever runs the
+        status scan: the resident background poll
+        (:class:`orch_hub.monitor.RunMonitor`, added so pushes fire without
+        dashboard traffic) plus every on-demand status query (``/api/runs``,
+        ``/api/escalations``, ``/api/history/runs``) — exactly like the
+        terminal-state push in ``_refresh``.
 
         De-dup is the in-memory ``(run_id, seq)`` set, mutated only here and only
         under the run-manager lock every ``_status`` caller holds, so a question

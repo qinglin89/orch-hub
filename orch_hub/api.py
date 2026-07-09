@@ -27,6 +27,7 @@ private-network deployment assumptions are documented in the README.
 from __future__ import annotations
 
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -46,6 +47,7 @@ from .control_dir import (
 from .git_meta import DEFAULT_COMMIT_LIMIT, latest_commit, read_commits
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
+from .monitor import RunMonitor
 from .notifications import build_notifier
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
@@ -203,6 +205,14 @@ def create_app(
     when ``ORCH_HUB_BARK_URL`` is set, else disabled), and tests inject one wired
     with fake spawner/clock over a temp data dir so no real subprocess is ever
     started.
+
+    A :class:`~orch_hub.monitor.RunMonitor` over that manager is started on
+    lifespan startup and stopped on shutdown, so run-ended / pending-question
+    pushes fire without any dashboard or client polling. It is created here but
+    only *started* by the lifespan, so merely building the app — the common test
+    path, and the module-level ``app`` below — spawns no background thread; only
+    running the lifespan (uvicorn, or ``with TestClient(app)``) does. The monitor
+    is exposed on ``app.state.run_monitor`` for lifecycle introspection in tests.
     """
     resolved = config if config is not None else Config.from_env()
     manager = (
@@ -210,11 +220,27 @@ def create_app(
         if run_manager is not None
         else RunManager(resolved, notifier=build_notifier(resolved))
     )
+    monitor = RunMonitor(manager)
+
+    @asynccontextmanager
+    async def lifespan(app_: FastAPI):
+        # Own the monitor's lifetime with the service: start the background poll
+        # on startup, stop it (joining the worker) on shutdown so the service
+        # leaves no thread behind. The auth middleware passes the lifespan scope
+        # straight through, so this runs regardless of the token.
+        monitor.start()
+        try:
+            yield
+        finally:
+            monitor.stop()
+
     app = FastAPI(
         title="orch-hub",
         description="Local control plane for AI coding orchestrators.",
         version="0.1.0",
+        lifespan=lifespan,
     )
+    app.state.run_monitor = monitor
 
     @app.exception_handler(RegistryError)
     async def _registry_error(request: Request, exc: RegistryError) -> JSONResponse:

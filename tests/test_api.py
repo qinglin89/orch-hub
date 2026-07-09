@@ -1107,3 +1107,22 @@ def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.post(
         "/api/runs/anything/escalations/1/answer", json={"answer": "go"}
     ).status_code == 401
+
+
+# -- background monitor lifecycle ----------------------------------------------
+
+
+def test_app_lifespan_starts_and_stops_the_run_monitor(tmp_path, monkeypatch):
+    # The resident monitor is owned by the app lifecycle: not running on mere
+    # construction (so the 300+ plain-TestClient tests spawn no thread), running
+    # while the lifespan is active, and stopped again on shutdown.
+    repo = make_run_repo(tmp_path)
+    manager, _ = make_run_manager(tmp_path)
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    app = api.create_app(run_config(tmp_path), run_manager=manager)
+    monitor = app.state.run_monitor
+
+    assert not monitor.is_running  # construction alone starts no worker
+    with TestClient(app):  # __enter__ runs startup, __exit__ runs shutdown
+        assert monitor.is_running
+    assert not monitor.is_running
