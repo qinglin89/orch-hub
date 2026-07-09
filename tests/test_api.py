@@ -16,8 +16,10 @@ from fastapi.testclient import TestClient
 
 from orch_hub import api
 from orch_hub.config import HOST_ENV, PORT_ENV, Config
+from orch_hub.git_meta import CommitLog
 from orch_hub.history import KIND_ANSWER_RECORDED, KIND_RUN_STARTED, read_events
 from orch_hub.models import (
+    CommitInfo,
     ManagedRepo,
     ReadinessCheck,
     ReadinessReport,
@@ -61,10 +63,12 @@ def test_repos_ready_matches_cli_shape(monkeypatch):
     report = ReadinessReport((ReadinessCheck("repo_path_exists", True, "ok"),))
     monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
     monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
 
     resp = build_client().get("/api/repos")
     assert resp.status_code == 200
-    # Byte-for-byte the same object CLI `repos --json` emits (see test_cli).
+    # Byte-for-byte the same object CLI `repos --json` emits (see test_cli),
+    # now including the best-effort `commit` field (null when git is unread).
     assert resp.json() == {
         "repos": [
             {
@@ -72,9 +76,79 @@ def test_repos_ready_matches_cli_shape(monkeypatch):
                 "path": "/p/r",
                 "manifest": "/p/r/.ai-deploy-manifest.json",
                 "readiness": {"ready": True, "checks": []},
+                "commit": None,
             }
         ]
     }
+
+
+def test_repos_includes_latest_commit(monkeypatch):
+    repo = make_repo()
+    report = ReadinessReport((ReadinessCheck("repo_path_exists", True, "ok"),))
+    commit = CommitInfo(
+        hash="c" * 40,
+        short_hash="ccccccc",
+        committed_ts="2026-07-09T16:25:00+08:00",
+        subject="feat: dashboard status layout",
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: commit)
+
+    data = build_client().get("/api/repos").json()
+    assert data["repos"][0]["commit"] == commit.to_dict()
+
+
+def test_repo_commits_returns_recent_newest_first(monkeypatch):
+    repo = make_repo("a")
+    commits = (
+        CommitInfo("h1" + "0" * 38, "h1", "2026-07-09T10:00:00+00:00", "newest"),
+        CommitInfo("h2" + "0" * 38, "h2", "2026-07-08T10:00:00+00:00", "older"),
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(
+        api, "read_commits", lambda r, limit: CommitLog(available=True, commits=commits)
+    )
+
+    resp = build_client().get("/api/repos/a/commits")
+    assert resp.status_code == 200
+    assert resp.json() == {
+        "repo": "a",
+        "available": True,
+        "commits": [c.to_dict() for c in commits],
+    }
+
+
+def test_repo_commits_unknown_repo_404(monkeypatch):
+    monkeypatch.setattr(api, "discover_repos", lambda config: [])
+    assert build_client().get("/api/repos/nope/commits").status_code == 404
+
+
+def test_repo_commits_unavailable_is_graceful_200(monkeypatch):
+    # A git failure degrades to available:false with an empty list, never a
+    # 5xx — a commit-lookup problem must not hide the repo.
+    repo = make_repo("a")
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(
+        api, "read_commits", lambda r, limit: CommitLog(available=False, commits=())
+    )
+    resp = build_client().get("/api/repos/a/commits")
+    assert resp.status_code == 200
+    assert resp.json() == {"repo": "a", "available": False, "commits": []}
+
+
+def test_repo_commits_passes_limit_through(monkeypatch):
+    repo = make_repo("a")
+    seen = {}
+
+    def fake_read(r, limit):
+        seen["limit"] = limit
+        return CommitLog(available=True, commits=())
+
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "read_commits", fake_read)
+    build_client().get("/api/repos/a/commits?limit=3")
+    assert seen["limit"] == 3
 
 
 def test_repos_reports_only_failed_checks(monkeypatch):

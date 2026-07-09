@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from orch_hub import cli
 from orch_hub.config import PORT_ENV
 from orch_hub.launchd import LaunchdError
-from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport
+from orch_hub.models import CommitInfo, ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.registry import RegistryError
 
 
@@ -30,6 +30,8 @@ def test_repos_json_ready(monkeypatch, capsys):
     report = ReadinessReport((ReadinessCheck("repo_path_exists", True, "ok"),))
     monkeypatch.setattr(cli, "discover_repos", lambda config: [repo])
     monkeypatch.setattr(cli, "check_readiness", lambda r, config: report)
+    # No commit found (best-effort git read) → the field is present but null.
+    monkeypatch.setattr(cli, "latest_commit", lambda repo: None)
 
     rc = cli.main(["repos", "--json"])
     assert rc == 0
@@ -42,8 +44,34 @@ def test_repos_json_ready(monkeypatch, capsys):
                 "path": "/p/r",
                 "manifest": "/p/r/.ai-deploy-manifest.json",
                 "readiness": {"ready": True, "checks": []},
+                "commit": None,
             }
         ]
+    }
+
+
+def test_repos_json_includes_latest_commit(monkeypatch, capsys):
+    # `repos --json` carries the latest commit so it stays identical to
+    # GET /api/repos (both go through repos_payload).
+    repo = make_repo()
+    report = ReadinessReport((ReadinessCheck("repo_path_exists", True, "ok"),))
+    commit = CommitInfo(
+        hash="f" * 40,
+        short_hash="fffffff",
+        committed_ts="2026-07-09T16:25:00+08:00",
+        subject="update ai-protocal",
+    )
+    monkeypatch.setattr(cli, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(cli, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(cli, "latest_commit", lambda repo: commit)
+
+    cli.main(["repos", "--json"])
+    data = json.loads(capsys.readouterr().out)
+    assert data["repos"][0]["commit"] == {
+        "hash": "f" * 40,
+        "short_hash": "fffffff",
+        "committed_ts": "2026-07-09T16:25:00+08:00",
+        "subject": "update ai-protocal",
     }
 
 

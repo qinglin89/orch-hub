@@ -43,6 +43,7 @@ from .control_dir import (
     pending_questions,
     write_answer,
 )
+from .git_meta import DEFAULT_COMMIT_LIMIT, latest_commit, read_commits
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
 from .readiness import check_readiness
@@ -278,10 +279,20 @@ def create_app(
 
     @app.get("/api/repos")
     def get_repos() -> dict:
-        """List managed repos with readiness, identical to CLI ``repos --json``."""
+        """List managed repos with readiness and latest commit.
+
+        Identical to CLI ``repos --json`` (both go through ``repos_payload``):
+        each repo carries its readiness plus its most recent ``commit`` (or
+        ``null`` when git could not be read — best-effort, so a commit-lookup
+        failure never hides the repo). The dashboard repo card reads the commit
+        time from here; the recent-commits list is a separate route below.
+        """
         repos = discover_repos(resolved)
-        pairs = [(repo, check_readiness(repo, resolved)) for repo in repos]
-        return repos_payload(pairs)
+        entries = [
+            (repo, check_readiness(repo, resolved), latest_commit(repo))
+            for repo in repos
+        ]
+        return repos_payload(entries)
 
     @app.get("/api/tasks")
     def get_tasks() -> dict:
@@ -329,6 +340,29 @@ def create_app(
             )
         content = read_task_content(repo, task_id)
         return {**task.to_dict(), "present": content is not None, "content": content}
+
+    @app.get("/api/repos/{repo_id}/commits")
+    def get_repo_commits(repo_id: str, limit: int = DEFAULT_COMMIT_LIMIT) -> dict:
+        """Return one repo's recent commits (newest first) for the detail view.
+
+        ``repo_id`` is the managed-repo name (unknown → 404). ``limit`` is
+        clamped by the git-meta reader to a sane range. ``available`` is False
+        when git could not be read at all (missing git, not a work tree, or a
+        failed ``git log``); the read is best-effort and never raises, so a git
+        problem degrades to an empty ``available: false`` list rather than
+        hiding the repo. The dashboard renders that as a graceful "commits
+        unavailable" state.
+        """
+        repos = discover_repos(resolved)
+        repo = next((r for r in repos if r.name == repo_id), None)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown repo: {repo_id}")
+        log = read_commits(repo, limit=limit)
+        return {
+            "repo": repo_id,
+            "available": log.available,
+            "commits": [commit.to_dict() for commit in log.commits],
+        }
 
     @app.post("/api/runs", status_code=201)
     def start_run(req: StartRunRequest) -> dict:

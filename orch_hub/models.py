@@ -68,16 +68,67 @@ class ReadinessReport:
         }
 
 
-def repo_readiness_dict(repo: ManagedRepo, report: ReadinessReport) -> dict:
-    """Combine a repo and its readiness into the public per-repo JSON shape."""
-    return {**repo.to_dict(), "readiness": report.to_dict()}
+@dataclass(frozen=True)
+class CommitInfo:
+    """A managed repo's git commit, for the dashboard's status views.
+
+    Display-only metadata, deliberately separate from readiness: readiness runs
+    git as a launch *gate* (is the tree clean?), while this is history shown on
+    the repo card and detail view. ``committed_ts`` is git's strict ISO-8601
+    committer date (``%cI``, carrying the original offset), taken verbatim — the
+    hub does not reformat or re-zone it. A commit-lookup failure is represented
+    as absence (``None`` here, or an empty/`available: false` log elsewhere), so
+    it never hides the repo or its readiness.
+    """
+
+    hash: str
+    short_hash: str
+    committed_ts: str
+    subject: str
+
+    def to_dict(self) -> dict:
+        return {
+            "hash": self.hash,
+            "short_hash": self.short_hash,
+            "committed_ts": self.committed_ts,
+            "subject": self.subject,
+        }
+
+
+def repo_readiness_dict(
+    repo: ManagedRepo,
+    report: ReadinessReport,
+    commit: CommitInfo | None = None,
+) -> dict:
+    """Combine a repo, its readiness, and its latest commit into per-repo JSON.
+
+    ``commit`` is the repo's most recent commit for the dashboard repo card, or
+    ``None`` when git could not be read (best-effort: a commit-lookup failure
+    must never hide the repo or its readiness). It defaults to ``None`` so a
+    caller that has no commit (or does not want the git cost) still gets the
+    stable shape with ``commit: null``.
+    """
+    return {
+        **repo.to_dict(),
+        "readiness": report.to_dict(),
+        "commit": commit.to_dict() if commit is not None else None,
+    }
 
 
 def repos_payload(
-    pairs: Iterable[tuple[ManagedRepo, ReadinessReport]],
+    entries: Iterable[
+        tuple[ManagedRepo, ReadinessReport]
+        | tuple[ManagedRepo, ReadinessReport, CommitInfo | None]
+    ],
 ) -> dict:
-    """Build the top-level ``{"repos": [...]}`` payload for CLI/API output."""
-    return {"repos": [repo_readiness_dict(repo, report) for repo, report in pairs]}
+    """Build the top-level ``{"repos": [...]}`` payload for CLI/API output.
+
+    Each entry is ``(repo, report)`` or ``(repo, report, commit)``; a 2-tuple
+    keeps ``commit: null``, so this stays the single shared helper for both
+    ``python -m orch_hub.cli repos --json`` and ``GET /api/repos`` — the two
+    surfaces are pinned identical, and both now carry ``commit``.
+    """
+    return {"repos": [repo_readiness_dict(*entry) for entry in entries]}
 
 
 @dataclass(frozen=True)
