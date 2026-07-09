@@ -437,7 +437,7 @@ class FakeSpawner:
         self.procs: list[FakeProc] = []
         self._pids = itertools.count(5000)
 
-    def __call__(self, argv, *, cwd, stdout, start_new_session):
+    def __call__(self, argv, *, cwd, stdout, env, start_new_session):
         proc = FakeProc(next(self._pids))
         self.calls.append({"argv": tuple(argv), "cwd": Path(cwd)})
         self.procs.append(proc)

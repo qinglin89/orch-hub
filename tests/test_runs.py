@@ -11,6 +11,7 @@ from __future__ import annotations
 import datetime as dt
 import itertools
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -65,12 +66,13 @@ class FakeSpawner:
         self.procs: list[FakeProc] = []
         self._pids = itertools.count(4000)
 
-    def __call__(self, argv, *, cwd, stdout, start_new_session):
+    def __call__(self, argv, *, cwd, stdout, env, start_new_session):
         self.calls.append(
             {
                 "argv": tuple(argv),
                 "cwd": Path(cwd),
                 "stdout_path": Path(stdout.name),
+                "env": dict(env),
                 "start_new_session": start_new_session,
             }
         )
@@ -187,6 +189,27 @@ def test_start_run_builds_the_documented_command(tmp_path):
     assert call["start_new_session"] is True
     assert call["stdout_path"] == manager.runs_dir / record.run_id / "spawn.out"
     assert record.argv == call["argv"]
+
+
+def test_start_run_passes_agent_cli_paths_to_orchestrator_env(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("PATH", "/existing/bin:/usr/bin")
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+
+    manager.start_run(repo, TASK_ID)
+
+    path_parts = spawner.calls[0]["env"]["PATH"].split(os.pathsep)
+    assert path_parts[:4] == [
+        str(home / ".local" / "bin"),
+        str(home / ".claude" / "local"),
+        str(home / ".npm-global" / "bin"),
+        str(home / ".cargo" / "bin"),
+    ]
+    assert "/existing/bin" in path_parts
+    assert "/opt/homebrew/bin" in path_parts
+    assert path_parts.count("/usr/bin") == 1
 
 
 def test_extra_args_are_appended_to_the_orchestrator_argv(tmp_path):
@@ -343,7 +366,7 @@ def test_started_ts_is_stamped_before_the_spawn(tmp_path):
     clock = AdvancingClock(dt.datetime(2026, 7, 8, 3, 0, 0, 500_000, tzinfo=dt.timezone.utc))
     spawn_observed: list[dt.datetime] = []
 
-    def recording_spawner(argv, *, cwd, stdout, start_new_session):
+    def recording_spawner(argv, *, cwd, stdout, env, start_new_session):
         # The child's log stamp is taken no earlier than this spawn call.
         spawn_observed.append(clock())
         return FakeProc(4000)
@@ -535,7 +558,7 @@ def test_launchable_statuses_start_without_caveats(tmp_path, status):
 def test_spawn_failure_cleans_up_the_fresh_run_dir(tmp_path):
     repo = make_repo(tmp_path)
 
-    def exploding_spawner(argv, *, cwd, stdout, start_new_session):
+    def exploding_spawner(argv, *, cwd, stdout, env, start_new_session):
         raise FileNotFoundError("caffeinate")
 
     manager, _, _ = make_manager(tmp_path, spawner=exploding_spawner)

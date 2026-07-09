@@ -53,7 +53,7 @@ import re
 import shutil
 import subprocess
 import threading
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, Protocol
@@ -94,6 +94,24 @@ ORCHESTRATOR_PYTHON = Path(".cursor") / "orchestrator" / ".venv" / "bin" / "pyth
 ORCHESTRATOR_LOG_DIR = Path(".cursor") / "orchestrator" / "logs"
 """Deployed-orchestrator paths relative to a target repo (readiness checks
 the first two; the orchestrator writes ``<log dir>/<utc-ts>-<task-id>.log``)."""
+
+USER_CLI_PATHS = (
+    Path(".local") / "bin",
+    Path(".claude") / "local",
+    Path(".npm-global") / "bin",
+    Path(".cargo") / "bin",
+)
+"""Common per-user install locations for agent CLIs such as claude/codex."""
+
+SYSTEM_PATHS = (
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+)
+"""Baseline macOS paths for launchd-started services with sparse env."""
 
 BLOCKED_STATUS = "blocked"
 LAUNCHABLE_STATUSES = frozenset(
@@ -168,16 +186,23 @@ class ProcessHandle(Protocol):
 Spawner = Callable[..., ProcessHandle]
 """Launches the detached subprocess; tests inject fakes.
 
-Called as ``spawner(argv, cwd=Path, stdout=BinaryIO, start_new_session=True)``.
+Called as ``spawner(argv, cwd=Path, stdout=BinaryIO, env=dict,
+start_new_session=True)``.
 """
 
 
 def _default_spawner(
-    argv: Sequence[str], *, cwd: Path, stdout: BinaryIO, start_new_session: bool
+    argv: Sequence[str],
+    *,
+    cwd: Path,
+    stdout: BinaryIO,
+    env: Mapping[str, str],
+    start_new_session: bool,
 ) -> ProcessHandle:
     return subprocess.Popen(
         list(argv),
         cwd=str(cwd),
+        env=dict(env),
         stdin=subprocess.DEVNULL,
         stdout=stdout,
         stderr=subprocess.STDOUT,
@@ -198,6 +223,39 @@ def _pid_alive(pid: int) -> bool:
 
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _orchestrator_env(
+    environ: Mapping[str, str] | None = None, *, home: Path | None = None
+) -> dict[str, str]:
+    """Return the environment inherited by deployed orchestrator runs.
+
+    launchd services often have a sparse PATH, while Claude/Codex CLIs are
+    commonly installed under the user's home directory. The orchestrator
+    launches those CLIs by name, so pass an explicit PATH that keeps the current
+    environment but includes the common user and macOS locations.
+    """
+    env = dict(os.environ if environ is None else environ)
+    resolved_home = home or Path.home()
+    path_parts = [
+        *(str(resolved_home / relative) for relative in USER_CLI_PATHS),
+        *((env.get("PATH") or "").split(os.pathsep)),
+        *SYSTEM_PATHS,
+    ]
+    env["PATH"] = os.pathsep.join(_dedupe_path(path_parts))
+    return env
+
+
+def _dedupe_path(parts: Sequence[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for part in parts:
+        normalized = part.strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return tuple(result)
 
 
 def _slug(value: str) -> str:
@@ -284,6 +342,7 @@ class RunManager:
                         list(argv),
                         cwd=repo.path,
                         stdout=spawn_out,
+                        env=_orchestrator_env(),
                         start_new_session=True,
                     )
             except Exception:
