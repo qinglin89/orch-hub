@@ -7,12 +7,14 @@ are exercised without touching real repos or subprocesses.
 from __future__ import annotations
 
 import json
+import plistlib
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.error import URLError
 
 from orch_hub import cli
-from orch_hub.config import PORT_ENV
-from orch_hub.launchd import LaunchdError
+from orch_hub.config import BARK_URL_ENV, PORT_ENV, TOKEN_ENV
+from orch_hub.launchd import LaunchdError, PLIST_NAME
 from orch_hub.models import CommitInfo, ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.registry import RegistryError
 
@@ -256,3 +258,112 @@ def test_launchd_deploy_cli(monkeypatch, capsys):
     assert "launchd deploy ok" in out
     assert "generated ORCH_HUB_TOKEN: generated" in out
     assert "bark push: disabled" in out
+
+
+# -- notify test ---------------------------------------------------------------
+
+
+class RecordingNotifier:
+    """Captures delivered notifications; can be told to raise a failure."""
+
+    def __init__(self, *, fail: Exception | None = None):
+        self.sent: list = []
+        self._fail = fail
+
+    def notify(self, notification) -> None:
+        self.sent.append(notification)
+        if self._fail is not None:
+            raise self._fail
+
+
+def _absent_plist(tmp_path: Path) -> list[str]:
+    # Point --plist-path at a nonexistent file so tests never read the real
+    # user launchd plist (which may carry a live Bark URL on the dev machine).
+    return ["--plist-path", str(tmp_path / "absent.plist")]
+
+
+def test_notify_test_sends_when_configured(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv(BARK_URL_ENV, "https://bark.example/KEY")
+    notifier = RecordingNotifier()
+    seen: dict = {}
+
+    def fake_build(config):
+        seen["bark_url"] = config.bark_url
+        return notifier
+
+    monkeypatch.setattr(cli, "build_notifier", fake_build)
+
+    rc = cli.main(["notify", "test", *_absent_plist(tmp_path)])
+
+    assert rc == 0
+    # The env value flows through to the notifier factory.
+    assert seen["bark_url"] == "https://bark.example/KEY"
+    assert len(notifier.sent) == 1
+    assert notifier.sent[0].title == "orch-hub: test notification"
+    assert "test notification sent" in capsys.readouterr().out
+
+
+def test_notify_test_missing_config_exits_nonzero(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv(BARK_URL_ENV, raising=False)
+
+    # Real build_notifier: with no URL anywhere it returns None -> clear error.
+    rc = cli.main(["notify", "test", *_absent_plist(tmp_path)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "no notification backend configured" in err
+
+
+def test_notify_test_reports_delivery_failure_without_leaking_url(
+    tmp_path, monkeypatch, capsys
+):
+    url = "https://bark.example/SECRETKEY"
+    monkeypatch.setenv(BARK_URL_ENV, url)
+    # A schemeless/misconfigured URL surfaces inside urllib's error text; the
+    # CLI must scrub the exact endpoint before printing.
+    failure = URLError(f"unknown url type: '{url}'")
+    monkeypatch.setattr(
+        cli, "build_notifier", lambda config: RecordingNotifier(fail=failure)
+    )
+
+    rc = cli.main(["notify", "test", *_absent_plist(tmp_path)])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "notification delivery failed" in err
+    assert "URLError" in err  # failure type is surfaced
+    assert "SECRETKEY" not in err  # secret device key never leaks
+    assert url not in err
+
+
+def test_notify_test_falls_back_to_installed_plist(tmp_path, monkeypatch, capsys):
+    # No ORCH_HUB_BARK_URL in the shell, but the installed launchd plist carries
+    # it; the delivery check must resolve the plist value.
+    monkeypatch.delenv(BARK_URL_ENV, raising=False)
+    plist_path = tmp_path / PLIST_NAME
+    with plist_path.open("wb") as fh:
+        plistlib.dump(
+            {
+                "EnvironmentVariables": {
+                    TOKEN_ENV: "tok",
+                    BARK_URL_ENV: "https://bark.example/PLISTKEY",
+                }
+            },
+            fh,
+            fmt=plistlib.FMT_XML,
+        )
+    notifier = RecordingNotifier()
+    seen: dict = {}
+
+    def fake_build(config):
+        seen["bark_url"] = config.bark_url
+        return notifier
+
+    monkeypatch.setattr(cli, "build_notifier", fake_build)
+
+    rc = cli.main(["notify", "test", "--plist-path", str(plist_path)])
+
+    assert rc == 0
+    assert seen["bark_url"] == "https://bark.example/PLISTKEY"
+    assert len(notifier.sent) == 1

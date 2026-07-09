@@ -172,6 +172,21 @@ def default_plist_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / PLIST_NAME
 
 
+def installed_bark_url(*, plist_path: Path | None = None) -> str | None:
+    """Return ``ORCH_HUB_BARK_URL`` from the installed launchd plist, if any.
+
+    The resident service carries its Bark URL in the launchd plist's
+    ``EnvironmentVariables``, not in an interactive shell. ``orch-hub notify
+    test`` run from a plain shell therefore falls back to this installed value
+    so an operator can verify delivery without re-exporting the secret URL.
+    Returns ``None`` when the plist is absent, unreadable, or has no non-blank
+    value; the URL embeds a device key and is never logged.
+    """
+    resolved = (plist_path or default_plist_path()).expanduser()
+    value = _plist_env(_read_plist(resolved)).get(BARK_URL_ENV, "")
+    return value.strip() or None
+
+
 def default_log_dir() -> Path:
     return Path.home() / "Library" / "Logs" / "orch-hub"
 

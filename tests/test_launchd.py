@@ -34,6 +34,7 @@ from orch_hub.launchd import (
     _is_transient_bootstrap_failure,
     _resolve_leftover_placeholders,
     deploy_service,
+    installed_bark_url,
     restart_service,
     service_domain,
     service_target,
@@ -260,6 +261,35 @@ def test_deploy_preserves_existing_plist_bark_url(tmp_path):
 
     assert result.deployment.bark_url == BARK_URL
     assert read_plist(plist_path)["EnvironmentVariables"][BARK_URL_ENV] == BARK_URL
+
+
+def test_installed_bark_url_reads_stripped_plist_value(tmp_path):
+    # `notify test` from a plain shell resolves the Bark URL the resident
+    # service carries in its installed plist; surrounding whitespace is stripped.
+    plist_path = tmp_path / PLIST_NAME
+    with plist_path.open("wb") as fh:
+        plistlib.dump(
+            {"EnvironmentVariables": {BARK_URL_ENV: f"  {BARK_URL}  "}},
+            fh,
+            fmt=plistlib.FMT_XML,
+        )
+
+    assert installed_bark_url(plist_path=plist_path) == BARK_URL
+
+
+def test_installed_bark_url_none_when_absent_or_blank(tmp_path):
+    # Missing plist -> None (nothing installed).
+    assert installed_bark_url(plist_path=tmp_path / "absent.plist") is None
+
+    # Present but blank value -> None (blank counts as unset, like the env).
+    blank = tmp_path / "blank.plist"
+    with blank.open("wb") as fh:
+        plistlib.dump(
+            {"EnvironmentVariables": {BARK_URL_ENV: "   "}},
+            fh,
+            fmt=plistlib.FMT_XML,
+        )
+    assert installed_bark_url(plist_path=blank) is None
 
 
 def test_resolve_leftover_placeholders_blanks_unknown_but_fails_required():

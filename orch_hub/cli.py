@@ -11,6 +11,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from .config import Config
@@ -19,6 +20,7 @@ from .launchd import (
     LABEL,
     LaunchdError,
     deploy_service,
+    installed_bark_url,
     restart_service,
     start_service,
     status_service,
@@ -26,6 +28,7 @@ from .launchd import (
 )
 from .git_meta import latest_commit
 from .models import ManagedRepo, ReadinessReport, repos_payload
+from .notifications import build_notifier, probe_notification
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
 
@@ -37,6 +40,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_repos(json_output=args.json)
     if args.command == "launchd":
         return args.launchd_handler(args)
+    if args.command == "notify":
+        return args.notify_handler(args)
     parser.error(f"unknown command: {args.command}")  # pragma: no cover
     return 2
 
@@ -97,6 +102,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_plist_path_arg(status_p)
     status_p.set_defaults(launchd_handler=_cmd_launchd_status)
+
+    # Backend-agnostic notification commands. `test` is a delivery check; the
+    # top-level verb is `notify`, not the concrete backend (Bark), so a later
+    # backend does not force a CLI rename.
+    notify_p = sub.add_parser(
+        "notify", help="send and verify push notifications"
+    )
+    notify_sub = notify_p.add_subparsers(dest="notify_command", required=True)
+    notify_test_p = notify_sub.add_parser(
+        "test",
+        help="send a test notification to verify push delivery works",
+    )
+    _add_plist_path_arg(notify_test_p)
+    notify_test_p.set_defaults(notify_handler=_cmd_notify_test)
     return parser
 
 
@@ -290,6 +309,57 @@ def _cmd_launchd_status(args: argparse.Namespace) -> int:
     if not result.loaded and result.launchctl_output:
         print(f"launchctl: {result.launchctl_output}")
     return 0
+
+
+def _cmd_notify_test(args: argparse.Namespace) -> int:
+    """Send one test notification through the configured backend.
+
+    Exits 0 only after the backend accepts delivery, so it distinguishes "push
+    is configured" from "push delivery actually works". Delivery is direct (not
+    through the run manager), so it touches no run/history/control-dir state.
+    """
+    try:
+        config = Config.from_env()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    # The resident service keeps ORCH_HUB_BARK_URL in its launchd plist, not in
+    # an interactive shell. When the env is unset, fall back to the installed
+    # plist so `notify test` can verify the service config from a plain shell.
+    if not config.bark_url:
+        config = replace(
+            config, bark_url=installed_bark_url(plist_path=args.plist_path)
+        )
+    notifier = build_notifier(config)
+    if notifier is None:
+        print(
+            "error: no notification backend configured "
+            "(set ORCH_HUB_BARK_URL or deploy the launchd service with it)",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        notifier.notify(probe_notification())
+    except Exception as exc:  # delivery is inherently unreliable
+        # Surface the failure but never the endpoint: the Bark URL embeds a
+        # device-key secret, and some transport errors echo the URL back.
+        detail = _redact_secret(f"{type(exc).__name__}: {exc}", config.bark_url)
+        print(f"error: notification delivery failed: {detail}", file=sys.stderr)
+        return 1
+    print("test notification sent; check your device")
+    return 0
+
+
+def _redact_secret(text: str, secret: str | None) -> str:
+    """Blank the configured endpoint out of an error string.
+
+    A misconfigured URL can surface in a raised exception's text (for example a
+    schemeless value in a urllib ``unknown url type`` error), so scrub the exact
+    resolved URL before printing it.
+    """
+    if secret and secret in text:
+        return text.replace(secret, "<redacted>")
+    return text
 
 
 def _print_human(

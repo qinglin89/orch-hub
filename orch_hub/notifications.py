@@ -179,6 +179,20 @@ def question_notification(
     return Notification(title=f"{repo}: needs input", body=body, group=repo)
 
 
+def probe_notification() -> Notification:
+    """Format the harmless probe sent by ``orch-hub notify test``.
+
+    A backend-agnostic delivery check: it distinguishes "push is configured"
+    from "push delivery actually works". Like the other formatters this only
+    builds the payload — the CLI delivers it directly (not through the run
+    manager's trigger path), so it touches no run/history/control-dir state.
+    """
+    return Notification(
+        title="orch-hub: test notification",
+        body="If you can see this, push delivery is working.",
+    )
+
+
 def _repo_label(record: RunRecord) -> str:
     if record.repo_name:
         return record.repo_name

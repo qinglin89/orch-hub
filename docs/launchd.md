@@ -124,6 +124,23 @@ values, verifies no placeholders remain, and writes the installed plist. This
 keeps plist structure in one place while the Python code owns install/reload
 semantics.
 
+### Verify push delivery
+
+`bark push: enabled` in the deploy output only means a URL is **configured** in
+the plist — it does not prove Bark accepts a push. To check delivery end to end:
+
+```bash
+.venv/bin/orch-hub notify test
+```
+
+This sends one harmless test notification through the configured backend and
+exits `0` only after the backend accepts it. A missing configuration or a failed
+delivery exits non-zero with a message, and the secret Bark URL is never
+printed. Run from a plain shell it reads `ORCH_HUB_BARK_URL` from the
+environment, then falls back to the value in the installed launchd plist — so
+you can verify the resident service's own configuration without re-exporting the
+secret.
+
 ## 3. Start, stop, or restart without changing deployment
 
 Use these lifecycle commands when the installed package and plist are already
@@ -232,6 +249,7 @@ tail -f ~/Library/Logs/orch-hub/orch-hub.err.log   # startup + errors
   reachable through the plist's `PATH`.
 - **No push notifications** — confirm `ORCH_HUB_BARK_URL` is present and
   non-blank in the installed plist's `EnvironmentVariables` (`orch-hub launchd
-  deploy` prints `bark push: enabled` when it is set). Delivery is best-effort:
-  a bad URL or unreachable Bark server drops the notification and is logged
-  (without the URL) but never affects run state.
+  deploy` prints `bark push: enabled` when a URL is *configured* — it does not
+  verify delivery). Run `orch-hub notify test` to check delivery end to end.
+  Delivery is best-effort: a bad URL or unreachable Bark server drops the
+  notification and is logged (without the URL) but never affects run state.

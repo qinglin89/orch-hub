@@ -18,6 +18,7 @@ from orch_hub.notifications import (
     BarkNotifier,
     Notification,
     build_notifier,
+    probe_notification,
     question_notification,
     run_end_notification,
 )
@@ -162,3 +163,14 @@ def test_question_notification_falls_back_to_seq_when_textless():
     q = Question(seq=7, path=Path("/x/007-question.json"))
     note = question_notification("repo-a", "task-x", q)
     assert note.body == "task-x\nquestion #7"
+
+
+# -- probe_notification formatting ---------------------------------------------
+
+
+def test_probe_notification_is_backend_agnostic_probe():
+    note = probe_notification()
+    assert note.title == "orch-hub: test notification"
+    assert "working" in note.body.lower()
+    # No repo context, so no grouping — it is not a run/question event.
+    assert note.group is None
