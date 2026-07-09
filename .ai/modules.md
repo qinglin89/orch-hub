@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 3191b5852164fdff5706f750bd0c47f892cb5709
+verified-against: 0eb09ced5bb9e6be4ac953101b3f7fe9f9f799eb
 ---
 
 # Modules
@@ -226,10 +226,11 @@ dashboard reads only HTTP payloads, uses `fetch` +
 present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.
 
-Repo cards show readiness plus a separate run signal (yellow waiting, green
-active, gray idle); ready cards add latest commit time and active task count
-from task inventory. Task cards use left-border/dot run accents distinct from
-frontmatter status badges. Repo detail adds a recent-commits section with
+Repo cards show readiness plus a bare leading run-state dot before the repo name
+(yellow waiting, green active, gray idle; state word only in title/aria text);
+ready cards add latest commit time and active task count from task inventory.
+Task cards use only left-border run accents, with no dot/word row, distinct
+from frontmatter status badges. Repo detail adds a recent-commits section with
 unavailable and empty-history states.
 
 Run controls stay frontend-only over the existing API: Start posts

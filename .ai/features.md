@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 3191b5852164fdff5706f750bd0c47f892cb5709
+verified-against: 0eb09ced5bb9e6be4ac953101b3f7fe9f9f799eb
 ---
 
 # Features
@@ -294,16 +294,18 @@ Implemented behavior:
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
 - Repo list renders readiness from `/api/repos` and a tri-state run signal from
-  `/api/runs`: yellow waiting, green active non-waiting, gray idle. Ready cards
-  add latest commit time from the shared repo `commit` field plus active task
-  count from `/api/tasks` task-inventory rows; not-ready cards keep readiness
-  failure reasons.
+  `/api/runs` as a bare leading dot before the repo name: yellow waiting, green
+  active non-waiting, gray idle; the state word exists only in title/aria text.
+  Ready cards add latest commit time from the shared repo `commit` field plus
+  active task count from `/api/tasks` task-inventory rows; not-ready cards keep
+  readiness failure reasons.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
   `index_present`, and `missing`/`unknown` sentinel semantics.
-- Task cards show live run state as a left-border accent plus dot signal
-  (yellow waiting, green active), kept distinct from the frontmatter status
-  badge so protocol `blocked` is not confused with runtime `waiting`.
+- Task cards show live run state only as a left-border accent (yellow waiting,
+  green active), with no separate dot/word row, kept distinct from the
+  frontmatter status badge so protocol `blocked` is not confused with runtime
+  `waiting`.
 - Repo detail renders a recent-commits section from
   `GET /api/repos/{repo_id}/commits`; unreadable git shows "Commit history
   unavailable" and readable empty history shows "No commits found".
