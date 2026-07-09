@@ -682,3 +682,11 @@ code {
   max-height: 70vh;
   min-height: 40vh;
 }
+
+/* Startup-failure diagnostic (spawn.out) shown when no orchestrator log
+   exists: a warning accent marks it distinct from a normal log tail. */
+.log-output.diagnostic {
+  border-color: var(--warn-fg);
+  border-left-width: 3px;
+  background: var(--warn-bg);
+}

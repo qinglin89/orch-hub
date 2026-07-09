@@ -13,7 +13,13 @@ import datetime as dt
 from pathlib import Path
 
 from orch_hub import logs
-from orch_hub.logs import MAX_TAIL_LINES, LogSnapshot, locate_log, read_recent
+from orch_hub.logs import (
+    MAX_TAIL_LINES,
+    LogSnapshot,
+    locate_log,
+    read_recent,
+    read_spawn_out,
+)
 from orch_hub.models import RunRecord
 
 TASK_ID = "2026-07-05-feature-x"
@@ -245,6 +251,76 @@ def test_snapshot_defaults_are_absent():
         "size": 0,
         "detail": None,
     }
+
+
+# -- read_spawn_out (startup-failure diagnostic) ------------------------------
+#
+# spawn.out is the subprocess stdout+stderr capture. It is the only evidence of
+# a run that died before the orchestrator opened its own log, so the logs route
+# falls back to it when locate_log finds nothing. read_spawn_out reads the path
+# straight off the record (no locate step), and treats an empty capture — the
+# normal case for a run that logged cleanly — as "nothing to show".
+
+
+def spawn_record(spawn_out: Path | None) -> RunRecord:
+    return RunRecord(run_id="20260708T030000Z-repo-a-task", spawn_out=spawn_out)
+
+
+def write_spawn_out(run_dir: Path, text: str) -> Path:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    path = run_dir / "spawn.out"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_read_spawn_out_none_path_is_absent():
+    snap = read_spawn_out(spawn_record(None))
+    assert snap.present is False
+    assert snap.lines == ()
+    assert "no startup diagnostic" in snap.detail
+
+
+def test_read_spawn_out_missing_file_is_absent(tmp_path):
+    # The record has a path but nothing was ever written there.
+    snap = read_spawn_out(spawn_record(tmp_path / "run" / "spawn.out"))
+    assert snap.present is False
+    assert "no startup diagnostic" in snap.detail
+
+
+def test_read_spawn_out_empty_capture_is_absent(tmp_path):
+    # A run whose orchestrator logged normally leaves spawn.out empty: there is
+    # no useful diagnostic, so it reads as absent (not a blank "present" view).
+    path = write_spawn_out(tmp_path / "run", "")
+    snap = read_spawn_out(spawn_record(path))
+    assert snap.present is False
+    assert "empty" in snap.detail
+
+
+def test_read_spawn_out_blank_lines_only_is_absent(tmp_path):
+    path = write_spawn_out(tmp_path / "run", "\n\n")
+    snap = read_spawn_out(spawn_record(path))
+    assert snap.present is False
+    assert "empty" in snap.detail
+
+
+def test_read_spawn_out_returns_the_startup_error_tail(tmp_path):
+    # A credential/PATH/import failure: the traceback is all we have.
+    path = write_spawn_out(
+        tmp_path / "run",
+        "Traceback (most recent call last):\n  File ...\nRuntimeError: no cc-codex on PATH\n",
+    )
+    snap = read_spawn_out(spawn_record(path))
+    assert snap.present is True
+    assert snap.lines[0] == "Traceback (most recent call last):"
+    assert snap.lines[-1] == "RuntimeError: no cc-codex on PATH"
+    assert snap.size > 0
+
+
+def test_read_spawn_out_tail_limits_lines(tmp_path):
+    path = write_spawn_out(tmp_path / "run", "".join(f"line-{i}\n" for i in range(10)))
+    snap = read_spawn_out(spawn_record(path), max_lines=3)
+    assert snap.lines == ("line-7", "line-8", "line-9")
+    assert snap.truncated is True
 
 
 # -- tail_events (SSE) --------------------------------------------------------

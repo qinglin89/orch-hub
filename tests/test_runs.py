@@ -232,6 +232,7 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
         "task_status": "in_progress",
         "control_dir": str(run_dir / "control"),
         "log_dir": str(repo.path / ".cursor" / "orchestrator" / "logs"),
+        "spawn_out": str(run_dir / "spawn.out"),
         "argv": list(spawner.calls[0]["argv"]),
         "pid": spawner.procs[0].pid,
         "started_ts": clock.now.isoformat(),
@@ -249,6 +250,51 @@ def test_run_record_carries_launch_time_task_status(tmp_path):
 
     assert record.task_status == "final_review"
     assert read_record(manager, record.run_id)["task_status"] == "final_review"
+
+
+def test_run_record_spawn_out_path_is_set_and_reattaches(tmp_path):
+    # spawn.out is the subprocess stdout+stderr capture; the logs route falls
+    # back to it for a run that fails before writing an orchestrator log. Its
+    # path is on the record and survives reattach from disk.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+
+    run_dir = manager.runs_dir / record.run_id
+    assert record.spawn_out == run_dir / "spawn.out"
+    assert read_record(manager, record.run_id)["spawn_out"] == str(run_dir / "spawn.out")
+
+    # A fresh manager loading only run.json resolves the same capture path.
+    manager_b, _, _ = make_manager(tmp_path, pid_probe=lambda pid: True)
+    assert manager_b.get_run(record.run_id).record.spawn_out == run_dir / "spawn.out"
+
+
+def test_load_record_without_spawn_out_field_falls_back_to_fixed_path(tmp_path):
+    # A run.json persisted before the spawn_out field still resolves the capture
+    # from the fixed run-dir layout (mirrors the control_dir fallback).
+    manager, _, _ = make_manager(tmp_path)
+    run_dir = manager.runs_dir / "20260708T030000Z-repo-a-old"
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps({"run_id": run_dir.name, "repo_path": "/repos/repo-a"}),
+        encoding="utf-8",
+    )
+
+    record = manager.get_run(run_dir.name).record
+    assert record.spawn_out == run_dir / "spawn.out"
+
+
+def test_stub_record_for_broken_dir_still_points_at_spawn_out(tmp_path):
+    # A crashed launch (unreadable run.json) may still have a spawn.out; the stub
+    # keeps the fixed path so the logs route can surface that crash diagnostic.
+    manager, _, _ = make_manager(tmp_path)
+    broken = manager.runs_dir / "20260708T000000Z-repo-a-old"
+    broken.mkdir(parents=True)
+    (broken / "run.json").write_text("{ not json", encoding="utf-8")
+
+    record = manager.get_run(broken.name).record
+    assert record.error is not None
+    assert record.spawn_out == broken / "spawn.out"
 
 
 def test_run_started_event_is_persisted(tmp_path):

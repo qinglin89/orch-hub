@@ -195,6 +195,10 @@ class RunRecord:
     ``ended_ts`` is when the hub *observed* the end, not the exact exit time;
     ``exit_code`` remains ``None`` on a run that ended while the hub was down
     (a reattached process is no longer our child, so its status is gone).
+    ``spawn_out`` is the subprocess stdout+stderr capture path; it is the only
+    diagnostic for a run that failed *before* the orchestrator opened its own
+    log file (bad credential, missing CLI on PATH, import error), which the
+    logs route falls back to when no orchestrator log is located.
     ``error`` is never persisted: it is set only on stub records built from an
     unreadable ``run.json``, so a broken dir cannot hide a run. Stubs carry
     ``None`` placeholders for the unknown fields.
@@ -207,6 +211,7 @@ class RunRecord:
     task_status: str | None = None
     control_dir: Path | None = None
     log_dir: Path | None = None
+    spawn_out: Path | None = None
     argv: tuple[str, ...] = ()
     pid: int | None = None
     started_ts: str | None = None
@@ -215,8 +220,9 @@ class RunRecord:
     error: str | None = None
 
     def to_dict(self) -> dict:
-        # ``control_dir``, ``log_dir``, and ``argv`` are deliberately internal
-        # (filesystem detail the UI does not need); they stay in ``run.json``.
+        # ``control_dir``, ``log_dir``, ``spawn_out``, and ``argv`` are
+        # deliberately internal (filesystem detail the UI does not need); they
+        # stay in ``run.json``.
         return {
             "run_id": self.run_id,
             "repo_name": self.repo_name,

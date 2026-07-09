@@ -25,6 +25,13 @@ dir is ever read. Missing or rotated logs are reported as an absent snapshot,
 never an error — a run may be listed before its orchestrator writes the first
 line, and old logs get cleaned up out from under us.
 
+When there is no orchestrator log at all — a run that failed during startup,
+before it opened its own log file — :func:`read_spawn_out` reads the run's
+``spawn.out`` capture (the subprocess's stdout+stderr, from the record's
+``spawn_out`` path) instead, so a credential/PATH/missing-CLI error surfaces as
+a real diagnostic rather than an empty log view. It, too, is scoped to the run
+record and treats an absent/empty capture as an absent snapshot.
+
 Live tailing (:func:`tail_events`) follows that same located file, emitting each
 newly completed line as a Server-Sent Events ``data:`` frame and a terminal
 ``event: end`` frame when the run ends or the file rotates away. It rides the
@@ -145,18 +152,87 @@ def read_recent(
     max_lines: int = DEFAULT_TAIL_LINES,
     max_bytes: int = _TAIL_BYTES,
 ) -> LogSnapshot:
-    """Read a bounded tail of this run's log into a :class:`LogSnapshot`.
+    """Read a bounded tail of this run's orchestrator log into a snapshot.
 
-    Reads at most ``max_bytes`` from the file end (so a large log never loads
-    whole) and keeps the last ``max_lines`` lines. Marks ``truncated`` when
-    either bound dropped earlier content. A missing or since-rotated file is a
-    graceful absent snapshot, not an exception.
+    Locates the run's own log (:func:`locate_log`), then reads at most
+    ``max_bytes`` from the file end (so a large log never loads whole) and keeps
+    the last ``max_lines`` lines. Marks ``truncated`` when either bound dropped
+    earlier content. A run with no log yet, or one whose file rotated away, is a
+    graceful absent snapshot, not an exception — the logs route then falls back
+    to :func:`read_spawn_out` for a startup-failure diagnostic.
     """
     max_lines = max(1, min(max_lines, MAX_TAIL_LINES))
     path = locate_log(record)
     if path is None:
         return LogSnapshot(present=False, detail="no log file found for this run yet")
+    return _read_tail(
+        path,
+        max_lines=max_lines,
+        max_bytes=max_bytes,
+        # Located, then rotated/removed before we opened it.
+        missing_detail="log file rotated or removed",
+        unreadable_noun="log",
+    )
 
+
+def read_spawn_out(
+    record: RunRecord,
+    *,
+    max_lines: int = DEFAULT_TAIL_LINES,
+    max_bytes: int = _TAIL_BYTES,
+) -> LogSnapshot:
+    """Read a bounded tail of a run's ``spawn.out`` startup-diagnostic capture.
+
+    ``spawn.out`` is the orchestrator subprocess's combined stdout/stderr,
+    written by the run manager (:mod:`orch_hub.runs`). It is the only evidence
+    of a run that failed *before* the orchestrator opened its own log file — a
+    bad credential, a missing CLI on PATH, an import error — so the logs route
+    falls back to it when :func:`locate_log` finds no orchestrator log. A record
+    with no ``spawn_out`` path, a missing/unreadable file, or an empty capture
+    (the normal case for a run that logged cleanly) yields an absent snapshot:
+    there is nothing useful to surface, never an error.
+    """
+    max_lines = max(1, min(max_lines, MAX_TAIL_LINES))
+    path = record.spawn_out
+    if path is None:
+        return LogSnapshot(present=False, detail="no startup diagnostic for this run")
+    snapshot = _read_tail(
+        path,
+        max_lines=max_lines,
+        max_bytes=max_bytes,
+        missing_detail="no startup diagnostic for this run",
+        unreadable_noun="startup diagnostic",
+    )
+    if snapshot.present and not any(line.strip() for line in snapshot.lines):
+        # A run whose orchestrator logged normally leaves spawn.out empty (or
+        # only blank lines); that is not a useful diagnostic to surface.
+        return LogSnapshot(
+            present=False,
+            detail="startup diagnostic is empty",
+            size=snapshot.size,
+            path=path,
+        )
+    return snapshot
+
+
+def _read_tail(
+    path: Path,
+    *,
+    max_lines: int,
+    max_bytes: int,
+    missing_detail: str,
+    unreadable_noun: str,
+) -> LogSnapshot:
+    """Read a bounded tail of ``path`` into a present snapshot, or an absent one.
+
+    Shared by :func:`read_recent` (orchestrator log) and :func:`read_spawn_out`
+    (startup diagnostic). Reads at most ``max_bytes`` from the file end, keeps
+    the last ``max_lines`` lines, drops a partial head line when the byte window
+    started mid-file, and marks ``truncated`` when either bound dropped content.
+    A missing file yields ``present=False`` with ``missing_detail``; an
+    unreadable one reports the OS error against ``unreadable_noun``. Never
+    raises — a missing/rotated file is normal, not an error.
+    """
     try:
         with path.open("rb") as handle:
             handle.seek(0, os.SEEK_END)
@@ -165,12 +241,11 @@ def read_recent(
             handle.seek(start)
             data = handle.read()
     except FileNotFoundError:
-        # Located, then rotated/removed before we opened it.
-        return LogSnapshot(
-            present=False, detail="log file rotated or removed", path=path
-        )
+        return LogSnapshot(present=False, detail=missing_detail, path=path)
     except OSError as err:
-        return LogSnapshot(present=False, detail=f"log unreadable ({err})", path=path)
+        return LogSnapshot(
+            present=False, detail=f"{unreadable_noun} unreadable ({err})", path=path
+        )
 
     byte_truncated = start > 0
     text = data.decode("utf-8", errors="replace")
@@ -183,10 +258,9 @@ def read_recent(
         lines.pop()
 
     line_truncated = len(lines) > max_lines
-    tail = tuple(lines[-max_lines:])
     return LogSnapshot(
         present=True,
-        lines=tail,
+        lines=tuple(lines[-max_lines:]),
         truncated=byte_truncated or line_truncated,
         size=size,
         path=path,

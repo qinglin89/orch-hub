@@ -212,3 +212,20 @@ def test_launch_dialog_submit_sends_extra_args_and_keeps_ack():
     assert "extra_args" in body
     assert "acknowledge_blocked" in body
     assert '"/api/runs"' in body
+
+
+# ---- startup-failure diagnostic (spawn.out) ---------------------------------
+#
+# Session-2 of the launch-options task: a run that exits before writing an
+# orchestrator log exposes its spawn.out capture through the logs route's
+# `diagnostic`, and the log view renders that fallback instead of an empty view.
+# Asserted at the served-asset boundary (no JS runtime in this suite).
+
+
+def test_log_view_renders_spawn_out_startup_diagnostic():
+    body = app_js()
+    # The recent-log renderer reads the route's `diagnostic` fallback...
+    assert "diagnostic" in body
+    # ...names the capture in the user-facing status note...
+    assert "startup diagnostics" in body
+    assert "spawn.out" in body

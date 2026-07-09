@@ -558,6 +558,17 @@ def write_run_log(
     return path
 
 
+def write_spawn_out(manager: RunManager, run_id: str, text: str) -> Path:
+    """Overwrite the run's spawn.out with a startup-failure capture.
+
+    ``start_run`` already created an empty spawn.out; this replaces it with the
+    subprocess stdout+stderr a crashed startup would have left there.
+    """
+    path = manager.runs_dir / run_id / "spawn.out"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 # -- start run -----------------------------------------------------------------
 
 
@@ -896,6 +907,56 @@ def test_get_run_logs_unknown_run_is_404(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     resp = client.get("/api/runs/20990101T000000Z-nope-x/logs")
     assert resp.status_code == 404
+
+
+def test_get_run_logs_falls_back_to_spawn_out_diagnostic(tmp_path, monkeypatch):
+    # A run that fails during startup never opens an orchestrator log; its error
+    # lands in spawn.out. The route surfaces that capture as `diagnostic` so the
+    # log view is a real error tail rather than empty.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_spawn_out(
+        manager,
+        started["run_id"],
+        "Traceback (most recent call last):\n  ...\nRuntimeError: missing credential\n",
+    )
+    spawner.procs[0].returncode = 1  # exits during startup, no orchestrator log
+
+    body = client.get(f"/api/runs/{started['run_id']}/logs").json()
+    assert body["present"] is False  # no orchestrator log located
+    assert body["lines"] == []
+    diag = body["diagnostic"]
+    assert diag is not None
+    assert diag["source"] == "spawn.out"
+    assert diag["present"] is True
+    assert diag["lines"][-1] == "RuntimeError: missing credential"
+
+
+def test_get_run_logs_no_diagnostic_when_orchestrator_log_present(tmp_path, monkeypatch):
+    # A real orchestrator log wins; the spawn.out fallback is not attached even
+    # when a capture exists.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], ["run started", "done"])
+    write_spawn_out(manager, started["run_id"], "some startup chatter\n")
+
+    body = client.get(f"/api/runs/{started['run_id']}/logs").json()
+    assert body["present"] is True
+    assert body["diagnostic"] is None
+
+
+def test_get_run_logs_empty_spawn_out_leaves_diagnostic_null(tmp_path, monkeypatch):
+    # spawn.out is created empty by start_run; with no orchestrator log and an
+    # empty capture there is nothing to show, so diagnostic stays null and the
+    # plain "no log" detail rides along.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    spawner.procs[0].returncode = 0
+
+    body = client.get(f"/api/runs/{started['run_id']}/logs").json()
+    assert body["present"] is False
+    assert body["diagnostic"] is None
+    assert body["detail"]
 
 
 # -- run logs: SSE stream ------------------------------------------------------

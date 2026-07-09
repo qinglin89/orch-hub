@@ -1136,6 +1136,19 @@
       return;
     }
     if (!snap.present) {
+      const diag = snap.diagnostic;
+      if (diag && diag.lines && diag.lines.length) {
+        // No orchestrator log — the run likely failed during startup, before it
+        // opened its own log. Show the spawn.out capture so the error isn't an
+        // empty view; the `diagnostic` class marks it visually distinct.
+        pre.textContent = "";
+        pre.classList.add("diagnostic");
+        appendLogLines(pre, diag.lines);
+        statusEl.textContent =
+          "No orchestrator log — showing startup diagnostics (spawn.out)" +
+          (diag.truncated ? " (truncated)." : ".");
+        return;
+      }
       statusEl.textContent = snap.detail || "No log file for this run.";
       return;
     }
@@ -1211,12 +1224,23 @@
       statusEl.textContent = "Paused — Reload to resume.";
     });
     statusEl.textContent = "Following live…";
+    let sawLine = false;
     streamLog(runId, DEFAULT_LOG_TAIL, {
       signal: controller.signal,
-      onLine: (line) => appendLogLines(pre, [line]),
+      onLine: (line) => {
+        sawLine = true;
+        appendLogLines(pre, [line]);
+      },
       onEnd: (reason) => {
         if (activeStream === controller) activeStream = null;
         pauseBtn.hidden = true;
+        if (!sawLine) {
+          // The run ended without writing an orchestrator log (e.g. it failed
+          // during startup). Pull the recent-log route, which falls back to the
+          // spawn.out startup diagnostic, rather than leaving an empty view.
+          loadRecentLog(runId, pre, statusEl);
+          return;
+        }
         statusEl.textContent = reason
           ? "Stream ended: " + reason
           : "Stream closed.";

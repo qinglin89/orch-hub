@@ -43,7 +43,7 @@ from .control_dir import (
     pending_questions,
     write_answer,
 )
-from .logs import DEFAULT_TAIL_LINES, read_recent, tail_events
+from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
@@ -400,10 +400,21 @@ def create_app(
         and is clamped to a sane range. A run with no log yet, or one whose file
         rotated away, is a 200 with ``present: false`` and a ``detail`` — a
         missing log is normal, not an error.
+
+        When no orchestrator log is located, ``diagnostic`` carries a bounded
+        tail of the run's ``spawn.out`` startup capture (its ``source``) so a
+        run that failed *before* opening its log — a credential/PATH/missing-CLI
+        error — is a useful error tail rather than an empty view. It is ``null``
+        when an orchestrator log is present or the capture is absent/empty.
         """
         status = manager.get_run(run_id)
         snapshot = read_recent(status.record, max_lines=tail)
-        return {"run_id": run_id, **snapshot.to_dict()}
+        diagnostic = None
+        if not snapshot.present:
+            diag = read_spawn_out(status.record, max_lines=tail)
+            if diag.present:
+                diagnostic = {**diag.to_dict(), "source": "spawn.out"}
+        return {"run_id": run_id, **snapshot.to_dict(), "diagnostic": diagnostic}
 
     @app.get("/api/runs/{run_id}/logs/stream")
     def stream_run_logs(run_id: str, tail: int = DEFAULT_TAIL_LINES) -> StreamingResponse:

@@ -300,6 +300,7 @@ class RunManager:
                 task_status=task_status,
                 control_dir=control_dir,
                 log_dir=repo.path / ORCHESTRATOR_LOG_DIR,
+                spawn_out=run_dir / SPAWN_OUT_NAME,
                 argv=argv,
                 pid=proc.pid,
                 started_ts=started_ts,
@@ -615,6 +616,7 @@ def _write_record(run_dir: Path, record: RunRecord) -> None:
         "task_status": record.task_status,
         "control_dir": str(record.control_dir) if record.control_dir else None,
         "log_dir": str(record.log_dir) if record.log_dir else None,
+        "spawn_out": str(record.spawn_out) if record.spawn_out else None,
         "argv": list(record.argv),
         "pid": record.pid,
         "started_ts": record.started_ts,
@@ -652,6 +654,9 @@ def _load_record(run_dir: Path) -> RunRecord:
         task_status=_str_field(data, "task_status"),
         control_dir=_path_field(data, "control_dir") or run_dir / CONTROL_SUBDIR,
         log_dir=_path_field(data, "log_dir"),
+        # Fall back to the fixed dir layout so records predating the field (and
+        # reattached runs) still resolve their startup-diagnostic capture.
+        spawn_out=_path_field(data, "spawn_out") or run_dir / SPAWN_OUT_NAME,
         argv=tuple(str(a) for a in argv) if isinstance(argv, list) else (),
         pid=_int_field(data, "pid"),
         started_ts=_str_field(data, "started_ts"),
@@ -661,9 +666,12 @@ def _load_record(run_dir: Path) -> RunRecord:
 
 
 def _stub(run_dir: Path, error: str) -> RunRecord:
+    # A crashed launch (missing/unreadable run.json) may still have written a
+    # spawn.out; keep the fixed path so the logs route can surface it.
     return RunRecord(
         run_id=run_dir.name,
         control_dir=run_dir / CONTROL_SUBDIR,
+        spawn_out=run_dir / SPAWN_OUT_NAME,
         error=error,
     )
 
