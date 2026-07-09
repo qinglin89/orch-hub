@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-09
-verified-against: 46c110a5f887060398827574b5e871610704e3f6
+last-updated: 2026-07-10
+verified-against: 3191b5852164fdff5706f750bd0c47f892cb5709
 ---
 
 # Features
@@ -18,7 +18,7 @@ verified-against: 46c110a5f887060398827574b5e871610704e3f6
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
 | Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including run start/stop controls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
-| Notifications | implemented | notifications, config, runs, monitor, launchd, api | Bark delivery backend; `ORCH_HUB_BARK_URL` |
+| Notifications | implemented | notifications, config, runs, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
 | Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs` |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
@@ -355,13 +355,17 @@ Status: implemented
 Description: Notify when a pending question is first observed and when a run
 reaches a terminal state. Bark is the v1 backend.
 
-Modules: notifications, config, runs, monitor, launchd, api.
+Modules: notifications, config, runs, monitor, launchd, api, cli.
 
 Implemented behavior:
 
 - `ORCH_HUB_BARK_URL` configures the full Bark endpoint including device key;
   unset or whitespace-only values disable notifications. `build_notifier`
   returns `BarkNotifier` or `None`, with `None` as the only disabled signal.
+- `orch-hub notify test` sends one `probe_notification()` directly through the
+  configured notifier and exits 0 only after backend acceptance. Missing config
+  or delivery failure exits non-zero, the resolved Bark URL is redacted from
+  errors, and an unset shell env falls back to the installed launchd plist.
 - `Notification` carries title/body/optional group. `BarkNotifier` sends JSON
   to the configured endpoint with a bounded timeout and injectable transport;
   the URL is treated as secret and is never logged.
@@ -434,8 +438,8 @@ Implemented behavior:
   launchctl output when unloaded, and the public `/api/health` probe result.
 - `docs/launchd.md` documents the integrated deploy/update/lifecycle flow,
   singleton service cardinality, template ownership, token behavior, manual
-  fallback commands, log inspection, optional Bark URL config, and
-  Tailscale-only exposure assumptions.
+  fallback commands, log inspection, optional Bark URL config, push delivery
+  checks through `notify test`, and Tailscale-only exposure assumptions.
 
 ### Run History and Audit
 

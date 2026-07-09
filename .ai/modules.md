@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-09
-verified-against: 46c110a5f887060398827574b5e871610704e3f6
+last-updated: 2026-07-10
+verified-against: 3191b5852164fdff5706f750bd0c47f892cb5709
 ---
 
 # Modules
@@ -9,9 +9,9 @@ verified-against: 46c110a5f887060398827574b5e871610704e3f6
 
 | Module | Location | Description |
 |---|---|---|
-| CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output and launchd operations dispatch |
+| CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output, launchd operations dispatch, and notification delivery checks |
 | Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token and Bark URL loading, data-dir setting, and derived `aii-2`/registry paths |
-| Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing |
+| Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing and lookup |
 | Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, and run models plus payload helpers |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
@@ -24,7 +24,7 @@ verified-against: 46c110a5f887060398827574b5e871610704e3f6
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/escalation/log/history routes, and uvicorn entry point |
-| Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and notification formatters |
+| Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/probe notification formatters |
 | Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including status layout, recent commits, and task-detail run controls |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
@@ -51,7 +51,18 @@ lifecycle operations:
 orch-hub launchd deploy|update|start|stop|restart|status
 ```
 
-Dependencies: config, registry, readiness, models, launchd.
+Notification commands dispatch through the configured notifier path:
+
+```bash
+orch-hub notify test
+```
+
+`notify test` resolves `Config.from_env()`, falls back to the installed launchd
+plist's Bark URL when the shell env is unset, sends one probe notification
+directly through `build_notifier(config)`, and reports delivery failure without
+printing the secret endpoint.
+
+Dependencies: config, registry, readiness, models, launchd, notifications.
 
 ### Launchd Operations
 
@@ -70,7 +81,9 @@ deploy/update poll for the label to disappear and retry transient bootstrap
 exit-5/input-output failures with bounded backoff. Token precedence is explicit
 option, env var, existing plist, then generated token. Bark URL precedence is
 `ORCH_HUB_BARK_URL`, then existing installed-plist value, then disabled; it has
-no CLI flag and is never echoed because the URL embeds a device-key secret.
+no deploy CLI flag and is never echoed because the URL embeds a device-key
+secret. `installed_bark_url(plist_path=...)` reads the installed plist value for
+`orch-hub notify test` when the current shell has not exported the URL.
 
 `start_service`, `stop_service`, and `restart_service` are launchd lifecycle
 helpers only. They bootstrap or boot out the fixed label and deliberately do
@@ -356,9 +369,12 @@ disabled.
 
 Formatters are pure: `run_end_notification(record, state, detail)` turns the
 run manager's completed/stopped/error/ended classification into device text,
-and `question_notification(repo_name, task_id, question)` formats a newly
-observed pending control-dir question as `needs input`. The module does not
-decide when notifications fire; `RunManager` owns trigger policy and isolation.
+`question_notification(repo_name, task_id, question)` formats a newly observed
+pending control-dir question as `needs input`, and `probe_notification()` builds
+the harmless delivery-check payload used by `orch-hub notify test`. The module
+does not decide when notifications fire; `RunManager` owns live-run trigger
+policy and isolation, while the CLI sends probes directly so failures affect
+only the command exit code.
 
 ## Boundary Rules
 

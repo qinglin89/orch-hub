@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-09
-verified-against: 46c110a5f887060398827574b5e871610704e3f6
+last-updated: 2026-07-10
+verified-against: 3191b5852164fdff5706f750bd0c47f892cb5709
 ---
 
 # APIs and Interfaces
@@ -86,6 +86,20 @@ verified-against: 46c110a5f887060398827574b5e871610704e3f6
 - Output: fixed label, installed plist path/presence, loaded state, program
   path when readable, dashboard URL, plist parse error when present, launchctl
   output when unloaded, and the public `/api/health` probe result.
+
+### `orch-hub notify test`
+
+- Purpose: verify push delivery, not merely that a Bark URL is configured.
+- Source: `orch_hub.cli` resolves config, then delivers through
+  `notifications.build_notifier(config)`.
+- Behavior: sends one harmless `probe_notification()` and exits 0 only after the
+  backend accepts delivery. If `ORCH_HUB_BARK_URL` is unset in the shell, it
+  falls back to the installed launchd plist's value; `--plist-path` overrides
+  that lookup for tests or alternate installs.
+- Errors: missing config exits 1 with a clear message; backend failures exit 1
+  with the failure type/detail after redacting the resolved Bark URL/device key.
+- Non-goal: does not call `RunManager` or write run records, history events,
+  task files, or control-dir files.
 
 ## HTTP API
 
@@ -389,10 +403,12 @@ Output: best-effort delivery through a configured backend.
 Behavior: `build_notifier(config)` returns `BarkNotifier` when
 `Config.bark_url` is set, otherwise `None`. Bark sends JSON to the configured
 full endpoint, which includes the device key and must not be logged. The run
-manager owns trigger timing and isolation: terminal notifications fire at the
-observed live-to-ended transition, pending-question notifications fire once per
-observed `(run_id, seq)`, and backend exceptions are swallowed without changing
-run records, history, or control-dir files.
+manager owns live-run trigger timing and isolation: terminal notifications fire
+at the observed live-to-ended transition, pending-question notifications fire
+once per observed `(run_id, seq)`, and backend exceptions are swallowed without
+changing run records, history, or control-dir files. `orch-hub notify test`
+delivers a probe directly through the same notifier factory so delivery failure
+is visible to the CLI exit code while remaining outside run state.
 
 ### Launchd Service Template
 
