@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
+verified-against: 46c110a5f887060398827574b5e871610704e3f6
 ---
 
 # Features
@@ -70,14 +70,18 @@ APIs: `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`,
 Implemented behavior:
 
 - `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and human summaries, preserving index row order.
+- Task cells may be bare ids or full-cell Markdown links such as
+  `[id](id.md)`; link targets are reduced to the target basename with one
+  trailing `.md` stripped before file lookup and API payloads, so directory
+  prefixes cannot steer reads outside `.ai-tasks`.
 - The index Status column is not authoritative; each `.ai-tasks/<id>.md` frontmatter supplies task status and blockers.
 - Missing `.ai-tasks/index.md` is represented as `index_present=False` with no task rows, distinct from a present-but-empty index.
 - Missing listed task files use status `missing`; files with no parseable status use `unknown`.
 - `TaskSummary`, `RepoTaskInventory`, and `tasks_payload` provide reusable data shapes for future CLI/API adapters.
 - The single-task detail endpoint returns frontmatter-authoritative fields plus
-  `present` and raw `content`; raw reads require index membership and resolved
-  containment under `.ai-tasks`, so symlinked files outside the task dir are
-  not disclosed.
+  `present` and raw `content`; raw reads require normalized index membership
+  and resolved containment under `.ai-tasks`, so symlinked files outside the
+  task dir are not disclosed.
 
 ### HTTP API Foundation
 

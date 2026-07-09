@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
+verified-against: 46c110a5f887060398827574b5e871610704e3f6
 ---
 
 # APIs and Interfaces
@@ -127,15 +127,16 @@ verified-against: 424b37c2c56496458fbffdd1c11a4079d1983c82
 
 - Purpose: list tasks for one repo, where `repo_id` is the managed-repo name.
 - Shape: `tasks_payload([inventory])`, the same `{"repos": [...]}` envelope as
-  all-repo task inventory with a single repo entry.
+  all-repo task inventory with a single repo entry. Task ids are normalized
+  bare ids even when the source index uses Markdown-link Task cells.
 
 ### `GET /api/repos/{repo_id}/tasks/{task_id}`
 
 - Purpose: fetch one listed task's frontmatter-authoritative inventory fields
   plus raw markdown body for the dashboard task-detail view.
 - Source: resolves `repo_id` through registry discovery, gets status/summary/
-  blockers through `list_repo_tasks`, gates `task_id` on index membership, then
-  reads `.ai-tasks/<task_id>.md` through `read_task_content`.
+  blockers through `list_repo_tasks`, gates `task_id` on normalized index
+  membership, then reads `.ai-tasks/<task_id>.md` through `read_task_content`.
 - Shape: `TaskSummary.to_dict()` plus `{"present": bool, "content": str|null}`.
   Listed-but-absent task files return HTTP 200 with `present: false` and
   `content: null`; unknown repos or unlisted task ids return HTTP 404.

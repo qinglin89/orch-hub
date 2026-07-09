@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+verified-against: 46c110a5f887060398827574b5e871610704e3f6
 ---
 
 # Project Map
@@ -10,7 +10,7 @@ verified-against: 98194a7b5c814f85807bb897298db131bc593900
 | Feature | Modules | Key Decisions |
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, git_meta, subprocess_utils, cli, api, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only; commit metadata is best-effort display data |
-| Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries, task frontmatter supplies authoritative status/blockers; single-task content reads are index-gated and contained under `.ai-tasks`; run overlay is supplied by runs |
+| Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries after normalizing bare-id or full-cell Markdown-link Task cells to safe bare ids; task frontmatter supplies authoritative status/blockers; single-task content reads are index-gated and contained under `.ai-tasks`; run overlay is supplied by runs |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
@@ -51,7 +51,7 @@ verified-against: 98194a7b5c814f85807bb897298db131bc593900
 | subprocess_utils | Run external commands consistently and surface missing executables distinctly |
 | cli | Human and JSON repo readiness output; launchd command dispatch |
 | launchd | Resolve launchd deployment settings including optional Bark URL, render/install plist from template, install/update package, run launchctl lifecycle commands, and probe service status |
-| task_store | Parse `.ai-tasks` indexes and task frontmatter into repo task inventories |
+| task_store | Parse `.ai-tasks` indexes, including Markdown-link Task cells, and task frontmatter into repo task inventories |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, append run history events, and trigger isolated notifications |
 | history | Append/read per-run JSONL audit/history events without storing answer text |
 | control_dir | Implement question/answer/stop file-channel handling |
