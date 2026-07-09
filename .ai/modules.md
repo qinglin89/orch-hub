@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
+verified-against: 7aeeee1df0f406e07b823c81e021964747272e41
 ---
 
 # Modules
@@ -63,7 +63,9 @@ ai-native-development path, token, host/port/data dir, plist path, log dir,
 `PATH`, and optional Bark URL; render the installed plist from
 `deploy/launchd/com.qinglin89.orch-hub.plist`; install/update the checkout
 `.venv` package; validate with `plutil`; boot out any loaded service; and
-bootstrap through `launchctl`. Token precedence is explicit option, env var,
+bootstrap through `launchctl`. After a successful bootout, deploy/update poll
+for the label to disappear and retry transient bootstrap exit-5/input-output
+failures with bounded backoff. Token precedence is explicit option, env var,
 existing plist, then generated token. Bark URL precedence is
 `ORCH_HUB_BARK_URL`, then existing installed-plist value, then disabled; it has
 no CLI flag and is never echoed because the URL embeds a device-key secret.

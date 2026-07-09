@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
+verified-against: 7aeeee1df0f406e07b823c81e021964747272e41
 ---
 
 # Features
@@ -401,7 +401,10 @@ Implemented behavior:
 - `orch-hub launchd deploy` and `update` resolve deployment settings, install
   or refresh the checkout `.venv` package, render the installed plist from the
   checked-in template, validate it, boot out any loaded singleton label, and
-  bootstrap the service. The template is parsed before venv/pip work.
+  bootstrap the service. After a successful bootout, deploy/update wait until
+  `launchctl print` stops reporting the label, then retry transient bootstrap
+  exit-5/input-output failures with bounded backoff. The template is parsed
+  before venv/pip work.
 - Token resolution is explicit `--token`, then `ORCH_HUB_TOKEN`, then an
   existing installed plist token, then a generated token printed once. The
   installed plist is written mode `600` because it embeds the bearer token.

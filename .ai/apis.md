@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-09
-verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
+verified-against: 7aeeee1df0f406e07b823c81e021964747272e41
 ---
 
 # APIs and Interfaces
@@ -53,15 +53,18 @@ verified-against: 4727385d2092bf99e654898252ca7d1bdd4837a6
 - Behavior: resolve deployment settings, optionally create/update `.venv`,
   run local `pip install`, render the installed plist from the checked-in
   template, write it mode `600`, validate it with `plutil`, boot out the fixed
-  label if loaded, and bootstrap it.
+  label if loaded, wait for a successful bootout to leave the launchd domain,
+  and bootstrap it with bounded retry for transient exit-5/input-output
+  failures.
 - Configuration precedence: CLI flag, environment, default for paths/host/port;
   bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
   installed plist token, then generated token printed once. Bark URL resolves
   as `ORCH_HUB_BARK_URL`, then existing installed plist value, then disabled;
   it has no CLI flag, and CLI output reports only `bark push:
   enabled/disabled` because the URL embeds a device-key secret.
-- Errors: operational failures return exit 1 with `error: ...`; missing or
-  invalid templates fail before venv/pip work.
+- Errors: operational failures return exit 1 with `error: ...`; non-transient
+  bootout/bootstrap failures are not retried, and missing or invalid templates
+  fail before venv/pip work.
 
 ### `orch-hub launchd start|stop|restart`
 
