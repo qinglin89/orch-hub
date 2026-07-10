@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ---
 
 # Modules: Web and Operations
@@ -16,8 +16,9 @@ public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
 escalation, log, and history routes over one
 `RunManager` instance plus a lifespan-owned `RunMonitor`. Implemented run
-routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
-`POST /api/runs/{run_id}/stop`; implemented escalation routes are
+routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`,
+`GET /api/runs/{run_id}/task`, and `POST /api/runs/{run_id}/stop`;
+implemented escalation routes are
 `GET /api/escalations` and
 `POST /api/runs/{run_id}/escalations/{seq}/answer`; implemented log routes are
 `GET /api/runs/{run_id}/logs` and
@@ -26,7 +27,9 @@ routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `GET /api/repos/{repo_id}/commits`. `GET /api/repos` includes a best-effort
 `commit` field and display-only `housekeeping_pending` state shared with CLI
 JSON; recent commit lookup failures return `available:false` rather than
-raising. The recent-log route adds a nested `diagnostic` from
+raising. The run-scoped task route reads active task content first and falls
+back to the task archive without opening general archived-task listing. The
+recent-log route adds a nested `diagnostic` from
 `spawn.out` only when the orchestrator log is absent and the capture is
 non-empty. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
@@ -48,8 +51,8 @@ served uncached by the API so updates reach browsers on the next load. `app.js`
 owns token entry/localStorage, bearer `fetch` calls, hash routing,
 repo/task/detail/run views, repo/task run-state signals, recent commits,
 task-detail Start/Stop run controls, waiting-question answer forms, run
-history, and recent/live log views; `styles.css` holds the mobile layout. The
-dashboard reads only HTTP payloads, uses `fetch` +
+history, a run-scoped task-file view, and recent/live log views; `styles.css`
+holds the mobile layout. The dashboard reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.
@@ -71,7 +74,9 @@ Stop posts to `POST /api/runs/{run_id}/stop`, and launch refusal UI renders
 structured 409 details such as readiness `reasons`, repo-busy `run_id`, or
 blocked-task `acknowledge_required`. The log view renders the recent-log
 route's `spawn.out` diagnostic and falls back to it when a live stream ends
-before any orchestrator log line is seen.
+before any orchestrator log line is seen; its task back-link routes to
+`#/runs/{run_id}/task` so archived task files stay reachable through run
+history while normal task views stay active-only.
 
 ## Launchd Operations
 

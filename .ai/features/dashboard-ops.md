@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ---
 
 # Features: Dashboard Ops
@@ -15,9 +15,9 @@ run observation, answering waiting questions, run history, and logs.
 Modules: api, web.
 
 APIs: public `GET /`, `GET /app.js`, `GET /styles.css`; protected
-repo/task/run/escalation/log/history HTTP APIs. Log streaming uses the
-bearer-authenticated SSE endpoint through `fetch`/ReadableStream, not browser
-`EventSource`.
+repo/task/run/escalation/log/history HTTP APIs, including the run-scoped task
+file route. Log streaming uses the bearer-authenticated SSE endpoint through
+`fetch`/ReadableStream, not browser `EventSource`.
 
 Implemented behavior:
 
@@ -63,6 +63,10 @@ Implemented behavior:
   back to that recent-log diagnostic. SSE heartbeats are skipped, blank data log
   lines are preserved, `event: end` closes the stream, navigation/reload/pause
   aborts the active stream, and untrusted log content is appended as text nodes.
+- A run-scoped task view at `#/runs/{run_id}/task` fetches
+  `GET /api/runs/{run_id}/task`, shows the active/archived source, and is used
+  by the log view's task back-link so run task links still open after close-out
+  archives the task. The Tasks page remains active-task-only.
 
 ## Notifications
 

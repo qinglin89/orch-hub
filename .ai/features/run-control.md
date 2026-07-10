@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ---
 
 # Features: Run Control
@@ -165,7 +165,7 @@ metadata for later inspection without copying human answer text into history.
 
 Modules: history, runs, api, models, control_dir.
 
-APIs: `GET /api/history/runs`.
+APIs: `GET /api/history/runs`, `GET /api/runs/{run_id}/task`.
 
 Implemented behavior:
 
@@ -184,5 +184,10 @@ Implemented behavior:
 - `GET /api/history/runs` returns recent runs newest-first with the normal
   serialized run status plus embedded persisted events; `limit` defaults to 50
   and is clamped to `0..200`.
+- `GET /api/runs/{run_id}/task` reads the task file through the persisted run
+  identity: active `.ai-tasks/<task_id>.md` first, then
+  `.ai-tasks/archive/<task_id>.md`. It returns `source:
+  "active"|"archived"|null`, `present`, and `content`; archived tasks remain
+  reachable only through a run record, not through the active task inventory.
 - History readback treats missing `events.jsonl` as empty history and surfaces
   unreadable or malformed event lines as `history_error` events.

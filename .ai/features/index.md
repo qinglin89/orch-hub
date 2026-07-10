@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ---
 
 # Features
@@ -14,11 +14,11 @@ verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 | Run lifecycle | implemented | runs, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `POST /api/runs/{id}/stop` |
 | Human question relay | implemented | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
-| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including run start/stop controls |
+| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including run start/stop controls and run-scoped task-file view |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | implemented | notifications, config, runs, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
-| Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs` |
+| Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs`, `GET /api/runs/{id}/task` |
 | Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
 | IM bot control | future | notifications or bot adapter, api | future bot callback interface |
 

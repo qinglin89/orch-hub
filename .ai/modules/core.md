@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ---
 
 # Modules: Core
@@ -79,11 +79,12 @@ and blockers;
 tasks. `Question` carries filename-authoritative `seq`, display/audit fields,
 parse error, answered state, stripped valid `answer`, and answer repair error;
 `to_dict()` deliberately excludes the local path. `RunRecord` is the persisted
-run shape and carries launch-time `task_status`; `RunStatus` overlays
-active/waiting/completed/stopped/error/ended state plus pending question count.
-`RunEvent` stores metadata-only history events and `RunHistoryEntry` combines a
-computed run status with its persisted events. Public readiness payloads
-contain `ready` plus failed check reasons only.
+run shape, carries launch-time `task_status`, and can reconstruct its
+`ManagedRepo` from persisted `repo_path` for run-scoped repo reads; `RunStatus`
+overlays active/waiting/completed/stopped/error/ended state plus pending
+question count. `RunEvent` stores metadata-only history events and
+`RunHistoryEntry` combines a computed run status with its persisted events.
+Public readiness payloads contain `ready` plus failed check reasons only.
 
 ## Registry
 
@@ -131,4 +132,4 @@ and redirect output.
 
 Location: `orch_hub/task_store.py`
 
-Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view; it rejects non-bare filenames, resolves the task file target, and only returns raw content whose resolved path remains under the resolved `.ai-tasks` directory.
+Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access. Both raw-content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ---
 
 # APIs: HTTP
@@ -95,6 +95,21 @@ verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 - Purpose: fetch one run's serialized `RunStatus`.
 - Errors: unknown run id returns HTTP 404.
 
+## `GET /api/runs/{run_id}/task`
+
+- Purpose: fetch the task file associated with a persisted run, even after
+  close-out archives the task.
+- Source: resolves `run_id` through `RunManager.get_run`, reconstructs the repo
+  from `RunRecord.repo_path`/`task_id`, reads active
+  `.ai-tasks/<task_id>.md` first, then falls back to
+  `.ai-tasks/archive/<task_id>.md`.
+- Shape: `{"run_id", "task_id", "source", "present", "content"}` where
+  `source` is `"active"`, `"archived"`, or `null`. Unknown runs return HTTP
+  404; missing active/archive files return HTTP 200 with `present: false`.
+- Boundary: this route is run-scoped and non-index-gated so historical run task
+  links survive archival; `/api/tasks` and `/api/repos/{repo_id}/tasks/{task_id}`
+  remain active-only and provide no general archived-task listing.
+
 ## `POST /api/runs/{run_id}/stop`
 
 - Purpose: request graceful stop by delegating to `RunManager.stop_run`, which
@@ -152,7 +167,7 @@ verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 
 - `create_app(config=None, *, run_manager=None)` captures `Config.from_env()`
   by default, is testable with an explicit `Config`, and holds one `RunManager`
-  instance for run, escalation, log, and background-monitor scans.
+  instance for run, run-task, escalation, log, and background-monitor scans.
 - The app constructs a `RunMonitor` over that manager, exposes it as
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.
