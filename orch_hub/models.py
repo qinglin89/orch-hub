@@ -99,19 +99,25 @@ def repo_readiness_dict(
     repo: ManagedRepo,
     report: ReadinessReport,
     commit: CommitInfo | None = None,
+    housekeeping_pending: bool = False,
 ) -> dict:
-    """Combine a repo, its readiness, and its latest commit into per-repo JSON.
+    """Combine repo status metadata into per-repo JSON.
 
     ``commit`` is the repo's most recent commit for the dashboard repo card, or
     ``None`` when git could not be read (best-effort: a commit-lookup failure
     must never hide the repo or its readiness). It defaults to ``None`` so a
     caller that has no commit (or does not want the git cost) still gets the
     stable shape with ``commit: null``.
+
+    ``housekeeping_pending`` reflects only the display marker
+    ``.ai/.housekeeping-pending``. It is informational dashboard/API metadata
+    and deliberately separate from readiness.
     """
     return {
         **repo.to_dict(),
         "readiness": report.to_dict(),
         "commit": commit.to_dict() if commit is not None else None,
+        "housekeeping_pending": housekeeping_pending,
     }
 
 
@@ -119,14 +125,16 @@ def repos_payload(
     entries: Iterable[
         tuple[ManagedRepo, ReadinessReport]
         | tuple[ManagedRepo, ReadinessReport, CommitInfo | None]
+        | tuple[ManagedRepo, ReadinessReport, CommitInfo | None, bool]
     ],
 ) -> dict:
     """Build the top-level ``{"repos": [...]}`` payload for CLI/API output.
 
-    Each entry is ``(repo, report)`` or ``(repo, report, commit)``; a 2-tuple
-    keeps ``commit: null``, so this stays the single shared helper for both
-    ``python -m orch_hub.cli repos --json`` and ``GET /api/repos`` — the two
-    surfaces are pinned identical, and both now carry ``commit``.
+    Each entry is ``(repo, report)``, ``(repo, report, commit)``, or
+    ``(repo, report, commit, housekeeping_pending)``; omitted optional values
+    keep ``commit: null`` and ``housekeeping_pending: false``, so this stays the
+    single shared helper for both ``python -m orch_hub.cli repos --json`` and
+    ``GET /api/repos``.
     """
     return {"repos": [repo_readiness_dict(*entry) for entry in entries]}
 

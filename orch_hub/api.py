@@ -45,6 +45,7 @@ from .control_dir import (
     write_answer,
 )
 from .git_meta import DEFAULT_COMMIT_LIMIT, latest_commit, read_commits
+from .housekeeping import housekeeping_pending
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
 from .monitor import RunMonitor
@@ -335,17 +336,22 @@ def create_app(
 
     @app.get("/api/repos")
     def get_repos() -> dict:
-        """List managed repos with readiness and latest commit.
+        """List managed repos with readiness, latest commit, and housekeeping.
 
         Identical to CLI ``repos --json`` (both go through ``repos_payload``):
-        each repo carries its readiness plus its most recent ``commit`` (or
-        ``null`` when git could not be read — best-effort, so a commit-lookup
-        failure never hides the repo). The dashboard repo card reads the commit
-        time from here; the recent-commits list is a separate route below.
+        each repo carries readiness, its most recent ``commit`` (or ``null``
+        when git could not be read), and ``housekeeping_pending`` from the repo
+        marker file. Commit and housekeeping metadata are display-only and
+        never change launch readiness.
         """
         repos = discover_repos(resolved)
         entries = [
-            (repo, check_readiness(repo, resolved), latest_commit(repo))
+            (
+                repo,
+                check_readiness(repo, resolved),
+                latest_commit(repo),
+                housekeeping_pending(repo),
+            )
             for repo in repos
         ]
         return repos_payload(entries)

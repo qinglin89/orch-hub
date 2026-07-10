@@ -77,6 +77,7 @@ def test_repos_ready_matches_cli_shape(monkeypatch):
                 "manifest": "/p/r/.ai-deploy-manifest.json",
                 "readiness": {"ready": True, "checks": []},
                 "commit": None,
+                "housekeeping_pending": False,
             }
         ]
     }
@@ -97,6 +98,44 @@ def test_repos_includes_latest_commit(monkeypatch):
 
     data = build_client().get("/api/repos").json()
     assert data["repos"][0]["commit"] == commit.to_dict()
+
+
+def test_repos_reports_housekeeping_marker_present(tmp_path, monkeypatch):
+    repo_path = tmp_path / "repo"
+    marker = repo_path / ".ai" / ".housekeeping-pending"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("", encoding="utf-8")
+    repo = ManagedRepo(
+        name="r",
+        path=repo_path,
+        manifest=repo_path / ".ai-deploy-manifest.json",
+    )
+    report = ReadinessReport((ReadinessCheck("repo_path_exists", True, "ok"),))
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
+
+    data = build_client().get("/api/repos").json()
+
+    assert data["repos"][0]["housekeeping_pending"] is True
+
+
+def test_repos_reports_housekeeping_marker_absent(tmp_path, monkeypatch):
+    repo_path = tmp_path / "repo"
+    repo_path.mkdir()
+    repo = ManagedRepo(
+        name="r",
+        path=repo_path,
+        manifest=repo_path / ".ai-deploy-manifest.json",
+    )
+    report = ReadinessReport((ReadinessCheck("repo_path_exists", True, "ok"),))
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
+
+    data = build_client().get("/api/repos").json()
+
+    assert data["repos"][0]["housekeeping_pending"] is False
 
 
 def test_repo_commits_returns_recent_newest_first(monkeypatch):

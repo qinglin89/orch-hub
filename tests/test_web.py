@@ -310,3 +310,12 @@ def test_repo_detail_shows_recent_commits_with_graceful_unavailable():
     assert "Recent commits" in body
     assert "available" in body  # distinguishes unreadable git from empty history
     assert "unavailable" in body.lower()
+
+
+def test_housekeeping_warning_renders_on_repo_detail_and_repo_card():
+    body = app_js()
+    assert "housekeeping_pending" in body
+    assert "housekeepingWarning" in body
+    assert "Housekeeping pending" in body
+    assert "repo.housekeeping_pending ? housekeepingWarning(true)" in body
+    assert "housekeepingPending ? housekeepingWarning(false)" in body

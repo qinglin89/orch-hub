@@ -47,6 +47,7 @@ def test_repos_json_ready(monkeypatch, capsys):
                 "manifest": "/p/r/.ai-deploy-manifest.json",
                 "readiness": {"ready": True, "checks": []},
                 "commit": None,
+                "housekeeping_pending": False,
             }
         ]
     }

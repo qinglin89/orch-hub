@@ -284,6 +284,31 @@ code {
   margin-top: 6px;
 }
 
+.housekeeping-warning {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  border: 1px solid var(--warn-fg);
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.housekeeping-warning.compact {
+  margin-top: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+
+.warning-icon {
+  flex: 0 0 auto;
+  line-height: 1;
+}
+
 /* Task-card run-state accent: a colour-coded left border — the whole runtime
    signal on a task card — kept visually separate from the status badge pill. */
 .card.task.run-waiting {

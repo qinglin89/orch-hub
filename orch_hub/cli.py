@@ -27,6 +27,7 @@ from .launchd import (
     stop_service,
 )
 from .git_meta import latest_commit
+from .housekeeping import housekeeping_pending
 from .models import ManagedRepo, ReadinessReport, repos_payload
 from .notifications import build_notifier, probe_notification
 from .readiness import check_readiness
@@ -198,10 +199,13 @@ def _cmd_repos(*, json_output: bool) -> int:
     pairs = [(repo, check_readiness(repo, config)) for repo in repos]
     if json_output:
         # `repos --json` and GET /api/repos are pinned identical, so the JSON
-        # form carries the latest commit too. It is best-effort (None on any git
-        # failure) and computed only here — the human output does not show it, so
-        # it pays no git-log cost.
-        entries = [(repo, report, latest_commit(repo)) for repo, report in pairs]
+        # form carries display-only status metadata too. Commit lookup is
+        # best-effort (None on any git failure) and computed only here — the
+        # human output does not show it, so it pays no git-log cost.
+        entries = [
+            (repo, report, latest_commit(repo), housekeeping_pending(repo))
+            for repo, report in pairs
+        ]
         print(json.dumps(repos_payload(entries), indent=2))
     else:
         _print_human(pairs)

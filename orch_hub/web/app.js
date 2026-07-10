@@ -330,6 +330,15 @@
     return `<div class="repo-meta muted">${parts.join(" · ")}</div>`;
   }
 
+  function housekeepingWarning(compact) {
+    return (
+      `<div class="housekeeping-warning${compact ? " compact" : ""}" role="status">` +
+      `<span class="warning-icon" aria-hidden="true">&#9888;</span>` +
+      `<span>Housekeeping pending</span>` +
+      `</div>`
+    );
+  }
+
   function repoCard(repo, liveRuns, taskCount) {
     const readiness = repo.readiness || { ready: false, checks: [] };
     // The tri-state run signal (yellow=waiting / green=active / gray=idle) is a
@@ -362,6 +371,7 @@
             <span class="badges">${badges}</span>
           </div>
           <div class="path muted">${escapeHtml(repo.path)}</div>
+          ${repo.housekeeping_pending ? housekeepingWarning(true) : ""}
           ${meta}
           ${reasons}
         </a>
@@ -623,12 +633,14 @@
     // token (401) propagates to the login gate.
     let readiness = null;
     let repoPath = entry.path;
+    let housekeepingPending = false;
     try {
       const reposData = await api("/api/repos");
       const match = (reposData.repos || []).find((r) => r.name === repoName);
       if (match) {
         readiness = match.readiness;
         repoPath = match.path;
+        housekeepingPending = !!match.housekeeping_pending;
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
@@ -681,6 +693,7 @@
         ${readyBadge}
       </div>
       <div class="path muted">${escapeHtml(repoPath || "")}</div>
+      ${housekeepingPending ? housekeepingWarning(false) : ""}
       ${reasons}
       ${
         entry.index_present
