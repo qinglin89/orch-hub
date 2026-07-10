@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
 ---
 
 # Modules: Core
@@ -132,4 +132,4 @@ and redirect output.
 
 Location: `orch_hub/task_store.py`
 
-Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads, then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access. Both raw-content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.
+Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads. It also parses five-column `id | title | status | session-est | blockers` indexes, using `title` as the summary there while preserving the legacy positional third-column summary for other table layouts. It then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access. Both raw-content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.

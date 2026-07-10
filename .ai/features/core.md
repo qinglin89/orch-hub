@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
 ---
 
 # Features: Core
@@ -57,6 +57,10 @@ Implemented behavior:
   `[id](id.md)`; link targets are reduced to the target basename with one
   trailing `.md` stripped before file lookup and API payloads, so directory
   prefixes cannot steer reads outside `.ai-tasks`.
+- Indexes may use either the legacy task-column layouts or the five-column
+  `id | title | status | session-est | blockers` layout; the five-column
+  `title` column supplies the summary, while other layouts keep the legacy
+  positional third-column summary convention.
 - The index Status column is not authoritative; each `.ai-tasks/<id>.md` frontmatter supplies task status and blockers.
 - Missing `.ai-tasks/index.md` is represented as `index_present=False` with no task rows, distinct from a present-but-empty index.
 - Missing listed task files use status `missing`; files with no parseable status use `unknown`.

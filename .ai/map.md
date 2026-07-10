@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
 ---
 
 # Project Map
@@ -10,7 +10,7 @@ verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 | Feature | Modules | Key Decisions |
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only; commit and housekeeping metadata are best-effort/display-only data |
-| Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries after normalizing bare-id or full-cell Markdown-link Task cells to safe bare ids; task frontmatter supplies authoritative status/blockers; normal single-task content reads are index-gated and contained under `.ai-tasks`; exact-id archived content reads are available only for run-scoped history access |
+| Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries after normalizing bare-id or full-cell Markdown-link Task cells to safe bare ids; also supports five-column `id|title|status|session-est|blockers` indexes with `title` as summary; otherwise summaries use the legacy positional third column; task frontmatter supplies authoritative status/blockers; normal single-task content reads are index-gated and contained under `.ai-tasks`; exact-id archived content reads are available only for run-scoped history access |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
