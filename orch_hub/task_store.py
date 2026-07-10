@@ -32,6 +32,22 @@ _SEPARATOR_CELL = re.compile(r"^:?-+:?$")
 _MARKDOWN_LINK = re.compile(r"^\[[^\]]*\]\((?P<target>[^)]*)\)$")
 """A full-cell Markdown link ``[text](target)`` with no nested ``]``/``)``."""
 
+_ID_HEADERS = ("task", "id")
+"""First-cell labels that mark a header row and its id column: ``Task`` (three-
+and single-column) or ``id`` (hkchain five-column). Task ids are date-prefixed,
+so a data row's first cell never collides with these."""
+
+_SUMMARY_HEADERS = ("summary", "title")
+"""Header labels that explicitly name the summary column and override the legacy
+positional default: ``Summary`` (three-column, already at the default index 2)
+or ``title`` (five-column, at index 1). A three-column header with any other
+third label (e.g. quantx's ``Notes``) keeps the positional default."""
+
+_DEFAULT_SUMMARY_COL = 2
+"""Legacy positional summary column: the third cell of a three-column index
+(``Summary``, quantx's ``Notes``, or any other third column). Single-column rows
+have no third cell, so they carry no summary."""
+
 
 def list_repo_tasks(repo: ManagedRepo) -> RepoTaskInventory:
     """Return the active-task inventory for one managed repo.
@@ -136,10 +152,18 @@ def _load_task(tasks_dir: Path, task_id: str, summary: str | None) -> TaskSummar
 def _parse_index(text: str) -> list[tuple[str, str | None]]:
     """Extract ``(task_id, summary)`` rows from the ``.ai-tasks/index.md`` table.
 
-    Skips the title, the header row, and the ``|---|`` separator; tolerates rows
-    that omit the summary cell. The index ``Status`` column is intentionally not
-    read here — the task file's frontmatter is the source of truth for status.
+    The id is always the first cell. The summary is positional by default — the
+    third cell — which covers the three-column ``| Task | Status | Summary |``
+    layout and any other third column (e.g. quantx's ``Notes``). A header that
+    names a ``title`` column repositions the summary, so the five-column
+    ``| id | title | status | session-est | blockers |`` layout (hkchain) reads
+    its summary from ``title`` (index 1) instead. Single-column ``| Task |`` rows
+    have no third cell and so carry no summary. The title, header, and ``|---|``
+    separator rows are skipped, and rows may omit the summary cell. The index
+    status/blockers columns are intentionally not read — task-file frontmatter is
+    the source of truth for those.
     """
+    summary_col = _DEFAULT_SUMMARY_COL
     rows: list[tuple[str, str | None]] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -150,11 +174,29 @@ def _parse_index(text: str) -> list[tuple[str, str | None]]:
             continue
         if all(_SEPARATOR_CELL.match(cell) for cell in cells):
             continue
-        if cells[0].lower() == "task":
+        if cells[0].lower() in _ID_HEADERS:
+            named = _named_summary_column(cells)
+            if named is not None:
+                summary_col = named
             continue
-        summary = cells[2] if len(cells) > 2 and cells[2] else None
+        summary = None
+        if len(cells) > summary_col and cells[summary_col]:
+            summary = cells[summary_col]
         rows.append((_normalize_task_id(cells[0]), summary))
     return rows
+
+
+def _named_summary_column(header_cells: list[str]) -> int | None:
+    """Return the index of an explicitly-named summary column, or ``None``.
+
+    Only a ``Summary`` or ``title`` header (case-insensitive) counts; any other
+    header — including quantx's ``Notes`` third column — returns ``None`` so the
+    caller keeps the legacy positional default (:data:`_DEFAULT_SUMMARY_COL`).
+    """
+    for index, cell in enumerate(header_cells):
+        if cell.lower() in _SUMMARY_HEADERS:
+            return index
+    return None
 
 
 def _normalize_task_id(cell: str) -> str:

@@ -171,6 +171,105 @@ def test_index_row_without_summary_cell(tmp_path):
     assert inv.tasks[0].status == "pending"
 
 
+def write_five_column_index(
+    tasks_dir: Path, rows: list[tuple[str, str, str, str, str]]
+) -> None:
+    """Write a hkchain-style five-column ``.ai-tasks/index.md``.
+
+    Columns: ``id | title | status | session-est | blockers``. The index has YAML
+    frontmatter and prose above the table (like the real hkchain file), and the
+    status/blockers columns are deliberately allowed to disagree with task
+    frontmatter so tests can prove the parser ignores them.
+    """
+    lines = [
+        "---",
+        "last-updated: 2026-06-13",
+        "---",
+        "",
+        "# Active tasks",
+        "",
+        "Prose preamble with a `2026-06-11-x` code ref the parser must ignore.",
+        "",
+        "| id | title | status | session-est | blockers |",
+        "|---|---|---|---|---|",
+    ]
+    for task_id, title, status, est, blockers in rows:
+        lines.append(f"| {task_id} | {title} | {status} | {est} | {blockers} |")
+    (tasks_dir / "index.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def make_repo_with_five_column_index(
+    root: Path, rows: list[tuple[str, str, str, str, str]], name: str = "repo"
+) -> tuple[ManagedRepo, Path]:
+    repo = make_repo(root, name)
+    tasks_dir = repo.path / ".ai-tasks"
+    tasks_dir.mkdir(parents=True)
+    write_five_column_index(tasks_dir, rows)
+    return repo, tasks_dir
+
+
+def test_five_column_index_produces_its_rows(tmp_path):
+    # hkchain renders `| id | title | status | session-est | blockers |`. All
+    # five rows must parse, the `id` header must not become a task, and each
+    # summary must come from the `title` column (not `status`).
+    hk_rows = [
+        ("2026-06-11-queryreport-in-app-render", "In-app QueryReport render", "pending", "0/1", "[]"),
+        ("2026-06-11-partner-live-scenario", "GoGreen partner live scenario", "pending", "0/2", "[]"),
+        ("2026-06-11-cli-coin-timestamp-fix", "Hand-rolled cobra cmds fix", "pending", "0/1", "[]"),
+        ("2026-06-11-kyc-distribution-drilldown", "KYC distribution drill-down", "pending", "0/1", "[]"),
+        ("2026-06-11-agentic-tx-annotation", "Annotate agent txs on dashboard", "pending", "0/1", "[]"),
+    ]
+    repo, tasks_dir = make_repo_with_five_column_index(tmp_path, hk_rows)
+    for task_id, *_ in hk_rows:
+        write_task(tasks_dir, task_id, "pending")
+
+    inv = list_repo_tasks(repo)
+
+    assert [t.task_id for t in inv.tasks] == [row[0] for row in hk_rows]
+    # The `id` header row was not mistaken for a task.
+    assert all(t.task_id not in ("id", "title") for t in inv.tasks)
+    by_id = {t.task_id: t for t in inv.tasks}
+    assert by_id["2026-06-11-queryreport-in-app-render"].summary == "In-app QueryReport render"
+    assert by_id["2026-06-11-agentic-tx-annotation"].summary == "Annotate agent txs on dashboard"
+
+
+def test_five_column_index_status_and_blockers_from_frontmatter(tmp_path):
+    # The index columns disagree with the task files; frontmatter must win.
+    repo, tasks_dir = make_repo_with_five_column_index(
+        tmp_path,
+        [("2026-06-11-x", "Title X", "pending", "0/3", "[]")],
+    )
+    write_task(
+        tasks_dir, "2026-06-11-x", "blocked", blockers="[external:awaiting spec]"
+    )
+    inv = list_repo_tasks(repo)
+    assert inv.tasks[0].task_id == "2026-06-11-x"
+    assert inv.tasks[0].summary == "Title X"
+    # Not the index's "pending"/"[]"; the frontmatter's blocked/[external:...].
+    assert inv.tasks[0].status == "blocked"
+    assert inv.tasks[0].blockers == ("external:awaiting spec",)
+
+
+def test_three_column_notes_header_still_supplies_summary(tmp_path):
+    # quantx renders `| Task | Status | Notes |` — the third column is the
+    # summary regardless of its label, via the legacy positional default.
+    repo = make_repo(tmp_path)
+    tasks_dir = repo.path / ".ai-tasks"
+    tasks_dir.mkdir(parents=True)
+    (tasks_dir / "index.md").write_text(
+        "# Active tasks\n\n"
+        "| Task | Status | Notes |\n"
+        "|---|---|---|\n"
+        "| [2026-04-13-golden-a](2026-04-13-golden-a.md) | pending (0/3) | Backtest fixtures. |\n",
+        encoding="utf-8",
+    )
+    write_task(tasks_dir, "2026-04-13-golden-a", "in_progress")
+    inv = list_repo_tasks(repo)
+    assert inv.tasks[0].task_id == "2026-04-13-golden-a"
+    assert inv.tasks[0].summary == "Backtest fixtures."
+    assert inv.tasks[0].status == "in_progress"  # frontmatter, not the index column
+
+
 def test_markdown_link_index_row_resolves_task_file(tmp_path):
     # quantx-style index: the Task cell is a Markdown link, not a bare id. It
     # must resolve to the real <id>.md and report the frontmatter status.
