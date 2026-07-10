@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 73b169fe81001e48f55ea65c5de72df28f9c1d0a
 ---
 
 # AI Knowledge Router
@@ -12,7 +12,7 @@ Load only what the current task needs.
 | Document | File | Use when |
 |---|---|---|
 | Overview | overview.md | what orch-hub is, users, scope, non-goals, tech stack |
-| Architecture | architecture/index.md | service shape, components, data flow, external dependencies, deployment |
+| Architecture | architecture.md | service shape, boundaries, data ownership, core flows, external dependencies, deployment |
 | Design | design/index.md | principles, tradeoffs, patterns, anti-patterns |
 | Modules | modules/index.md | planned module ownership, responsibilities, dependencies, boundaries |
 | APIs | apis/index.md | CLI, future HTTP routes, internal interfaces, API conventions |
@@ -26,12 +26,12 @@ Load only what the current task needs.
 | Task Type | Load Order |
 |---|---|
 | New feature | map -> features/index.md -> modules/index.md -> apis/index.md |
-| API change | map -> apis/index.md -> modules/index.md -> architecture/index.md |
+| API change | map -> apis/index.md -> modules/index.md -> architecture.md |
 | Bug / debugging | map -> modules/index.md -> code |
-| Architecture change | architecture/index.md -> design/index.md -> modules/index.md |
+| Architecture change | architecture.md -> design/index.md -> modules/index.md |
 | Code review | map -> relevant docs -> code/tests |
 | Conventions question | conventions.md |
-| Onboarding | overview -> architecture/index.md -> map |
-| Orchestrator integration | architecture/index.md -> apis/index.md -> modules/index.md -> features/index.md |
-| Dashboard/UI work | features/index.md -> architecture/index.md -> design/index.md -> modules/index.md |
-| Deployment packaging | features/index.md -> architecture/index.md -> modules/index.md -> conventions |
+| Onboarding | overview -> architecture.md -> map |
+| Orchestrator integration | architecture.md -> apis/index.md -> modules/index.md -> features/index.md |
+| Dashboard/UI work | features/index.md -> architecture.md -> design/index.md -> modules/index.md |
+| Deployment packaging | features/index.md -> architecture.md -> modules/index.md -> conventions |
