@@ -60,7 +60,12 @@ from .runs import (
     RunManager,
     UnknownRunError,
 )
-from .task_store import list_repo_tasks, list_tasks, read_task_content
+from .task_store import (
+    list_repo_tasks,
+    list_tasks,
+    read_archived_task_content,
+    read_task_content,
+)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 """Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
@@ -463,6 +468,46 @@ def create_app(
     def get_run(run_id: str) -> dict:
         """Return one run's current :class:`RunStatus`; unknown ids are 404."""
         return manager.get_run(run_id).to_dict()
+
+    @app.get("/api/runs/{run_id}/task")
+    def get_run_task(run_id: str) -> dict:
+        """Return the task file associated with a run, active or archived.
+
+        Backs the run/audit UI's task link. Unlike the index-gated inventory
+        routes (``/api/tasks``, ``/api/repos/{repo_id}/tasks/{task_id}``, which
+        stay active-only), this resolves the task purely from the persisted run
+        record (``repo_path`` + ``task_id``), so it keeps working after
+        ``/ai-sync-v2`` close-out archives the task and drops it from the active
+        index. It reads the active ``.ai-tasks/<task_id>.md`` first, then falls
+        back to ``.ai-tasks/archive/<task_id>.md``; both reads keep the
+        ``.ai-tasks`` containment protections and reject unsafe task ids, and
+        there is deliberately no general archived-task *listing* — an archived
+        task is reachable only through a run that references it.
+
+        ``source`` is ``"active"``/``"archived"``/``null`` (null when neither is
+        present); ``present``/``content`` mirror the other task routes. Unknown
+        run ids are 404 (via the run manager); a broken run record with no
+        repo/task resolves to ``present: false`` rather than an error.
+        """
+        record = manager.get_run(run_id).record  # UnknownRunError → 404
+        repo = record.managed_repo()
+        source = None
+        content = None
+        if repo is not None and record.task_id:
+            content = read_task_content(repo, record.task_id)
+            if content is not None:
+                source = "active"
+            else:
+                content = read_archived_task_content(repo, record.task_id)
+                if content is not None:
+                    source = "archived"
+        return {
+            "run_id": run_id,
+            "task_id": record.task_id,
+            "source": source,
+            "present": content is not None,
+            "content": content,
+        }
 
     @app.post("/api/runs/{run_id}/stop")
     def stop_run(run_id: str) -> dict:

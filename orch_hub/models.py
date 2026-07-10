@@ -278,6 +278,24 @@ class RunRecord:
     exit_code: int | None = None
     error: str | None = None
 
+    def managed_repo(self) -> ManagedRepo | None:
+        """Reconstruct the run's :class:`ManagedRepo` from persisted fields.
+
+        Returns ``None`` for a stub record with no ``repo_path`` (an unreadable
+        ``run.json``), so callers that need to reach the repo — the run-scoped
+        task read, task-completion classification — can resolve it from run
+        identity alone without re-consulting the registry. The manifest is the
+        deployment-standard path (not persisted on the record); task-file reads
+        use only ``path``, so its exact value does not affect them.
+        """
+        if self.repo_path is None:
+            return None
+        return ManagedRepo(
+            name=self.repo_name or self.repo_path.name,
+            path=self.repo_path,
+            manifest=self.repo_path / ".ai-deploy-manifest.json",
+        )
+
     def to_dict(self) -> dict:
         # ``control_dir``, ``log_dir``, ``spawn_out``, and ``argv`` are
         # deliberately internal (filesystem detail the UI does not need); they

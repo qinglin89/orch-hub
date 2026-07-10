@@ -72,6 +72,37 @@ def read_task_content(repo: ManagedRepo, task_id: str) -> str | None:
     :func:`list_repo_tasks` remains the source of the frontmatter-authoritative
     status/summary/blockers.
     """
+    return _read_contained_task_file(repo.path / ".ai-tasks", task_id)
+
+
+def read_archived_task_content(repo: ManagedRepo, task_id: str) -> str | None:
+    """Return the raw markdown of ``.ai-tasks/archive/<task_id>.md``, or ``None``.
+
+    Backs the run-scoped task view (``GET /api/runs/{run_id}/task``): once
+    ``/ai-sync-v2`` close-out moves a completed task into ``archive/`` it leaves
+    the active index, so the index-gated task routes stop resolving it — but a
+    persisted run still references its id and must keep showing its file. Same
+    single-segment id validation and resolved-path containment as
+    :func:`read_task_content`, scoped to the ``archive`` subdir, so neither a
+    crafted id nor a symlinked archive file can read outside it. There is
+    deliberately no archived-task *listing*: an archived file is reachable only
+    when a caller already holds its exact id (e.g. from a run record), never by
+    enumerating ``archive/``.
+    """
+    return _read_contained_task_file(repo.path / ".ai-tasks" / "archive", task_id)
+
+
+def _read_contained_task_file(base_dir: Path, task_id: str) -> str | None:
+    """Read ``<base_dir>/<task_id>.md`` iff it is safe and stays contained.
+
+    Shared by the active (:func:`read_task_content`) and archived
+    (:func:`read_archived_task_content`) readers so both enforce identical
+    id/containment discipline; only ``base_dir`` differs. ``task_id`` must be a
+    single path segment (no separators, no null byte, not a dot ref), the file
+    must exist, and — because ``is_file()``/``read_text()`` follow symlinks — its
+    fully resolved target must stay under the resolved ``base_dir``, so neither a
+    crafted id nor a symlinked task file can read outside the intended directory.
+    """
     if (
         not task_id
         or "/" in task_id
@@ -80,15 +111,11 @@ def read_task_content(repo: ManagedRepo, task_id: str) -> str | None:
         or task_id in (".", "..")
     ):
         return None
-    tasks_dir = repo.path / ".ai-tasks"
-    task_path = tasks_dir / f"{task_id}.md"
+    task_path = base_dir / f"{task_id}.md"
     if not task_path.is_file():
         return None
-    # is_file()/read_text() follow symlinks, so a listed task file that is a
-    # symlink pointing outside .ai-tasks would otherwise escape containment.
-    # Require the fully resolved target to stay under the resolved tasks dir.
     resolved = task_path.resolve()
-    if not resolved.is_relative_to(tasks_dir.resolve()):
+    if not resolved.is_relative_to(base_dir.resolve()):
         return None
     return resolved.read_text(encoding="utf-8")
 

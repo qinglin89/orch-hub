@@ -842,6 +842,73 @@ def test_get_run_returns_status_and_unknown_is_404(tmp_path, monkeypatch):
     assert missing.status_code == 404
 
 
+# -- run-scoped task view (active or archived) --------------------------------
+#
+# GET /api/runs/{run_id}/task resolves the task from the persisted run record,
+# not the active index, so a run's task file stays reachable after close-out
+# archives it. The inventory routes stay active-only and index-gated; there is
+# deliberately no general archived-task listing.
+
+
+def archive_run_task(repo: ManagedRepo, task_id: str, body: str) -> Path:
+    """Simulate close-out: drop the task from the active index/file into archive."""
+    tasks_dir = repo.path / ".ai-tasks"
+    (tasks_dir / f"{task_id}.md").unlink()  # remove the active task file
+    write_task_index(repo.path, [])  # ...and its active-index row
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / f"{task_id}.md"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def test_run_task_returns_active_task(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+
+    body = client.get(f"/api/runs/{started['run_id']}/task").json()
+    assert body["task_id"] == RUN_TASK_ID
+    assert body["source"] == "active"
+    assert body["present"] is True
+    assert f"id: {RUN_TASK_ID}" in body["content"]
+
+
+def test_run_task_falls_back_to_archived_task(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    archived = f"---\nid: {RUN_TASK_ID}\nstatus: completed\n---\n\n# archived body\n"
+    archive_run_task(repo, RUN_TASK_ID, archived)
+
+    body = client.get(f"/api/runs/{started['run_id']}/task").json()
+    assert body["source"] == "archived"
+    assert body["present"] is True
+    assert body["content"] == archived
+    # The active inventory routes stay active-only: the archived (now unlisted)
+    # task no longer resolves there — no general archived-task listing.
+    assert client.get(f"/api/repos/{repo.name}/tasks/{RUN_TASK_ID}").status_code == 404
+    listing = client.get(f"/api/repos/{repo.name}/tasks").json()
+    assert listing["repos"][0]["tasks"] == []
+
+
+def test_run_task_missing_task_is_absent(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    # Neither active nor archived: the active file is gone and close-out never
+    # archived it.
+    (repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md").unlink()
+
+    body = client.get(f"/api/runs/{started['run_id']}/task").json()
+    assert body["source"] is None
+    assert body["present"] is False
+    assert body["content"] is None
+
+
+def test_run_task_unknown_run_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get("/api/runs/20990101T000000Z-nope-x/task")
+    assert resp.status_code == 404
+
+
 # -- stop ----------------------------------------------------------------------
 
 
@@ -1172,6 +1239,7 @@ def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.get("/api/runs").status_code == 401
     assert unauthed.get("/api/history/runs").status_code == 401
     assert unauthed.get("/api/runs/anything").status_code == 401
+    assert unauthed.get("/api/runs/anything/task").status_code == 401
     assert unauthed.post("/api/runs/anything/stop").status_code == 401
     assert unauthed.get("/api/runs/anything/logs").status_code == 401
     assert unauthed.get("/api/runs/anything/logs/stream").status_code == 401

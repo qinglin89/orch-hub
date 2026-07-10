@@ -16,6 +16,7 @@ from orch_hub.task_store import (
     STATUS_UNKNOWN,
     list_repo_tasks,
     list_tasks,
+    read_archived_task_content,
     read_task_content,
 )
 
@@ -292,6 +293,71 @@ def test_read_task_content_rejects_symlink_escaping_tasks_dir(tmp_path):
     secret.write_text("top secret", encoding="utf-8")
     (tasks_dir / "2026-07-05-linked.md").symlink_to(secret)
     assert read_task_content(repo, "2026-07-05-linked") is None
+
+
+def write_archived_task(
+    tasks_dir: Path, task_id: str, *, body: str = "archived detail"
+) -> Path:
+    """Write a completed task into ``.ai-tasks/archive/<id>.md`` (close-out shape)."""
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    path = archive_dir / f"{task_id}.md"
+    path.write_text(
+        f"---\nid: {task_id}\nstatus: completed\n---\n\n# {task_id}\n\n{body}\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_read_archived_task_content_returns_raw_body(tmp_path):
+    # The run-scoped task view reads a completed task straight from archive/,
+    # even though it is no longer listed in the active index.
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    write_archived_task(tasks_dir, "2026-07-05-done", body="archived detail")
+    content = read_archived_task_content(repo, "2026-07-05-done")
+    assert content is not None
+    assert "status: completed" in content
+    assert "archived detail" in content
+
+
+def test_read_archived_task_content_absent_file_is_none(tmp_path):
+    # Archive dir exists but this id was never archived.
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    (tasks_dir / "archive").mkdir()
+    assert read_archived_task_content(repo, "2026-07-05-ghost") is None
+
+
+def test_read_archived_task_content_no_archive_dir_is_none(tmp_path):
+    # A repo whose close-out never ran has no archive/ dir at all.
+    repo, _ = make_repo_with_index(tmp_path, [])
+    assert read_archived_task_content(repo, "2026-07-05-a") is None
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    ["../secret", "a/b", "..", ".", "", "nested\\win", "null\x00byte"],
+)
+def test_read_archived_task_content_rejects_unsafe_ids(tmp_path, bad_id):
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    write_archived_task(tasks_dir, "2026-07-05-done")
+    # Files outside the archive dir must never be reachable via a crafted id
+    # (the same containment guarantee as the active reader).
+    (repo.path / "secret.md").write_text("top secret", encoding="utf-8")
+    (tasks_dir / "secret.md").write_text("active secret", encoding="utf-8")
+    assert read_archived_task_content(repo, bad_id) is None
+
+
+def test_read_archived_task_content_rejects_symlink_escaping_archive_dir(tmp_path):
+    # An archived task file that is itself a symlink out of archive/ must not
+    # leak its target — is_file()/read_text() follow symlinks, so containment is
+    # enforced on the fully resolved path, exactly as the active reader does.
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    archive_dir = tasks_dir / "archive"
+    archive_dir.mkdir()
+    secret = repo.path / "secret.md"
+    secret.write_text("top secret", encoding="utf-8")
+    (archive_dir / "2026-07-05-linked.md").symlink_to(secret)
+    assert read_archived_task_content(repo, "2026-07-05-linked") is None
 
 
 def test_to_dict_and_payload_shape(tmp_path):

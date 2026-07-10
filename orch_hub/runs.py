@@ -752,16 +752,12 @@ class RunManager:
 
         ``completed`` status means the final gate passed (close-out may still
         be pending); the id vanishing from a present index means close-out
-        archived it. The repo is rebuilt from the record — ``manifest`` is the
-        deployment-standard path and is not read by the task store.
+        archived it. The repo is rebuilt from the record via
+        :meth:`RunRecord.managed_repo`.
         """
-        if record.repo_path is None or not record.task_id:
+        repo = record.managed_repo()
+        if repo is None or not record.task_id:
             return None
-        repo = ManagedRepo(
-            name=record.repo_name or record.repo_path.name,
-            path=record.repo_path,
-            manifest=record.repo_path / ".ai-deploy-manifest.json",
-        )
         inventory = self._task_lister(repo)
         if not inventory.index_present:
             return None

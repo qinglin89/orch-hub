@@ -319,3 +319,33 @@ def test_housekeeping_warning_renders_on_repo_detail_and_repo_card():
     assert "Housekeeping pending" in body
     assert "repo.housekeeping_pending ? housekeepingWarning(true)" in body
     assert "housekeepingPending ? housekeepingWarning(false)" in body
+
+
+# ---- run-scoped task view (run-archived-task-access) -------------------------
+#
+# A run's task file is opened through GET /api/runs/{id}/task, which resolves the
+# task from the run record (active or archived) instead of the index-gated
+# inventory — so the link keeps working after close-out archives the task. The
+# Tasks page stays active-only. Asserted at the served-asset boundary (no JS
+# runtime in this suite), like the run-control / log-stream checks above.
+
+
+def test_run_task_view_resolves_task_through_the_run_record():
+    body = app_js()
+    # A dedicated run-scoped task view + its hash builder + route wiring...
+    assert "renderRunTask" in body
+    assert "runTaskHash" in body
+    assert "renderRunTask(seg[1])" in body
+    assert 'seg[2] === "task"' in body
+    # ...reading the run-scoped endpoint (never an index-gated /api/repos task
+    # route), and surfacing the active/archived source to the reader.
+    assert '"/task"' in body
+    assert "data.source" in body
+
+
+def test_log_view_task_link_uses_run_scoped_route():
+    body = app_js()
+    # The log view's task back-link routes through the run-scoped task view
+    # (runTaskHash), not taskHash's active-only task detail, so clicking a run's
+    # task link after archival opens the archived file instead of 404-ing.
+    assert "runTaskHash(" in body

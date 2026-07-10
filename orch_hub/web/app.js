@@ -205,6 +205,10 @@
   const taskHash = (repo, taskId) =>
     "#/tasks/" + encodeURIComponent(repo) + "/" + encodeURIComponent(taskId);
   const logsHash = (runId) => "#/runs/" + encodeURIComponent(runId) + "/logs";
+  // A run's task file, resolved through the run record (active or archived) so
+  // it stays reachable after close-out archives the task — unlike taskHash,
+  // which points at the index-gated (active-only) task detail page.
+  const runTaskHash = (runId) => "#/runs/" + encodeURIComponent(runId) + "/task";
 
   function showChrome(authed) {
     document.getElementById("signout-btn").hidden = !authed;
@@ -1231,6 +1235,31 @@
       `<ul class="list">` + runs.map(historyRunCard).join("") + `</ul>`;
   }
 
+  // ---- run-scoped task view (active or archived) ----
+  // The task file associated with a run, read through the run record via
+  // GET /api/runs/{run_id}/task, so it stays reachable after close-out archives
+  // the task (the Tasks page stays active-only). Reached from the run/audit
+  // surfaces — e.g. the log view's task back-link — and shows the file body with
+  // an active/archived source badge; an absent file renders a muted note.
+  async function renderRunTask(runId) {
+    view().innerHTML = centerHtml("Loading task…");
+    const data = await api("/api/runs/" + encodeURIComponent(runId) + "/task"); // unknown run → 404
+    const taskId = data.task_id || runId;
+    const sourceBadge = data.source ? badge(data.source) : "";
+    const body = data.present
+      ? `<pre class="task-content">${escapeHtml(data.content)}</pre>`
+      : `<p class="muted">The task file for this run is not available
+         (neither active nor archived).</p>`;
+    view().innerHTML = `
+      <a class="back-link" href="#/runs">← Runs</a>
+      <div class="detail-head">
+        <span class="task-id big">${escapeHtml(taskId)}</span>
+        ${sourceBadge}
+      </div>
+      <p><a class="text-link" href="${logsHash(runId)}">View logs →</a></p>
+      <section class="section"><h2>Task file</h2>${body}</section>`;
+  }
+
   // ---- run logs (recent tail + live SSE stream) ----
 
   // Parse one SSE event block (the text between blank-line separators) per the
@@ -1360,13 +1389,14 @@
     view().innerHTML = centerHtml("Loading run…");
     const run = await api("/api/runs/" + encodeURIComponent(runId)); // unknown → 404
     const live = LIVE_STATES.has(run.state);
-    const back =
-      run.repo_name && run.task_id
-        ? `<a class="back-link" href="${taskHash(
-            run.repo_name,
-            run.task_id
-          )}">← ${escapeHtml(run.task_id)}</a>`
-        : `<a class="back-link" href="#/runs">← Runs</a>`;
+    // The task link goes through the run-scoped task view (resolved from the run
+    // record), not taskHash's index-gated task detail, so it still opens the
+    // task file after close-out archives the task instead of 404-ing.
+    const back = run.task_id
+      ? `<a class="back-link" href="${runTaskHash(
+          run.run_id
+        )}">← ${escapeHtml(run.task_id)}</a>`
+      : `<a class="back-link" href="#/runs">← Runs</a>`;
     view().innerHTML = `
       ${back}
       <div class="detail-head">
@@ -1469,6 +1499,8 @@
     if (seg[0] === "runs") {
       if (seg.length >= 3 && seg[2] === "logs")
         return () => renderRunLogs(seg[1]);
+      if (seg.length >= 3 && seg[2] === "task")
+        return () => renderRunTask(seg[1]);
       return renderRuns;
     }
     if (seg[0] === "tasks")
