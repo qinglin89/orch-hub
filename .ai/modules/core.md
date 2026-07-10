@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Modules: Core
@@ -10,7 +10,8 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 Location: `orch_hub/cli.py`
 
 Responsibility: expose user-facing commands. Repo commands list managed repos
-and readiness; JSON output also carries best-effort latest commit metadata:
+and readiness; JSON output also carries best-effort latest commit metadata and
+housekeeping marker state:
 
 ```bash
 python -m orch_hub.cli repos
@@ -35,7 +36,8 @@ plist's Bark URL when the shell env is unset, sends one probe notification
 directly through `build_notifier(config)`, and reports delivery failure without
 printing the secret endpoint.
 
-Dependencies: config, registry, readiness, models, launchd, notifications.
+Dependencies: config, registry, readiness, housekeeping, models, launchd,
+notifications.
 
 ## Config
 
@@ -64,12 +66,13 @@ push notifications.
 Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
-commit metadata, task inventory, control-dir questions, run state, and run
-history.
+commit metadata, housekeeping marker state, task inventory, control-dir
+questions, run state, and run history.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
-`repos_payload` accepts `(repo, report)` or `(repo, report, commit)` so CLI
-JSON and `GET /api/repos` stay identical and always include `commit` (`null`
-when unavailable).
+`repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
+`(repo, report, commit, housekeeping_pending)` so CLI JSON and
+`GET /api/repos` stay identical and always include `commit` (`null` when
+unavailable) plus `housekeeping_pending`.
 `TaskSummary` carries `task_id`, task-file `status`, optional index summary,
 and blockers;
 `RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered
@@ -106,6 +109,14 @@ It invokes `git log` in the repo, parses `%H`, `%h`, `%cI`, and `%s` using an
 ASCII unit-separator field delimiter, and degrades to unavailable on missing
 git, non-git dirs, missing paths, or non-zero exit. Commit lookup failure must
 not hide repo/task content.
+
+## Housekeeping
+
+Location: `orch_hub/housekeeping.py`
+
+Responsibility: read the repo-local `.ai/.housekeeping-pending` marker for
+display-only dashboard/API metadata. `housekeeping_pending(repo)` returns a
+boolean and must not participate in readiness or launch gating.
 
 ## Subprocess Utilities
 

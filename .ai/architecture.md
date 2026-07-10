@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 73b169fe81001e48f55ea65c5de72df28f9c1d0a
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Architecture
@@ -91,6 +91,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
 | Commit metadata | Target repo git history | display-only; never gates readiness or launch |
+| Housekeeping marker | Target repo `.ai/.housekeeping-pending` | display-only dashboard/API warning; never gates readiness or launch |
 | Notifications | Derived from run state and pending questions | delivery is best-effort and must not affect state writes |
 
 ## Core Flows
@@ -127,6 +128,7 @@ credential-bearing query string.
 - Registry discovery does not perform readiness checks.
 - Readiness does not launch orchestrators.
 - Git metadata is display-only and never gates launch.
+- Housekeeping marker state is display-only and never gates launch.
 - Task inventory reads task files but does not decide orchestrator turn state.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.

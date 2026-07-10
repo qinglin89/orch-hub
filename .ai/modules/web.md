@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Modules: Web and Operations
@@ -24,8 +24,9 @@ routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, and
 `GET /api/runs/{run_id}/logs/stream`; implemented history route is
 `GET /api/history/runs`; implemented commit route is
 `GET /api/repos/{repo_id}/commits`. `GET /api/repos` includes a best-effort
-`commit` field shared with CLI JSON; recent commit lookup failures return
-`available:false` rather than raising. The recent-log route adds a nested `diagnostic` from
+`commit` field and display-only `housekeeping_pending` state shared with CLI
+JSON; recent commit lookup failures return `available:false` rather than
+raising. The recent-log route adds a nested `diagnostic` from
 `spawn.out` only when the orchestrator log is absent and the capture is
 non-empty. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`
@@ -56,6 +57,8 @@ log/task data as escaped HTML or text nodes.
 Repo cards show readiness plus a bare leading run-state dot before the repo name
 (yellow waiting, green active, gray idle; state word only in title/aria text);
 ready cards add latest commit time and active task count from task inventory.
+Cards and repo detail show a yellow "Housekeeping pending" warning from the
+shared repo payload when `.ai/.housekeeping-pending` exists.
 Task cards use only left-border run accents, with no dot/word row, distinct
 from frontmatter status badges. Repo detail adds a recent-commits section with
 unavailable and empty-history states.

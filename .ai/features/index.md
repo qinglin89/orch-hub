@@ -1,13 +1,13 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Features
 
 | Feature | Status | Key Modules | Key APIs |
 |---|---|---|---|
-| Repo discovery and readiness | implemented | config, registry, readiness, git_meta, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
+| Repo discovery and readiness | implemented | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |

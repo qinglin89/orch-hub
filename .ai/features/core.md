@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Features: Core
@@ -11,7 +11,8 @@ Status: implemented
 
 Description: Load managed repos from ai-native-development and report whether each is ready for orchestration. This validates the registry and target-repo deployment assumptions before service/UI work.
 
-Modules: config, registry, readiness, git_meta, models, subprocess_utils, cli.
+Modules: config, registry, readiness, git_meta, housekeeping, models,
+subprocess_utils, cli.
 
 APIs: `python -m orch_hub.cli repos`, `python -m orch_hub.cli repos --json`,
 `GET /api/repos`, `GET /api/repos/{repo_id}/commits`.
@@ -27,9 +28,12 @@ Implemented behavior:
   limit)` returns `CommitLog(available, commits)` newest-first with `limit`
   clamped to `1..50`. Missing git, non-git dirs, missing paths, and failed
   `git log` degrade to unavailable/`None` rather than hiding repo content.
+- `housekeeping_pending(repo)` reads the display-only
+  `.ai/.housekeeping-pending` marker and returns `housekeeping_pending`; it
+  never changes launch readiness or run-start gating.
 - CLI `repos --json` and `GET /api/repos` share `repos_payload`; each repo now
-  includes `commit: null` or `{hash, short_hash, committed_ts, subject}`. Human
-  CLI output remains unchanged.
+  includes `commit: null` or `{hash, short_hash, committed_ts, subject}` plus
+  `housekeeping_pending`. Human CLI output remains unchanged.
 - `GET /api/repos/{repo_id}/commits` returns recent commits for repo detail;
   unknown repos are 404, but commit lookup failure is HTTP 200 with
   `available: false` and an empty list.
@@ -81,7 +85,8 @@ Implemented behavior:
 - `create_app(config=None)` builds a FastAPI app, capturing explicit config for
   tests or `Config.from_env()` by default.
 - `GET /api/repos` returns the same shape as CLI `repos --json`, including
-  readiness failure reasons and best-effort latest commit metadata.
+  readiness failure reasons, best-effort latest commit metadata, and
+  display-only housekeeping marker state.
 - Task endpoints return the `tasks_payload` envelope, preserving
   `index_present`, ordered tasks, frontmatter-authoritative status/blockers,
   and task-store sentinel statuses.

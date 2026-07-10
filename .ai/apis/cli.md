@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # APIs: CLI
@@ -35,13 +35,17 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
         "short_hash": "0123456",
         "committed_ts": "2026-07-09T16:25:00+08:00",
         "subject": "feat(example): update dashboard"
-      }
+      },
+      "housekeeping_pending": true
     }
   ]
 }
 ```
 
 `readiness.checks` contains only failed checks as `{name, message}`; it is empty when `ready` is true. Internally the readiness report keeps all seven check results for callers that need the full picture. `commit` is the latest commit or `null` when git metadata is unavailable; this field is best-effort and does not affect readiness.
+`housekeeping_pending` is true when `.ai/.housekeeping-pending` exists in the
+managed repo and is also display-only; it does not affect readiness or launch
+gating. Human `repos` output does not show commit or housekeeping metadata.
 
 ## `orch-hub launchd deploy|update`
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Features: Dashboard Ops
@@ -30,7 +30,8 @@ Implemented behavior:
   active non-waiting, gray idle; the state word exists only in title/aria text.
   Ready cards add latest commit time from the shared repo `commit` field plus
   active task count from `/api/tasks` task-inventory rows; not-ready cards keep
-  readiness failure reasons.
+  readiness failure reasons. Cards render a compact yellow "Housekeeping
+  pending" warning when `/api/repos` reports `housekeeping_pending`.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
   `index_present`, and `missing`/`unknown` sentinel semantics.
@@ -40,7 +41,8 @@ Implemented behavior:
   `waiting`.
 - Repo detail renders a recent-commits section from
   `GET /api/repos/{repo_id}/commits`; unreadable git shows "Commit history
-  unavailable" and readable empty history shows "No commits found".
+  unavailable" and readable empty history shows "No commits found". It also
+  renders the full housekeeping warning near the top when the marker is pending.
 - Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
   content, shows current/most-recent run state, links to logs, and renders
   answer forms for waiting questions from `/api/escalations`.

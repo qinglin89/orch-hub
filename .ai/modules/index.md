@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # Modules
@@ -14,6 +14,7 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent commit reads for dashboard/API display |
+| Housekeeping | `orch_hub/housekeeping.py` | Implemented display-only `.ai/.housekeeping-pending` marker detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, and contained raw task-content reads |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
@@ -32,7 +33,7 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 
 | File | Contains |
 |---|---|
-| core.md | CLI, config, models, registry, readiness, git metadata, subprocess utilities, task inventory |
+| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
 | runtime.md | Run manager, monitor, history, control-dir, logs, notifications |
 | web.md | API, web UI, and launchd operations |
 
@@ -41,6 +42,7 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 - Registry code does not perform readiness checks.
 - Readiness code does not launch orchestrators.
 - Git metadata is display-only and never gates readiness or run launch.
+- Housekeeping marker state is display-only and never gates readiness or run launch.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
 - History serializes run/audit metadata only; `RunManager` decides when events

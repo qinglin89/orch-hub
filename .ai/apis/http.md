@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # APIs: HTTP
@@ -23,9 +23,9 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
 
 ## `GET /api/repos`
 
-- Purpose: list managed repos with readiness.
+- Purpose: list managed repos with readiness and display metadata.
 - Source: same functions as CLI `repos --json`.
-- Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`, including best-effort `commit`.
+- Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`, including best-effort `commit` and display-only `housekeeping_pending`.
 
 ## `GET /api/repos/{repo_id}/commits`
 
@@ -186,9 +186,10 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
   empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
   `BlockedTaskError` includes `acknowledge_required: true`.
 - The dashboard repo/task status layout consumes these APIs directly: repo
-  cards use `/api/repos` for readiness/latest commit, `/api/runs` for the
-  tri-state run signal, and `/api/tasks` for active task counts; repo detail
-  uses `/api/repos/{repo_id}/commits` for recent commits and treats
+  cards use `/api/repos` for readiness/latest commit/housekeeping warning
+  state, `/api/runs` for the tri-state run signal, and `/api/tasks` for active
+  task counts; repo detail uses `/api/repos` for the housekeeping warning,
+  uses `/api/repos/{repo_id}/commits` for recent commits, and treats
   `available:false` as a graceful unavailable state.
 - The dashboard task-detail run controls consume these existing run APIs
   directly: Start sends `{repo_id, task_id, acknowledge_blocked, extra_args}`

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
 ---
 
 # APIs: Internal Interfaces
@@ -20,6 +20,16 @@ Input: managed repo model.
 Output: readiness report with boolean `ready` and list of failed checks.
 
 Behavior: pure inspection and subprocess checks only; no mutation. Missing repo path skips subprocess execution but records `git_clean` and `aii_status` as failed so launch readiness still fails closed.
+
+## Housekeeping Marker
+
+Input: managed repo model.
+
+Output: boolean housekeeping-pending marker state.
+
+Behavior: checks only `<repo>/.ai/.housekeeping-pending` for display metadata.
+The value is included in repo payloads but never participates in readiness or
+run-start gates.
 
 ## Task Store
 
@@ -139,6 +149,8 @@ in `docs/launchd.md`.
 - Prefer absolute paths internally; avoid exposing more path data than the UI needs.
 - Keep JSON stable and explicit.
 - Include `ready: false` with reasons instead of raising for ordinary readiness failures.
+- Keep display metadata such as commit history and housekeeping marker state
+  separate from launch readiness.
 - Raise or return operational errors for invalid registry JSON, unreadable config, or malformed user requests.
 - Keep task `blocked` distinct from run `waiting`.
 - Never make API handlers call orchestrator internals directly.
