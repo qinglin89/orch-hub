@@ -57,7 +57,7 @@ from .models import (
     ReadinessReport,
 )
 from .readiness import check_readiness
-from .task_store import STATUS_MISSING, list_repo_tasks
+from .task_store import list_repo_tasks
 
 _log = logging.getLogger(__name__)
 
@@ -208,22 +208,39 @@ def _slug(value: str) -> str:
     return _SLUG.sub("-", value).strip("-") or "x"
 
 
-def _task_landed(repo: ManagedRepo, task_id: str) -> bool:
-    """True iff ``task_id`` now appears as a real task in ``repo``'s inventory.
+INTAKE_TASK_STATUSES = frozenset({"pending", "blocked"})
+"""Frontmatter statuses a freshly intaked task file may legally carry.
 
-    The confirmation postcondition: a genuinely written task has both a
-    ``.ai-tasks/<id>.md`` file and an ``.ai-tasks/index.md`` row, so it
-    round-trips through the same task-inventory path the dashboard routes to (an
-    index-gated read). A ``missing`` sentinel (index row but no file), an
+``/intake-task`` produces a ``pending`` task, or a ``blocked`` one when it
+records blockers (human-resolved: ``blocked`` is valid only with blockers,
+otherwise the state is ``pending``). Any other landed status —
+``in_progress``/``final_review``/``completed``, the task-store
+``missing``/``unknown`` sentinels, or an unrecognized value — means the confirm
+turn did not produce a valid new intake task, so the confirmation fails closed.
+"""
+
+
+def _task_landed(repo: ManagedRepo, task_id: str) -> bool:
+    """True iff ``task_id`` now appears as a valid new intake task in ``repo``.
+
+    The confirmation postcondition: a genuinely written intake task has both a
+    ``.ai-tasks/<id>.md`` file and an ``.ai-tasks/index.md`` row, *and* a legal
+    post-intake frontmatter status (:data:`INTAKE_TASK_STATUSES` — ``pending``,
+    or ``blocked`` when intake records blockers). It therefore round-trips
+    through the same frontmatter-authoritative, index-gated task-inventory path
+    the dashboard routes to. A ``missing`` sentinel (index row but no file), an
+    ``unknown`` sentinel (file without a parseable status), an in-flight or
+    finished status such as ``in_progress``/``final_review``/``completed``, an
     unwritten index, or an absent id all fail closed — an exit-0 agent turn that
-    wrote nothing or only part of the task is not a confirmation.
+    wrote nothing, only part of the task, or a task in the wrong state is not a
+    confirmation.
     """
     try:
         inventory = list_repo_tasks(repo)
     except OSError:
         return False
     return any(
-        task.task_id == task_id and task.status != STATUS_MISSING
+        task.task_id == task_id and task.status in INTAKE_TASK_STATUSES
         for task in inventory.tasks
     )
 
@@ -471,9 +488,11 @@ class IntakeManager:
         write-permitted turn can mutate ``.ai-tasks/`` and then fail. So the
         record is only marked ``confirmed`` once the task actually lands in the
         target repo's task inventory (:func:`_task_landed`: a real
-        ``.ai-tasks/<id>.md`` file *and* an ``index.md`` row, round-tripping
-        through the same index-gated path the dashboard routes to). A lost
-        session, an agent-turn failure, or an unverified write all resolve to
+        ``.ai-tasks/<id>.md`` file, an ``index.md`` row, *and* a legal
+        post-intake status — ``pending`` or ``blocked`` — round-tripping through
+        the same frontmatter-authoritative, index-gated path the dashboard routes
+        to). A lost session, an agent-turn failure, or an unverified write all
+        resolve to
         ``failed`` — and any partial ``.ai-tasks/`` write from a failed/unverified
         confirm turn is rolled back (:class:`_ConfirmGuard`), so a non-confirmed
         intake leaves the target repo unchanged.
@@ -514,9 +533,10 @@ class IntakeManager:
                 return self._fail(
                     intake_dir,
                     confirming,
-                    f"confirm turn did not create task {created_id!r}: it is not"
-                    " in the repo task inventory (no task file or index row"
-                    " written)",
+                    f"confirm turn did not create a valid pending/blocked task"
+                    f" {created_id!r}: it is not in the repo task inventory as a"
+                    " new intake task (missing task file or index row, or an"
+                    " unexpected frontmatter status)",
                 )
             self._handles.pop(intake_id, None)
             updated = replace(

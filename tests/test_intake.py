@@ -171,6 +171,42 @@ class WriteThenFailOnConfirmAgent(FakeIntakeAgent):
         raise RuntimeError("write turn exited nonzero after writing")
 
 
+class ConfirmWritesTaskWithStatusAgent(FakeIntakeAgent):
+    """``confirm`` writes a complete task file + index row whose frontmatter
+    carries a caller-chosen status. Used to prove the confirm postcondition
+    accepts only ``pending``/``blocked`` and rejects every other landed status.
+    An empty ``status`` writes no ``status:`` line, so the task-store reports the
+    ``unknown`` sentinel; ``blocked`` also writes a ``blockers`` line so the
+    file is a well-formed blocked task.
+    """
+
+    def __init__(self, status: str, **kw):
+        super().__init__(**kw)
+        self.status = status
+
+    def confirm(self, handle, repo) -> AgentConfirmResult:
+        self.confirm_calls += 1
+        tasks = repo.path / ".ai-tasks"
+        status_line = f"status: {self.status}\n" if self.status else ""
+        blockers_line = (
+            "blockers: [external:awaiting API spec]\n"
+            if self.status == "blocked"
+            else ""
+        )
+        task_file = (
+            f"---\nid: {DRAFT_TASK_ID}\n{status_line}{blockers_line}"
+            f"session-est: 0/2\n---\n\n# Add a widget\n\nLanded task.\n"
+        )
+        (tasks / f"{DRAFT_TASK_ID}.md").write_text(task_file, encoding="utf-8")
+        index = tasks / "index.md"
+        index.write_text(
+            index.read_text(encoding="utf-8")
+            + f"| {DRAFT_TASK_ID} | Add a widget | {self.status or 'unknown'} | 0/2 | [] |\n",
+            encoding="utf-8",
+        )
+        return AgentConfirmResult(task_id=DRAFT_TASK_ID)
+
+
 def passing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport((ReadinessCheck("all", True, "ok"),))
 
@@ -474,6 +510,52 @@ def test_confirm_rolls_back_when_write_turn_fails_after_writing(tmp_path):
     assert "write turn exited nonzero" in (failed.error or "")
     assert not (repo.path / ".ai-tasks" / f"{DRAFT_TASK_ID}.md").exists()
     assert snapshot(repo) == before
+
+
+@pytest.mark.parametrize("status", ["pending", "blocked"])
+def test_confirm_accepts_valid_post_intake_status(tmp_path, status):
+    repo = make_repo(tmp_path)
+    manager, agent, _ = make_manager(
+        tmp_path, agent=ConfirmWritesTaskWithStatusAgent(status)
+    )
+    record = manager.start_intake(repo, REQUEST)
+
+    confirmed = manager.confirm_intake(record.intake_id)
+
+    # ``pending`` (fresh intake) and ``blocked`` (intake recorded blockers) are
+    # the two legal post-intake states, so both satisfy the confirm
+    # postcondition and record ``confirmed`` with the created task id.
+    assert confirmed.status == STATUS_CONFIRMED
+    assert confirmed.created_task_id == DRAFT_TASK_ID
+    assert (repo.path / ".ai-tasks" / f"{DRAFT_TASK_ID}.md").is_file()
+    assert agent.confirm_calls == 1
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["in_progress", "final_review", "completed", ""],
+    ids=["in_progress", "final_review", "completed", "unknown-no-status"],
+)
+def test_confirm_rejects_and_rolls_back_non_intake_status(tmp_path, status):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    manager, agent, _ = make_manager(
+        tmp_path, agent=ConfirmWritesTaskWithStatusAgent(status)
+    )
+    record = manager.start_intake(repo, REQUEST)
+
+    failed = manager.confirm_intake(record.intake_id)
+
+    # Only ``pending``/``blocked`` are legal post-intake states. A confirm turn
+    # that lands a task in any other frontmatter status — an in-flight/finished
+    # ``in_progress``/``final_review``/``completed``, or an empty-status
+    # ``unknown`` sentinel — is not a valid intake: the postcondition fails
+    # closed and the unverified write is rolled back, so the repo is unchanged.
+    assert failed.status == STATUS_FAILED
+    assert failed.created_task_id is None
+    assert not (repo.path / ".ai-tasks" / f"{DRAFT_TASK_ID}.md").exists()
+    assert snapshot(repo) == before
+    assert agent.confirm_calls == 1
 
 
 def test_default_agent_makes_intake_fail_cleanly(tmp_path):
