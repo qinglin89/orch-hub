@@ -398,3 +398,146 @@ class RunHistoryEntry:
             **self.status.to_dict(),
             "events": [event.to_dict() for event in self.events],
         }
+
+
+@dataclass(frozen=True)
+class IntakeDraft:
+    """A complete proposed task, as an intake agent drafts it before any write.
+
+    The draft is the whole review artifact: the dashboard shows ``task_file``
+    (the full ``.ai-tasks/<id>.md`` content the agent would write) and
+    ``index_entry`` (the ``.ai-tasks/index.md`` row it would append) so the
+    human sees exactly what confirmation will create. It is deliberately *not*
+    a task: it lives only in hub-owned intake state, never in the target repo
+    or the active task inventory, until an explicit confirmation. ``task_id`` is
+    the proposed id (it can change across revisions); ``notes`` carries agent
+    clarifications such as duplicate-overlap or oversized-scope warnings.
+    """
+
+    task_id: str
+    summary: str
+    task_file: str
+    index_entry: str
+    notes: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "task_id": self.task_id,
+            "summary": self.summary,
+            "task_file": self.task_file,
+            "index_entry": self.index_entry,
+            "notes": self.notes,
+        }
+
+
+@dataclass(frozen=True)
+class IntakeRecord:
+    """One remote intake session, as persisted in ``intake/<id>/intake.json``.
+
+    The record — not hub memory — is the source of truth for an intake, so the
+    current draft and lifecycle status survive a hub restart and stay
+    inspectable for audit. ``status`` is an intake lifecycle label
+    (``drafting``/``awaiting_review``/``revising``/``confirming`` while an agent
+    turn is in flight, and the terminal ``confirmed``/``cancelled``/``failed``);
+    it is deliberately distinct from task frontmatter status and from run
+    overlay states. ``draft`` holds the complete current proposal (``None`` only
+    before the first draft lands or when a draft turn failed). ``iteration`` is
+    the revision count (0 = initial draft). ``error`` describes a failure;
+    ``created_task_id`` is set only after a confirmed write. ``agent_ref`` is the
+    persistable conversational handle for the intake session and is internal
+    (never serialized to API callers), like a run's control dir.
+    """
+
+    intake_id: str
+    repo_name: str
+    repo_path: Path | None
+    request: str
+    status: str
+    draft: IntakeDraft | None = None
+    iteration: int = 0
+    created_ts: str | None = None
+    updated_ts: str | None = None
+    error: str | None = None
+    created_task_id: str | None = None
+    agent_ref: str | None = None
+
+    def managed_repo(self) -> ManagedRepo | None:
+        """Reconstruct the intake's :class:`ManagedRepo` from persisted fields.
+
+        Mirrors :meth:`RunRecord.managed_repo`: callers that must reach the repo
+        (the confirming write, a reattached manager) resolve it from intake
+        identity alone. Returns ``None`` for a record with no ``repo_path``.
+        """
+        if self.repo_path is None:
+            return None
+        return ManagedRepo(
+            name=self.repo_name or self.repo_path.name,
+            path=self.repo_path,
+            manifest=self.repo_path / ".ai-deploy-manifest.json",
+        )
+
+    def to_dict(self) -> dict:
+        # ``agent_ref`` is deliberately internal (the conversational handle the
+        # UI never needs), so it stays in ``intake.json`` and out of API output.
+        return {
+            "intake_id": self.intake_id,
+            "repo_name": self.repo_name,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "request": self.request,
+            "status": self.status,
+            "draft": self.draft.to_dict() if self.draft is not None else None,
+            "iteration": self.iteration,
+            "created_ts": self.created_ts,
+            "updated_ts": self.updated_ts,
+            "error": self.error,
+            "created_task_id": self.created_task_id,
+        }
+
+
+@dataclass(frozen=True)
+class IntakeEvent:
+    """One persisted intake audit event.
+
+    Like :class:`RunEvent`, event files store metadata only: an unconfirmed
+    draft is never copied here, so audit stays reconstructable without treating
+    a draft as a task. ``kind`` records the lifecycle step (creation, revision,
+    confirmation, cancellation, failure); ``iteration`` ties a revision event to
+    its intake iteration; ``task_id`` carries the proposed id on draft events and
+    the created id on confirmation; ``detail`` is a concise human-readable note
+    (for a revision, the feedback that drove it).
+    """
+
+    ts: str
+    kind: str
+    intake_id: str
+    repo_name: str = ""
+    repo_path: Path | None = None
+    iteration: int | None = None
+    task_id: str | None = None
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts,
+            "kind": self.kind,
+            "intake_id": self.intake_id,
+            "repo_name": self.repo_name,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "iteration": self.iteration,
+            "task_id": self.task_id,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class IntakeHistoryEntry:
+    """Intake read model: the current record plus its persisted audit events."""
+
+    record: IntakeRecord
+    events: tuple[IntakeEvent, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            **self.record.to_dict(),
+            "events": [event.to_dict() for event in self.events],
+        }
