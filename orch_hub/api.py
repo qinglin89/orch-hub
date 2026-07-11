@@ -53,6 +53,7 @@ from .intake import (
     IntakeStateError,
     UnknownIntakeError,
 )
+from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
 from .monitor import RunMonitor
@@ -246,12 +247,13 @@ def create_app(
 
     ``intake_manager`` is the single :class:`~orch_hub.intake.IntakeManager` the
     intake routes drive; it is built from ``resolved`` by default with the
-    ``_UnavailableIntakeAgent`` backend (the concrete CLI-backed ``/intake-task``
-    agent lands with the dashboard flow that first drives it), so a
-    default-wired hub records an unconfigured intake as ``failed`` rather than
-    crashing. Tests inject one wired with a fake agent so the
-    read-only-until-confirm invariant is exercised through the HTTP surface
-    without launching a real intake session.
+    concrete :class:`~orch_hub.intake_agent.ClaudeIntakeAgent` backend (a headless
+    ``/intake-task`` driver over ``claude -p``). If ``claude`` is unavailable the
+    drafting turn fails cleanly and the intake is recorded as ``failed`` — the
+    same graceful, auditable outcome the earlier unavailable-agent default gave,
+    now actually functional wherever the CLI is installed. Tests inject one wired
+    with a fake agent so the read-only-until-confirm invariant is exercised
+    through the HTTP surface without launching a real intake session.
 
     A :class:`~orch_hub.monitor.RunMonitor` over that manager is started on
     lifespan startup and stopped on shutdown, so run-ended / pending-question
@@ -268,7 +270,9 @@ def create_app(
         else RunManager(resolved, notifier=build_notifier(resolved))
     )
     intake = (
-        intake_manager if intake_manager is not None else IntakeManager(resolved)
+        intake_manager
+        if intake_manager is not None
+        else IntakeManager(resolved, agent=ClaudeIntakeAgent())
     )
     monitor = RunMonitor(manager)
 
