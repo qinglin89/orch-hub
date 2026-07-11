@@ -41,6 +41,17 @@
     "final_review",
     "completed",
   ]);
+  // Remote-intake lifecycle labels (mirror orch_hub.intake). The terminal set is
+  // a resting outcome; `awaiting_review` is the single reviewable state; the
+  // transient trio (drafting/revising/confirming) brackets an in-flight agent
+  // turn and is only observed if the hub was interrupted mid-turn (v1 runs each
+  // turn synchronously). Used to spot a repo's one in-flight intake.
+  const INTAKE_TERMINAL = new Set([
+    "confirmed",
+    "cancelled",
+    "failed",
+    "error",
+  ]);
 
   // ---- token storage ----
   const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
@@ -209,6 +220,8 @@
   // it stays reachable after close-out archives the task — unlike taskHash,
   // which points at the index-gated (active-only) task detail page.
   const runTaskHash = (runId) => "#/runs/" + encodeURIComponent(runId) + "/task";
+  // A remote intake's draft-review view, addressed by intake id.
+  const intakeHash = (intakeId) => "#/intakes/" + encodeURIComponent(intakeId);
 
   function showChrome(authed) {
     document.getElementById("signout-btn").hidden = !authed;
@@ -430,6 +443,17 @@
     if (status === "blocked") return "warn";
     if (status === "completed") return "ok";
     return "";
+  }
+
+  // Colour an intake status badge: confirmed = ok, awaiting_review needs the
+  // human (warn), failed/error = bad, cancelled = neutral, and the in-flight
+  // transient states ride the "run" colour.
+  function intakeBadgeKind(status) {
+    if (status === "confirmed") return "ok";
+    if (status === "awaiting_review") return "warn";
+    if (status === "failed" || status === "error") return "bad";
+    if (status === "cancelled") return "";
+    return "run"; // drafting / revising / confirming
   }
 
   function taskProblemText(status) {
@@ -667,6 +691,18 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
+    // Best-effort in-flight intake for this repo (the backend allows one at a
+    // time). A fetch failure just falls back to offering a new intake.
+    let inflightIntake = null;
+    try {
+      const intakesData = await api("/api/intakes");
+      inflightIntake =
+        (intakesData.intakes || []).find(
+          (i) => i.repo_name === repoName && !INTAKE_TERMINAL.has(i.status)
+        ) || null;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
 
     const tasks = entry.tasks || [];
     const statuses = orderedStatusesFromTasks(tasks);
@@ -699,6 +735,7 @@
       <div class="path muted">${escapeHtml(repoPath || "")}</div>
       ${housekeepingPending ? housekeepingWarning(false) : ""}
       ${reasons}
+      ${intakeSection(repoName, inflightIntake, readiness)}
       ${
         entry.index_present
           ? `<div class="filters"><label>Status
@@ -712,6 +749,11 @@
           : `<ul class="list">${missingIndexCard(repoName)}</ul>`
       }
       ${commitsSection(commitLog)}`;
+
+    // Wire the intake-start form (present only when no in-flight intake and the
+    // repo is not known-not-ready) before the missing-index early return, so it
+    // works even for a repo whose task index is absent.
+    wireIntakeStart();
 
     if (!entry.index_present) return;
 
@@ -872,6 +914,24 @@
     if (body.acknowledge_required)
       return err.message + " — tick the acknowledgement box, then retry.";
     return err.message;
+  }
+
+  // Re-render a view after an action, routing a hard error to the error view (a
+  // 401 already shows the login gate). Used by the intake control re-renders.
+  function rerender(promise) {
+    promise.catch((err) => {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      renderError(err);
+    });
+  }
+
+  // Toggle a control button's busy state and clear its status line when busy.
+  function setControlBusy(button, statusEl, busy) {
+    if (button) button.disabled = busy;
+    if (statusEl && busy) {
+      statusEl.textContent = "";
+      statusEl.classList.remove("error-text");
+    }
   }
 
   // The Start/Stop control for a task, chosen from the run overlay the backend
@@ -1260,6 +1320,367 @@
       <section class="section"><h2>Task file</h2>${body}</section>`;
   }
 
+  // ---- remote intake (draft → review → confirm / cancel) ----
+  //
+  // Repo-scoped: the hub runs a read-only /intake-task session that drafts a
+  // complete task for the human to review; only an explicit Confirm writes the
+  // task file + index row. The dashboard drives the shipped intake HTTP API and
+  // never touches the target repo itself. On confirmation it routes to the new
+  // task's detail, where the existing Start control launches it — intake does
+  // not duplicate run start/stop.
+
+  // The "new task intake" entry on repo detail. If the repo already has an
+  // in-flight intake (the backend allows one at a time), link to its review
+  // instead of offering a second. A known-not-ready repo pre-explains the block
+  // the backend would 409 on; the submit handler still renders a raced 409.
+  function intakeSection(repoName, inflight, readiness) {
+    const head = `<section class="section intake"><h2>New task intake</h2>`;
+    const foot = `</section>`;
+    if (inflight) {
+      return (
+        head +
+        `<p class="muted">A task intake is in progress
+          ${badge(inflight.status, intakeBadgeKind(inflight.status))}.</p>
+         <p><a class="text-link" href="${intakeHash(
+           inflight.intake_id
+         )}">Review the draft →</a></p>` +
+        foot
+      );
+    }
+    if (readiness && !readiness.ready) {
+      return (
+        head +
+        `<p class="muted">The repo is not ready, so a task intake can't start:</p>
+         <ul class="reasons">${reasonItems(readiness.checks)}</ul>` +
+        foot
+      );
+    }
+    return (
+      head +
+      `<p class="muted">Describe a new task in plain language. The hub drafts the
+        full task file for you to review; nothing is written until you confirm.</p>
+       <form class="intake-form" data-repo="${escapeHtml(repoName)}">
+         <textarea class="intake-request answer-input" rows="3"
+           placeholder="e.g. Add a CSV export button to the run history view"></textarea>
+         <div class="control-actions">
+           <button type="submit">Draft task…</button>
+           <span class="control-status" role="status"></span>
+         </div>
+       </form>` +
+      foot
+    );
+  }
+
+  function wireIntakeStart() {
+    const form = document.querySelector(".intake-form");
+    if (form) form.addEventListener("submit", onIntakeStart);
+  }
+
+  // Start: POST /api/intakes {repo_id, request} → route to the review view. A
+  // 409 with an `intake_id` means the repo already has an in-flight intake (it
+  // raced our best-effort check) — link straight to it rather than dead-ending.
+  // Other refusals (empty request, not ready) render in place.
+  async function onIntakeStart(ev) {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const input = form.querySelector(".intake-request");
+    const statusEl = form.querySelector(".control-status");
+    const button = form.querySelector("button");
+    if (statusEl) {
+      statusEl.textContent = "";
+      statusEl.classList.remove("error-text");
+    }
+    const request = input ? input.value.trim() : "";
+    if (!request) {
+      if (statusEl) statusEl.textContent = "Describe the task first.";
+      return;
+    }
+    if (button) button.disabled = true;
+    try {
+      const rec = await api("/api/intakes", {
+        method: "POST",
+        body: { repo_id: form.dataset.repo, request },
+      });
+      location.hash = intakeHash(rec.intake_id);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (button) button.disabled = false;
+      const existing = err instanceof ApiError && err.body && err.body.intake_id;
+      if (existing) {
+        location.hash = intakeHash(existing);
+        return;
+      }
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = controlErrorText(err, "Failed to start intake.");
+      }
+    }
+  }
+
+  // The draft the human reviews: the complete proposed task file and the index
+  // row confirmation would write, plus any agent notes (duplicate overlap,
+  // oversized-scope warnings). Shown verbatim in read-only blocks — it is a
+  // proposal, never a task, until confirmed.
+  function intakeDraftView(draft) {
+    if (!draft) return "";
+    const notes = draft.notes
+      ? `<div class="intake-notes">${escapeHtml(draft.notes)}</div>`
+      : "";
+    return `
+      <section class="section">
+        <h2>Proposed task</h2>
+        ${draft.summary ? `<p class="summary">${escapeHtml(draft.summary)}</p>` : ""}
+        ${notes}
+        <h3 class="intake-sub">Task file
+          <code>.ai-tasks/${escapeHtml(draft.task_id)}.md</code></h3>
+        <pre class="task-content">${escapeHtml(draft.task_file)}</pre>
+        <h3 class="intake-sub">Index entry <code>.ai-tasks/index.md</code></h3>
+        <pre class="task-content">${escapeHtml(draft.index_entry)}</pre>
+      </section>`;
+  }
+
+  // The review controls for an awaiting_review intake. Confirm writes the task
+  // (the only write); Request changes sends feedback back into the same session
+  // for a fresh draft (still read-only); Cancel discards it (writes nothing).
+  function intakeReviewControls() {
+    return `
+      <section class="section intake">
+        <h2>Review</h2>
+        <div class="intake-actions">
+          <button type="button" class="intake-confirm">Confirm &amp; create task</button>
+          <button type="button" class="btn-danger intake-cancel">Cancel</button>
+          <span class="control-status intake-status" role="status"></span>
+        </div>
+        <form class="intake-revise-form">
+          <label class="intake-revise-label">Request changes
+            <textarea class="intake-feedback answer-input" rows="3"
+              placeholder="Describe what to change; the draft is revised in the same session"></textarea>
+          </label>
+          <div class="control-actions">
+            <button type="submit">Send changes</button>
+            <span class="control-status intake-revise-status" role="status"></span>
+          </div>
+        </form>
+      </section>`;
+  }
+
+  // Metadata-only audit trail: creation, each revision, confirmation,
+  // cancellation, failure. Never carries a draft body, so history stays
+  // reconstructable without treating an unconfirmed draft as a task.
+  function intakeAuditSection(events) {
+    if (!events || !events.length) return "";
+    const rows = events
+      .map((e) => {
+        const meta = [
+          typeof e.iteration === "number" ? "iteration " + e.iteration : "",
+          e.detail || "",
+        ]
+          .filter(Boolean)
+          .map(escapeHtml)
+          .join(" · ");
+        return `<li class="intake-event">
+          <div class="intake-event-head">
+            <span class="intake-event-kind">${escapeHtml(e.kind)}</span>
+            ${e.ts ? `<span class="muted">${escapeHtml(e.ts)}</span>` : ""}
+          </div>
+          ${meta ? `<div class="muted">${meta}</div>` : ""}
+        </li>`;
+      })
+      .join("");
+    return `<section class="section"><h2>Intake history</h2>
+      <ul class="intake-events list">${rows}</ul></section>`;
+  }
+
+  async function renderIntakeReview(intakeId) {
+    view().innerHTML = centerHtml("Loading intake…");
+    // Record + metadata-only audit events in one call. Unknown intake → 404 the
+    // router surfaces as an error view.
+    const data = await api(
+      "/api/intakes/" + encodeURIComponent(intakeId) + "/history"
+    );
+    const repoName = data.repo_name || "";
+    const back = repoName
+      ? `<a class="back-link" href="${repoHash(repoName)}">← ${escapeHtml(
+          repoName
+        )}</a>`
+      : `<a class="back-link" href="#/repos">← Repos</a>`;
+
+    let body;
+    if (data.status === "awaiting_review") {
+      body = intakeDraftView(data.draft) + intakeReviewControls();
+    } else if (data.status === "confirmed") {
+      const taskId = data.created_task_id;
+      body =
+        `<section class="section"><h2>Task created</h2>
+          <p class="muted">The task file and its index entry were written.</p>
+          ${
+            taskId && repoName
+              ? `<p><a class="text-link" href="${taskHash(
+                  repoName,
+                  taskId
+                )}">Open <code>${escapeHtml(taskId)}</code> →</a></p>`
+              : ""
+          }
+        </section>` + intakeDraftView(data.draft);
+    } else if (data.status === "failed" || data.status === "error") {
+      body = `<section class="section"><h2>Intake failed</h2>
+        <p class="error-text">${escapeHtml(
+          data.error || "The intake did not complete."
+        )}</p>
+        <p class="muted">The target repo was not modified.</p>
+        ${
+          repoName
+            ? `<p><a class="text-link" href="${repoHash(
+                repoName
+              )}">Back to ${escapeHtml(repoName)} →</a></p>`
+            : ""
+        }</section>`;
+    } else if (data.status === "cancelled") {
+      body = `<section class="section"><h2>Intake cancelled</h2>
+        <p class="muted">No task was created and the repo is unchanged.</p></section>`;
+    } else {
+      // drafting / revising / confirming — only visible if the hub was
+      // interrupted mid-turn (turns run synchronously in v1). Offer a reload,
+      // and Cancel for the two cancellable transient states.
+      const cancellable =
+        data.status === "drafting" || data.status === "revising";
+      body = `<section class="section intake"><h2>Working…</h2>
+        <p class="muted">The intake is mid-${escapeHtml(
+          data.status
+        )}. Reload to refresh.</p>
+        <div class="intake-actions">
+          <button type="button" class="intake-reload btn-secondary">Reload</button>
+          ${
+            cancellable
+              ? `<button type="button" class="btn-danger intake-cancel">Cancel</button>`
+              : ""
+          }
+          <span class="control-status intake-status" role="status"></span>
+        </div></section>`;
+    }
+
+    view().innerHTML = `
+      ${back}
+      <div class="detail-head">
+        <span class="name big">Task intake</span>
+        ${badge(data.status, intakeBadgeKind(data.status))}
+      </div>
+      ${
+        data.request
+          ? `<p class="intake-request muted">Request: ${escapeHtml(
+              data.request
+            )}</p>`
+          : ""
+      }
+      ${body}
+      ${intakeAuditSection(data.events)}`;
+
+    wireIntakeReviewControls(intakeId);
+  }
+
+  function wireIntakeReviewControls(intakeId) {
+    const reload = document.querySelector(".intake-reload");
+    if (reload)
+      reload.addEventListener("click", () =>
+        rerender(renderIntakeReview(intakeId))
+      );
+    const confirmBtn = document.querySelector(".intake-confirm");
+    if (confirmBtn)
+      confirmBtn.addEventListener("click", () =>
+        onIntakeConfirm(intakeId, confirmBtn)
+      );
+    const cancelBtn = document.querySelector(".intake-cancel");
+    if (cancelBtn)
+      cancelBtn.addEventListener("click", () =>
+        onIntakeCancel(intakeId, cancelBtn)
+      );
+    const reviseForm = document.querySelector(".intake-revise-form");
+    if (reviseForm)
+      reviseForm.addEventListener("submit", (ev) => onIntakeRevise(ev, intakeId));
+  }
+
+  // Confirm: POST /confirm — the only write. A confirmed record routes to the
+  // new task's detail, where the existing Start control launches it. A failed
+  // record (lost session / write failure) re-renders the review to show the
+  // outcome; no task was created and the repo is unchanged.
+  async function onIntakeConfirm(intakeId, button) {
+    const statusEl = document.querySelector(".intake-status");
+    setControlBusy(button, statusEl, true);
+    try {
+      const rec = await api(
+        "/api/intakes/" + encodeURIComponent(intakeId) + "/confirm",
+        { method: "POST" }
+      );
+      if (rec.status === "confirmed" && rec.created_task_id && rec.repo_name) {
+        location.hash = taskHash(rec.repo_name, rec.created_task_id);
+      } else {
+        rerender(renderIntakeReview(intakeId)); // failed / unexpected → show it
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      setControlBusy(button, statusEl, false);
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = controlErrorText(err, "Failed to confirm.");
+      }
+    }
+  }
+
+  // Cancel: POST /cancel — never writes. Re-renders to the cancelled outcome
+  // (with its back-link and audit trail).
+  async function onIntakeCancel(intakeId, button) {
+    const statusEl = document.querySelector(".intake-status");
+    setControlBusy(button, statusEl, true);
+    try {
+      await api("/api/intakes/" + encodeURIComponent(intakeId) + "/cancel", {
+        method: "POST",
+      });
+      rerender(renderIntakeReview(intakeId));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      setControlBusy(button, statusEl, false);
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = controlErrorText(err, "Failed to cancel.");
+      }
+    }
+  }
+
+  // Request changes: POST /revise with feedback — still read-only, replaces the
+  // draft and bumps the iteration in the same session. Re-renders to the fresh
+  // draft (or a failed record on a lost session / agent failure).
+  async function onIntakeRevise(ev, intakeId) {
+    ev.preventDefault();
+    const form = ev.currentTarget;
+    const input = form.querySelector(".intake-feedback");
+    const statusEl = form.querySelector(".intake-revise-status");
+    const button = form.querySelector("button");
+    if (statusEl) {
+      statusEl.textContent = "";
+      statusEl.classList.remove("error-text");
+    }
+    const feedback = input ? input.value.trim() : "";
+    if (!feedback) {
+      if (statusEl) statusEl.textContent = "Describe the change first.";
+      return;
+    }
+    if (button) button.disabled = true;
+    try {
+      await api("/api/intakes/" + encodeURIComponent(intakeId) + "/revise", {
+        method: "POST",
+        body: { feedback },
+      });
+      rerender(renderIntakeReview(intakeId));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (button) button.disabled = false;
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = controlErrorText(err, "Failed to send changes.");
+      }
+    }
+  }
+
   // ---- run logs (recent tail + live SSE stream) ----
 
   // Parse one SSE event block (the text between blank-line separators) per the
@@ -1507,6 +1928,8 @@
       return seg.length >= 3
         ? () => renderTaskDetail(seg[1], seg[2])
         : renderTasks;
+    if (seg[0] === "intakes" && seg.length >= 2)
+      return () => renderIntakeReview(seg[1]);
     if (seg[0] === "repos" && seg.length >= 2)
       return () => renderRepoDetail(seg[1]);
     return renderRepos;

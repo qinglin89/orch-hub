@@ -725,6 +725,110 @@ code {
   margin-top: 4px;
 }
 
+/* ---- remote intake (draft review) ---- */
+
+.intake .intake-actions,
+.intake .control-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.intake button {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.intake button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* More specific than `.intake button`, so the danger/secondary variants keep
+   their own fill instead of the accent. */
+.intake .btn-danger {
+  background: var(--bad-fg);
+}
+
+.intake .btn-secondary {
+  background: var(--surface-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-weight: 600;
+}
+
+.intake-form,
+.intake-revise-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.intake-revise-label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.intake-request {
+  margin-top: 6px;
+  word-break: break-word;
+}
+
+/* Agent clarifications on a draft — duplicate overlap, oversized-scope. */
+.intake-notes {
+  margin: 8px 0;
+  padding: 9px 10px;
+  border: 1px solid var(--warn-fg);
+  border-radius: 8px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.intake-sub {
+  margin: 14px 0 6px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.intake-events {
+  gap: 8px;
+}
+
+.intake-event {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.intake-event-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.intake-event-kind {
+  font-weight: 650;
+  font-size: 13px;
+}
+
 /* ---- inline text link (e.g. "View logs") ---- */
 
 .text-link {

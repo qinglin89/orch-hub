@@ -349,3 +349,91 @@ def test_log_view_task_link_uses_run_scoped_route():
     # (runTaskHash), not taskHash's active-only task detail, so clicking a run's
     # task link after archival opens the archived file instead of 404-ing.
     assert "runTaskHash(" in body
+
+
+# ---- remote intake (draft → review → confirm / cancel) -----------------------
+#
+# Session-3 of remote-intake-task: the dashboard intake + review loop over the
+# shipped protected intake HTTP API. Like the run-control checks above, the
+# wiring is asserted at the served-asset boundary (no JS runtime in this suite);
+# each check maps to a scope/acceptance line. The concrete CLI-backed agent is a
+# later slice — these pin the UI contract independent of which agent is wired.
+
+
+def test_intake_entry_posts_create_on_repo_detail():
+    body = app_js()
+    # Repo detail carries a repo-scoped "new task intake" entry whose form drives
+    # POST /api/intakes with the request text and the repo id.
+    assert "intakeSection" in body
+    assert "intake-form" in body
+    assert '"/api/intakes"' in body
+    assert "repo_id" in body  # the create body names the repo...
+    assert "data-repo" in body  # ...sourced from the form's dataset
+
+
+def test_intake_entry_reflects_inflight_and_not_ready():
+    body = app_js()
+    # The entry pre-reflects the backend gates the create would 409 on: a repo's
+    # one in-flight intake links to its review instead of offering a second, and
+    # a known-not-ready repo explains the block rather than offering a dead Start.
+    assert "INTAKE_TERMINAL" in body  # spots the non-terminal in-flight intake
+    assert "inflightIntake" in body
+    assert "Review the draft" in body
+    assert "not ready, so a task intake" in body
+    # A busy 409 carries the existing intake id, so the racing Start links to it.
+    assert "intake_id" in body
+
+
+def test_intake_review_view_is_routed():
+    body = app_js()
+    # A dedicated intake-review view, its hash builder, and route wiring.
+    assert "renderIntakeReview" in body
+    assert "intakeHash" in body
+    assert 'seg[0] === "intakes"' in body
+    assert "renderIntakeReview(seg[1])" in body
+    # It reads the record + metadata-only audit events from the history route.
+    assert '"/history"' in body
+
+
+def test_intake_review_shows_full_draft_before_any_write():
+    body = app_js()
+    # The full proposed task file AND the index row are shown for review before
+    # anything is written — the whole point of the confirmation gate.
+    assert "intakeDraftView" in body
+    assert "draft.task_file" in body
+    assert "draft.index_entry" in body
+    # Agent clarifications (duplicate overlap / oversized-scope) surface too.
+    assert "draft.notes" in body
+    assert "intake-notes" in body
+
+
+def test_intake_review_offers_confirm_revise_cancel():
+    body = app_js()
+    # The three review outcomes, each wired to its route. Revise sends feedback
+    # back into the same session; only Confirm reaches the write route.
+    assert "intake-confirm" in body
+    assert '"/confirm"' in body
+    assert "intake-revise-form" in body
+    assert '"/revise"' in body
+    assert "feedback" in body
+    assert "intake-cancel" in body
+    assert '"/cancel"' in body
+
+
+def test_intake_confirm_hands_off_to_the_existing_task_start_flow():
+    body = app_js()
+    # Only a confirmed intake routes onward, and it routes to the created task's
+    # detail (taskHash) — where the EXISTING Start control launches it. Intake
+    # never duplicates run start/stop; the handoff is the created-task link.
+    assert "created_task_id" in body
+    assert "taskHash(rec.repo_name, rec.created_task_id)" in body
+
+
+def test_intake_audit_trail_is_metadata_only():
+    body = app_js()
+    # A metadata-only audit trail (kinds + iteration + detail) renders from the
+    # history events, so intake iterations are auditable without the review view
+    # depending on a draft body being copied into history.
+    assert "intakeAuditSection" in body
+    assert "intake-events" in body
+    assert "e.kind" in body
