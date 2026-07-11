@@ -57,6 +57,7 @@ from .models import (
     ReadinessReport,
 )
 from .readiness import check_readiness
+from .task_store import STATUS_MISSING, list_repo_tasks
 
 _log = logging.getLogger(__name__)
 
@@ -205,6 +206,109 @@ def _utc_now() -> dt.datetime:
 def _slug(value: str) -> str:
     """Make a repo name safe as an intake-dir path component."""
     return _SLUG.sub("-", value).strip("-") or "x"
+
+
+def _task_landed(repo: ManagedRepo, task_id: str) -> bool:
+    """True iff ``task_id`` now appears as a real task in ``repo``'s inventory.
+
+    The confirmation postcondition: a genuinely written task has both a
+    ``.ai-tasks/<id>.md`` file and an ``.ai-tasks/index.md`` row, so it
+    round-trips through the same task-inventory path the dashboard routes to (an
+    index-gated read). A ``missing`` sentinel (index row but no file), an
+    unwritten index, or an absent id all fail closed — an exit-0 agent turn that
+    wrote nothing or only part of the task is not a confirmation.
+    """
+    try:
+        inventory = list_repo_tasks(repo)
+    except OSError:
+        return False
+    return any(
+        task.task_id == task_id and task.status != STATUS_MISSING
+        for task in inventory.tasks
+    )
+
+
+def _safe_task_path(repo: ManagedRepo, task_id: str) -> Path | None:
+    """``.ai-tasks/<task_id>.md`` iff ``task_id`` is a safe single segment.
+
+    Mirrors ``task_store``'s containment rule so a crafted draft id can never
+    make rollback delete a file outside ``.ai-tasks/``. Returns ``None`` for an
+    unsafe id; such an id could not have produced an inventory-visible task
+    anyway, so verification fails and no in-tree task file needs removing.
+    """
+    if (
+        not task_id
+        or "/" in task_id
+        or "\\" in task_id
+        or "\x00" in task_id
+        or task_id in (".", "..")
+    ):
+        return None
+    return repo.path / ".ai-tasks" / f"{task_id}.md"
+
+
+@dataclass
+class _ConfirmGuard:
+    """Snapshot of the ``.ai-tasks/`` paths a confirm write is allowed to touch.
+
+    Captured just before the write turn so a failed or unverified confirm can be
+    rolled back, upholding the acceptance invariant that a failed/unconfirmed
+    intake leaves the target repo unchanged. Scoped to exactly the proposed task
+    file and ``index.md`` — the two paths the confirm prompt authorizes — so
+    rollback never disturbs an unrelated concurrent write to some other task's
+    file. (A concurrent writer to ``index.md`` itself during the confirm window
+    is the same cross-manager race already noted for run dirs; it is not newly
+    introduced here.)
+    """
+
+    task_path: Path | None
+    task_existed: bool
+    index_path: Path
+    index_existed: bool
+    index_before: bytes | None
+
+    @classmethod
+    def capture(cls, repo: ManagedRepo, task_id: str) -> _ConfirmGuard:
+        task_path = _safe_task_path(repo, task_id)
+        index_path = repo.path / ".ai-tasks" / "index.md"
+        index_existed = index_path.exists()
+        try:
+            index_before = index_path.read_bytes() if index_existed else None
+        except OSError:
+            index_before = None  # existed but unreadable: restore is best-effort
+        return cls(
+            task_path=task_path,
+            task_existed=bool(task_path and task_path.exists()),
+            index_path=index_path,
+            index_existed=index_existed,
+            index_before=index_before,
+        )
+
+    def rollback(self) -> None:
+        """Undo a confirm turn's write to the snapshotted paths (best effort)."""
+        # Remove a task file this turn created; leave a pre-existing one alone.
+        if self.task_path is not None and not self.task_existed:
+            try:
+                self.task_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as err:  # pragma: no cover - unexpected fs error
+                _log.warning(
+                    "intake rollback could not remove %s: %s", self.task_path, err
+                )
+        # Restore index.md: drop one this turn created, else revert its content.
+        try:
+            if not self.index_existed:
+                self.index_path.unlink(missing_ok=True)
+            elif (
+                self.index_before is not None
+                and self.index_path.read_bytes() != self.index_before
+            ):
+                self.index_path.write_bytes(self.index_before)
+        except OSError as err:  # pragma: no cover - unexpected fs error
+            _log.warning(
+                "intake rollback could not restore %s: %s", self.index_path, err
+            )
 
 
 class IntakeManager:
@@ -360,10 +464,19 @@ class IntakeManager:
         Legal only from ``awaiting_review``. This is the sole method that reaches
         the agent's write path, so it is the only way an intake modifies the
         target repo. The ``confirming`` status is persisted before the write so a
-        hub death mid-write is reconcilable (the task may exist); on success the
-        record records the created task id for the existing task-inventory path
-        to surface. A lost session or a write failure resolves to ``failed`` with
-        no partial task left behind by this manager.
+        hub death mid-write is reconcilable (the task may exist).
+
+        The agent's exit code alone is not trusted as proof: an agent turn can
+        exit 0 having written nothing or only part of the task, and a
+        write-permitted turn can mutate ``.ai-tasks/`` and then fail. So the
+        record is only marked ``confirmed`` once the task actually lands in the
+        target repo's task inventory (:func:`_task_landed`: a real
+        ``.ai-tasks/<id>.md`` file *and* an ``index.md`` row, round-tripping
+        through the same index-gated path the dashboard routes to). A lost
+        session, an agent-turn failure, or an unverified write all resolve to
+        ``failed`` — and any partial ``.ai-tasks/`` write from a failed/unverified
+        confirm turn is rolled back (:class:`_ConfirmGuard`), so a non-confirmed
+        intake leaves the target repo unchanged.
         """
         with self._lock:
             intake_dir = self._intake_dir_for(intake_id)
@@ -377,19 +490,39 @@ class IntakeManager:
                     record,
                     "intake session lost (hub restarted before confirmation)",
                 )
+            draft = record.draft
+            if draft is None:  # awaiting_review always carries a draft; defensive.
+                return self._fail(
+                    intake_dir, record, "intake has no draft to confirm"
+                )
             confirming = replace(
                 record, status=STATUS_CONFIRMING, updated_ts=self._clock().isoformat()
             )
             _write_record(intake_dir, confirming)
+            # Snapshot the exact `.ai-tasks/` paths a confirm write may touch,
+            # so a failed or unverified turn is rolled back to leave the repo
+            # unchanged.
+            guard = _ConfirmGuard.capture(repo, draft.task_id)
             try:
                 result = self._agent.confirm(handle, repo)
             except Exception as exc:  # noqa: BLE001
+                guard.rollback()
                 return self._fail(intake_dir, confirming, f"confirm failed: {exc}")
+            created_id = (result.task_id or "").strip() or draft.task_id
+            if not _task_landed(repo, created_id):
+                guard.rollback()
+                return self._fail(
+                    intake_dir,
+                    confirming,
+                    f"confirm turn did not create task {created_id!r}: it is not"
+                    " in the repo task inventory (no task file or index row"
+                    " written)",
+                )
             self._handles.pop(intake_id, None)
             updated = replace(
                 confirming,
                 status=STATUS_CONFIRMED,
-                created_task_id=result.task_id,
+                created_task_id=created_id,
                 updated_ts=self._clock().isoformat(),
             )
             _write_record(intake_dir, updated)
@@ -399,7 +532,7 @@ class IntakeManager:
                 KIND_INTAKE_CONFIRMED,
                 ts=updated.updated_ts,
                 iteration=updated.iteration,
-                task_id=result.task_id,
+                task_id=created_id,
                 detail="task and index entry written",
             )
             return updated

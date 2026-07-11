@@ -133,6 +133,44 @@ class FakeIntakeAgent:
         handle.cancelled = True
 
 
+class WriteNothingOnConfirmAgent(FakeIntakeAgent):
+    """``confirm`` reports success (returns a result) but writes NO files — a
+    real agent answering 'done' with exit 0 having written nothing."""
+
+    def confirm(self, handle, repo) -> AgentConfirmResult:
+        self.confirm_calls += 1
+        return AgentConfirmResult(task_id=DRAFT_TASK_ID)
+
+
+class PartialWriteOnConfirmAgent(FakeIntakeAgent):
+    """``confirm`` writes only the task file and never the index row, so the
+    task never becomes inventory-visible."""
+
+    def confirm(self, handle, repo) -> AgentConfirmResult:
+        self.confirm_calls += 1
+        draft = _draft_for(len(handle.feedback))
+        (repo.path / ".ai-tasks" / f"{draft.task_id}.md").write_text(
+            draft.task_file, encoding="utf-8"
+        )
+        return AgentConfirmResult(task_id=draft.task_id)
+
+
+class WriteThenFailOnConfirmAgent(FakeIntakeAgent):
+    """``confirm`` writes the full task file + index row, then the turn fails."""
+
+    def confirm(self, handle, repo) -> AgentConfirmResult:
+        self.confirm_calls += 1
+        draft = _draft_for(len(handle.feedback))
+        tasks = repo.path / ".ai-tasks"
+        (tasks / f"{draft.task_id}.md").write_text(draft.task_file, encoding="utf-8")
+        index = tasks / "index.md"
+        index.write_text(
+            index.read_text(encoding="utf-8") + draft.index_entry + "\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError("write turn exited nonzero after writing")
+
+
 def passing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport((ReadinessCheck("all", True, "ok"),))
 
@@ -381,6 +419,61 @@ def test_confirm_failure_marks_failed_and_leaves_repo_unchanged(tmp_path):
     assert failed.status == STATUS_FAILED
     assert "write blew up" in (failed.error or "")
     assert snapshot(repo) == before  # the agent failed before writing
+
+
+# -- confirm postcondition: verify the task landed, roll back partial writes --
+
+
+def test_confirm_fails_when_agent_reports_success_but_writes_nothing(tmp_path):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    manager, agent, _ = make_manager(tmp_path, agent=WriteNothingOnConfirmAgent())
+    record = manager.start_intake(repo, REQUEST)
+
+    failed = manager.confirm_intake(record.intake_id)
+
+    # Exit-0 with no write is NOT a confirmation: the manager verifies the task
+    # actually appears in the repo inventory before recording ``confirmed``, so
+    # the dashboard never routes to a task that does not exist.
+    assert failed.status == STATUS_FAILED
+    assert failed.created_task_id is None
+    assert "inventory" in (failed.error or "")
+    assert agent.confirm_calls == 1
+    assert snapshot(repo) == before  # no phantom task, repo untouched
+    events = read_events(manager.intake_dir / record.intake_id)
+    assert events[-1].kind == KIND_INTAKE_FAILED
+
+
+def test_confirm_rolls_back_partial_task_file_when_index_row_missing(tmp_path):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    manager, _, _ = make_manager(tmp_path, agent=PartialWriteOnConfirmAgent())
+    record = manager.start_intake(repo, REQUEST)
+
+    failed = manager.confirm_intake(record.intake_id)
+
+    # A task file with no index row is not inventory-visible → unverified → the
+    # orphan file is rolled back; a non-confirmed intake leaves no artifact.
+    assert failed.status == STATUS_FAILED
+    assert not (repo.path / ".ai-tasks" / f"{DRAFT_TASK_ID}.md").exists()
+    assert snapshot(repo) == before
+
+
+def test_confirm_rolls_back_when_write_turn_fails_after_writing(tmp_path):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    manager, _, _ = make_manager(tmp_path, agent=WriteThenFailOnConfirmAgent())
+    record = manager.start_intake(repo, REQUEST)
+
+    failed = manager.confirm_intake(record.intake_id)
+
+    # A write-permitted confirm turn that mutates .ai-tasks/ and then fails must
+    # not leave the created task behind (acceptance: a failed intake does not
+    # modify the target repo): the partial write is rolled back.
+    assert failed.status == STATUS_FAILED
+    assert "write turn exited nonzero" in (failed.error or "")
+    assert not (repo.path / ".ai-tasks" / f"{DRAFT_TASK_ID}.md").exists()
+    assert snapshot(repo) == before
 
 
 def test_default_agent_makes_intake_fail_cleanly(tmp_path):

@@ -25,6 +25,7 @@ from orch_hub.intake import (
     IntakeManager,
     STATUS_AWAITING_REVIEW,
     STATUS_CONFIRMED,
+    STATUS_FAILED,
 )
 from orch_hub.intake_agent import (
     CONFIRM_END,
@@ -470,3 +471,39 @@ def test_manager_end_to_end_is_read_only_until_confirm(tmp_path):
     assert runner.argvs[0][runner.argvs[0].index("--session-id") + 1] == "sid-e2e"
     assert runner.argvs[1][runner.argvs[1].index("--resume") + 1] == "sid-e2e"
     assert runner.argvs[2][runner.argvs[2].index("--resume") + 1] == "sid-e2e"
+
+
+class WriteNothingRunner:
+    """Read turns return a draft; the write turn returns a confirm envelope but
+    writes NO files — a real agent claiming success (exit 0) having written
+    nothing. Proves the manager verifies the postcondition, not the exit code."""
+
+    def __call__(self, argv, cwd) -> AgentRunResult:
+        if "--dangerously-skip-permissions" in argv:
+            return stream(confirm_envelope())  # claims done; touches no file
+        return stream(draft_envelope())
+
+
+def test_manager_confirm_fails_when_backend_writes_nothing(tmp_path):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    agent = ClaudeIntakeAgent(runner=WriteNothingRunner(), new_session_id=lambda: "sid")
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    manager = IntakeManager(
+        config,
+        agent=agent,
+        readiness_checker=passing_readiness,
+        clock=lambda: FIXED_NOW,
+    )
+
+    record = manager.start_intake(repo, REQUEST)
+    assert record.status == STATUS_AWAITING_REVIEW
+
+    confirmed = manager.confirm_intake(record.intake_id)
+
+    # The backend turn exited 0 with a confirm envelope but wrote nothing; the
+    # manager's inventory postcondition catches it and records ``failed``, not a
+    # phantom ``confirmed``. The target repo is untouched.
+    assert confirmed.status == STATUS_FAILED
+    assert confirmed.created_task_id is None
+    assert snapshot(repo) == before

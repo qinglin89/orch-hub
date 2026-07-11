@@ -422,9 +422,14 @@ def _parse_confirm(
 ) -> AgentConfirmResult:
     """Parse a confirm turn's envelope; fall back to the confirmed draft.
 
-    The write already succeeded when this runs (``_turn`` raised otherwise), so
-    an absent or garbled confirmation envelope is not fatal: the created id/path
-    fall back to the last draft's id and the conventional ``.ai-tasks/`` path.
+    An absent or garbled confirmation envelope is not fatal here: the reported
+    id/path fall back to the last draft's id and the conventional ``.ai-tasks/``
+    path. This is only the agent's best-effort report of what it wrote — an
+    exit-0 turn is not proof it actually wrote the task. The
+    :class:`~orch_hub.intake.IntakeManager` independently verifies the task
+    landed in the repo inventory (and rolls back a partial write) before
+    recording the intake ``confirmed``, so an optimistic or wrong id is caught
+    there rather than trusted.
     """
     task_id: str | None = None
     task_path: Path | None = None
