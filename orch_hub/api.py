@@ -46,6 +46,13 @@ from .control_dir import (
 )
 from .git_meta import DEFAULT_COMMIT_LIMIT, latest_commit, read_commits
 from .housekeeping import housekeeping_pending
+from .intake import (
+    IntakeBusyError,
+    IntakeManager,
+    IntakeNotReadyError,
+    IntakeStateError,
+    UnknownIntakeError,
+)
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import repos_payload, tasks_payload
 from .monitor import RunMonitor
@@ -195,8 +202,33 @@ class AnswerRequest(BaseModel):
     responder: str | None = None
 
 
+class StartIntakeRequest(BaseModel):
+    """Body for ``POST /api/intakes``.
+
+    ``repo_id`` is the managed-repo name (resolved through registry discovery,
+    like the run routes). ``request`` is the natural-language task request the
+    intake agent drafts from; the manager rejects an empty/whitespace request.
+    """
+
+    repo_id: str
+    request: str
+
+
+class ReviseIntakeRequest(BaseModel):
+    """Body for ``POST /api/intakes/{intake_id}/revise``.
+
+    ``feedback`` is the reviewer's change request, sent back to the same intake
+    session for a fresh draft; the manager rejects empty/whitespace feedback.
+    """
+
+    feedback: str
+
+
 def create_app(
-    config: Config | None = None, *, run_manager: RunManager | None = None
+    config: Config | None = None,
+    *,
+    run_manager: RunManager | None = None,
+    intake_manager: IntakeManager | None = None,
 ) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
 
@@ -212,6 +244,15 @@ def create_app(
     with fake spawner/clock over a temp data dir so no real subprocess is ever
     started.
 
+    ``intake_manager`` is the single :class:`~orch_hub.intake.IntakeManager` the
+    intake routes drive; it is built from ``resolved`` by default with the
+    ``_UnavailableIntakeAgent`` backend (the concrete CLI-backed ``/intake-task``
+    agent lands with the dashboard flow that first drives it), so a
+    default-wired hub records an unconfigured intake as ``failed`` rather than
+    crashing. Tests inject one wired with a fake agent so the
+    read-only-until-confirm invariant is exercised through the HTTP surface
+    without launching a real intake session.
+
     A :class:`~orch_hub.monitor.RunMonitor` over that manager is started on
     lifespan startup and stopped on shutdown, so run-ended / pending-question
     pushes fire without any dashboard or client polling. It is created here but
@@ -225,6 +266,9 @@ def create_app(
         run_manager
         if run_manager is not None
         else RunManager(resolved, notifier=build_notifier(resolved))
+    )
+    intake = (
+        intake_manager if intake_manager is not None else IntakeManager(resolved)
     )
     monitor = RunMonitor(manager)
 
@@ -296,6 +340,37 @@ def create_app(
     async def _duplicate_answer(
         request: Request, exc: DuplicateAnswerError
     ) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    # Intake-manager errors map to their HTTP shapes here, mirroring the run
+    # mapping: 404 = no such intake; 409 = a state conflict the caller can act
+    # on (an in-flight intake already holds the repo, a failed readiness gate, or
+    # an operation illegal for the intake's current status). An agent-turn
+    # failure and a lost session are deliberately NOT errors here — the manager
+    # records them as a ``failed`` intake that the routes return with a success
+    # code — so only the fail-closed gates reach these handlers.
+    @app.exception_handler(UnknownIntakeError)
+    async def _unknown_intake(
+        request: Request, exc: UnknownIntakeError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(IntakeBusyError)
+    async def _intake_busy(request: Request, exc: IntakeBusyError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409, content={"detail": str(exc), "intake_id": exc.intake_id}
+        )
+
+    @app.exception_handler(IntakeNotReadyError)
+    async def _intake_not_ready(
+        request: Request, exc: IntakeNotReadyError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409, content={"detail": str(exc), "reasons": list(exc.reasons)}
+        )
+
+    @app.exception_handler(IntakeStateError)
+    async def _intake_state(request: Request, exc: IntakeStateError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     # Default-deny bearer auth as pure ASGI middleware (see BearerAuthMiddleware
@@ -656,6 +731,102 @@ def create_app(
             "responder": responder,
             "answer": req.answer.strip(),
         }
+
+    # -- remote intake-task ----------------------------------------------------
+    #
+    # Thin adapters over the app's single IntakeManager (like the run routes over
+    # RunManager). The load-bearing contract is unchanged across the HTTP surface:
+    # only ``confirm`` reaches the agent's write path, so a drafted, revised,
+    # cancelled, or failed intake never modifies the target repo. Gate refusals
+    # (repo busy, readiness, illegal state, unknown id) surface as the mapped 4xx
+    # above; an agent-turn failure or a lost session is a ``failed`` record
+    # returned with a success code, not a 5xx.
+
+    @app.post("/api/intakes", status_code=201)
+    def start_intake(req: StartIntakeRequest) -> dict:
+        """Start a remote intake for ``repo_id``, returning the drafted record.
+
+        Resolves ``repo_id`` by managed-repo name (unknown → 404) and delegates
+        to :meth:`IntakeManager.start_intake`, which fail-closed gates on a
+        non-empty request (empty → 400), one in-flight intake per repo (busy →
+        409), and readiness (not ready → 409) before drafting. The response is
+        the :class:`~orch_hub.models.IntakeRecord`: ``awaiting_review`` with the
+        complete draft on success, or ``failed`` with a reason when the drafting
+        turn (including the default unconfigured backend) failed — a failed draft
+        is an auditable outcome, not an error. The intake resource is created
+        either way, hence 201; the ``status`` field carries the outcome.
+        """
+        repos = discover_repos(resolved)
+        repo = next((r for r in repos if r.name == req.repo_id), None)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown repo: {req.repo_id}")
+        try:
+            record = intake.start_intake(repo, req.request)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return record.to_dict()
+
+    @app.get("/api/intakes")
+    def list_intakes() -> dict:
+        """List every known intake (oldest first); ``agent_ref`` stays internal."""
+        return {"intakes": [record.to_dict() for record in intake.list_intakes()]}
+
+    @app.get("/api/intakes/{intake_id}")
+    def get_intake(intake_id: str) -> dict:
+        """Return one intake's current record (draft + status); unknown → 404."""
+        return intake.get_intake(intake_id).to_dict()
+
+    @app.get("/api/intakes/{intake_id}/history")
+    def get_intake_history(intake_id: str) -> dict:
+        """Return one intake's record plus its metadata-only audit events.
+
+        Backs the review UI's audit trail. Events never carry an unconfirmed
+        draft's body, so history stays reconstructable without treating a draft
+        as a task. Unknown ids are 404.
+        """
+        return intake.intake_history(intake_id).to_dict()
+
+    @app.post("/api/intakes/{intake_id}/revise")
+    def revise_intake(intake_id: str, req: ReviseIntakeRequest) -> dict:
+        """Send review feedback back to the intake session for a fresh draft.
+
+        Legal only from ``awaiting_review`` (any other status → 409); empty
+        feedback → 400. Still read-only: the revised draft replaces the current
+        one and bumps ``iteration`` without touching the target repo. A lost
+        session or agent failure resolves to a ``failed`` record (200), not a
+        5xx. Unknown ids are 404.
+        """
+        try:
+            record = intake.revise_intake(intake_id, req.feedback)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return record.to_dict()
+
+    @app.post("/api/intakes/{intake_id}/confirm")
+    def confirm_intake(intake_id: str) -> dict:
+        """Confirm the current draft, letting the session perform the write.
+
+        The sole route that reaches the agent's write path, so it is the only way
+        an intake creates the ``.ai-tasks/`` task file and index row. Legal only
+        from ``awaiting_review`` (else 409); unknown ids are 404. On success the
+        record carries ``created_task_id`` and the new ``pending`` task is then
+        visible through the existing task-inventory routes
+        (``GET /api/repos/{repo_id}/tasks``) — intake does not duplicate task
+        listing. A lost session or a write failure resolves to a ``failed``
+        record (200) with no task left behind by the manager.
+        """
+        return intake.confirm_intake(intake_id).to_dict()
+
+    @app.post("/api/intakes/{intake_id}/cancel")
+    def cancel_intake(intake_id: str) -> dict:
+        """Cancel a non-confirmed intake, leaving the target repo unchanged.
+
+        Legal from ``drafting``/``awaiting_review``/``revising`` (a terminal or
+        mid-write ``confirming`` intake → 409); unknown ids are 404. Cancellation
+        never writes to the repo and never needs a live session, so it always
+        succeeds for a cancellable intake.
+        """
+        return intake.cancel_intake(intake_id).to_dict()
 
     return app
 

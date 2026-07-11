@@ -18,8 +18,20 @@ from orch_hub import api
 from orch_hub.config import HOST_ENV, PORT_ENV, Config
 from orch_hub.git_meta import CommitLog
 from orch_hub.history import KIND_ANSWER_RECORDED, KIND_RUN_STARTED, read_events
+from orch_hub.intake import (
+    AgentConfirmResult,
+    AgentDraftResult,
+    IntakeManager,
+    KIND_INTAKE_CREATED,
+    KIND_INTAKE_REVISED,
+    STATUS_AWAITING_REVIEW,
+    STATUS_CANCELLED,
+    STATUS_CONFIRMED,
+    STATUS_FAILED,
+)
 from orch_hub.models import (
     CommitInfo,
+    IntakeDraft,
     ManagedRepo,
     ReadinessCheck,
     ReadinessReport,
@@ -1266,3 +1278,467 @@ def test_app_lifespan_starts_and_stops_the_run_monitor(tmp_path, monkeypatch):
     with TestClient(app):  # __enter__ runs startup, __exit__ runs shutdown
         assert monitor.is_running
     assert not monitor.is_running
+
+
+# --- intake routes -----------------------------------------------------------
+#
+# These drive a *real* IntakeManager over a fake repo in ``tmp_path`` with an
+# injected conversational agent/readiness/clock: no real /intake-task session is
+# launched and no orchestrator code is imported. The fake agent writes to the
+# repo ONLY inside ``confirm``, so the read-only-until-confirm invariant is
+# observable through the HTTP surface too. Repo resolution monkeypatches
+# ``discover_repos`` (as elsewhere); confirmed inventory refresh goes end-to-end
+# through the real task store reading the files the fake agent wrote.
+
+INTAKE_REQUEST = "Add a widget endpoint to the dashboard"
+INTAKE_TASK_ID = "2026-07-11-add-widget"
+
+
+def _intake_draft(iteration: int) -> IntakeDraft:
+    return IntakeDraft(
+        task_id=INTAKE_TASK_ID,
+        summary="Add a widget",
+        task_file=(
+            f"---\nid: {INTAKE_TASK_ID}\nstatus: pending\nsession-est: 0/2\n"
+            f"---\n\n# Add a widget\n\nDraft iteration {iteration}.\n"
+        ),
+        index_entry=f"| {INTAKE_TASK_ID} | Add a widget | pending | 0/2 | [] |",
+    )
+
+
+class FakeIntakeSession:
+    """The opaque conversational handle the manager keeps between turns."""
+
+    def __init__(self, request: str):
+        self.request = request
+        self.feedback: list[str] = []
+
+
+class FakeIntakeAgent:
+    """A scripted intake agent: draft/revise are read-only, confirm writes."""
+
+    def __init__(self, *, draft_error=None, confirm_error=None):
+        self.draft_error = draft_error
+        self.confirm_error = confirm_error
+        self.draft_calls = 0
+        self.revise_calls = 0
+        self.confirm_calls = 0
+        self.cancel_calls = 0
+
+    def draft(self, request, repo) -> AgentDraftResult:
+        self.draft_calls += 1
+        if self.draft_error is not None:
+            raise self.draft_error
+        return AgentDraftResult(
+            handle=FakeIntakeSession(request), ref="sess-1", draft=_intake_draft(0)
+        )
+
+    def revise(self, handle, feedback, repo) -> AgentDraftResult:
+        self.revise_calls += 1
+        handle.feedback.append(feedback)
+        return AgentDraftResult(
+            handle=handle, ref="sess-1", draft=_intake_draft(len(handle.feedback))
+        )
+
+    def confirm(self, handle, repo) -> AgentConfirmResult:
+        self.confirm_calls += 1
+        if self.confirm_error is not None:
+            raise self.confirm_error
+        draft = _intake_draft(len(handle.feedback))
+        tasks = repo.path / ".ai-tasks"
+        task_path = tasks / f"{draft.task_id}.md"
+        task_path.write_text(draft.task_file, encoding="utf-8")
+        index = tasks / "index.md"
+        index.write_text(
+            index.read_text(encoding="utf-8") + draft.index_entry + "\n",
+            encoding="utf-8",
+        )
+        return AgentConfirmResult(task_id=draft.task_id, task_path=task_path)
+
+    def cancel(self, handle) -> None:
+        self.cancel_calls += 1
+
+
+def make_intake_repo(tmp_path: Path, name: str = "repo-a") -> ManagedRepo:
+    path = tmp_path / "repos" / name
+    (path / ".ai-tasks").mkdir(parents=True)
+    (path / ".ai-tasks" / "index.md").write_text(
+        "# Active tasks\n\n| id | title | status | session-est | blockers |\n"
+        "|---|---|---|---|---|\n",
+        encoding="utf-8",
+    )
+    return ManagedRepo(name=name, path=path, manifest=path / ".ai-deploy-manifest.json")
+
+
+def make_intake_manager(
+    tmp_path: Path,
+    *,
+    agent: FakeIntakeAgent | None = None,
+    readiness=passing_readiness,
+) -> tuple[IntakeManager, FakeIntakeAgent]:
+    agent = agent if agent is not None else FakeIntakeAgent()
+    manager = IntakeManager(
+        run_config(tmp_path),
+        agent=agent,
+        readiness_checker=readiness,
+        clock=lambda: FIXED_NOW,
+    )
+    return manager, agent
+
+
+def make_intake_client(
+    tmp_path,
+    monkeypatch,
+    *,
+    repo: ManagedRepo | None = None,
+    agent: FakeIntakeAgent | None = None,
+    readiness=passing_readiness,
+) -> tuple[TestClient, IntakeManager, FakeIntakeAgent, ManagedRepo]:
+    repo = repo if repo is not None else make_intake_repo(tmp_path)
+    manager, agent = make_intake_manager(tmp_path, agent=agent, readiness=readiness)
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    client = TestClient(api.create_app(run_config(tmp_path), intake_manager=manager))
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    return client, manager, agent, repo
+
+
+def intake_task_files(repo: ManagedRepo) -> dict[str, bytes]:
+    """Byte-exact ``.ai-tasks/`` file contents — a stray-write detector."""
+    tasks = repo.path / ".ai-tasks"
+    return {p.name: p.read_bytes() for p in sorted(tasks.iterdir()) if p.is_file()}
+
+
+def start_an_intake(
+    client: TestClient, repo: ManagedRepo, request: str = INTAKE_REQUEST
+) -> dict:
+    resp = client.post("/api/intakes", json={"repo_id": repo.name, "request": request})
+    assert resp.status_code == 201, resp.text
+    return resp.json()
+
+
+# -- start intake --------------------------------------------------------------
+
+
+def test_start_intake_returns_awaiting_review_draft_without_writing(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    before = intake_task_files(repo)
+
+    body = start_an_intake(client, repo)
+
+    assert body["status"] == STATUS_AWAITING_REVIEW
+    assert body["repo_name"] == repo.name
+    assert body["request"] == INTAKE_REQUEST
+    assert body["iteration"] == 0
+    assert body["draft"]["task_id"] == INTAKE_TASK_ID
+    assert body["draft"]["task_file"].startswith("---")
+    # agent_ref is internal and must never reach the client.
+    assert "agent_ref" not in body
+    assert agent.draft_calls == 1
+    assert agent.confirm_calls == 0
+    assert intake_task_files(repo) == before  # drafting is read-only
+
+
+def test_start_intake_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    resp = client.post(
+        "/api/intakes", json={"repo_id": "ghost", "request": INTAKE_REQUEST}
+    )
+    assert resp.status_code == 404
+    assert "ghost" in resp.json()["detail"]
+    assert agent.draft_calls == 0
+
+
+def test_start_intake_repo_busy_is_409(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    first = start_an_intake(client, repo)
+
+    resp = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": "another request"}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["intake_id"] == first["intake_id"]
+
+
+def test_start_intake_not_ready_is_409_with_reasons(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(
+        tmp_path, monkeypatch, readiness=failing_readiness
+    )
+    resp = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+    )
+    assert resp.status_code == 409
+    assert resp.json()["reasons"] == [
+        "git_clean: working tree has uncommitted changes"
+    ]
+    assert agent.draft_calls == 0
+    assert manager.list_intakes() == []  # a gated start creates no intake dir
+
+
+def test_start_intake_empty_request_is_400(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    resp = client.post("/api/intakes", json={"repo_id": repo.name, "request": "   "})
+    assert resp.status_code == 400
+    assert agent.draft_calls == 0
+
+
+def test_start_intake_missing_body_field_is_422(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    resp = client.post("/api/intakes", json={"repo_id": repo.name})  # no request
+    assert resp.status_code == 422
+
+
+def test_start_intake_agent_failure_is_201_failed_record(tmp_path, monkeypatch):
+    # A drafting-turn failure is an auditable outcome, not a 5xx: the intake
+    # resource is created (201) with status=failed and the repo is untouched.
+    client, manager, agent, repo = make_intake_client(
+        tmp_path, monkeypatch, agent=FakeIntakeAgent(draft_error=RuntimeError("agent crashed"))
+    )
+    before = intake_task_files(repo)
+
+    resp = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["status"] == STATUS_FAILED
+    assert "agent crashed" in body["error"]
+    assert intake_task_files(repo) == before
+
+
+def test_start_intake_registry_error_returns_500(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+
+    def boom(config):
+        raise RegistryError("bad registry")
+
+    monkeypatch.setattr(api, "discover_repos", boom)
+    resp = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+    )
+    assert resp.status_code == 500
+
+
+# -- get / list / history ------------------------------------------------------
+
+
+def test_get_intake_returns_record_and_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+
+    ok = client.get(f"/api/intakes/{started['intake_id']}")
+    assert ok.status_code == 200
+    assert ok.json()["intake_id"] == started["intake_id"]
+    assert ok.json()["draft"]["task_id"] == INTAKE_TASK_ID
+
+    assert client.get("/api/intakes/nope").status_code == 404
+
+
+def test_list_intakes_returns_started_intake(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+
+    resp = client.get("/api/intakes")
+    assert resp.status_code == 200
+    intakes = resp.json()["intakes"]
+    assert [r["intake_id"] for r in intakes] == [started["intake_id"]]
+    assert "agent_ref" not in intakes[0]
+
+
+def test_intake_history_returns_record_and_events(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+    client.post(
+        f"/api/intakes/{started['intake_id']}/revise",
+        json={"feedback": "tighten scope"},
+    )
+
+    resp = client.get(f"/api/intakes/{started['intake_id']}/history")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["intake_id"] == started["intake_id"]
+    assert [e["kind"] for e in body["events"]] == [
+        KIND_INTAKE_CREATED,
+        KIND_INTAKE_REVISED,
+    ]
+    # Audit events never carry the unconfirmed draft body.
+    assert all("task_file" not in e for e in body["events"])
+
+
+def test_intake_history_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    assert client.get("/api/intakes/nope/history").status_code == 404
+
+
+# -- revise --------------------------------------------------------------------
+
+
+def test_revise_intake_updates_draft_without_writing(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    before = intake_task_files(repo)
+    started = start_an_intake(client, repo)
+
+    resp = client.post(
+        f"/api/intakes/{started['intake_id']}/revise",
+        json={"feedback": "Scope it to a single route"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == STATUS_AWAITING_REVIEW
+    assert body["iteration"] == 1
+    assert "iteration 1" in body["draft"]["task_file"]
+    assert agent.revise_calls == 1
+    assert agent.confirm_calls == 0
+    assert intake_task_files(repo) == before  # revision stays read-only
+
+
+def test_revise_intake_empty_feedback_is_400(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+    resp = client.post(
+        f"/api/intakes/{started['intake_id']}/revise", json={"feedback": "  "}
+    )
+    assert resp.status_code == 400
+
+
+def test_revise_intake_wrong_state_is_409(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+    client.post(f"/api/intakes/{started['intake_id']}/confirm")  # → confirmed
+
+    resp = client.post(
+        f"/api/intakes/{started['intake_id']}/revise", json={"feedback": "again"}
+    )
+    assert resp.status_code == 409
+
+
+def test_revise_intake_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    resp = client.post("/api/intakes/nope/revise", json={"feedback": "x"})
+    assert resp.status_code == 404
+
+
+# -- confirm -------------------------------------------------------------------
+
+
+def test_confirm_intake_writes_task_and_refreshes_inventory(tmp_path, monkeypatch):
+    # Confirmation is the only write. After it, the new pending task must be
+    # visible through the *existing* task-inventory route (list_repo_tasks),
+    # frontmatter-authoritative — intake does not duplicate task listing.
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+
+    resp = client.post(f"/api/intakes/{started['intake_id']}/confirm")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["status"] == STATUS_CONFIRMED
+    assert body["created_task_id"] == INTAKE_TASK_ID
+    assert agent.confirm_calls == 1
+
+    # The confirmed write landed a real task file + index row; the existing
+    # inventory route now surfaces it with its frontmatter status.
+    listing = client.get(f"/api/repos/{repo.name}/tasks").json()
+    tasks = listing["repos"][0]["tasks"]
+    assert [t["task_id"] for t in tasks] == [INTAKE_TASK_ID]
+    assert tasks[0]["status"] == "pending"
+
+    detail = client.get(f"/api/repos/{repo.name}/tasks/{INTAKE_TASK_ID}").json()
+    assert detail["present"] is True
+    assert f"id: {INTAKE_TASK_ID}" in detail["content"]
+
+
+def test_confirm_intake_already_confirmed_is_409(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+    assert client.post(f"/api/intakes/{started['intake_id']}/confirm").status_code == 200
+
+    again = client.post(f"/api/intakes/{started['intake_id']}/confirm")
+    assert again.status_code == 409  # already confirmed
+
+
+def test_confirm_intake_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    assert client.post("/api/intakes/nope/confirm").status_code == 404
+
+
+def test_confirm_lost_session_is_failed_not_5xx(tmp_path, monkeypatch):
+    # A hub restart drops the in-memory conversational handle. Confirming through
+    # a fresh app over the same data dir must fail closed (a ``failed`` record,
+    # 200) without writing — never a silent repo write and never a 5xx.
+    client1, manager1, agent1, repo = make_intake_client(tmp_path, monkeypatch)
+    before = intake_task_files(repo)
+    started = start_an_intake(client1, repo)
+
+    fresh_agent = FakeIntakeAgent()
+    manager2, _ = make_intake_manager(tmp_path, agent=fresh_agent)
+    client2 = TestClient(api.create_app(run_config(tmp_path), intake_manager=manager2))
+    client2.headers["Authorization"] = f"Bearer {TOKEN}"
+
+    resp = client2.post(f"/api/intakes/{started['intake_id']}/confirm")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == STATUS_FAILED
+    assert fresh_agent.confirm_calls == 0
+    assert intake_task_files(repo) == before
+
+
+# -- cancel --------------------------------------------------------------------
+
+
+def test_cancel_intake_leaves_repo_unchanged(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    before = intake_task_files(repo)
+    started = start_an_intake(client, repo)
+
+    resp = client.post(f"/api/intakes/{started['intake_id']}/cancel")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == STATUS_CANCELLED
+    assert agent.cancel_calls == 1
+    assert agent.confirm_calls == 0
+    assert intake_task_files(repo) == before
+
+
+def test_cancel_intake_terminal_is_409(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)
+    client.post(f"/api/intakes/{started['intake_id']}/confirm")  # terminal
+
+    resp = client.post(f"/api/intakes/{started['intake_id']}/cancel")
+    assert resp.status_code == 409
+
+
+def test_cancel_intake_unknown_is_404(tmp_path, monkeypatch):
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    assert client.post("/api/intakes/nope/cancel").status_code == 404
+
+
+def test_terminal_intake_frees_repo_for_a_new_one(tmp_path, monkeypatch):
+    # A terminal intake releases the per-repo slot: a second start succeeds.
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    first = start_an_intake(client, repo)
+    client.post(f"/api/intakes/{first['intake_id']}/cancel")
+
+    second = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": "a fresh request"}
+    )
+    assert second.status_code == 201
+    assert second.json()["intake_id"] != first["intake_id"]
+
+
+# -- auth ----------------------------------------------------------------------
+
+
+def test_intake_routes_require_auth(tmp_path, monkeypatch):
+    # The default-deny middleware covers the intake routes with no per-route
+    # exception: an unauthenticated caller is 401 on every one of them.
+    manager, _ = make_intake_manager(tmp_path)
+    unauthed = TestClient(api.create_app(run_config(tmp_path), intake_manager=manager))
+    assert unauthed.post(
+        "/api/intakes", json={"repo_id": "r", "request": "x"}
+    ).status_code == 401
+    assert unauthed.get("/api/intakes").status_code == 401
+    assert unauthed.get("/api/intakes/anything").status_code == 401
+    assert unauthed.get("/api/intakes/anything/history").status_code == 401
+    assert unauthed.post(
+        "/api/intakes/anything/revise", json={"feedback": "x"}
+    ).status_code == 401
+    assert unauthed.post("/api/intakes/anything/confirm").status_code == 401
+    assert unauthed.post("/api/intakes/anything/cancel").status_code == 401
