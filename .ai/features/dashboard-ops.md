@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Features: Dashboard Ops
@@ -163,9 +163,41 @@ Implemented behavior:
 
 ## Remote Intake-Task
 
-Status: future
+Status: implemented
 
-Description: Let the user type a request remotely and have the hub run a one-shot agent session to invoke `/intake-task`, producing a pending task that can then be orchestrated.
+Description: Let the user type a request remotely, review the full proposed
+task file and index entry, revise or cancel it, and only on explicit
+confirmation write the new task into the target repo.
+
+Modules: intake, intake_agent, api, web, models, readiness, task_store.
+
+APIs: protected `POST /api/intakes`, `GET /api/intakes`,
+`GET /api/intakes/{id}`, `GET /api/intakes/{id}/history`,
+`POST /api/intakes/{id}/revise`, `POST /api/intakes/{id}/confirm`, and
+`POST /api/intakes/{id}/cancel`.
+
+Implemented behavior:
+
+- `IntakeManager` owns hub state under `<ORCH_HUB_DATA_DIR>/intake/<id>/`
+  (`intake.json` plus metadata-only `events.jsonl`) and enforces one in-flight
+  intake per repo after readiness passes.
+- Draft and revise turns produce hub-owned proposals only. They are not active
+  tasks, are not returned by task inventory, and are not launchable.
+- The dashboard repo-detail view starts intake; the intake review view shows the
+  complete proposed task file, index entry, notes, status, and audit events with
+  Confirm, Request changes, and Cancel outcomes. Confirmed intakes re-fetch task
+  inventory and route to the created task detail so the existing Start control
+  launches it.
+- The concrete default backend is `ClaudeIntakeAgent`, a headless Claude CLI
+  adapter that drives `/intake-task` with structured draft/confirm envelopes,
+  session resume, read-only `--permission-mode plan` draft/revise turns, and a
+  write-permitted confirm turn.
+- Confirmation is not trusted on agent exit code alone. The manager records
+  `confirmed` only after the created task appears through `list_repo_tasks` with
+  frontmatter status `pending` or `blocked`; no-write, partial-write,
+  invalid-status, agent-failure, cancellation, and lost-session outcomes record
+  `failed`/`cancelled` and do not surface a launchable task. In-process
+  failed/unverified confirms roll back the proposed task file and `index.md`.
 
 ## IM Bot Control
 

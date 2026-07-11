@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # APIs: HTTP
@@ -144,6 +144,61 @@ verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
   clients use `fetch` plus a `ReadableStream` reader because `EventSource`
   cannot set authorization headers; query-string tokens are not supported.
 
+## `POST /api/intakes`
+
+- Purpose: start a remote `/intake-task` drafting session for `{repo_id,
+  request}`.
+- Source: resolves `repo_id` through registry discovery, then delegates gates
+  and draft creation to the app's single `IntakeManager`.
+- Shape: returns the serialized `IntakeRecord` with HTTP 201. Draft-turn agent
+  failure still returns the created record with status `failed`; pre-creation
+  gate refusals use 4xx responses.
+- Errors: unknown repo returns 404; empty request returns 400; repo already has
+  an in-flight intake or readiness fails returns 409, with readiness `reasons`
+  included.
+
+## `GET /api/intakes`
+
+- Purpose: list known intake records for dashboard resume and audit views.
+- Shape: `{"intakes": [IntakeRecord.to_dict(), ...]}`.
+
+## `GET /api/intakes/{intake_id}`
+
+- Purpose: fetch one intake's current draft/status.
+- Shape: `IntakeRecord.to_dict()`, including the complete draft when present.
+- Errors: unknown intakes return 404.
+
+## `GET /api/intakes/{intake_id}/history`
+
+- Purpose: fetch one intake record plus metadata-only lifecycle/revision audit
+  events.
+- Shape: `{"record": IntakeRecord.to_dict(), "events": [IntakeEvent...]}`.
+
+## `POST /api/intakes/{intake_id}/revise`
+
+- Purpose: send non-empty human feedback back to the same intake session and
+  return a revised complete draft for review.
+- Source: delegates to `IntakeManager.revise_intake`.
+- Shape: serialized `IntakeRecord`; wrong lifecycle state returns 409; empty
+  feedback returns 400; a lost session or agent-turn failure returns status
+  `failed` in the record.
+
+## `POST /api/intakes/{intake_id}/confirm`
+
+- Purpose: explicitly approve the current draft and let the intake session
+  perform the protocol-defined task/index write.
+- Source: delegates to `IntakeManager.confirm_intake`, which records
+  `confirmed` only after the created task appears through task inventory with
+  frontmatter status `pending` or `blocked`.
+- Shape: serialized `IntakeRecord`. A failed/unverified confirm is an auditable
+  record with status `failed`, not a transport 5xx.
+
+## `POST /api/intakes/{intake_id}/cancel`
+
+- Purpose: cancel a draft/review intake without writing target repo task files.
+- Shape: serialized `IntakeRecord` with status `cancelled`; wrong lifecycle
+  state returns 409.
+
 ## `GET /api/escalations`
 
 - Purpose: list pending control-dir questions across live runs, with run/repo
@@ -165,9 +220,11 @@ verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 ## Current HTTP Behavior
 
 
-- `create_app(config=None, *, run_manager=None)` captures `Config.from_env()`
+- `create_app(config=None, *, run_manager=None, intake_manager=None)` captures `Config.from_env()`
   by default, is testable with an explicit `Config`, and holds one `RunManager`
-  instance for run, run-task, escalation, log, and background-monitor scans.
+  instance for run, run-task, escalation, log, and background-monitor scans plus
+  one `IntakeManager` instance for remote intake routes. The default intake
+  backend is `ClaudeIntakeAgent`.
 - The app constructs a `RunMonitor` over that manager, exposes it as
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.
@@ -200,6 +257,10 @@ verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
   `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
   empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
   `BlockedTaskError` includes `acknowledge_required: true`.
+- Intake-manager errors map to client-actionable statuses: `UnknownIntakeError`
+  → 404; `IntakeBusyError`, `IntakeNotReadyError`, and `IntakeStateError` →
+  409; empty request/feedback `ValueError` → 400. Agent failures are lifecycle
+  outcomes in the returned intake record.
 - The dashboard repo/task status layout consumes these APIs directly: repo
   cards use `/api/repos` for readiness/latest commit/housekeeping warning
   state, `/api/runs` for the tri-state run signal, and `/api/tasks` for active

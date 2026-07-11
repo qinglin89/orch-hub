@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # APIs and Interfaces

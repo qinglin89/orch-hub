@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # APIs: Internal Interfaces
@@ -41,6 +41,37 @@ Behavior: parse `.ai-tasks/index.md` and task frontmatter locally. The index sup
 `read_task_content(repo, task_id)` is the only raw-body reader: it rejects
 non-bare filenames, requires the file target to resolve under the resolved
 `.ai-tasks` directory, and returns `None` for absent or unsafe content.
+
+## Intake Manager
+
+Input: managed repo, natural-language request, optional revision feedback, and
+explicit confirm/cancel operations.
+
+Output: persisted `IntakeRecord` values and metadata-only intake events.
+
+Behavior: `IntakeManager` gates start on request text, one in-flight intake per
+repo, and readiness. It stores records under `<data_dir>/intake/<id>/` and
+drives an injected `IntakeAgent`. Draft/revise turns are proposal-only; confirm
+is the sole write-capable turn. The manager records `confirmed` only when the
+reported/draft task id is visible through `list_repo_tasks` with status
+`pending` or `blocked`; otherwise it records `failed`. Failed/unverified
+in-process confirms restore the proposed task file and `.ai-tasks/index.md`
+snapshot. Cancel is allowed before confirming and writes no target repo files.
+
+## Intake Agent
+
+Input: request/feedback/handle plus managed repo.
+
+Output: `AgentDraftResult` with a complete `IntakeDraft`, or
+`AgentConfirmResult` with a best-effort created task id.
+
+Behavior: the protocol requires draft/revise to be read-only and confirm to
+perform the `/intake-task` write. `ClaudeIntakeAgent` is the default concrete
+adapter: it shells out to Claude in the target repo, uses stream-json output,
+requires structured draft envelopes, resumes sessions by id, runs draft/revise
+under `--permission-mode plan`, and uses the write-permitted mode only for
+confirm. Bad CLI exits or bad envelopes raise so the manager records failed
+intakes.
 
 ## Run Manager
 
@@ -159,6 +190,9 @@ in `docs/launchd.md`.
 - API/run handlers should reuse `orch_hub.runs.RunManager` for launch gates,
   per-repo serialization, stop requests, and end classification instead of
   rebuilding subprocess or run-dir behavior in route code.
+- API/intake handlers should reuse `orch_hub.intake.IntakeManager` for intake
+  gates, lifecycle state, audit events, confirmation verification, and rollback
+  instead of deciding draft/task status in route code.
 - API/log handlers should reuse `orch_hub.logs` for log location, bounded
   reads, and SSE framing instead of accepting client paths or rebuilding the
   orchestrator filename convention in route code.

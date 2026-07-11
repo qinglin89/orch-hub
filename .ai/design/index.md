@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 3c6da44b4a90ac6e3c3d3730308604007148ff5d
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Design Principles and Decisions
@@ -14,6 +14,8 @@ verified-against: 3c6da44b4a90ac6e3c3d3730308604007148ff5d
 - File-channel boundary: questions, answers, and stop requests cross through run-dir files, not through network code inside the orchestrator.
 - Mobile-first operation: remote workflows should be practical from iPhone/iPad.
 - Fail closed before launch: readiness checks should block unclear or unsafe runs.
+- Human-confirmed task creation: remote intake drafts stay hub-owned until the
+  user explicitly confirms the complete task file and index row.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
 
@@ -43,13 +45,18 @@ verified-against: 3c6da44b4a90ac6e3c3d3730308604007148ff5d
 - Adding a cookie or query-token credential path for the dashboard shell.
 - Exposing the hub outside the tailnet.
 - Running multiple orchestrators against the same repo.
+- Treating an unconfirmed intake draft as a task or exposing it through active
+  task inventory.
+- Duplicating run start/stop behavior inside the intake flow after a task is
+  created.
 - Adding watchdog or log-silence detection.
 - Hardcoding target repo paths in product code.
 - Using broad shell commands where structured subprocess arguments are practical.
 
 ## Open Design Items
 
-- Retention policy for run dirs and per-run `events.jsonl` history under
-  `ORCH_HUB_DATA_DIR`.
+- Retention/reconciliation policy for hub-owned run dirs and intake dirs under
+  `ORCH_HUB_DATA_DIR`, including per-run `events.jsonl` history and stuck
+  `confirming` intake records after a mid-write process crash.
 - Exact route schema beyond the implemented repo/task/run/escalation/log/history
   and dashboard-shell API surface.

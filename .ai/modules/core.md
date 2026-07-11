@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Modules: Core
@@ -67,7 +67,7 @@ Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
-questions, run state, and run history.
+questions, run state, run history, and intake state.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
@@ -85,6 +85,11 @@ overlays active/waiting/completed/stopped/error/ended state plus pending
 question count. `RunEvent` stores metadata-only history events and
 `RunHistoryEntry` combines a computed run status with its persisted events.
 Public readiness payloads contain `ready` plus failed check reasons only.
+`IntakeDraft` carries the full proposed task file plus index entry for human
+review. `IntakeRecord` persists hub-owned intake status, draft, created task id,
+repo attribution, and audit metadata while omitting internal agent handles from
+serialized payloads. `IntakeEvent` and `IntakeHistoryEntry` expose metadata-only
+intake history.
 
 ## Registry
 
@@ -133,3 +138,34 @@ and redirect output.
 Location: `orch_hub/task_store.py`
 
 Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads. It also parses five-column `id | title | status | session-est | blockers` indexes, using `title` as the summary there while preserving the legacy positional third-column summary for other table layouts. It then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access. Both raw-content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.
+
+## Intake Manager
+
+Location: `orch_hub/intake.py`
+
+Responsibility: own the remote intake-task lifecycle and hub-owned audit state.
+`IntakeManager` stores each intake under `<data_dir>/intake/<intake_id>/` with
+`intake.json` and metadata-only `events.jsonl`, gates start on non-empty input,
+one in-flight intake per repo, and readiness, then drives an injected
+`IntakeAgent` through draft, revise, confirm, and cancel turns.
+
+Draft/revise turns return complete proposals and leave target repos unchanged.
+Only `confirm_intake` calls the agent write path. Confirmation is verified via
+`list_repo_tasks`: the created id must appear in the target repo inventory with
+frontmatter status `pending` or `blocked`. Missing/index-only/no-write,
+invalid-status, agent-failure, lost-session, and unverified outcomes become
+`failed` rather than `confirmed`; in-process failed/unverified confirms restore
+the proposed task file and `.ai-tasks/index.md` snapshot.
+
+## Intake Agent
+
+Location: `orch_hub/intake_agent.py`
+
+Responsibility: provide the concrete Claude CLI backend for `/intake-task`.
+`ClaudeIntakeAgent` runs `claude -p --output-format stream-json` in the target
+repo, uses a structured fenced JSON envelope for drafts and confirmations,
+threads session ids through `--session-id`/`--resume`, and parses assistant text
+from stream events. Draft and revise use `--permission-mode plan`; confirm uses
+the write-permitted CLI mode. Bad exits, stream errors, missing/invalid required
+envelopes, and bad handles fail the agent turn so the manager records an
+auditable failed intake.

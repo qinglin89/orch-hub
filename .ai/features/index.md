@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Features
@@ -19,7 +19,7 @@ verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
 | Notifications | implemented | notifications, config, runs, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
 | Run history and audit | implemented | history, runs, api, models, control_dir | `GET /api/history/runs`, `GET /api/runs/{id}/task` |
-| Remote intake-task | future | runs or agent adapter, task_store | future task creation endpoint |
+| Remote intake-task | implemented | intake, intake_agent, api, web, models, readiness, task_store | `POST /api/intakes`, `GET /api/intakes`, `GET /api/intakes/{id}`, `GET /api/intakes/{id}/history`, `POST /api/intakes/{id}/revise|confirm|cancel` |
 | IM bot control | future | notifications or bot adapter, api | future bot callback interface |
 
 ## Detail Files

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Project Map
@@ -17,6 +17,7 @@ verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
 | Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; Bark pending-question push fires once per observed `(run_id, seq)` |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, repo/task run-state status layout, housekeeping warnings, cc-codex Start dialog, run history, run-scoped task-file view, recent commits, and recent/live log views |
+| Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store | implemented; readiness-gated draft/revise/confirm/cancel flow with hub-owned draft/audit state, Claude CLI backend, complete draft review in dashboard, and confirmation verified through task inventory as `pending`/`blocked` before a task becomes launchable |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, config, runs, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL` config; run manager owns terminal/pending-question triggers and isolation; CLI `notify test` probes delivery directly with launchd-plist fallback and URL redaction |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging and operations CLI; plist template is source of truth; lifecycle commands manage only the fixed service label, not orchestrator runs |
@@ -34,6 +35,7 @@ verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
 | Human question relay | `GET /api/escalations`, `POST /api/runs/{run_id}/escalations/{seq}/answer` |
 | Log viewing | `GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream` |
 | Mobile dashboard | `GET /`, `GET /app.js`, `GET /styles.css`; protected repo/task/run/escalation/log/history/commit APIs including `GET /api/runs/{run_id}/task` |
+| Remote intake-task | `POST /api/intakes`, `GET /api/intakes`, `GET /api/intakes/{intake_id}`, `GET /api/intakes/{intake_id}/history`, `POST /api/intakes/{intake_id}/revise`, `POST /api/intakes/{intake_id}/confirm`, `POST /api/intakes/{intake_id}/cancel` |
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
 | Notifications | internal notifier interface, `ORCH_HUB_BARK_URL`, Bark POST backend, CLI `orch-hub notify test` |
 | Launchd service | CLI `orch-hub launchd deploy|update|start|stop|restart|status`, `orch-hub-api`, `deploy/launchd/com.qinglin89.orch-hub.plist`, `docs/launchd.md` |
@@ -53,6 +55,8 @@ verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
 | cli | Human and JSON repo readiness output; launchd command dispatch; notification delivery-check dispatch |
 | launchd | Resolve launchd deployment settings including optional Bark URL, expose installed-plist Bark URL lookup, render/install plist from template, install/update package, run launchctl lifecycle commands, and probe service status |
 | task_store | Parse `.ai-tasks` indexes, including Markdown-link Task cells, and task frontmatter into repo task inventories; read contained active or archived task file bodies by exact id |
+| intake | Own remote intake lifecycle, hub-owned intake records/events, readiness and repo-busy gates, read-only draft/revise/cancel semantics, and inventory-verified confirm/rollback |
+| intake_agent | Drive a Claude CLI `/intake-task` session with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, append run history events, and trigger isolated notifications |
 | history | Append/read per-run JSONL audit/history events without storing answer text |
 | control_dir | Implement question/answer/stop file-channel handling |

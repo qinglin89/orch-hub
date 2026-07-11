@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-09
-verified-against: 98194a7b5c814f85807bb897298db131bc593900
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Project Overview
@@ -13,16 +13,18 @@ The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
-the mobile dashboard, and Bark notifications: read the ai-native-development
-local registry, list managed repos, report launch readiness, parse each repo's
-`.ai-tasks/` index plus task frontmatter, expose those payloads through HTTP,
-require `ORCH_HUB_TOKEN` on every non-health HTTP path, provide a launchd
-user-agent template for resident macOS operation, read/write orchestrator
-question, answer, and stop files, launch/list/stop/reattach orchestrator
-subprocess runs with per-repo serialization, answer waiting questions remotely,
-retrieve or stream run logs, persist run lifecycle plus answer-audit metadata,
-serve the dashboard, and push Bark notifications for pending questions and
-terminal run states. Later slices add remote intake-task and IM bot control.
+the mobile dashboard, Bark notifications, and remote intake-task: read the
+ai-native-development local registry, list managed repos, report launch
+readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
+those payloads through HTTP, require `ORCH_HUB_TOKEN` on every non-health HTTP
+path, provide a launchd user-agent template for resident macOS operation,
+read/write orchestrator question, answer, and stop files, launch/list/stop/
+reattach orchestrator subprocess runs with per-repo serialization, answer
+waiting questions remotely, retrieve or stream run logs, persist run lifecycle
+plus answer-audit metadata, serve the dashboard, push Bark notifications for
+pending questions and terminal run states, and run a confirmed remote intake
+loop that drafts a task before writing it to the target repo. Later slices add
+IM bot control.
 
 ## Users
 
@@ -41,6 +43,8 @@ terminal run states. Later slices add remote intake-task and IM bot control.
 - Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
 - Push mobile notifications for pending questions and terminal run states via
   Bark when `ORCH_HUB_BARK_URL` is configured.
+- Draft, revise, confirm, or cancel new task proposals remotely while keeping
+  target repo `.ai-tasks/` files unchanged until explicit confirmation.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.
@@ -54,6 +58,8 @@ terminal run states. Later slices add remote intake-task and IM bot control.
 - Do not make the service public on the internet.
 - Do not implement watchdogs or hang/log-silence detection.
 - Do not run more than one orchestrator at a time in the same target repo.
+- Do not treat unconfirmed intake drafts as active tasks or expose them through
+  task inventory.
 - Do not hand-edit deployed protocol/orchestrator copies in target repos; canonical changes belong in ai-native-development.
 
 ## Tech Stack
@@ -79,6 +85,8 @@ orch_hub/
   cli.py
   config.py
   history.py
+  intake.py
+  intake_agent.py
   models.py
   registry.py
   readiness.py
@@ -95,6 +103,8 @@ tests/
   test_config.py
   test_control_dir.py
   test_history.py
+  test_intake.py
+  test_intake_agent.py
   test_logs.py
   test_registry.py
   test_readiness.py

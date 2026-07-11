@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Modules: Web and Operations
@@ -11,11 +11,12 @@ Location: `orch_hub/api.py`
 
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
-run_manager=None)` builds an app with a default-deny bearer-token middleware,
+run_manager=None, intake_manager=None)` builds an app with a default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
-escalation, log, and history routes over one
-`RunManager` instance plus a lifespan-owned `RunMonitor`. Implemented run
+escalation, log, and history routes over one `RunManager` instance plus a
+lifespan-owned `RunMonitor`, plus protected intake routes over one
+`IntakeManager`. Implemented run
 routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`,
 `GET /api/runs/{run_id}/task`, and `POST /api/runs/{run_id}/stop`;
 implemented escalation routes are
@@ -29,6 +30,13 @@ implemented escalation routes are
 JSON; recent commit lookup failures return `available:false` rather than
 raising. The run-scoped task route reads active task content first and falls
 back to the task archive without opening general archived-task listing. The
+intake routes are `POST /api/intakes`, `GET /api/intakes`,
+`GET /api/intakes/{intake_id}`, `GET /api/intakes/{intake_id}/history`,
+`POST /api/intakes/{intake_id}/revise`,
+`POST /api/intakes/{intake_id}/confirm`, and
+`POST /api/intakes/{intake_id}/cancel`; manager errors map to 404/409/400 and
+agent-turn failures are returned as auditable intake records rather than 5xx.
+The default intake backend is `ClaudeIntakeAgent`. The
 recent-log route adds a nested `diagnostic` from
 `spawn.out` only when the orchestrator log is absent and the capture is
 non-empty. Module-level `app` supports
@@ -51,8 +59,8 @@ served uncached by the API so updates reach browsers on the next load. `app.js`
 owns token entry/localStorage, bearer `fetch` calls, hash routing,
 repo/task/detail/run views, repo/task run-state signals, recent commits,
 task-detail Start/Stop run controls, waiting-question answer forms, run
-history, a run-scoped task-file view, and recent/live log views; `styles.css`
-holds the mobile layout. The dashboard reads only HTTP payloads, uses `fetch` +
+history, a run-scoped task-file view, remote intake start/review views, and
+recent/live log views; `styles.css` holds the mobile layout. The dashboard reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.
@@ -77,6 +85,12 @@ route's `spawn.out` diagnostic and falls back to it when a live stream ends
 before any orchestrator log line is seen; its task back-link routes to
 `#/runs/{run_id}/task` so archived task files stay reachable through run
 history while normal task views stay active-only.
+
+Remote intake stays separate from run controls: repo detail posts a natural
+language request to `POST /api/intakes`, the review view displays the complete
+draft task file and index row plus metadata-only history, Request changes posts
+to revise, Cancel terminates the intake, and Confirm re-fetches task inventory
+before routing to the created task's existing detail/Start flow.
 
 ## Launchd Operations
 

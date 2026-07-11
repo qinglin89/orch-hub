@@ -1,13 +1,14 @@
 ---
-last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+last-updated: 2026-07-11
+verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 ---
 
 # Architecture
 
 orch-hub is a local control plane for remotely inspecting managed repos,
-starting deployed orchestrator runs, answering human-input prompts, and reading
-run state. It coordinates existing systems rather than replacing them:
+starting deployed orchestrator runs, answering human-input prompts, reading run
+state, and drafting new tasks through a confirmed intake loop. It coordinates
+existing systems rather than replacing them:
 ai-native-development remains the managed-repo registry, target repos own their
 task files and deployed orchestrator payloads, and orch-hub owns only its
 service surface plus external run state.
@@ -87,6 +88,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Launch readiness | Computed from target repo files, git state, and `aii-2 status` | readiness fails closed and gates run launch |
 | Task ids, summaries, status, blockers | Target repo `.ai-tasks/index.md` plus task frontmatter | task inventory is read-only; runtime overlays do not replace task status |
 | Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
+| Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
 | Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
@@ -123,6 +125,16 @@ then locates recent or streamed logs from that record's task and timestamp
 context. Browser streaming uses bearer-authenticated fetch streams instead of a
 credential-bearing query string.
 
+Remote intake starts from a natural-language request for a ready repo. The hub
+persists hub-owned intake state, drives a conversational `/intake-task` session
+through draft/revise turns that are treated as read-only proposals, and shows the
+full proposed task file plus index row for human review. Only explicit confirm
+calls the agent write turn. The manager records `confirmed` only after the
+created task round-trips through the frontmatter-authoritative task inventory as
+`pending` or `blocked`; failed, cancelled, unverified, or interrupted intakes
+stay outside active task inventory and roll back the task file/index paths they
+were authorized to touch when the process is still alive.
+
 ## Component Boundaries
 
 - Registry discovery does not perform readiness checks.
@@ -130,6 +142,8 @@ credential-bearing query string.
 - Git metadata is display-only and never gates launch.
 - Housekeeping marker state is display-only and never gates launch.
 - Task inventory reads task files but does not decide orchestrator turn state.
+- Intake owns draft/revise/confirm/cancel lifecycle, intake audit state, and the
+  read-only-until-confirm safety contract.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
 - Control-dir handling owns only the file-channel mechanics for questions,
@@ -152,6 +166,7 @@ credential-bearing query string.
 - FastAPI and uvicorn for the HTTP service.
 - launchd for resident macOS service operation.
 - Optional Bark push endpoint when configured.
+- Claude CLI for the concrete remote intake backend.
 - Tailscale or an equivalent private network for remote access.
 
 ## Invariants
@@ -162,6 +177,9 @@ credential-bearing query string.
 - Control-dir adapter code stays file-channel only.
 - The same target repo cannot have two active orchestrator runs.
 - Hub-owned run dirs stay outside target repo working trees.
+- Hub-owned unconfirmed intake drafts are not tasks and cannot be launched.
+- A confirmed intake must land through task inventory as `pending` or `blocked`;
+  every other confirm outcome is failed/unverified.
 - Human answers are auditable, but history must not duplicate answer text.
 - Log access is scoped to known run records.
 - Readiness must fail closed before launch.
