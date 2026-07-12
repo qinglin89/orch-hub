@@ -635,7 +635,8 @@ code {
   background: var(--bad-fg);
 }
 
-.run-controls .ack {
+.run-controls .ack,
+.run-controls .opt-toggle {
   display: flex;
   gap: 8px;
   align-items: flex-start;
@@ -645,7 +646,8 @@ code {
   cursor: pointer;
 }
 
-.run-controls .ack input {
+.run-controls .ack input,
+.run-controls .opt-toggle input {
   margin-top: 2px;
   flex-shrink: 0;
 }

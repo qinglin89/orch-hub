@@ -1040,6 +1040,10 @@
             <input type="text" class="opt-review-effort" autocapitalize="off"
               autocomplete="off" spellcheck="false" placeholder="default" />
           </label>
+          <label class="opt-toggle"><input type="checkbox" class="opt-plan-gate" />
+            <span>Plan-gate: every dev session first proposes its goal and plan
+            and blocks for confirmation before implementing (orchestrator
+            default: off).</span></label>
           ${ack}
           <div class="control-actions">
             <button type="submit">Launch run</button>
@@ -1087,7 +1091,8 @@
   // Build the orchestrator extra args for a Start. The backend is always pinned
   // to cc-codex (never selectable from the dashboard); each override adds its
   // flag only when the user supplied a value, so a blank field defers to the
-  // orchestrator default and never reaches the argv.
+  // orchestrator default and never reaches the argv. Plan-gate is the one
+  // valueless toggle and is appended last (see below).
   function buildExtraArgs(form) {
     const args = ["--backend", "cc-codex"];
     for (const [flag, cls] of RUN_OPTION_FIELDS) {
@@ -1095,6 +1100,13 @@
       const value = field ? field.value.trim() : "";
       if (value) args.push(flag, value);
     }
+    // Plan-gate is a valueless store_true flag, not a [flag, value] override, so
+    // it can't ride the RUN_OPTION_FIELDS loop. Append a bare "--plan-gate" only
+    // when checked; unchecked omits it so the orchestrator keeps its default
+    // (off). Pinned to the argv tail, after the overrides, for a deterministic
+    // order (…, "--plan-gate").
+    const planGate = form.querySelector(".opt-plan-gate");
+    if (planGate && planGate.checked) args.push("--plan-gate");
     return args;
   }
 

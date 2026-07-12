@@ -220,6 +220,16 @@ def test_launch_options_dialog_renders_the_supported_overrides():
         assert cls in body
 
 
+def test_launch_options_dialog_exposes_the_plan_gate_toggle():
+    # Plan-gate is a valueless store_true flag, not a [flag, value] override, so
+    # it rides its own checkbox (opt-plan-gate) and a dedicated buildExtraArgs
+    # branch that appends a bare `--plan-gate` only when checked. Asserted at the
+    # served-asset boundary like the overrides above.
+    body = app_js()
+    assert "opt-plan-gate" in body
+    assert "--plan-gate" in body
+
+
 def test_launch_dialog_submit_sends_extra_args_and_keeps_ack():
     # Start still carries acknowledge_blocked (blocked-task launch) and now also
     # sends the constructed extra_args to the same /api/runs create route.
