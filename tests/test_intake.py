@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -33,13 +34,21 @@ from orch_hub.intake import (
     STATUS_AWAITING_REVIEW,
     STATUS_CANCELLED,
     STATUS_CONFIRMED,
+    STATUS_CONFIRMING,
     STATUS_DRAFTING,
     STATUS_ERROR,
     STATUS_FAILED,
+    STATUS_REVISING,
     UnknownIntakeError,
     read_events,
 )
-from orch_hub.models import IntakeDraft, ManagedRepo, ReadinessCheck, ReadinessReport
+from orch_hub.models import (
+    IntakeDraft,
+    IntakeRecord,
+    ManagedRepo,
+    ReadinessCheck,
+    ReadinessReport,
+)
 
 FIXED_NOW = dt.datetime(2026, 7, 11, 4, 0, 0, tzinfo=dt.timezone.utc)
 DRAFT_TASK_ID = "2026-07-11-add-widget"
@@ -231,18 +240,41 @@ def make_repo(root: Path, name: str = "repo-a") -> ManagedRepo:
     return ManagedRepo(name=name, path=path, manifest=path / ".ai-deploy-manifest.json")
 
 
+def sync_executor(run) -> None:
+    """Run an intake turn inline so a mutating call settles before it returns.
+
+    The manager runs each agent turn off the lock through an injected executor;
+    the production default is a daemon thread. Tests inject this synchronous one
+    so a turn finishes (and the record settles) within the mutating call — the
+    return value stays the transient record, but a subsequent ``get_intake``
+    deterministically observes the settled outcome with no thread joins.
+    """
+    run()
+
+
+def settle(manager: IntakeManager, transient: IntakeRecord) -> IntakeRecord:
+    """The persisted record after a (synchronously executed) turn finished.
+
+    A mutating call returns the transient (drafting/revising/confirming) record;
+    with :func:`sync_executor` the off-lock turn already ran, so re-reading shows
+    the settled awaiting_review/confirmed/failed state.
+    """
+    return manager.get_intake(transient.intake_id)
+
+
 def make_manager(
     root: Path,
     *,
     agent: FakeIntakeAgent | None = None,
     readiness=passing_readiness,
     clock: FakeClock | None = None,
+    executor=sync_executor,
 ) -> tuple[IntakeManager, FakeIntakeAgent, FakeClock]:
     agent = agent if agent is not None else FakeIntakeAgent()
     clock = clock if clock is not None else FakeClock()
     config = Config(ai_native_path=root / "ai-native", data_dir=root / "hub-data")
     manager = IntakeManager(
-        config, agent=agent, readiness_checker=readiness, clock=clock
+        config, agent=agent, readiness_checker=readiness, clock=clock, executor=executor
     )
     return manager, agent, clock
 
@@ -267,8 +299,10 @@ def test_start_intake_drafts_without_touching_the_repo(tmp_path):
     before = snapshot(repo)
     manager, agent, _ = make_manager(tmp_path)
 
-    record = manager.start_intake(repo, REQUEST)
+    transient = manager.start_intake(repo, REQUEST)
+    assert transient.status == STATUS_DRAFTING  # returned before the off-lock turn
 
+    record = settle(manager, transient)
     assert record.status == STATUS_AWAITING_REVIEW
     assert record.draft is not None
     assert record.draft.task_id == DRAFT_TASK_ID
@@ -315,8 +349,10 @@ def test_revise_updates_draft_and_bumps_iteration_without_writing(tmp_path):
     record = manager.start_intake(repo, REQUEST)
 
     clock.tick()
-    revised = manager.revise_intake(record.intake_id, "Scope it to a single route")
+    transient = manager.revise_intake(record.intake_id, "Scope it to a single route")
+    assert transient.status == STATUS_REVISING  # returned before the off-lock turn
 
+    revised = settle(manager, transient)
     assert revised.status == STATUS_AWAITING_REVIEW
     assert revised.iteration == 1
     assert "iteration 1" in revised.draft.task_file
@@ -351,8 +387,10 @@ def test_confirm_is_the_only_write_and_records_created_task(tmp_path):
     manager.revise_intake(record.intake_id, "Tighten the acceptance")
 
     clock.tick()
-    confirmed = manager.confirm_intake(record.intake_id)
+    transient = manager.confirm_intake(record.intake_id)
+    assert transient.status == STATUS_CONFIRMING  # returned before the write turn
 
+    confirmed = settle(manager, transient)
     assert confirmed.status == STATUS_CONFIRMED
     assert confirmed.created_task_id == DRAFT_TASK_ID
     assert agent.confirm_calls == 1
@@ -420,7 +458,7 @@ def test_draft_failure_marks_failed_and_leaves_repo_unchanged(tmp_path):
     agent = FakeIntakeAgent(draft_error=RuntimeError("agent crashed"))
     manager, _, _ = make_manager(tmp_path, agent=agent)
 
-    record = manager.start_intake(repo, REQUEST)
+    record = settle(manager, manager.start_intake(repo, REQUEST))
 
     assert record.status == STATUS_FAILED
     assert "agent crashed" in (record.error or "")
@@ -436,7 +474,7 @@ def test_revise_failure_marks_failed(tmp_path):
     manager, _, _ = make_manager(tmp_path, agent=agent)
     record = manager.start_intake(repo, REQUEST)
 
-    failed = manager.revise_intake(record.intake_id, "change it")
+    failed = settle(manager, manager.revise_intake(record.intake_id, "change it"))
 
     assert failed.status == STATUS_FAILED
     assert "revise boom" in (failed.error or "")
@@ -450,7 +488,7 @@ def test_confirm_failure_marks_failed_and_leaves_repo_unchanged(tmp_path):
     manager, _, _ = make_manager(tmp_path, agent=agent)
     record = manager.start_intake(repo, REQUEST)
 
-    failed = manager.confirm_intake(record.intake_id)
+    failed = settle(manager, manager.confirm_intake(record.intake_id))
 
     assert failed.status == STATUS_FAILED
     assert "write blew up" in (failed.error or "")
@@ -466,7 +504,7 @@ def test_confirm_fails_when_agent_reports_success_but_writes_nothing(tmp_path):
     manager, agent, _ = make_manager(tmp_path, agent=WriteNothingOnConfirmAgent())
     record = manager.start_intake(repo, REQUEST)
 
-    failed = manager.confirm_intake(record.intake_id)
+    failed = settle(manager, manager.confirm_intake(record.intake_id))
 
     # Exit-0 with no write is NOT a confirmation: the manager verifies the task
     # actually appears in the repo inventory before recording ``confirmed``, so
@@ -486,7 +524,7 @@ def test_confirm_rolls_back_partial_task_file_when_index_row_missing(tmp_path):
     manager, _, _ = make_manager(tmp_path, agent=PartialWriteOnConfirmAgent())
     record = manager.start_intake(repo, REQUEST)
 
-    failed = manager.confirm_intake(record.intake_id)
+    failed = settle(manager, manager.confirm_intake(record.intake_id))
 
     # A task file with no index row is not inventory-visible → unverified → the
     # orphan file is rolled back; a non-confirmed intake leaves no artifact.
@@ -501,7 +539,7 @@ def test_confirm_rolls_back_when_write_turn_fails_after_writing(tmp_path):
     manager, _, _ = make_manager(tmp_path, agent=WriteThenFailOnConfirmAgent())
     record = manager.start_intake(repo, REQUEST)
 
-    failed = manager.confirm_intake(record.intake_id)
+    failed = settle(manager, manager.confirm_intake(record.intake_id))
 
     # A write-permitted confirm turn that mutates .ai-tasks/ and then fails must
     # not leave the created task behind (acceptance: a failed intake does not
@@ -520,7 +558,7 @@ def test_confirm_accepts_valid_post_intake_status(tmp_path, status):
     )
     record = manager.start_intake(repo, REQUEST)
 
-    confirmed = manager.confirm_intake(record.intake_id)
+    confirmed = settle(manager, manager.confirm_intake(record.intake_id))
 
     # ``pending`` (fresh intake) and ``blocked`` (intake recorded blockers) are
     # the two legal post-intake states, so both satisfy the confirm
@@ -544,7 +582,7 @@ def test_confirm_rejects_and_rolls_back_non_intake_status(tmp_path, status):
     )
     record = manager.start_intake(repo, REQUEST)
 
-    failed = manager.confirm_intake(record.intake_id)
+    failed = settle(manager, manager.confirm_intake(record.intake_id))
 
     # Only ``pending``/``blocked`` are legal post-intake states. A confirm turn
     # that lands a task in any other frontmatter status — an in-flight/finished
@@ -565,10 +603,13 @@ def test_default_agent_makes_intake_fail_cleanly(tmp_path):
     # No agent injected: the default unavailable backend must fail the intake,
     # not crash the manager.
     manager = IntakeManager(
-        config, readiness_checker=passing_readiness, clock=FakeClock()
+        config,
+        readiness_checker=passing_readiness,
+        clock=FakeClock(),
+        executor=sync_executor,
     )
 
-    record = manager.start_intake(repo, REQUEST)
+    record = settle(manager, manager.start_intake(repo, REQUEST))
 
     assert record.status == STATUS_FAILED
     assert "no intake agent configured" in (record.error or "")
@@ -673,7 +714,7 @@ def test_terminal_intake_frees_the_repo_for_a_new_one(tmp_path):
     second = manager.start_intake(repo, "a fresh request")
 
     assert second.intake_id != first.intake_id
-    assert second.status == STATUS_AWAITING_REVIEW
+    assert settle(manager, second).status == STATUS_AWAITING_REVIEW
 
 
 def test_two_repos_can_intake_concurrently(tmp_path):
@@ -684,7 +725,7 @@ def test_two_repos_can_intake_concurrently(tmp_path):
     manager.start_intake(repo_a, REQUEST)
     record_b = manager.start_intake(repo_b, "b request")
 
-    assert record_b.status == STATUS_AWAITING_REVIEW
+    assert settle(manager, record_b).status == STATUS_AWAITING_REVIEW
     assert len(manager.list_intakes()) == 2
 
 
@@ -724,7 +765,7 @@ def test_get_and_list_and_history(tmp_path):
 def test_record_to_dict_hides_agent_ref_but_shows_draft(tmp_path):
     repo = make_repo(tmp_path)
     manager, _, _ = make_manager(tmp_path)
-    record = manager.start_intake(repo, REQUEST)
+    record = settle(manager, manager.start_intake(repo, REQUEST))
 
     payload = record.to_dict()
     assert "agent_ref" not in payload
@@ -744,4 +785,220 @@ def test_unreadable_record_surfaces_as_error(tmp_path):
     assert surfaced.status == STATUS_ERROR
     assert "unreadable" in (surfaced.error or "")
     # An error record carries no repo attribution, so it never holds the slot.
-    assert manager.start_intake(repo, "new one").status == STATUS_AWAITING_REVIEW
+    assert settle(manager, manager.start_intake(repo, "new one")).status == STATUS_AWAITING_REVIEW
+
+
+# -- off-lock turns: concurrency, cancel-race, startup reconciliation ----------
+#
+# These exercise the async model directly with a real background thread: a turn
+# that blocks (BlockingIntakeAgent) so a read or cancel can land while it is in
+# flight, run through a joinable executor (ThreadExecutor) so finalize completes
+# deterministically. The sync-executor tests above already cover the happy/fail
+# state machine; here the point is that the turn runs OFF the manager lock.
+
+
+class BlockingIntakeAgent(FakeIntakeAgent):
+    """A ``FakeIntakeAgent`` whose selected turn blocks until released.
+
+    Lets a test observe a turn in flight off the manager lock: the turn signals
+    ``started`` and waits on ``release`` before producing its result. Only the
+    turn named by ``block`` (``"draft"`` or ``"revise"``) blocks.
+    """
+
+    def __init__(self, *, block: str = "draft", **kw):
+        super().__init__(**kw)
+        self._block = block
+        self.started = threading.Event()
+        self.release = threading.Event()
+
+    def draft(self, request, repo) -> AgentDraftResult:
+        if self._block == "draft":
+            self.started.set()
+            assert self.release.wait(timeout=5), "draft turn was never released"
+        return super().draft(request, repo)
+
+    def revise(self, handle, feedback, repo) -> AgentDraftResult:
+        if self._block == "revise":
+            self.started.set()
+            assert self.release.wait(timeout=5), "revise turn was never released"
+        return super().revise(handle, feedback, repo)
+
+
+class ThreadExecutor:
+    """Runs each intake turn on its own daemon thread the test can join.
+
+    The production executor is a fire-and-forget daemon thread; this one keeps
+    the threads so a test can wait for finalize to complete before asserting.
+    """
+
+    def __init__(self):
+        self._threads: list[threading.Thread] = []
+
+    def __call__(self, run) -> None:
+        thread = threading.Thread(target=run, daemon=True)
+        self._threads.append(thread)
+        thread.start()
+
+    def join(self, timeout: float = 5.0) -> None:
+        for thread in self._threads:
+            thread.join(timeout)
+            assert not thread.is_alive(), "intake turn thread did not finish"
+
+
+def call_without_blocking(fn, timeout: float = 5.0):
+    """Run ``fn`` on a thread; fail if it does not return within ``timeout``.
+
+    A read that blocks means an in-flight turn is (wrongly) holding the manager
+    lock; this turns that deadlock into a clean assertion instead of a hung test.
+    """
+    box: dict = {}
+    thread = threading.Thread(
+        target=lambda: box.__setitem__("value", fn()), daemon=True
+    )
+    thread.start()
+    thread.join(timeout)
+    assert not thread.is_alive(), "call blocked — a turn is holding the manager lock"
+    return box["value"]
+
+
+def force_status(manager: IntakeManager, intake_id: str, status: str) -> None:
+    """Rewrite a persisted intake's status (simulating a hub crash mid-turn)."""
+    path = manager.intake_dir / intake_id / "intake.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["status"] = status
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
+def test_reads_do_not_block_during_in_flight_turn(tmp_path):
+    repo = make_repo(tmp_path)
+    agent = BlockingIntakeAgent()
+    executor = ThreadExecutor()
+    manager, _, _ = make_manager(tmp_path, agent=agent, executor=executor)
+
+    transient = manager.start_intake(repo, REQUEST)
+    assert transient.status == STATUS_DRAFTING
+    assert agent.started.wait(timeout=5)  # the draft turn is running off the lock
+
+    # The in-flight turn holds no lock, so reads return at once with the
+    # transient state. If the turn held the manager lock these would deadlock;
+    # ``call_without_blocking`` fails cleanly in that case instead of hanging.
+    listed = call_without_blocking(manager.list_intakes)
+    assert [r.status for r in listed] == [STATUS_DRAFTING]
+    fetched = call_without_blocking(lambda: manager.get_intake(transient.intake_id))
+    assert fetched.status == STATUS_DRAFTING
+
+    agent.release.set()
+    executor.join()
+    assert manager.get_intake(transient.intake_id).status == STATUS_AWAITING_REVIEW
+
+
+def test_cancel_during_drafting_turn_ends_cancelled_and_discards_result(tmp_path):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    agent = BlockingIntakeAgent()
+    executor = ThreadExecutor()
+    manager, _, _ = make_manager(tmp_path, agent=agent, executor=executor)
+
+    transient = manager.start_intake(repo, REQUEST)
+    assert agent.started.wait(timeout=5)  # draft turn in flight, blocked
+
+    # Cancel lands mid-turn: drafting is cancellable, so the record goes terminal
+    # now while the turn is still blocked — a concurrent cancel does not wait for
+    # the turn.
+    cancelled = manager.cancel_intake(transient.intake_id)
+    assert cancelled.status == STATUS_CANCELLED
+
+    # Release the turn; finalize must DISCARD its result and never resurrect the
+    # cancelled intake back to awaiting_review.
+    agent.release.set()
+    executor.join()
+
+    final = manager.get_intake(transient.intake_id)
+    assert final.status == STATUS_CANCELLED
+    assert final.draft is None  # the finished draft was thrown away
+    assert snapshot(repo) == before  # drafting is read-only regardless
+    # The orphaned session is released best-effort exactly once, by finalize
+    # (the drafting turn had not yet stored a handle for cancel to release).
+    assert agent.cancel_calls == 1
+    events = read_events(manager.intake_dir / transient.intake_id)
+    assert [e.kind for e in events] == [KIND_INTAKE_CREATED, KIND_INTAKE_CANCELLED]
+
+
+def test_cancel_during_revising_turn_ends_cancelled_and_discards_result(tmp_path):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    agent = BlockingIntakeAgent(block="revise")
+    executor = ThreadExecutor()
+    manager, _, _ = make_manager(tmp_path, agent=agent, executor=executor)
+
+    started = manager.start_intake(repo, REQUEST)  # draft runs (not blocked)
+    executor.join()  # let the draft settle to awaiting_review
+    assert manager.get_intake(started.intake_id).status == STATUS_AWAITING_REVIEW
+
+    transient = manager.revise_intake(started.intake_id, "make it smaller")
+    assert transient.status == STATUS_REVISING
+    assert agent.started.wait(timeout=5)  # revise turn in flight, blocked
+
+    cancelled = manager.cancel_intake(started.intake_id)
+    assert cancelled.status == STATUS_CANCELLED
+    # The revision's draft is still iteration 0 (the revise result is discarded).
+    assert cancelled.iteration == 0
+
+    agent.release.set()
+    executor.join()
+
+    final = manager.get_intake(started.intake_id)
+    assert final.status == STATUS_CANCELLED
+    assert final.iteration == 0  # the discarded revise never bumped iteration
+    assert snapshot(repo) == before
+    events = read_events(manager.intake_dir / started.intake_id)
+    # No revised event: the cancelled turn's result is discarded, not audited.
+    assert [e.kind for e in events] == [KIND_INTAKE_CREATED, KIND_INTAKE_CANCELLED]
+
+
+@pytest.mark.parametrize(
+    "transient_status", [STATUS_DRAFTING, STATUS_REVISING, STATUS_CONFIRMING]
+)
+def test_reconcile_orphans_fails_orphaned_transient_records(tmp_path, transient_status):
+    repo = make_repo(tmp_path)
+    before = snapshot(repo)
+    manager1, _, clock = make_manager(tmp_path)
+    started = manager1.start_intake(repo, REQUEST)  # settles awaiting_review (sync)
+
+    # Simulate a hub crash mid-turn: force a persisted transient status. A fresh
+    # manager over the same data dir has no in-memory handle, so this is an
+    # orphan no thread will finalize.
+    force_status(manager1, started.intake_id, transient_status)
+    manager2, _, _ = make_manager(tmp_path, clock=clock)
+
+    # The orphan holds the repo's intake slot until reconciled.
+    with pytest.raises(IntakeBusyError):
+        manager2.start_intake(repo, "blocked while the orphan holds the slot")
+
+    reconciled = manager2.reconcile_orphans()
+
+    assert [r.intake_id for r in reconciled] == [started.intake_id]
+    assert reconciled[0].status == STATUS_FAILED
+    assert "session lost" in (reconciled[0].error or "")
+    assert manager2.get_intake(started.intake_id).status == STATUS_FAILED
+    assert snapshot(repo) == before  # reconciliation never mutates the target repo
+    events = read_events(manager2.intake_dir / started.intake_id)
+    assert events[-1].kind == KIND_INTAKE_FAILED
+    # The freed slot lets a new intake start.
+    fresh = manager2.start_intake(repo, "now unblocked")
+    assert settle(manager2, fresh).status == STATUS_AWAITING_REVIEW
+
+
+def test_reconcile_orphans_preserves_resting_states_and_returns_nothing(tmp_path):
+    repo = make_repo(tmp_path)
+    manager1, _, clock = make_manager(tmp_path)
+    started = settle(manager1, manager1.start_intake(repo, REQUEST))
+    assert started.status == STATUS_AWAITING_REVIEW
+
+    # A restart: fresh manager over the same data dir, no in-memory handles. An
+    # awaiting_review draft is a resting (not in-flight transient) state, so
+    # reconciliation leaves it untouched — the human can still review it after a
+    # restart. Reconciliation only fails the in-flight transient trio.
+    manager2, _, _ = make_manager(tmp_path, clock=clock)
+    assert manager2.reconcile_orphans() == []
+    assert manager2.get_intake(started.intake_id).status == STATUS_AWAITING_REVIEW

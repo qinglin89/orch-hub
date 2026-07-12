@@ -278,10 +278,14 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
-        # Own the monitor's lifetime with the service: start the background poll
-        # on startup, stop it (joining the worker) on shutdown so the service
-        # leaves no thread behind. The auth middleware passes the lifespan scope
-        # straight through, so this runs regardless of the token.
+        # Recover intake state before serving: an orphaned transient intake
+        # record (a hub that died mid-turn) would hold its repo's intake slot
+        # forever, so fail it once at startup while no turn is in flight. Then own
+        # the monitor's lifetime with the service: start the background poll on
+        # startup, stop it (joining the worker) on shutdown so the service leaves
+        # no thread behind. The auth middleware passes the lifespan scope straight
+        # through, so this runs regardless of the token.
+        intake.reconcile_orphans()
         monitor.start()
         try:
             yield
@@ -741,24 +745,30 @@ def create_app(
     # Thin adapters over the app's single IntakeManager (like the run routes over
     # RunManager). The load-bearing contract is unchanged across the HTTP surface:
     # only ``confirm`` reaches the agent's write path, so a drafted, revised,
-    # cancelled, or failed intake never modifies the target repo. Gate refusals
-    # (repo busy, readiness, illegal state, unknown id) surface as the mapped 4xx
-    # above; an agent-turn failure or a lost session is a ``failed`` record
-    # returned with a success code, not a 5xx.
+    # cancelled, or failed intake never modifies the target repo. Agent turns run
+    # off the manager lock, so a mutating route returns the transient record
+    # (drafting/revising/confirming) at once and the client polls
+    # ``GET /api/intakes/{id}`` for the settled outcome; reads never block behind
+    # an in-flight turn. Gate refusals (repo busy, readiness, illegal state,
+    # unknown id) surface as the mapped 4xx above; a lost session is a ``failed``
+    # record returned with a success code, not a 5xx.
 
     @app.post("/api/intakes", status_code=201)
     def start_intake(req: StartIntakeRequest) -> dict:
-        """Start a remote intake for ``repo_id``, returning the drafted record.
+        """Start a remote intake for ``repo_id``, returning the transient record.
 
         Resolves ``repo_id`` by managed-repo name (unknown → 404) and delegates
         to :meth:`IntakeManager.start_intake`, which fail-closed gates on a
         non-empty request (empty → 400), one in-flight intake per repo (busy →
-        409), and readiness (not ready → 409) before drafting. The response is
-        the :class:`~orch_hub.models.IntakeRecord`: ``awaiting_review`` with the
-        complete draft on success, or ``failed`` with a reason when the drafting
-        turn (including the default unconfigured backend) failed — a failed draft
-        is an auditable outcome, not an error. The intake resource is created
-        either way, hence 201; the ``status`` field carries the outcome.
+        409), and readiness (not ready → 409) before drafting. The drafting turn
+        runs off the manager lock, so the response is the transient
+        :class:`~orch_hub.models.IntakeRecord` (``status: drafting``, no draft
+        yet) returned immediately; the client then polls
+        ``GET /api/intakes/{id}`` to observe the settled ``awaiting_review``
+        draft, or a ``failed`` record when the drafting turn (including the
+        default unconfigured backend) failed — a failed draft is an auditable
+        outcome, not an error. The intake resource is created either way, hence
+        201; the ``status`` field carries the current lifecycle state.
         """
         repos = discover_repos(resolved)
         repo = next((r for r in repos if r.name == req.repo_id), None)
@@ -795,10 +805,13 @@ def create_app(
         """Send review feedback back to the intake session for a fresh draft.
 
         Legal only from ``awaiting_review`` (any other status → 409); empty
-        feedback → 400. Still read-only: the revised draft replaces the current
-        one and bumps ``iteration`` without touching the target repo. A lost
-        session or agent failure resolves to a ``failed`` record (200), not a
-        5xx. Unknown ids are 404.
+        feedback → 400. Still read-only: the revise turn runs off the lock and
+        the revised draft replaces the current one and bumps ``iteration``
+        without touching the target repo. The response is the transient
+        ``revising`` record (200) returned immediately; poll ``GET
+        /api/intakes/{id}`` for the settled ``awaiting_review`` draft. A lost
+        session (fail-closed before any turn) resolves to a ``failed`` record
+        (200), not a 5xx. Unknown ids are 404.
         """
         try:
             record = intake.revise_intake(intake_id, req.feedback)
@@ -812,12 +825,15 @@ def create_app(
 
         The sole route that reaches the agent's write path, so it is the only way
         an intake creates the ``.ai-tasks/`` task file and index row. Legal only
-        from ``awaiting_review`` (else 409); unknown ids are 404. On success the
-        record carries ``created_task_id`` and the new ``pending`` task is then
-        visible through the existing task-inventory routes
-        (``GET /api/repos/{repo_id}/tasks``) — intake does not duplicate task
-        listing. A lost session or a write failure resolves to a ``failed``
-        record (200) with no task left behind by the manager.
+        from ``awaiting_review`` (else 409); unknown ids are 404. The write turn
+        runs off the lock, so the response is the transient ``confirming`` record
+        (200) returned immediately; poll ``GET /api/intakes/{id}`` for the settled
+        outcome. On success that record carries ``created_task_id`` and the new
+        ``pending`` task is then visible through the existing task-inventory
+        routes (``GET /api/repos/{repo_id}/tasks``) — intake does not duplicate
+        task listing. A lost session (fail-closed before any turn) or a write
+        failure resolves to a ``failed`` record with no task left behind by the
+        manager.
         """
         return intake.confirm_intake(intake_id).to_dict()
 

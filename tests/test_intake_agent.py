@@ -25,6 +25,8 @@ from orch_hub.intake import (
     IntakeManager,
     STATUS_AWAITING_REVIEW,
     STATUS_CONFIRMED,
+    STATUS_CONFIRMING,
+    STATUS_DRAFTING,
     STATUS_FAILED,
 )
 from orch_hub.intake_agent import (
@@ -396,6 +398,17 @@ def test_unexpected_handle_type_raises(tmp_path):
 # -- end-to-end through the real IntakeManager --------------------------------
 
 
+def sync_executor(run) -> None:
+    """Run each intake turn inline so a mutating call settles before it returns.
+
+    The manager runs agent turns off its lock through an injected executor (a
+    daemon thread in production); this synchronous one keeps the end-to-end
+    assertions deterministic — the mutating call returns the transient record and
+    a follow-up ``get_intake`` observes the settled outcome.
+    """
+    run()
+
+
 def passing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport((ReadinessCheck("all", True, "ok"),))
 
@@ -443,19 +456,24 @@ def test_manager_end_to_end_is_read_only_until_confirm(tmp_path):
         agent=agent,
         readiness_checker=passing_readiness,
         clock=lambda: FIXED_NOW,
+        executor=sync_executor,
     )
 
-    record = manager.start_intake(repo, REQUEST)
+    transient = manager.start_intake(repo, REQUEST)
+    assert transient.status == STATUS_DRAFTING  # returned before the off-lock turn
+    record = manager.get_intake(transient.intake_id)
     assert record.status == STATUS_AWAITING_REVIEW
     assert record.draft.task_id == TASK_ID
     assert snapshot(repo) == before  # drafting wrote nothing to the repo
 
-    revised = manager.revise_intake(record.intake_id, "Scope to one route")
+    manager.revise_intake(record.intake_id, "Scope to one route")
+    revised = manager.get_intake(record.intake_id)
     assert revised.iteration == 1
     assert "read#2" in revised.draft.task_file
     assert snapshot(repo) == before  # revision wrote nothing to the repo
 
-    confirmed = manager.confirm_intake(record.intake_id)
+    manager.confirm_intake(record.intake_id)
+    confirmed = manager.get_intake(record.intake_id)
     assert confirmed.status == STATUS_CONFIRMED
     assert confirmed.created_task_id == TASK_ID
     assert (repo.path / ".ai-tasks" / f"{TASK_ID}.md").exists()
@@ -494,12 +512,16 @@ def test_manager_confirm_fails_when_backend_writes_nothing(tmp_path):
         agent=agent,
         readiness_checker=passing_readiness,
         clock=lambda: FIXED_NOW,
+        executor=sync_executor,
     )
 
-    record = manager.start_intake(repo, REQUEST)
-    assert record.status == STATUS_AWAITING_REVIEW
+    transient = manager.start_intake(repo, REQUEST)
+    assert transient.status == STATUS_DRAFTING
+    assert manager.get_intake(transient.intake_id).status == STATUS_AWAITING_REVIEW
 
-    confirmed = manager.confirm_intake(record.intake_id)
+    confirming = manager.confirm_intake(transient.intake_id)
+    assert confirming.status == STATUS_CONFIRMING  # transient; write runs off-lock
+    confirmed = manager.get_intake(transient.intake_id)
 
     # The backend turn exited 0 with a confirm envelope but wrote nothing; the
     # manager's inventory postcondition catches it and records ``failed``, not a

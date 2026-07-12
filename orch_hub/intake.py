@@ -26,11 +26,23 @@ dashboard flow that actually needs to drive it. The default backend is
 :class:`_UnavailableIntakeAgent`, so the manager is always constructible and an
 unconfigured backend fails an intake cleanly (auditable) instead of crashing.
 
-The agent turn runs synchronously inside each mutating call in v1 (a fake in
-tests, a real turn later). The transient ``drafting``/``revising``/``confirming``
-statuses are persisted *before* the turn so an interrupted hub leaves an
-observable non-terminal record — and, when a slow real backend arrives, they
-already hold the per-repo/per-intake slot needed to move the turn off the lock.
+Each agent turn runs **off the manager lock**. A mutating call
+(``start``/``revise``/``confirm``) holds the lock only long enough to gate and
+persist the transient ``drafting``/``revising``/``confirming`` status, then
+returns that transient record at once and runs the (potentially slow, real)
+turn through an injectable executor seam (:data:`IntakeExecutor`, a daemon
+thread by default; tests inject a synchronous one). The turn re-acquires the
+lock to finalize, so reads (``get``/``list``) and a concurrent ``cancel`` never
+block behind an in-flight turn. Finalize re-loads the record and respects a
+cancel that landed during the turn — it discards the turn's result and never
+resurrects a cancelled intake. Because the transient status is persisted before
+the turn, a hub that dies mid-turn leaves an observable orphan holding the
+repo's intake slot; :meth:`IntakeManager.reconcile_orphans` (run once at
+startup) fails those orphans so the slot frees. The confirm turn is the only
+one that writes, and it stays fenced by :class:`_ConfirmGuard` (captured just
+before the write) plus the inventory postcondition, so a failed/unverified
+confirm still rolls back — the read-only-until-confirmation invariant is
+unchanged by moving the turn off the lock.
 """
 
 from __future__ import annotations
@@ -86,6 +98,13 @@ _TERMINAL = frozenset(
 _CANCELLABLE = frozenset({STATUS_DRAFTING, STATUS_AWAITING_REVIEW, STATUS_REVISING})
 """States a cancel may leave. ``confirming`` is deliberately excluded: its write
 may have already landed, so cancelling it could mislabel a created task."""
+
+_TRANSIENT = frozenset({STATUS_DRAFTING, STATUS_REVISING, STATUS_CONFIRMING})
+"""In-flight states that bracket an agent turn. A persisted transient record
+with no live turn (a hub that died mid-turn) is an orphan holding the repo's
+intake slot, reconciled to ``failed`` at startup (:meth:`IntakeManager.reconcile_orphans`).
+The finalize step keys off these: it only settles a turn whose record is still
+in the expected transient status, so a cancel that landed meanwhile wins."""
 
 KIND_INTAKE_CREATED = "intake_created"
 KIND_INTAKE_REVISED = "intake_revised"
@@ -201,6 +220,25 @@ class _UnavailableIntakeAgent:
 
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+IntakeExecutor = Callable[[Callable[[], None]], None]
+"""Runs one intake turn's off-lock work. The default detaches it onto a daemon
+thread so the mutating call returns immediately with the transient record; the
+turn then re-acquires the manager lock to finalize. Mirrors the run manager's
+``notify_dispatch`` seam. Tests inject a synchronous executor
+(``lambda run: run()``) so a turn settles before the mutating call returns."""
+
+
+def _thread_executor(run: Callable[[], None]) -> None:
+    """Default executor: run one intake turn on a short-lived daemon thread.
+
+    The turn (a real ``/intake-task`` CLI session later) can take seconds, and it
+    must never stall intake reads, a concurrent cancel, or an unrelated repo's
+    intake, so it runs off the manager lock. The thread is daemon so it never
+    blocks interpreter shutdown; an unfinished read-only turn is safe to abandon.
+    """
+    threading.Thread(target=run, daemon=True, name="orch-hub-intake").start()
 
 
 def _slug(value: str) -> str:
@@ -333,13 +371,23 @@ class IntakeManager:
 
     One instance lives in the resident hub service. Collaborators are
     injectable for tests: ``agent`` is the conversational backend (a fake in
-    tests), ``readiness_checker`` defaults to the real launch gate, and
-    ``clock`` must return timezone-aware UTC datetimes.
+    tests), ``readiness_checker`` defaults to the real launch gate, ``clock``
+    must return timezone-aware UTC datetimes, and ``executor`` runs each agent
+    turn off the manager lock (a daemon thread in production; a synchronous
+    ``lambda run: run()`` in tests).
 
     The invariant the tests pin down: the target repo is unchanged until an
     explicit :meth:`confirm_intake`, because only that method reaches the
     agent's write path. Drafting, revision, cancellation, agent failure, and a
     hub restart before confirmation all leave the repo untouched.
+
+    Concurrency: a mutating call gates and persists the transient status under
+    the lock, returns that transient record, then runs the turn off the lock and
+    re-acquires it to finalize (:meth:`_finalize_draft`/`_finalize_revise`/
+    `_finalize_confirm`). Reads and cancel therefore never block behind a turn.
+    Finalize re-loads and settles only a record still in its expected transient
+    status, so a cancel that landed during the turn wins and the turn's result is
+    discarded (never resurrecting a cancelled intake).
     """
 
     def __init__(
@@ -349,11 +397,13 @@ class IntakeManager:
         agent: IntakeAgent | None = None,
         readiness_checker: Callable[[ManagedRepo, Config], ReadinessReport] = check_readiness,
         clock: Callable[[], dt.datetime] = _utc_now,
+        executor: IntakeExecutor = _thread_executor,
     ):
         self._config = config
         self._agent: IntakeAgent = agent if agent is not None else _UnavailableIntakeAgent()
         self._readiness_checker = readiness_checker
         self._clock = clock
+        self._executor = executor
         self._lock = threading.Lock()
         # Live conversational handles by intake id. Not persisted: a hub restart
         # drops them, so a non-terminal intake whose handle is gone is treated as
@@ -368,14 +418,17 @@ class IntakeManager:
     # -- start ----------------------------------------------------------------
 
     def start_intake(self, repo: ManagedRepo, request: str) -> IntakeRecord:
-        """Gate, draft, and record one intake for ``repo``.
+        """Gate and start one intake for ``repo``; return the ``drafting`` record.
 
         Gates fail closed cheapest-first: non-empty request, no other in-flight
         intake for the repo, then readiness. The ``drafting`` record is persisted
-        *before* the agent turn so an interrupted hub leaves an observable record
-        and (critically) never a repo write. A drafting failure — including the
-        default unconfigured backend — resolves to a ``failed`` record with an
-        audited reason, not an exception.
+        under the lock *before* the agent turn so an interrupted hub leaves an
+        observable record and (critically) never a repo write. The drafting turn
+        then runs off the lock (:meth:`_run_draft_turn`) and this returns the
+        transient ``drafting`` record immediately — a later ``get``/``list`` (or
+        the dashboard poll) observes the settled ``awaiting_review`` draft, or a
+        ``failed`` record if the turn (including the default unconfigured
+        backend) failed.
         """
         text = request.strip()
         if not text:
@@ -402,20 +455,50 @@ class IntakeManager:
                 ts=ts,
                 detail="intake started",
             )
-            try:
-                result = self._agent.draft(text, repo)
-            except Exception as exc:  # noqa: BLE001 - any backend failure is a failed intake
-                return self._fail(intake_dir, record, f"draft failed: {exc}")
-            self._handles[intake_id] = result.handle
-            updated = replace(
-                record,
-                status=STATUS_AWAITING_REVIEW,
-                draft=result.draft,
-                agent_ref=result.ref,
-                updated_ts=self._clock().isoformat(),
-            )
-            _write_record(intake_dir, updated)
-            return updated
+        # Draft off the lock; the transient record is returned now and the turn
+        # settles the record asynchronously. Submit strictly OUTSIDE the lock:
+        # the turn re-acquires it to finalize, which a synchronous executor would
+        # deadlock on the non-reentrant lock.
+        self._submit(lambda: self._run_draft_turn(intake_dir, intake_id, text, repo))
+        return record
+
+    def _run_draft_turn(
+        self, intake_dir: Path, intake_id: str, text: str, repo: ManagedRepo
+    ) -> None:
+        """Off-lock drafting turn, then re-acquire the lock to finalize."""
+        try:
+            result = self._agent.draft(text, repo)
+        except Exception as exc:  # noqa: BLE001 - any backend failure is a failed intake
+            with self._lock:
+                self._finalize_failure(
+                    intake_dir, intake_id, STATUS_DRAFTING, f"draft failed: {exc}"
+                )
+            return
+        with self._lock:
+            self._finalize_draft(intake_dir, intake_id, result)
+
+    def _finalize_draft(
+        self, intake_dir: Path, intake_id: str, result: AgentDraftResult
+    ) -> None:
+        """Settle a finished draft to ``awaiting_review`` (called under the lock).
+
+        Re-loads first: if the record is no longer ``drafting`` a cancel landed
+        during the turn, so the draft is discarded and its session released — the
+        intake is never resurrected from its resting ``cancelled`` state.
+        """
+        record = _load_record(intake_dir)
+        if record.status != STATUS_DRAFTING:
+            self._discard_turn(intake_id, result.handle)
+            return
+        self._handles[intake_id] = result.handle
+        updated = replace(
+            record,
+            status=STATUS_AWAITING_REVIEW,
+            draft=result.draft,
+            agent_ref=result.ref,
+            updated_ts=self._clock().isoformat(),
+        )
+        _write_record(intake_dir, updated)
 
     # -- revise ---------------------------------------------------------------
 
@@ -447,31 +530,70 @@ class IntakeManager:
                 record, status=STATUS_REVISING, updated_ts=self._clock().isoformat()
             )
             _write_record(intake_dir, revising)
-            try:
-                result = self._agent.revise(handle, text, repo)
-            except Exception as exc:  # noqa: BLE001
-                return self._fail(intake_dir, revising, f"revision failed: {exc}")
-            self._handles[intake_id] = result.handle
-            iteration = record.iteration + 1
-            updated = replace(
-                revising,
-                status=STATUS_AWAITING_REVIEW,
-                draft=result.draft,
-                iteration=iteration,
-                agent_ref=result.ref,
-                updated_ts=self._clock().isoformat(),
-            )
-            _write_record(intake_dir, updated)
-            self._append(
-                intake_dir,
-                updated,
-                KIND_INTAKE_REVISED,
-                ts=updated.updated_ts,
-                iteration=iteration,
-                task_id=result.draft.task_id,
-                detail=_summarize_feedback(text),
-            )
-            return updated
+        # Revise off the lock; return the transient ``revising`` record now.
+        self._submit(
+            lambda: self._run_revise_turn(intake_dir, intake_id, handle, text, repo)
+        )
+        return revising
+
+    def _run_revise_turn(
+        self,
+        intake_dir: Path,
+        intake_id: str,
+        handle: object,
+        text: str,
+        repo: ManagedRepo,
+    ) -> None:
+        """Off-lock revision turn, then re-acquire the lock to finalize."""
+        try:
+            result = self._agent.revise(handle, text, repo)
+        except Exception as exc:  # noqa: BLE001
+            with self._lock:
+                self._finalize_failure(
+                    intake_dir, intake_id, STATUS_REVISING, f"revision failed: {exc}"
+                )
+            return
+        with self._lock:
+            self._finalize_revise(intake_dir, intake_id, result, text)
+
+    def _finalize_revise(
+        self,
+        intake_dir: Path,
+        intake_id: str,
+        result: AgentDraftResult,
+        feedback: str,
+    ) -> None:
+        """Settle a finished revision to ``awaiting_review`` (under the lock).
+
+        Like :meth:`_finalize_draft`, a record no longer ``revising`` means a
+        cancel landed during the turn: discard and never resurrect. Otherwise the
+        revised draft replaces the current one, bumps ``iteration``, and audits
+        the revision as its own iteration event.
+        """
+        record = _load_record(intake_dir)
+        if record.status != STATUS_REVISING:
+            self._discard_turn(intake_id, result.handle)
+            return
+        self._handles[intake_id] = result.handle
+        iteration = record.iteration + 1
+        updated = replace(
+            record,
+            status=STATUS_AWAITING_REVIEW,
+            draft=result.draft,
+            iteration=iteration,
+            agent_ref=result.ref,
+            updated_ts=self._clock().isoformat(),
+        )
+        _write_record(intake_dir, updated)
+        self._append(
+            intake_dir,
+            updated,
+            KIND_INTAKE_REVISED,
+            ts=updated.updated_ts,
+            iteration=iteration,
+            task_id=result.draft.task_id,
+            detail=_summarize_feedback(feedback),
+        )
 
     # -- confirm --------------------------------------------------------------
 
@@ -518,44 +640,86 @@ class IntakeManager:
                 record, status=STATUS_CONFIRMING, updated_ts=self._clock().isoformat()
             )
             _write_record(intake_dir, confirming)
-            # Snapshot the exact `.ai-tasks/` paths a confirm write may touch,
-            # so a failed or unverified turn is rolled back to leave the repo
-            # unchanged.
-            guard = _ConfirmGuard.capture(repo, draft.task_id)
-            try:
-                result = self._agent.confirm(handle, repo)
-            except Exception as exc:  # noqa: BLE001
-                guard.rollback()
-                return self._fail(intake_dir, confirming, f"confirm failed: {exc}")
-            created_id = (result.task_id or "").strip() or draft.task_id
-            if not _task_landed(repo, created_id):
-                guard.rollback()
-                return self._fail(
+        # Run the write turn off the lock; return the transient ``confirming``
+        # record now. ``confirming`` is non-cancellable, so no cancel can race the
+        # write, but finalize still re-checks the status defensively.
+        self._submit(
+            lambda: self._run_confirm_turn(intake_dir, intake_id, handle, repo, draft)
+        )
+        return confirming
+
+    def _run_confirm_turn(
+        self,
+        intake_dir: Path,
+        intake_id: str,
+        handle: object,
+        repo: ManagedRepo,
+        draft: IntakeDraft,
+    ) -> None:
+        """Off-lock confirm write turn: guard, write, verify, then finalize.
+
+        The guard snapshots the exact ``.ai-tasks/`` paths the write may touch,
+        captured just before the write turn so a failed or unverified confirm is
+        rolled back to leave the repo unchanged. The agent's exit code is not
+        trusted: the record only settles ``confirmed`` once :func:`_task_landed`
+        confirms the task round-trips through the repo inventory as a legal
+        ``pending``/``blocked`` intake task. Rollback happens off the lock (it
+        touches only target-repo files); finalize re-acquires the lock.
+        """
+        guard = _ConfirmGuard.capture(repo, draft.task_id)
+        try:
+            result = self._agent.confirm(handle, repo)
+        except Exception as exc:  # noqa: BLE001
+            guard.rollback()
+            with self._lock:
+                self._finalize_failure(
+                    intake_dir, intake_id, STATUS_CONFIRMING, f"confirm failed: {exc}"
+                )
+            return
+        created_id = (result.task_id or "").strip() or draft.task_id
+        if not _task_landed(repo, created_id):
+            guard.rollback()
+            with self._lock:
+                self._finalize_failure(
                     intake_dir,
-                    confirming,
+                    intake_id,
+                    STATUS_CONFIRMING,
                     f"confirm turn did not create a valid pending/blocked task"
                     f" {created_id!r}: it is not in the repo task inventory as a"
                     " new intake task (missing task file or index row, or an"
                     " unexpected frontmatter status)",
                 )
+            return
+        with self._lock:
+            self._finalize_confirm(intake_dir, intake_id, created_id)
+
+    def _finalize_confirm(
+        self, intake_dir: Path, intake_id: str, created_id: str
+    ) -> None:
+        """Settle a verified confirm to ``confirmed`` (under the lock)."""
+        record = _load_record(intake_dir)
+        if record.status != STATUS_CONFIRMING:
+            # Defensive: ``confirming`` is non-cancellable, so nothing legal moves
+            # it. Drop the handle rather than double-write over a settled record.
             self._handles.pop(intake_id, None)
-            updated = replace(
-                confirming,
-                status=STATUS_CONFIRMED,
-                created_task_id=created_id,
-                updated_ts=self._clock().isoformat(),
-            )
-            _write_record(intake_dir, updated)
-            self._append(
-                intake_dir,
-                updated,
-                KIND_INTAKE_CONFIRMED,
-                ts=updated.updated_ts,
-                iteration=updated.iteration,
-                task_id=created_id,
-                detail="task and index entry written",
-            )
-            return updated
+            return
+        self._handles.pop(intake_id, None)
+        updated = replace(
+            record,
+            status=STATUS_CONFIRMED,
+            created_task_id=created_id,
+            updated_ts=self._clock().isoformat(),
+        )
+        _write_record(intake_dir, updated)
+        self._append(
+            intake_dir,
+            updated,
+            KIND_INTAKE_CONFIRMED,
+            ts=updated.updated_ts,
+            iteration=updated.iteration,
+            task_id=created_id,
+            detail="task and index entry written",
+        )
 
     # -- cancel ---------------------------------------------------------------
 
@@ -601,6 +765,43 @@ class IntakeManager:
                 detail="intake cancelled",
             )
             return updated
+
+    # -- startup reconciliation -----------------------------------------------
+
+    def reconcile_orphans(self) -> list[IntakeRecord]:
+        """Fail every orphaned transient record; return what was reconciled.
+
+        A persisted ``drafting``/``revising``/``confirming`` record with no live
+        turn is an orphan from a previous hub process that died mid-turn: its
+        in-memory conversational handle is gone and no thread will finalize it, so
+        it would hold the repo's intake slot forever (a non-terminal record makes
+        :meth:`start_intake` refuse a new intake for that repo). This marks each
+        such record ``failed`` (lost session) so the slot frees.
+
+        It must run once at startup, before any new intake is submitted (the
+        FastAPI lifespan calls it, mirroring the run monitor's start); at that
+        point every transient record on disk is unambiguously an orphan.
+
+        It never mutates the target repo: rollback is a live-process guarantee
+        (:class:`_ConfirmGuard` lives in memory), so a ``confirming`` orphan whose
+        write already landed leaves a real task — surfaced independently through
+        task inventory — with a conservatively-``failed`` intake. That mid-write
+        crash accounting is the flagged open item, not closed here.
+        """
+        reconciled: list[IntakeRecord] = []
+        with self._lock:
+            for intake_dir in self._intake_dirs():
+                record = _load_record(intake_dir)
+                if record.status not in _TRANSIENT:
+                    continue
+                reconciled.append(
+                    self._fail(
+                        intake_dir,
+                        record,
+                        f"intake session lost (hub restarted during {record.status})",
+                    )
+                )
+        return reconciled
 
     # -- inspection -----------------------------------------------------------
 
@@ -656,6 +857,52 @@ class IntakeManager:
                 f"intake {record.intake_id!r} has no repo path on record"
             )
         return repo
+
+    def _submit(self, run: Callable[[], None]) -> None:
+        """Run one intake turn's off-lock work through the injected executor.
+
+        MUST be called outside ``self._lock``: ``run`` re-acquires the lock to
+        finalize, and the non-reentrant lock would deadlock a synchronous
+        executor otherwise. The default thread executor detaches ``run`` so the
+        mutating call returns at once with the transient record.
+        """
+        self._executor(run)
+
+    def _finalize_failure(
+        self, intake_dir: Path, intake_id: str, expected: str, reason: str
+    ) -> None:
+        """Fail an intake whose off-lock turn errored — unless it settled first.
+
+        Called under the lock. Re-loads and only fails a record still in its
+        ``expected`` transient status: a cancel that landed during the turn
+        already left it ``cancelled`` (terminal), and respecting that is what
+        stops a late turn failure from clobbering a resting outcome.
+        """
+        record = _load_record(intake_dir)
+        if record.status != expected:
+            self._handles.pop(intake_id, None)
+            return
+        self._fail(intake_dir, record, reason)
+
+    def _discard_turn(self, intake_id: str, handle: object) -> None:
+        """Drop a finished turn whose intake was cancelled meanwhile.
+
+        Called under the lock from a finalize step. The turn's result is thrown
+        away (draft/revise are read-only — nothing to undo), any stored handle is
+        dropped, and the now-orphaned conversational session is released
+        best-effort (a no-op for the real CLI agent). This is the handle-leak
+        guard: a discarded turn never leaves a live session dangling.
+        """
+        self._handles.pop(intake_id, None)
+        if handle is not None:
+            try:
+                self._agent.cancel(handle)
+            except Exception as exc:  # noqa: BLE001 - cancel is best-effort
+                _log.warning(
+                    "intake agent cancel failed (%s) for %s",
+                    type(exc).__name__,
+                    intake_id,
+                )
 
     def _fail(
         self, intake_dir: Path, record: IntakeRecord, reason: str

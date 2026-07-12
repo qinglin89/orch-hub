@@ -27,7 +27,10 @@ from orch_hub.intake import (
     STATUS_AWAITING_REVIEW,
     STATUS_CANCELLED,
     STATUS_CONFIRMED,
+    STATUS_CONFIRMING,
+    STATUS_DRAFTING,
     STATUS_FAILED,
+    STATUS_REVISING,
 )
 from orch_hub.models import (
     CommitInfo,
@@ -1370,6 +1373,18 @@ def make_intake_repo(tmp_path: Path, name: str = "repo-a") -> ManagedRepo:
     return ManagedRepo(name=name, path=path, manifest=path / ".ai-deploy-manifest.json")
 
 
+def intake_sync_executor(run) -> None:
+    """Run an intake turn inline so a mutating route settles before responding.
+
+    The manager runs each agent turn off its lock through an injected executor
+    (a daemon thread in production). Injecting this synchronous one keeps the API
+    tests deterministic: a mutating route still returns the transient record, but
+    a follow-up ``GET /api/intakes/{id}`` observes the settled outcome with no
+    thread joins.
+    """
+    run()
+
+
 def make_intake_manager(
     tmp_path: Path,
     *,
@@ -1382,6 +1397,7 @@ def make_intake_manager(
         agent=agent,
         readiness_checker=readiness,
         clock=lambda: FIXED_NOW,
+        executor=intake_sync_executor,
     )
     return manager, agent
 
@@ -1419,20 +1435,29 @@ def start_an_intake(
 # -- start intake --------------------------------------------------------------
 
 
-def test_start_intake_returns_awaiting_review_draft_without_writing(tmp_path, monkeypatch):
+def test_start_intake_returns_transient_drafting_then_settles(tmp_path, monkeypatch):
     client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
     before = intake_task_files(repo)
 
+    # POST returns the transient ``drafting`` record immediately (the turn runs
+    # off the manager lock); there is no draft body yet and agent_ref stays
+    # internal.
     body = start_an_intake(client, repo)
-
-    assert body["status"] == STATUS_AWAITING_REVIEW
+    assert body["status"] == STATUS_DRAFTING
     assert body["repo_name"] == repo.name
     assert body["request"] == INTAKE_REQUEST
-    assert body["iteration"] == 0
-    assert body["draft"]["task_id"] == INTAKE_TASK_ID
-    assert body["draft"]["task_file"].startswith("---")
-    # agent_ref is internal and must never reach the client.
+    assert body["draft"] is None
     assert "agent_ref" not in body
+
+    # A follow-up GET observes the settled draft — the injected sync executor ran
+    # the turn within the POST, so it is already awaiting_review here (production
+    # clients poll until this flip).
+    settled = client.get(f"/api/intakes/{body['intake_id']}").json()
+    assert settled["status"] == STATUS_AWAITING_REVIEW
+    assert settled["iteration"] == 0
+    assert settled["draft"]["task_id"] == INTAKE_TASK_ID
+    assert settled["draft"]["task_file"].startswith("---")
+    assert "agent_ref" not in settled
     assert agent.draft_calls == 1
     assert agent.confirm_calls == 0
     assert intake_task_files(repo) == before  # drafting is read-only
@@ -1487,9 +1512,10 @@ def test_start_intake_missing_body_field_is_422(tmp_path, monkeypatch):
     assert resp.status_code == 422
 
 
-def test_start_intake_agent_failure_is_201_failed_record(tmp_path, monkeypatch):
+def test_start_intake_agent_failure_is_201_then_failed_record(tmp_path, monkeypatch):
     # A drafting-turn failure is an auditable outcome, not a 5xx: the intake
-    # resource is created (201) with status=failed and the repo is untouched.
+    # resource is created (201, transient drafting) and settles to ``failed`` with
+    # the repo untouched.
     client, manager, agent, repo = make_intake_client(
         tmp_path, monkeypatch, agent=FakeIntakeAgent(draft_error=RuntimeError("agent crashed"))
     )
@@ -1500,8 +1526,12 @@ def test_start_intake_agent_failure_is_201_failed_record(tmp_path, monkeypatch):
     )
     assert resp.status_code == 201
     body = resp.json()
-    assert body["status"] == STATUS_FAILED
-    assert "agent crashed" in body["error"]
+    assert body["status"] == STATUS_DRAFTING  # transient; the turn fails off-lock
+
+    # The failed drafting turn settles to a ``failed`` record with its reason.
+    settled = client.get(f"/api/intakes/{body['intake_id']}").json()
+    assert settled["status"] == STATUS_FAILED
+    assert "agent crashed" in settled["error"]
     assert intake_task_files(repo) == before
 
 
@@ -1582,10 +1612,12 @@ def test_revise_intake_updates_draft_without_writing(tmp_path, monkeypatch):
         json={"feedback": "Scope it to a single route"},
     )
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == STATUS_AWAITING_REVIEW
-    assert body["iteration"] == 1
-    assert "iteration 1" in body["draft"]["task_file"]
+    assert resp.json()["status"] == STATUS_REVISING  # transient; turn runs off-lock
+
+    settled = client.get(f"/api/intakes/{started['intake_id']}").json()
+    assert settled["status"] == STATUS_AWAITING_REVIEW
+    assert settled["iteration"] == 1
+    assert "iteration 1" in settled["draft"]["task_file"]
     assert agent.revise_calls == 1
     assert agent.confirm_calls == 0
     assert intake_task_files(repo) == before  # revision stays read-only
@@ -1629,9 +1661,11 @@ def test_confirm_intake_writes_task_and_refreshes_inventory(tmp_path, monkeypatc
 
     resp = client.post(f"/api/intakes/{started['intake_id']}/confirm")
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["status"] == STATUS_CONFIRMED
-    assert body["created_task_id"] == INTAKE_TASK_ID
+    assert resp.json()["status"] == STATUS_CONFIRMING  # transient; write runs off-lock
+
+    settled = client.get(f"/api/intakes/{started['intake_id']}").json()
+    assert settled["status"] == STATUS_CONFIRMED
+    assert settled["created_task_id"] == INTAKE_TASK_ID
     assert agent.confirm_calls == 1
 
     # The confirmed write landed a real task file + index row; the existing
@@ -1678,6 +1712,25 @@ def test_confirm_lost_session_is_failed_not_5xx(tmp_path, monkeypatch):
     assert resp.json()["status"] == STATUS_FAILED
     assert fresh_agent.confirm_calls == 0
     assert intake_task_files(repo) == before
+
+
+def test_app_lifespan_reconciles_orphaned_intakes(tmp_path, monkeypatch):
+    # A hub restart with an orphaned transient intake (a crash mid-turn) must free
+    # the repo's intake slot on startup: the app lifespan calls reconcile_orphans.
+    client, manager, agent, repo = make_intake_client(tmp_path, monkeypatch)
+    started = start_an_intake(client, repo)  # settles awaiting_review
+
+    # Force a persisted transient status: an orphan no thread will finalize.
+    path = manager.intake_dir / started["intake_id"] / "intake.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["status"] = STATUS_DRAFTING
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    # Entering the app lifespan (startup) runs reconciliation over that manager.
+    app = api.create_app(run_config(tmp_path), intake_manager=manager)
+    with TestClient(app):
+        pass
+    assert manager.get_intake(started["intake_id"]).status == STATUS_FAILED
 
 
 # -- cancel --------------------------------------------------------------------
