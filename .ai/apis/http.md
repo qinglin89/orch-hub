@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-12
+verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 ---
 
 # APIs: HTTP
@@ -72,7 +72,8 @@ verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
   gates and subprocess start to the app's single `RunManager`.
 - Dashboard caller: the task-detail Start dialog sends `extra_args` beginning
   with fixed `["--backend", "cc-codex"]` plus only changed cc-codex override
-  fields; the dashboard does not expose a backend selector.
+  fields and an optional bare `--plan-gate`; the dashboard does not expose a
+  backend selector.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
 
 ## `GET /api/runs`
@@ -269,7 +270,8 @@ verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
   `available:false` as a graceful unavailable state.
 - The dashboard task-detail run controls consume these existing run APIs
   directly: Start sends `{repo_id, task_id, acknowledge_blocked, extra_args}`
-  to `POST /api/runs` with fixed `--backend cc-codex` and optional cc-codex
-  overrides, Stop sends `POST /api/runs/{run_id}/stop`, and frontend error
+  to `POST /api/runs` with fixed `--backend cc-codex`, optional cc-codex
+  overrides, and a default-off plan-gate checkbox that appends a bare
+  `--plan-gate`; Stop sends `POST /api/runs/{run_id}/stop`, and frontend error
   rendering preserves structured 409 fields instead of flattening every refusal
   to `detail`.

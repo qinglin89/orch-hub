@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-12
+verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 ---
 
 # Features: Dashboard Ops
@@ -49,10 +49,11 @@ Implemented behavior:
 - Task detail Start opens a cc-codex launch-options dialog and posts
   `extra_args` with fixed `["--backend", "cc-codex"]` plus only changed
   overrides for `--dev-agent`, `--dev-model`, `--dev-effort`,
-  `--review-model`, and `--review-effort`; no backend selector is exposed.
-  Stop posts to `POST /api/runs/{run_id}/stop`. `blocked` tasks require an
-  explicit acknowledgement checkbox; stale/raced starts render the backend 409
-  response instead of trusting frontend state.
+  `--review-model`, and `--review-effort`; a default-off plan-gate checkbox
+  appends a single bare `--plan-gate` token when enabled. No backend selector is
+  exposed. Stop posts to `POST /api/runs/{run_id}/stop`. `blocked` tasks require
+  an explicit acknowledgement checkbox; stale/raced starts render the backend
+  409 response instead of trusting frontend state.
 - Start is hidden or replaced with an explanation when the dashboard already
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.

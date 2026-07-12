@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-12
+verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 ---
 
 # Modules: Web and Operations
@@ -76,8 +76,9 @@ unavailable and empty-history states.
 
 Run controls stay frontend-only over the existing API: Start posts
 `{repo_id, task_id, acknowledge_blocked, extra_args}` to `POST /api/runs` from a
-launch-options dialog whose first args are always `--backend cc-codex` plus
-only user-changed cc-codex overrides; it does not expose a backend selector.
+launch-options dialog whose first args are always `--backend cc-codex`, followed
+by only user-changed cc-codex overrides and, when enabled, a bare
+`--plan-gate`; it does not expose a backend selector.
 Stop posts to `POST /api/runs/{run_id}/stop`, and launch refusal UI renders
 structured 409 details such as readiness `reasons`, repo-busy `run_id`, or
 blocked-task `acknowledge_required`. The log view renders the recent-log
