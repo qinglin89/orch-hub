@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 ---
 
 # Modules: Runtime
@@ -33,12 +33,16 @@ exit codes for runs that end while the hub process is alive.
 
 Reattach scans run dirs, loads records, and probes pid liveness with
 `os.kill(pid, 0)`. If a run ended while the hub was down, `ended_ts` is
-recorded with `exit_code=None`. End classification prefers task completion or
-archival evidence, then hub stop evidence (`stop.flag` or a valid `"stop"`
-answer), then bare exit code. Broken run dirs surface as `error` states and do
-not block repo launches when no repo attribution is available. The manager
-appends `run_started`, `run_ended`, `stop_requested`, and `answer_recorded`
-events and exposes newest-first `recent_runs(limit=...)` history entries.
+recorded with `exit_code=None`. Live `RunStatus` reads derive a
+`stop_requested` overlay from `control_dir.stop_requested` so a requested stop
+survives dashboard reloads until the run ends; terminal statuses leave that
+field false because stop evidence is expressed by end classification. End
+classification prefers task completion or archival evidence, then hub stop
+evidence (`stop.flag` or a valid `"stop"` answer), then bare exit code. Broken
+run dirs surface as `error` states and do not block repo launches when no repo
+attribution is available. The manager appends `run_started`, `run_ended`,
+`stop_requested`, and `answer_recorded` events and exposes newest-first
+`recent_runs(limit=...)` history entries.
 
 The manager persists per-session context snapshots when a run transitions from
 live to ended: it parses the repo-side orchestrator log once into `sessions.json`

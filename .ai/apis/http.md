@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 ---
 
 # APIs: HTTP
@@ -79,7 +79,9 @@ verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ## `GET /api/runs`
 
 - Purpose: list known runs with live/waiting/end-state overlays.
-- Shape: `{"runs": [RunStatus.to_dict(), ...]}`.
+- Shape: `{"runs": [RunStatus.to_dict(), ...]}`. Live run entries include
+  `stop_requested: true` after `POST /stop` writes `stop.flag`; terminal entries
+  keep `stop_requested: false` and express honored stops through `state/detail`.
 
 ## `GET /api/history/runs`
 
@@ -88,14 +90,16 @@ verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 - Source: delegates to `RunManager.recent_runs(limit=...)`, which refreshes
   run state and reads each run's `events.jsonl`.
 - Shape: `{"runs": [RunHistoryEntry.to_dict(), ...]}` where each entry embeds
-  the normal `RunStatus` fields plus `events`, persisted session snapshot fields
-  (`sessions`, `context_budget`), and `session_est` (`{"current","total"}` or
-  `null` when unknown).
+  the normal `RunStatus` fields, including `stop_requested`, plus `events`,
+  persisted session snapshot fields (`sessions`, `context_budget`), and
+  `session_est` (`{"current","total"}` or `null` when unknown).
 - Query: `limit` defaults to 50 and is clamped to `0..200`.
 
 ## `GET /api/runs/{run_id}`
 
 - Purpose: fetch one run's serialized `RunStatus`.
+- Shape note: same `RunStatus.to_dict()` shape as list entries, including the
+  live-only `stop_requested` boolean.
 - Errors: unknown run id returns HTTP 404.
 
 ## `GET /api/runs/{run_id}/task`

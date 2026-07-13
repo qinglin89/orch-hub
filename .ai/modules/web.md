@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 ---
 
 # Modules: Web and Operations
@@ -84,13 +84,15 @@ Run controls stay frontend-only over the existing API: Start posts
 launch-options dialog whose first args are always `--backend cc-codex`, followed
 by only user-changed cc-codex overrides and, when enabled, a bare
 `--plan-gate`; it does not expose a backend selector.
-Stop posts to `POST /api/runs/{run_id}/stop`, and launch refusal UI renders
-structured 409 details such as readiness `reasons`, repo-busy `run_id`, or
-blocked-task `acknowledge_required`. The log view renders the recent-log
+Stop posts to `POST /api/runs/{run_id}/stop`; while a live run record carries
+`stop_requested`, the Stop control renders disabled as "Stop requested" from
+server state so reloads and other devices do not re-enable it. Launch refusal UI
+renders structured 409 details such as readiness `reasons`, repo-busy `run_id`,
+or blocked-task `acknowledge_required`. The log view renders the recent-log
 route's `spawn.out` diagnostic and falls back to it when a live stream ends
 before any orchestrator log line is seen; its task back-link routes to
-`#/runs/{run_id}/task` so archived task files stay reachable through run
-history while normal task views stay active-only.
+`#/runs/{run_id}/task` so archived task files stay reachable through run history
+while normal task views stay active-only.
 
 Task detail fetches `GET /api/runs/{run_id}/sessions` for live runs only and
 renders compact protocol-session strips against the returned context budget.

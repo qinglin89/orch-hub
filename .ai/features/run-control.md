@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 ---
 
 # Features: Run Control
@@ -42,15 +42,18 @@ Implemented behavior:
   capture exit codes while the hub is the parent process.
 - Reattach scans run dirs and probes pid liveness. If a run ended while the hub
   was down, `ended_ts` is persisted with `exit_code=None`.
-- Live status is `active` or `waiting` based on pending control-dir questions.
+- Live status is `active` or `waiting` based on pending control-dir questions
+  and carries `stop_requested=true` while the live run's `stop.flag` exists.
   End status is classified as `completed`, `stopped`, `error`, or `ended` by
-  task completion/archival evidence, stop evidence, and then exit code.
+  task completion/archival evidence, stop evidence, and then exit code; terminal
+  run payloads keep `stop_requested=false`.
 - `stop_run` writes `stop.flag` through `control_dir.request_stop` and refuses
   unknown, broken, or already-ended runs.
 - HTTP run routes resolve repos through registry discovery, return serialized
-  `RunStatus` payloads, expose start/list/get/stop behavior, and map launch/run
-  manager errors to 4xx JSON responses (`RepoBusyError` and ended/blocked
-  states use 409; unknown runs use 404).
+  `RunStatus` payloads including the live-only `stop_requested` overlay, expose
+  start/list/get/stop behavior, and map launch/run manager errors to 4xx JSON
+  responses (`RepoBusyError` and ended/blocked states use 409; unknown runs use
+  404).
 - Per-session context usage is log-derived: live runs parse the current
   orchestrator log on demand, terminal runs serve the `sessions.json` snapshot
   persisted at the observed live-to-ended transition. Parsing failures are
