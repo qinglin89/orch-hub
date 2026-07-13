@@ -505,18 +505,25 @@ class RunManager:
             ]
 
     def recent_runs(self, limit: int = 50) -> list[RunHistoryEntry]:
-        """Return recent runs newest-first with persisted audit events."""
+        """Return recent runs newest-first with audit events and session summary.
+
+        Each entry embeds the run's persisted per-session context snapshot so the
+        history view renders context strips without a per-run follow-up request.
+        The refresh runs first (it may persist the snapshot at a just-observed
+        live->ended transition), then the snapshot is read.
+        """
         bounded = max(0, min(limit, 200))
         with self._lock:
-            entries = [
-                RunHistoryEntry(
-                    status=self._status(
-                        run_dir, self._refresh(run_dir, _load_record(run_dir))
-                    ),
-                    events=read_events(run_dir),
+            entries: list[RunHistoryEntry] = []
+            for run_dir in reversed(self._run_dirs()):
+                record = self._refresh(run_dir, _load_record(run_dir))
+                entries.append(
+                    RunHistoryEntry(
+                        status=self._status(run_dir, record),
+                        events=read_events(run_dir),
+                        sessions=self._history_sessions(run_dir),
+                    )
                 )
-                for run_dir in reversed(self._run_dirs())
-            ]
             return entries[:bounded]
 
     def get_run(self, run_id: str) -> RunStatus:
@@ -663,6 +670,21 @@ class RunManager:
         state, detail = self._classify_end(updated)
         self._emit(run_end_notification(updated, state, detail))
         return updated
+
+    @staticmethod
+    def _history_sessions(run_dir: Path) -> SessionsSnapshot:
+        """The run's persisted per-session summary for the history view.
+
+        History is snapshot-only and cheap: an ended run reads its small
+        persisted ``sessions.json`` (written once at the live->ended transition,
+        so it survives repo-side log cleanup); a live or pre-field run with no
+        snapshot yet contributes an empty snapshot rather than triggering a live
+        log parse under the lock. The on-demand run-detail route
+        (:meth:`read_sessions`) is the path that live-parses and falls back for a
+        still-running or pre-field run.
+        """
+        snapshot = read_snapshot(run_dir)
+        return snapshot if snapshot is not None else SessionsSnapshot()
 
     def _snapshot_sessions(self, run_dir: Path, record: RunRecord) -> None:
         """Persist the run's per-session summary at the live->ended transition.

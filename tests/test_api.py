@@ -1152,6 +1152,36 @@ def test_get_run_sessions_unknown_run_is_404(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_history_runs_embeds_per_run_sessions_snapshot(tmp_path, monkeypatch):
+    # Each history entry embeds the run's persisted per-session snapshot (shape: a
+    # `sessions` list + the soft `context_budget`), so the history view renders
+    # context strips without an extra per-run request. An ended run with a log
+    # carries its parsed sessions.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], ORCH_SESSION_LOG)
+    spawner.procs[0].returncode = 0
+    client.get("/api/runs")  # observe the end -> snapshot persisted
+
+    run = client.get("/api/history/runs").json()["runs"][0]
+    assert run["context_budget"] == 200_000
+    assert [(s["kind"], s["sid"]) for s in run["sessions"]] == [
+        ("plan-gate", "pg"),
+        ("session", "dev1"),
+    ]
+
+
+def test_history_runs_sessions_shape_present_even_when_empty(tmp_path, monkeypatch):
+    # Every history entry carries the sessions shape even with no parsed log: an
+    # empty `sessions` list plus the soft budget, so the client reads it uniformly.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_a_run(client, repo)  # no orchestrator log written
+
+    run = client.get("/api/history/runs").json()["runs"][0]
+    assert run["sessions"] == []
+    assert run["context_budget"] == 200_000
+
+
 # -- run logs ------------------------------------------------------------------
 
 

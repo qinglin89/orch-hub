@@ -1274,6 +1274,37 @@ def test_ended_run_with_no_log_persists_empty_snapshot(tmp_path):
     assert manager.read_sessions(record.run_id).sessions == ()
 
 
+def test_recent_runs_embeds_persisted_sessions_snapshot(tmp_path):
+    # An ended run's history entry carries its persisted per-session snapshot, so
+    # the history view renders context strips without a per-run follow-up read.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES)
+    end_run(spawner, 0)
+    manager.list_runs()  # observe end -> snapshot persisted
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert [(s.role, s.sid, s.context_tokens) for s in entry.sessions.sessions] == [
+        ("dev", "dev1", 150000),
+        ("review", "rev1", 90000),
+    ]
+    assert entry.sessions.context_budget == 200_000
+
+
+def test_recent_runs_sessions_empty_for_live_run(tmp_path):
+    # History is snapshot-only (no live parse under the lock): a still-running run
+    # has no persisted snapshot yet, so its embedded sessions are empty. The live
+    # strip is served on run detail via read_sessions instead.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:2])  # a log exists, but the run is live
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.sessions.sessions == ()
+
+
 def test_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
     # A parse/IO failure in snapshotting must be swallowed like a notifier
     # failure: the run still ends and classifies, only the snapshot is missing.

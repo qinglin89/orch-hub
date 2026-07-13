@@ -388,15 +388,30 @@ class RunEvent:
 
 @dataclass(frozen=True)
 class RunHistoryEntry:
-    """Recent-run read model: current status plus persisted audit events."""
+    """Recent-run read model: current status, persisted audit events, and the
+    run's per-session context summary.
+
+    ``sessions`` is the run's persisted :class:`SessionsSnapshot` (the
+    ``sessions.json`` written once at the live->ended transition), embedded so
+    the history view renders each run's context strips without an extra per-run
+    request. It is an empty snapshot for a live or pre-field run that has none;
+    ``None`` is normalized to an empty snapshot in :meth:`to_dict` so the
+    serialized shape always carries ``sessions``/``context_budget``. The
+    snapshot's own keys (``sessions``, ``context_budget``) are spread at the top
+    level, matching the ``GET /api/runs/{run_id}/sessions`` route shape so a
+    client reads them identically from either surface.
+    """
 
     status: RunStatus
     events: tuple[RunEvent, ...] = ()
+    sessions: SessionsSnapshot | None = None
 
     def to_dict(self) -> dict:
+        snapshot = self.sessions if self.sessions is not None else SessionsSnapshot()
         return {
             **self.status.to_dict(),
             "events": [event.to_dict() for event in self.events],
+            **snapshot.to_dict(),
         }
 
 

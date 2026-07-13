@@ -536,6 +536,79 @@ code {
   max-height: 60vh;
 }
 
+/* ---- per-session context strips (run detail + run history) ---- */
+
+.sessions h3 {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--muted);
+  margin: 10px 0 6px;
+}
+
+.session-strips {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.session-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+/* A live (still-open) session leads with a run-coloured edge. */
+.session-strip.open {
+  border-left: 3px solid var(--run-fg);
+}
+
+.ss-line {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.ss-label {
+  font-weight: 650;
+}
+
+.ss-sid {
+  color: var(--muted);
+}
+
+/* Over the soft budget: flag the figure, never hide it. */
+.ss-ctx.over {
+  color: var(--warn-fg);
+  font-weight: 650;
+}
+
+.ctx-meter {
+  display: block;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.ctx-fill {
+  display: block;
+  height: 100%;
+  background: var(--run-fg);
+  border-radius: 999px;
+}
+
+.ctx-meter.over .ctx-fill {
+  background: var(--warn-fg);
+}
+
 /* ---- waiting-question answer box ---- */
 
 .section.waiting {

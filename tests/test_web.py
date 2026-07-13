@@ -500,3 +500,44 @@ def test_intake_confirm_handoff_shared_by_sync_and_polled_settle():
     # so an off-lock confirm ends at the same created-task detail.
     assert "handoffToCreatedTask" in body
     assert "confirming" in body  # the poll's confirmed-settle branch keys on it
+
+
+# ---- per-session context strips (session-context-usage, session-2) -----------
+#
+# Run detail (live runs) and run-history cards render a per-session context strip
+# from the sessions payload — GET /api/runs/{id}/sessions for a live run, and the
+# per-run snapshot embedded in /api/history/runs for an ended one — each session
+# shown against the soft context budget with a clamped meter. Asserted at the
+# served-asset boundary (no JS runtime in this suite), like the checks above.
+
+
+def test_session_strip_builder_renders_context_against_budget():
+    body = app_js()
+    # The strip builder + list wrapper, the escaped `context≈` figure, and the
+    # clamped meter that visualises context against the budget.
+    assert "sessionStrip" in body
+    assert "sessionStrips" in body
+    assert "context≈" in body
+    assert "session-strip" in body
+    assert "ctx-meter" in body
+    # Tokens are compacted to "k" and the sid is shortened for the strip.
+    assert "fmtTokensK" in body
+    assert "shortSid" in body
+
+
+def test_run_detail_fetches_sessions_for_live_runs_only():
+    body = app_js()
+    # Run detail pulls the per-session context for a LIVE run only (an ended run
+    # gets its strips in history), best-effort so a failure never hides the task.
+    assert "/sessions" in body
+    assert "context_budget" in body
+    assert "LIVE_STATES.has(run.state)" in body
+    # The fetched payload is threaded into the run status section for rendering.
+    assert "runStatusSection(run, sessions)" in body
+
+
+def test_run_history_card_embeds_session_strips():
+    body = app_js()
+    # History cards render each run's embedded sessions snapshot (no extra
+    # per-run fetch) via the same strip builder.
+    assert "sessionStrips(run.sessions, run.context_budget)" in body

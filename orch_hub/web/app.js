@@ -780,8 +780,93 @@
     paint();
   }
 
+  // ---- per-session context strips (run detail + run history) ----
+  //
+  // The orchestrator logs each protocol session's latest context size; the hub
+  // parses those into per-session summaries (role/kind, sid, turns, latest
+  // context) exposed as a `sessions[]` list plus a soft `context_budget` — both
+  // by GET /api/runs/{id}/sessions (a live run) and embedded per run in the
+  // history payload (an ended run's persisted snapshot). A strip renders one
+  // session compactly, e.g. `plan c05cfe3d… · 1 turn · context≈101k/200k`, with
+  // a clamped meter. Every parsed string is escaped; a missing sid or context
+  // degrades to a plain omission, never a broken strip. The budget is a display
+  // reference, not a cap: context can exceed it, and an over-budget session is
+  // flagged rather than hidden.
+
+  // Compact a token count to "k": 101000 -> "101k", 0 -> "0k". Null/undefined
+  // (a zero-turn session logs no context figure) -> null so the caller omits it.
+  function fmtTokensK(n) {
+    if (n === null || n === undefined) return null;
+    return Math.round(n / 1000) + "k";
+  }
+
+  // Shorten a backend session id for display (first 8 chars + ellipsis, like the
+  // `c05cfe3d…` strip example); a short id passes through unchanged.
+  function shortSid(sid) {
+    const s = String(sid);
+    return s.length > 8 ? s.slice(0, 8) + "…" : s;
+  }
+
+  // A clamped context meter: fill width = context/budget, capped at 100% even
+  // when context exceeds the soft budget (the real figure rides the strip text).
+  // Over-budget adds a class for colour. Empty when there is no context or budget.
+  function ctxMeter(tokens, budget) {
+    if (tokens === null || tokens === undefined) return "";
+    if (!budget || budget <= 0) return "";
+    const pct = Math.max(0, Math.min(100, (tokens / budget) * 100));
+    const over = tokens > budget ? " over" : "";
+    return (
+      `<span class="ctx-meter${over}" aria-hidden="true">` +
+      `<span class="ctx-fill" style="width: ${pct.toFixed(1)}%"></span></span>`
+    );
+  }
+
+  // One protocol session as a compact strip. `session` is a session summary
+  // (role/kind/sid/turns/context_tokens/open); `budget` is the snapshot's
+  // context_budget. A plan-gate is labelled "plan"; a normal session by its role.
+  function sessionStrip(session, budget) {
+    const label =
+      session.kind === "plan-gate" ? "plan" : session.role || "session";
+    const bits = [`<span class="ss-label">${escapeHtml(label)}</span>`];
+    if (session.sid)
+      bits.push(`<span class="ss-sid">${escapeHtml(shortSid(session.sid))}</span>`);
+    const turns = session.turns || 0;
+    bits.push(`${turns} ${turns === 1 ? "turn" : "turns"}`);
+    const ctxK = fmtTokensK(session.context_tokens);
+    if (ctxK) {
+      const over = budget > 0 && session.context_tokens > budget;
+      bits.push(
+        `<span class="ss-ctx${over ? " over" : ""}">context≈${escapeHtml(
+          ctxK
+        )}/${escapeHtml(fmtTokensK(budget))}</span>`
+      );
+    }
+    const meter = ctxK ? ctxMeter(session.context_tokens, budget) : "";
+    return (
+      `<li class="session-strip${session.open ? " open" : ""}">` +
+      `<span class="ss-line">${bits.join(" · ")}</span>` +
+      meter +
+      `</li>`
+    );
+  }
+
+  // The per-session context strips for a run, in log order (each plan-gate
+  // before its dev session). Empty string when the run has no parsed/persisted
+  // sessions (no log yet, or a pre-field run) so the caller can drop the heading.
+  function sessionStrips(sessions, budget) {
+    if (!sessions || !sessions.length) return "";
+    return (
+      `<ul class="session-strips">` +
+      sessions.map((s) => sessionStrip(s, budget)).join("") +
+      `</ul>`
+    );
+  }
+
   // ---- task detail ----
-  function runStatusSection(run) {
+  // `sessions` is the live run's { sessions, context_budget } payload (run
+  // detail is live-only; an ended run's strips live in run history), or null
+  // when the best-effort fetch was skipped or failed — then no strip renders.
+  function runStatusSection(run, sessions) {
     if (!run)
       return `<section class="section"><h2>Run</h2>
         <p class="muted">No run recorded for this task.</p></section>`;
@@ -794,9 +879,13 @@
     const kv = rows
       .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(v)}</dd>`)
       .join("");
+    const strips = sessions
+      ? sessionStrips(sessions.sessions, sessions.context_budget)
+      : "";
     return `<section class="section">
       <h2>Run ${runBadge(run.state)}</h2>
       <dl class="kv">${kv}</dl>
+      ${strips ? `<div class="sessions"><h3>Sessions</h3>${strips}</div>` : ""}
       ${run.detail ? `<p class="muted">${escapeHtml(run.detail)}</p>` : ""}
       ${run.error ? `<p class="error-text">${escapeHtml(run.error)}</p>` : ""}
       <p><a class="text-link" href="${logsHash(run.run_id)}">View logs →</a></p>
@@ -1217,6 +1306,20 @@
       if (err instanceof ApiError && err.status === 401) throw err;
     }
 
+    // Best-effort per-session context for a LIVE run only (an ended run gets its
+    // strips in run history, so run detail stays live-only). A sessions failure
+    // must never hide the task file, so it degrades to no strip.
+    let sessions = null;
+    if (run && LIVE_STATES.has(run.state)) {
+      try {
+        sessions = await api(
+          "/api/runs/" + encodeURIComponent(run.run_id) + "/sessions"
+        );
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) throw err;
+      }
+    }
+
     // Only a live, waiting run can have a pending question to answer.
     let questions = [];
     if (run && run.state === "waiting" && run.pending_questions) {
@@ -1259,7 +1362,7 @@
       ${detail.summary ? `<p class="summary">${escapeHtml(detail.summary)}</p>` : ""}
       ${blockers}
       ${unknownNote}
-      ${runStatusSection(run)}
+      ${runStatusSection(run, sessions)}
       ${runControlsSection(repoName, detail, run, busyRun, readiness)}
       ${answerSection(run ? run.run_id : "", questions)}
       ${contentSection}`;
@@ -1288,6 +1391,10 @@
       .map(escapeHtml)
       .join(" · ");
     const kv = runMetaKv(run);
+    // Each entry embeds its persisted per-session snapshot (sessions[] +
+    // context_budget), so the card renders context strips without a per-run
+    // fetch; an ended run with no parsed sessions renders none.
+    const strips = sessionStrips(run.sessions, run.context_budget);
     return `
       <li class="card run">
         <a class="card-link" href="${logsHash(run.run_id)}">
@@ -1297,6 +1404,7 @@
           </div>
           ${meta ? `<div class="muted">${meta}</div>` : ""}
           ${kv ? `<dl class="kv">${kv}</dl>` : ""}
+          ${strips}
         </a>
       </li>`;
   }
