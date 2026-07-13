@@ -388,8 +388,8 @@ class RunEvent:
 
 @dataclass(frozen=True)
 class RunHistoryEntry:
-    """Recent-run read model: current status, persisted audit events, and the
-    run's per-session context summary.
+    """Recent-run read model: current status, persisted audit events, the run's
+    per-session context summary, and the run task's session estimate.
 
     ``sessions`` is the run's persisted :class:`SessionsSnapshot` (the
     ``sessions.json`` written once at the live->ended transition), embedded so
@@ -400,11 +400,19 @@ class RunHistoryEntry:
     snapshot's own keys (``sessions``, ``context_budget``) are spread at the top
     level, matching the ``GET /api/runs/{run_id}/sessions`` route shape so a
     client reads them identically from either surface.
+
+    ``session_est`` is the run task's frontmatter :class:`SessionEst`, read
+    *current* (so a task whose est total was later raised shows the new total),
+    embedded so the history view's est-vs-actual task rollup needs no per-task
+    request. ``None`` — serialized as ``session_est: null`` — is "unknown": a
+    task with no readable/parseable ``session-est``. The backend reads it once
+    per ``(repo, task)`` and stamps the same value on each of that task's runs.
     """
 
     status: RunStatus
     events: tuple[RunEvent, ...] = ()
     sessions: SessionsSnapshot | None = None
+    session_est: SessionEst | None = None
 
     def to_dict(self) -> dict:
         snapshot = self.sessions if self.sessions is not None else SessionsSnapshot()
@@ -412,6 +420,9 @@ class RunHistoryEntry:
             **self.status.to_dict(),
             "events": [event.to_dict() for event in self.events],
             **snapshot.to_dict(),
+            "session_est": (
+                self.session_est.to_dict() if self.session_est is not None else None
+            ),
         }
 
 
@@ -495,6 +506,27 @@ class SessionsSnapshot:
             "sessions": [summary.to_dict() for summary in self.sessions],
             "context_budget": self.context_budget,
         }
+
+
+@dataclass(frozen=True)
+class SessionEst:
+    """A task's frontmatter ``session-est: <current>/<total>`` estimate.
+
+    ``current`` is the task file's own dev-session progress count (it increments
+    at each dev-advancement session entry); ``total`` is the estimated
+    dev-session budget. The dashboard's est-vs-actual rollup measures the
+    dev-session count *observed in persisted run history* against ``total`` — a
+    figure independent of ``current``, which is the task's self-reported
+    progress. Parsed by :func:`orch_hub.task_store.read_session_est`; a missing
+    or malformed est is represented as absence (``None`` at the call sites),
+    never a sentinel here, so both fields are always real parsed integers.
+    """
+
+    current: int
+    total: int
+
+    def to_dict(self) -> dict:
+        return {"current": self.current, "total": self.total}
 
 
 @dataclass(frozen=True)

@@ -10,13 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from orch_hub.models import ManagedRepo, tasks_payload
+from orch_hub.models import ManagedRepo, SessionEst, tasks_payload
 from orch_hub.task_store import (
     STATUS_MISSING,
     STATUS_UNKNOWN,
     list_repo_tasks,
     list_tasks,
     read_archived_task_content,
+    read_session_est,
     read_task_content,
 )
 
@@ -457,6 +458,80 @@ def test_read_archived_task_content_rejects_symlink_escaping_archive_dir(tmp_pat
     secret.write_text("top secret", encoding="utf-8")
     (archive_dir / "2026-07-05-linked.md").symlink_to(secret)
     assert read_archived_task_content(repo, "2026-07-05-linked") is None
+
+
+# -- session-est parse (est-vs-actual rollup source) ---------------------------
+
+
+def write_task_est(tasks_dir: Path, task_id: str, est_line: str | None) -> None:
+    """Write a minimal task file whose ``session-est`` line is ``est_line``.
+
+    ``est_line`` is the whole raw frontmatter line (e.g. ``"session-est: 2/3"``)
+    so tests can exercise malformed shapes verbatim, or ``None`` to omit the
+    field entirely.
+    """
+    lines = ["---", f"id: {task_id}", "status: in_progress"]
+    if est_line is not None:
+        lines.append(est_line)
+    lines += ["---", "", f"# {task_id}", ""]
+    (tasks_dir / f"{task_id}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
+def test_read_session_est_parses_active_frontmatter(tmp_path):
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    write_task_est(tasks_dir, "2026-07-05-a", "session-est: 2/3")
+    assert read_session_est(repo, "2026-07-05-a") == SessionEst(current=2, total=3)
+
+
+def test_read_session_est_falls_back_to_archive(tmp_path):
+    # A completed task lives only in archive/ after close-out; the rollup still
+    # reads its est through the run record's id (active-then-archive fallback).
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    archive = tasks_dir / "archive"
+    archive.mkdir()
+    write_task_est(archive, "2026-07-05-done", "session-est: 3/3")
+    assert read_session_est(repo, "2026-07-05-done") == SessionEst(3, 3)
+
+
+def test_read_session_est_active_is_authoritative_over_archive(tmp_path):
+    # Only genuine absence of the active file falls through to archive; a present
+    # active file with a malformed est stays unknown rather than reading a stale
+    # archived copy.
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    write_task_est(tasks_dir, "2026-07-05-x", "session-est: oops")  # malformed active
+    archive = tasks_dir / "archive"
+    archive.mkdir()
+    write_task_est(archive, "2026-07-05-x", "session-est: 1/2")  # valid archive
+    assert read_session_est(repo, "2026-07-05-x") is None
+
+
+@pytest.mark.parametrize(
+    "est_line",
+    [
+        "session-est: 2",  # no total
+        "session-est: /3",  # no current
+        "session-est: abc/3",  # non-numeric current
+        "session-est: 2/x",  # non-numeric total
+        "session-est: 2/3/4",  # too many parts
+        "session-est: ²/3",  # superscript "²": isdigit() true but not int-able
+        "session-est:",  # empty value
+        None,  # field omitted entirely
+    ],
+)
+def test_read_session_est_malformed_or_missing_is_unknown(tmp_path, est_line):
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    write_task_est(tasks_dir, "2026-07-05-m", est_line)
+    assert read_session_est(repo, "2026-07-05-m") is None
+
+
+def test_read_session_est_absent_task_file_is_unknown(tmp_path):
+    # No active file and no archive/ copy: unknown, never an error.
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    assert read_session_est(repo, "2026-07-05-ghost") is None
+
+
+def test_session_est_to_dict_round_trip():
+    assert SessionEst(current=1, total=4).to_dict() == {"current": 1, "total": 4}
 
 
 def test_to_dict_and_payload_shape(tmp_path):

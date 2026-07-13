@@ -23,7 +23,7 @@ from orch_hub.history import (
     KIND_STOP_REQUESTED,
     read_events,
 )
-from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport
+from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport, SessionEst
 from orch_hub.sessions import read_snapshot
 from orch_hub.runs import (
     CAFFEINATE,
@@ -1303,6 +1303,109 @@ def test_recent_runs_sessions_empty_for_live_run(tmp_path):
 
     entry = manager.recent_runs(limit=1)[0]
     assert entry.sessions.sessions == ()
+
+
+def write_task_with_est(repo: ManagedRepo, current: int, total: int) -> None:
+    """Overwrite ``TASK_ID``'s task file with a ``session-est: current/total``."""
+    (repo.path / ".ai-tasks" / f"{TASK_ID}.md").write_text(
+        f"---\nid: {TASK_ID}\nstatus: in_progress\n"
+        f"session-est: {current}/{total}\n---\n\n# Task\n",
+        encoding="utf-8",
+    )
+
+
+def test_recent_runs_embeds_session_est(tmp_path):
+    # A run's history entry carries its task's typed session-est for the
+    # est-vs-actual rollup, serialized as a top-level session_est object.
+    repo = make_repo(tmp_path)
+    write_task_with_est(repo, 1, 3)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.session_est == SessionEst(current=1, total=3)
+    assert entry.to_dict()["session_est"] == {"current": 1, "total": 3}
+
+
+def test_recent_runs_session_est_unknown_without_frontmatter(tmp_path):
+    # The default task file carries no session-est, so the est is unknown (None),
+    # serialized as session_est: null.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.session_est is None
+    assert entry.to_dict()["session_est"] is None
+
+
+def test_recent_runs_session_est_reads_archived_task_after_closeout(tmp_path):
+    # After close-out archives the completed task, recent_runs still reads its est
+    # from archive/ via the run record's id, so a completed task's rollup keeps
+    # its estimate (mirrors read_session_est's active-then-archive fallback).
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    end_run(spawner, 0)
+    manager.list_runs()  # observe the end
+    # Simulate close-out: drop the active file + index row, archive with est.
+    tasks_dir = repo.path / ".ai-tasks"
+    (tasks_dir / f"{TASK_ID}.md").unlink()
+    (tasks_dir / "index.md").write_text(
+        "# Active tasks\n\n| Task | Status | Summary |\n|---|---|---|\n",
+        encoding="utf-8",
+    )
+    archive = tasks_dir / "archive"
+    archive.mkdir()
+    (archive / f"{TASK_ID}.md").write_text(
+        f"---\nid: {TASK_ID}\nstatus: completed\nsession-est: 3/3\n---\n\n# Task\n",
+        encoding="utf-8",
+    )
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.session_est == SessionEst(3, 3)
+
+
+def test_recent_runs_session_est_isolated_on_read_failure(tmp_path, monkeypatch):
+    # A target-repo est read failure must degrade to unknown, never raise into
+    # the history read (mirrors the snapshot/notifier isolation).
+    repo = make_repo(tmp_path)
+    write_task_with_est(repo, 1, 3)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+
+    def boom(_repo, _task_id):
+        raise OSError("task file unreadable")
+
+    monkeypatch.setattr("orch_hub.runs.read_session_est", boom)
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.session_est is None  # unknown, not a crash
+    assert entry.status.record.task_id == TASK_ID  # run still in history
+
+
+def test_recent_runs_session_est_deduped_per_task(tmp_path, monkeypatch):
+    # Two runs of the same (repo, task) read the frontmatter once, deduped within
+    # the call so a task with many runs does not re-read its task file per run.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    end_run(spawner, 0)
+    manager.list_runs()  # free the repo
+    manager.start_run(repo, TASK_ID)  # second run, same task
+
+    calls: list[str] = []
+
+    def counting(_repo, task_id):
+        calls.append(task_id)
+        return SessionEst(1, 2)
+
+    monkeypatch.setattr("orch_hub.runs.read_session_est", counting)
+
+    entries = manager.recent_runs()
+    assert len(entries) == 2
+    assert all(e.session_est == SessionEst(1, 2) for e in entries)
+    assert calls == [TASK_ID]  # read once despite two runs of the task
 
 
 def test_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):

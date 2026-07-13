@@ -19,7 +19,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
-from .models import ManagedRepo, RepoTaskInventory, TaskSummary
+from .models import ManagedRepo, RepoTaskInventory, SessionEst, TaskSummary
 
 STATUS_MISSING = "missing"
 """Sentinel status: a task id is listed in the index but has no ``<id>.md``."""
@@ -106,6 +106,57 @@ def read_archived_task_content(repo: ManagedRepo, task_id: str) -> str | None:
     enumerating ``archive/``.
     """
     return _read_contained_task_file(repo.path / ".ai-tasks" / "archive", task_id)
+
+
+def read_session_est(repo: ManagedRepo, task_id: str) -> SessionEst | None:
+    """Return the task's typed ``session-est`` (current/total), or ``None``.
+
+    Reads the frontmatter ``session-est: <current>/<total>`` from the active
+    ``.ai-tasks/<task_id>.md`` first, then the archived copy — a completed task's
+    run history still references its id after close-out moves the file into
+    ``archive/`` (same active-then-archive fallback as the run-scoped task view).
+    ``None`` means "unknown": the file is absent, has no frontmatter, omits
+    ``session-est``, or its value is not two ``/``-separated non-negative
+    integers. Only genuine *absence* of the active file falls through to archive;
+    a present active file with a malformed est stays unknown (the active file is
+    authoritative). This reads only the frontmatter est —
+    :func:`list_repo_tasks` remains the source of status/summary/blockers. It
+    does not swallow IO errors (a mid-read failure propagates, matching
+    :func:`read_task_content`); callers that need isolation wrap it.
+    """
+    content = read_task_content(repo, task_id)
+    if content is None:
+        content = read_archived_task_content(repo, task_id)
+    if content is None:
+        return None
+    return _parse_session_est(_parse_frontmatter(content).get("session-est"))
+
+
+def _parse_session_est(raw: str | None) -> SessionEst | None:
+    """Parse a ``session-est`` frontmatter value ``<current>/<total>``.
+
+    ``None`` for an absent value or any shape that is not exactly two
+    slash-separated non-negative integers — ``2`` (no total), ``/3`` (no
+    current), ``abc/3``, ``2/3/4``, or an empty string all degrade to unknown
+    rather than raising.
+    """
+    if raw is None:
+        return None
+    parts = raw.split("/")
+    if len(parts) != 2:
+        return None
+    current, total = parts[0].strip(), parts[1].strip()
+    # ASCII-only: ``str.isdigit()`` is also true for chars like superscript "²"
+    # that ``int()`` rejects, so guard with ``isascii()`` to keep the "never
+    # raises" contract (every accepted char is then an int-able 0-9).
+    if not _ascii_digits(current) or not _ascii_digits(total):
+        return None
+    return SessionEst(current=int(current), total=int(total))
+
+
+def _ascii_digits(text: str) -> bool:
+    """True iff ``text`` is a non-empty run of ASCII decimal digits (0-9)."""
+    return bool(text) and text.isascii() and text.isdigit()
 
 
 def _read_contained_task_file(base_dir: Path, task_id: str) -> str | None:

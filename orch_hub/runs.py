@@ -78,6 +78,7 @@ from .models import (
     RunHistoryEntry,
     RunRecord,
     RunStatus,
+    SessionEst,
     SessionsSnapshot,
 )
 from .notifications import (
@@ -88,7 +89,12 @@ from .notifications import (
 )
 from .readiness import check_readiness
 from .sessions import read_live, read_snapshot, write_snapshot
-from .task_store import STATUS_MISSING, STATUS_UNKNOWN, list_repo_tasks
+from .task_store import (
+    STATUS_MISSING,
+    STATUS_UNKNOWN,
+    list_repo_tasks,
+    read_session_est,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -505,16 +511,23 @@ class RunManager:
             ]
 
     def recent_runs(self, limit: int = 50) -> list[RunHistoryEntry]:
-        """Return recent runs newest-first with audit events and session summary.
+        """Return recent runs newest-first with audit events, session summary,
+        and each run task's session estimate.
 
         Each entry embeds the run's persisted per-session context snapshot so the
-        history view renders context strips without a per-run follow-up request.
-        The refresh runs first (it may persist the snapshot at a just-observed
-        live->ended transition), then the snapshot is read.
+        history view renders context strips without a per-run follow-up request,
+        plus the run task's typed ``session-est`` for the est-vs-actual task
+        rollup. The refresh runs first (it may persist the snapshot at a
+        just-observed live->ended transition), then the snapshot is read. The est
+        is read from the target repo's task file (active then archive), deduped
+        per ``(repo, task)`` within the call — a task with many runs reads its
+        frontmatter once — and fully isolated so a target-repo read failure
+        degrades that task's est to unknown without touching history.
         """
         bounded = max(0, min(limit, 200))
         with self._lock:
             entries: list[RunHistoryEntry] = []
+            est_cache: dict[tuple[str, str], SessionEst | None] = {}
             for run_dir in reversed(self._run_dirs()):
                 record = self._refresh(run_dir, _load_record(run_dir))
                 entries.append(
@@ -522,9 +535,42 @@ class RunManager:
                         status=self._status(run_dir, record),
                         events=read_events(run_dir),
                         sessions=self._history_sessions(run_dir),
+                        session_est=self._history_session_est(record, est_cache),
                     )
                 )
             return entries[:bounded]
+
+    @staticmethod
+    def _history_session_est(
+        record: RunRecord, cache: dict[tuple[str, str], SessionEst | None]
+    ) -> SessionEst | None:
+        """The run task's typed ``session-est`` for the history rollup, cached.
+
+        Fully isolated like the snapshot/notifier paths: a stub record with no
+        repo, an empty task id, or a target-repo read failure degrades to
+        ``None`` (unknown) and never raises into the history read. ``read_session_est``
+        does not swallow IO errors, so the wrap here is the isolation boundary,
+        mirroring :meth:`_snapshot_sessions`. Deduped per ``(repo_path, task_id)``
+        so a task with many runs reads (or fails to read) its frontmatter once,
+        including the failure verdict.
+        """
+        repo = record.managed_repo()
+        if repo is None or not record.task_id:
+            return None
+        key = (str(repo.path), record.task_id)
+        if key not in cache:
+            try:
+                cache[key] = read_session_est(repo, record.task_id)
+            except Exception:
+                # A target-repo read failure must never corrupt history; unknown
+                # est is a graceful degradation. Log only the (non-secret) ids.
+                _log.warning(
+                    "session-est read failed for run %s task %s",
+                    record.run_id,
+                    record.task_id,
+                )
+                cache[key] = None
+        return cache[key]
 
     def get_run(self, run_id: str) -> RunStatus:
         """Return one run's current status; unknown ids raise."""

@@ -1372,6 +1372,14 @@
   }
 
   // ---- run history ----
+  //
+  // Runs are grouped client-side by their (repo, task) so a completed or
+  // archived task's whole run arc reads as one unit: a header, an est-vs-actual
+  // rollup (dev sessions used vs the frontmatter session-est, peak per-session
+  // context, summed wall-clock), then each run's card with its context strips.
+  // The flat /api/history/runs list is already newest-first and embeds, per run,
+  // the persisted session snapshot and the task's typed session_est.
+
   function runMetaKv(run) {
     const rows = [];
     if (run.started_ts) rows.push(["started", run.started_ts]);
@@ -1385,15 +1393,142 @@
       .join("");
   }
 
+  // The task's session_est (the backend stamps the same value on every run of a
+  // task, reading it once). First non-null wins; null when every run's est is
+  // unknown (missing/malformed frontmatter).
+  function firstEst(runs) {
+    for (const run of runs) if (run.session_est) return run.session_est;
+    return null;
+  }
+
+  // "Actual" dev sessions observed across a task's runs: role "dev", kind
+  // "session". Plan-gates (kind "plan-gate") and review sessions are excluded
+  // because frontmatter session-est counts dev sessions only, so this is the
+  // faithful mate of the est total. It counts sessions seen in persisted run
+  // history, so pruned run dirs undercount (an audit-of-persisted-runs view);
+  // a live run contributes nothing until its snapshot is persisted at end.
+  function countDevSessions(runs) {
+    let n = 0;
+    for (const run of runs)
+      for (const s of run.sessions || [])
+        if (s.role === "dev" && s.kind === "session") n++;
+    return n;
+  }
+
+  // The peak single-session context across a task's runs (each session's
+  // context_tokens is already that conversation's monotonic peak). Null when no
+  // session reported a context figure.
+  function peakContext(runs) {
+    let peak = null;
+    for (const run of runs)
+      for (const s of run.sessions || [])
+        if (
+          s.context_tokens != null &&
+          (peak === null || s.context_tokens > peak)
+        )
+          peak = s.context_tokens;
+    return peak;
+  }
+
+  // Summed wall-clock of a task's runs, in seconds, from the run-record ISO
+  // started_ts/ended_ts — never the log's HH:MM:SS (no date, wraps past
+  // midnight). A run with no ended_ts (live, or an end the hub never observed)
+  // or an unparseable/negative span contributes nothing. Only the duration is
+  // derived, so naive local parsing is safe: the zone offset cancels in the
+  // subtraction.
+  function sumWallClockSecs(runs) {
+    let secs = 0;
+    for (const run of runs) {
+      if (!run.started_ts || !run.ended_ts) continue;
+      const start = new Date(run.started_ts).getTime();
+      const end = new Date(run.ended_ts).getTime();
+      if (isNaN(start) || isNaN(end) || end < start) continue;
+      secs += (end - start) / 1000;
+    }
+    return secs;
+  }
+
+  // A compact duration: "45s", "5m", "2h 5m", "3h". Zero/negative -> "0s".
+  function fmtDuration(secs) {
+    secs = Math.max(0, Math.round(secs));
+    if (secs < 60) return secs + "s";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m";
+    const hrs = Math.floor(mins / 60);
+    const rem = mins % 60;
+    return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
+  }
+
+  // Group the flat history list by (repo, task), preserving newest-first order:
+  // the list is already newest-first, so a group's first appearance — and each
+  // run within it — stays newest-first. Keyed on repo_path (the backend's est
+  // dedup key) with a repo_name fallback, joined to task_id by a NUL that can't
+  // occur in either.
+  function groupRunsByTask(runs) {
+    const groups = new Map();
+    for (const run of runs) {
+      const key =
+        (run.repo_path || run.repo_name || "") + "\u0000" + (run.task_id || "");
+      let group = groups.get(key);
+      if (!group) {
+        group = { repo_name: run.repo_name, task_id: run.task_id, runs: [] };
+        groups.set(key, group);
+      }
+      group.runs.push(run);
+    }
+    return [...groups.values()];
+  }
+
+  // The est-vs-actual rollup for one task group: dev sessions used against the
+  // frontmatter session-est total (a clamped meter, over-estimate flagged),
+  // peak per-session context, and summed wall-clock. Est unknown -> the count
+  // shows with an "est unknown" note and no meter.
+  function taskRollup(group) {
+    const runs = group.runs;
+    const est = firstEst(runs);
+    const actual = countDevSessions(runs);
+    const total = est ? est.total : null;
+    const bits = [];
+    if (total !== null) {
+      const over = actual > total;
+      bits.push(
+        `<span class="roll-metric${over ? " over" : ""}">${actual}/${total} ` +
+          `dev session${total === 1 ? "" : "s"}</span>`
+      );
+    } else {
+      bits.push(
+        `<span class="roll-metric">${actual} dev session${
+          actual === 1 ? "" : "s"
+        } · est unknown</span>`
+      );
+    }
+    const peakK = fmtTokensK(peakContext(runs));
+    if (peakK)
+      bits.push(
+        `<span class="roll-metric">peak context≈${escapeHtml(peakK)}</span>`
+      );
+    const wall = sumWallClockSecs(runs);
+    if (wall > 0)
+      bits.push(
+        `<span class="roll-metric">${escapeHtml(
+          fmtDuration(wall)
+        )} wall-clock</span>`
+      );
+    const meter = total !== null ? ctxMeter(actual, total) : "";
+    return (
+      `<div class="task-rollup">` +
+      `<div class="roll-line">${bits.join(" · ")}</div>` +
+      meter +
+      `</div>`
+    );
+  }
+
   function historyRunCard(run) {
-    const meta = [run.repo_name, run.task_id]
-      .filter(Boolean)
-      .map(escapeHtml)
-      .join(" · ");
     const kv = runMetaKv(run);
     // Each entry embeds its persisted per-session snapshot (sessions[] +
     // context_budget), so the card renders context strips without a per-run
-    // fetch; an ended run with no parsed sessions renders none.
+    // fetch; an ended run with no parsed sessions renders none. The run's
+    // (repo, task) is carried by the enclosing group header, not repeated here.
     const strips = sessionStrips(run.sessions, run.context_budget);
     return `
       <li class="card run">
@@ -1402,15 +1537,35 @@
             <span class="run-id">${escapeHtml(run.run_id)}</span>
             <span class="badges">${runBadge(run.state)}</span>
           </div>
-          ${meta ? `<div class="muted">${meta}</div>` : ""}
           ${kv ? `<dl class="kv">${kv}</dl>` : ""}
           ${strips}
         </a>
       </li>`;
   }
 
-  // Run history: recent runs newest-first from the history endpoint. Each run
-  // taps through to its log tail.
+  // One task group: header (task id + repo + run count), the est-vs-actual
+  // rollup, then the group's run cards newest-first via the shared card builder.
+  function taskGroupCard(group) {
+    const runCount = group.runs.length;
+    const cards = group.runs.map(historyRunCard).join("");
+    return (
+      `<section class="task-group">` +
+      `<header class="task-group-head">` +
+      `<span class="tg-task">${escapeHtml(
+        group.task_id || "(unknown task)"
+      )}</span>` +
+      `<span class="tg-meta muted">${escapeHtml(
+        group.repo_name || ""
+      )} · ${runCount} run${runCount === 1 ? "" : "s"}</span>` +
+      `</header>` +
+      taskRollup(group) +
+      `<ul class="list">${cards}</ul>` +
+      `</section>`
+    );
+  }
+
+  // Run history: recent runs newest-first from the history endpoint, grouped by
+  // (repo, task) into per-task cards. Each run taps through to its log tail.
   async function renderRuns() {
     view().innerHTML = centerHtml("Loading runs…");
     const data = await api("/api/history/runs");
@@ -1419,8 +1574,7 @@
       view().innerHTML = centerHtml("No runs recorded yet.");
       return;
     }
-    view().innerHTML =
-      `<ul class="list">` + runs.map(historyRunCard).join("") + `</ul>`;
+    view().innerHTML = groupRunsByTask(runs).map(taskGroupCard).join("");
   }
 
   // ---- run-scoped task view (active or archived) ----

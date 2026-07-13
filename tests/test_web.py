@@ -541,3 +541,47 @@ def test_run_history_card_embeds_session_strips():
     # History cards render each run's embedded sessions snapshot (no extra
     # per-run fetch) via the same strip builder.
     assert "sessionStrips(run.sessions, run.context_budget)" in body
+
+
+# ---- completed-task history: grouping + est-vs-actual rollup (session-2-cont) -
+#
+# Run history groups the flat, newest-first /api/history/runs list by (repo,
+# task) — archived tasks included, since run history is independent of task-file
+# archival — into per-task cards with an est-vs-actual rollup: dev sessions used
+# (dev role, session kind; plan-gate/review excluded) vs the embedded
+# session_est total, peak per-session context, and summed wall-clock from the
+# run-record ISO stamps. Asserted at the served-asset boundary (no JS runtime).
+
+
+def test_run_history_groups_runs_by_task_with_est_rollup():
+    body = app_js()
+    # renderRuns groups by (repo, task) and renders a per-task rollup + card list.
+    assert "groupRunsByTask" in body
+    assert "taskGroupCard" in body
+    assert "taskRollup" in body
+    assert "task-group" in body
+    assert "task-rollup" in body
+    # renderRuns builds group cards rather than a flat run list.
+    assert "groupRunsByTask(runs).map(taskGroupCard)" in body
+
+
+def test_run_history_rollup_counts_dev_sessions_against_est():
+    body = app_js()
+    # "Actual" = dev sessions only (role dev, kind session); a plan-gate and a
+    # review session are excluded, matching what frontmatter session-est counts.
+    assert "countDevSessions" in body
+    assert 's.role === "dev" && s.kind === "session"' in body
+    # The est total comes from the per-run embedded session_est field.
+    assert "session_est" in body
+    assert "firstEst" in body
+
+
+def test_run_history_rollup_shows_peak_context_and_wall_clock():
+    body = app_js()
+    # Peak per-session context and summed wall-clock from run-record ISO
+    # started_ts/ended_ts (never the log HH:MM:SS), via a compact duration fmt.
+    assert "peakContext" in body
+    assert "sumWallClockSecs" in body
+    assert "fmtDuration" in body
+    assert "wall-clock" in body
+    assert "started_ts" in body and "ended_ts" in body

@@ -1182,6 +1182,36 @@ def test_history_runs_sessions_shape_present_even_when_empty(tmp_path, monkeypat
     assert run["context_budget"] == 200_000
 
 
+def write_run_task_est(repo: ManagedRepo, *, current: int, total: int) -> None:
+    """Give the run task a ``session-est: current/total`` for the rollup source."""
+    (repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md").write_text(
+        f"---\nid: {RUN_TASK_ID}\nstatus: in_progress\n"
+        f"session-est: {current}/{total}\n---\n\n# Task\n",
+        encoding="utf-8",
+    )
+
+
+def test_history_runs_embeds_session_est(tmp_path, monkeypatch):
+    # Each history entry embeds the run task's typed session-est (current/total),
+    # so the est-vs-actual task rollup needs no per-task follow-up request.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    write_run_task_est(repo, current=1, total=3)
+    start_a_run(client, repo)
+
+    run = client.get("/api/history/runs").json()["runs"][0]
+    assert run["session_est"] == {"current": 1, "total": 3}
+
+
+def test_history_runs_session_est_null_when_unknown(tmp_path, monkeypatch):
+    # A task with no session-est frontmatter carries the key as null (unknown),
+    # so the client reads the shape uniformly rather than probing for absence.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_a_run(client, repo)  # default run task has no session-est
+
+    run = client.get("/api/history/runs").json()["runs"][0]
+    assert run["session_est"] is None
+
+
 # -- run logs ------------------------------------------------------------------
 
 
