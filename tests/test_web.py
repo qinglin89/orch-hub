@@ -434,7 +434,10 @@ def test_intake_confirm_hands_off_to_the_existing_task_start_flow():
     body = app_js()
     # Only a confirmed intake routes onward, and it routes to the created task's
     # detail (taskHash) — where the EXISTING Start control launches it. Intake
-    # never duplicates run start/stop; the handoff is the created-task link.
+    # never duplicates run start/stop. The confirm turn now runs off the lock, so
+    # this handoff fires both on a synchronous `confirmed` return and when the
+    # poll observes the async `confirming`→`confirmed` settle; one shared helper
+    # keeps the taskHash target identical for both paths.
     assert "created_task_id" in body
     assert "taskHash(rec.repo_name, rec.created_task_id)" in body
 
@@ -447,3 +450,53 @@ def test_intake_audit_trail_is_metadata_only():
     assert "intakeAuditSection" in body
     assert "intake-events" in body
     assert "e.kind" in body
+
+
+# ---- async intake turns (2026-07-12-async-intake-turns, session-2) -----------
+#
+# The intake agent turn now runs off the request lock on the hub, so a mutating
+# route returns the transient record at once and the review view polls
+# GET /api/intakes/{id} through the in-flight turn instead of assuming a
+# synchronous draft. These pin the polling / elapsed / navigate-away wiring at
+# the served-asset boundary (no JS runtime in this suite), like the checks above.
+
+
+def test_intake_review_polls_a_transient_record_and_stops_when_resting():
+    body = app_js()
+    # An in-flight intake is polled through a single module-level handle that the
+    # router tears down on navigation (mirrors the SSE activeStream discipline),
+    # and the poll is started ONLY for a transient status, so a resting record
+    # never polls and a left view never keeps reading.
+    assert "startIntakePoll" in body
+    assert "stopIntakePoll" in body
+    assert "activeIntakePoll" in body
+    assert "INTAKE_TRANSIENT" in body
+    assert "INTAKE_TRANSIENT.has(data.status)" in body  # gates the poll start
+    # A chained timeout, never a leak-prone setInterval. Assert the *call* forms
+    # so a comment naming setInterval doesn't trip the negative check (as the
+    # log-stream test does for `new EventSource`).
+    assert "setTimeout(" in body
+    assert "setInterval(" not in body
+
+
+def test_intake_review_shows_live_elapsed_and_navigate_away_note():
+    body = app_js()
+    # The working panel shows a ticking elapsed time (from the record's
+    # updated_ts) and tells the operator the turn keeps running on the hub, so
+    # leaving the page is safe — the whole point of moving turns off the lock.
+    assert "intakeElapsed" in body  # the elapsed-time builder
+    assert "intake-elapsed" in body  # the span it refreshes in place
+    assert "updated_ts" in body  # the elapsed anchor (new to the SPA)
+    assert "safe to leave this page" in body
+    # The old static "Reload to refresh" panel (which assumed a synchronous turn)
+    # is gone, replaced by the live poll.
+    assert "intake-reload" not in body
+
+
+def test_intake_confirm_handoff_shared_by_sync_and_polled_settle():
+    body = app_js()
+    # The created-task handoff lives in one shared helper used by both the
+    # synchronous confirm return and the async confirming→confirmed poll settle,
+    # so an off-lock confirm ends at the same created-task detail.
+    assert "handoffToCreatedTask" in body
+    assert "confirming" in body  # the poll's confirmed-settle branch keys on it

@@ -831,6 +831,29 @@ code {
   font-size: 13px;
 }
 
+/* In-flight intake working panel: a run-coloured accent (matching the transient
+   status badge) marks it as an agent turn actively running on the hub, with a
+   live elapsed time. Distinct from the warn-coloured .section.waiting box. */
+.intake-working {
+  border: 1px solid var(--run-fg);
+  border-left-width: 3px;
+  border-radius: 12px;
+  padding: 12px 14px;
+  background: var(--run-bg);
+}
+
+.intake-working h2 {
+  color: var(--run-fg);
+}
+
+.intake-elapsed {
+  font-variant-numeric: tabular-nums;
+}
+
+.intake-away-note {
+  margin-top: 6px;
+}
+
 /* ---- inline text link (e.g. "View logs") ---- */
 
 .text-link {

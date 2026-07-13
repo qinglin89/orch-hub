@@ -19,7 +19,9 @@
   const TOKEN_KEY = "orch-hub-token";
   const LIVE_STATES = new Set(["active", "waiting"]); // run states that badge a repo
   const DEFAULT_LOG_TAIL = 200; // initial log lines to request (matches the API default)
+  const INTAKE_POLL_MS = 2000; // review-view poll cadence for an in-flight intake turn
   let activeStream = null; // AbortController for the in-flight SSE log stream, if any
+  let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
   // Known task-file statuses in protocol order; the sentinels are data
   // problems (file missing / status unparseable), not runnable states.
   const KNOWN_STATUSES = [
@@ -44,14 +46,20 @@
   // Remote-intake lifecycle labels (mirror orch_hub.intake). The terminal set is
   // a resting outcome; `awaiting_review` is the single reviewable state; the
   // transient trio (drafting/revising/confirming) brackets an in-flight agent
-  // turn and is only observed if the hub was interrupted mid-turn (v1 runs each
-  // turn synchronously). Used to spot a repo's one in-flight intake.
+  // turn that runs off the request lock on the hub — so the review view polls
+  // GET /api/intakes/{id} through it until it settles (see startIntakePoll).
+  // INTAKE_TERMINAL spots a repo's one in-flight intake (any non-terminal one).
   const INTAKE_TERMINAL = new Set([
     "confirmed",
     "cancelled",
     "failed",
     "error",
   ]);
+  // The in-flight statuses the review view polls through: an agent turn is
+  // running on the hub, so the record self-updates to a resting status when it
+  // settles. Mirrors orch_hub.intake._TRANSIENT. (`confirming` is deliberately
+  // not cancellable — see the working panel — so no cancel races the write.)
+  const INTAKE_TRANSIENT = new Set(["drafting", "revising", "confirming"]);
 
   // ---- token storage ----
   const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
@@ -1503,7 +1511,114 @@
       <ul class="intake-events list">${rows}</ul></section>`;
   }
 
+  // ---- in-flight intake polling ----
+  //
+  // An intake agent turn runs off the request lock on the hub (task
+  // 2026-07-12-async-intake-turns), so a mutating route returns a transient
+  // record at once and this view polls GET /api/intakes/{id} until it settles.
+  // The teardown discipline mirrors the SSE log stream's activeStream: one
+  // module-level handle (activeIntakePoll), cleared by router() on navigation
+  // and at the top of renderIntakeReview, with a staleness guard before every
+  // paint/reschedule so a poll that outlived its view — or a slow response
+  // landing after the view was left — can neither paint nor reschedule.
+
+  // Elapsed since an intake's last status change (its updated_ts, a tz-aware UTC
+  // isoformat stamped when the transient status was persisted). Compact, and
+  // degrades to "" on a null/unparseable/future stamp so the panel shows just
+  // the verb rather than "NaN" (mirrors formatCommitTime's guard).
+  function intakeElapsed(updatedTs) {
+    if (!updatedTs) return "";
+    const then = new Date(updatedTs);
+    if (isNaN(then.getTime())) return "";
+    const secs = Math.floor((Date.now() - then.getTime()) / 1000);
+    if (secs < 0) return "";
+    if (secs < 60) return secs + "s";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m " + (secs % 60) + "s";
+    const hrs = Math.floor(mins / 60);
+    return hrs + "h " + (mins % 60) + "m";
+  }
+
+  // The elapsed phrase for the working panel's #intake-elapsed span, refreshed in
+  // place each poll tick; empty (no phrase) when the stamp can't be read.
+  function intakeElapsedPhrase(updatedTs) {
+    const e = intakeElapsed(updatedTs);
+    return e ? " — running " + e : "";
+  }
+
+  function updateIntakeElapsed(updatedTs) {
+    const el = document.getElementById("intake-elapsed");
+    if (el) el.textContent = intakeElapsedPhrase(updatedTs);
+  }
+
+  // The active-turn verb for the working panel's status line (the status itself
+  // also rides the detail-head badge). Fixed for the panel's lifetime — a status
+  // change re-renders — so only the elapsed span ticks.
+  function intakeWorkingVerb(status) {
+    if (status === "confirming") return "Creating the task";
+    if (status === "revising") return "Revising the draft";
+    return "Drafting the task"; // drafting
+  }
+
+  // Hand a confirmed intake off to its created task's detail, where the existing
+  // Start control launches it — intake never duplicates run start/stop. Shared by
+  // the synchronous confirm return and the async confirming→confirmed poll settle
+  // so either path ends in the same place.
+  function handoffToCreatedTask(rec) {
+    location.hash = taskHash(rec.repo_name, rec.created_task_id);
+  }
+
+  function stopIntakePoll() {
+    if (activeIntakePoll) {
+      activeIntakePoll.cancelled = true;
+      if (activeIntakePoll.timer) clearTimeout(activeIntakePoll.timer);
+      activeIntakePoll = null;
+    }
+  }
+
+  // Poll one in-flight intake (started only for a transient status) until it
+  // settles. A chained setTimeout — never setInterval — so a slow response can't
+  // overlap the next fetch; while the status is unchanged it just refreshes the
+  // elapsed label in place; on a change it hands off (confirming→confirmed) or
+  // re-renders the review, which restarts the poll only if still transient.
+  function startIntakePoll(intakeId, currentStatus) {
+    stopIntakePoll();
+    const poll = { cancelled: false, timer: null };
+    activeIntakePoll = poll;
+    const tick = async () => {
+      if (poll.cancelled) return;
+      let rec = null;
+      try {
+        rec = await api("/api/intakes/" + encodeURIComponent(intakeId));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) return; // login shown
+        // A transient read failure must not kill the poll — the turn is still
+        // running on the hub; fall through to reschedule and retry.
+      }
+      if (poll.cancelled || activeIntakePoll !== poll) return; // view left / superseded
+      if (rec && rec.status !== currentStatus) {
+        if (
+          currentStatus === "confirming" &&
+          rec.status === "confirmed" &&
+          rec.created_task_id &&
+          rec.repo_name
+        ) {
+          handoffToCreatedTask(rec);
+        } else {
+          rerender(renderIntakeReview(intakeId)); // settled (or a new transient) → repaint
+        }
+        return;
+      }
+      if (rec) updateIntakeElapsed(rec.updated_ts); // still working — tick the label
+      poll.timer = setTimeout(tick, INTAKE_POLL_MS);
+    };
+    poll.timer = setTimeout(tick, INTAKE_POLL_MS);
+  }
+
   async function renderIntakeReview(intakeId) {
+    // A fresh render supersedes any in-flight poll (this may BE the poll's settle
+    // re-render); it restarts below if the new status is still transient.
+    stopIntakePoll();
     view().innerHTML = centerHtml("Loading intake…");
     // Record + metadata-only audit events in one call. Unknown intake → 404 the
     // router surfaces as an error view.
@@ -1551,24 +1666,33 @@
       body = `<section class="section"><h2>Intake cancelled</h2>
         <p class="muted">No task was created and the repo is unchanged.</p></section>`;
     } else {
-      // drafting / revising / confirming — only visible if the hub was
-      // interrupted mid-turn (turns run synchronously in v1). Offer a reload,
-      // and Cancel for the two cancellable transient states.
+      // drafting / revising / confirming: an agent turn is in flight on the hub,
+      // off the request lock. Show live status with a ticking elapsed time; the
+      // poll started at the end of this render self-updates the view when the
+      // turn settles, so no manual reload is needed and the operator can leave
+      // the page. Cancel is offered for the two cancellable states; `confirming`
+      // is non-cancellable (mirrors the backend _CANCELLABLE) so no cancel races
+      // the write.
       const cancellable =
         data.status === "drafting" || data.status === "revising";
-      body = `<section class="section intake"><h2>Working…</h2>
-        <p class="muted">The intake is mid-${escapeHtml(
-          data.status
-        )}. Reload to refresh.</p>
+      body = `<section class="section intake intake-working">
+        <h2>Working…</h2>
+        <p class="muted">${escapeHtml(intakeWorkingVerb(data.status))} on the
+          hub<span id="intake-elapsed" class="intake-elapsed">${escapeHtml(
+            intakeElapsedPhrase(data.updated_ts)
+          )}</span></p>
+        <p class="muted intake-away-note">This turn runs on the hub, so it is
+          safe to leave this page — it keeps going, and the view updates when
+          the draft is ready.</p>
         <div class="intake-actions">
-          <button type="button" class="intake-reload btn-secondary">Reload</button>
           ${
             cancellable
               ? `<button type="button" class="btn-danger intake-cancel">Cancel</button>`
               : ""
           }
           <span class="control-status intake-status" role="status"></span>
-        </div></section>`;
+        </div>
+      </section>`;
     }
 
     view().innerHTML = `
@@ -1588,14 +1712,13 @@
       ${intakeAuditSection(data.events)}`;
 
     wireIntakeReviewControls(intakeId);
+
+    // A transient record self-updates: poll GET /api/intakes/{id} through the
+    // in-flight turn until it settles. Resting statuses never poll.
+    if (INTAKE_TRANSIENT.has(data.status)) startIntakePoll(intakeId, data.status);
   }
 
   function wireIntakeReviewControls(intakeId) {
-    const reload = document.querySelector(".intake-reload");
-    if (reload)
-      reload.addEventListener("click", () =>
-        rerender(renderIntakeReview(intakeId))
-      );
     const confirmBtn = document.querySelector(".intake-confirm");
     if (confirmBtn)
       confirmBtn.addEventListener("click", () =>
@@ -1611,10 +1734,12 @@
       reviseForm.addEventListener("submit", (ev) => onIntakeRevise(ev, intakeId));
   }
 
-  // Confirm: POST /confirm — the only write. A confirmed record routes to the
-  // new task's detail, where the existing Start control launches it. A failed
-  // record (lost session / write failure) re-renders the review to show the
-  // outcome; no task was created and the repo is unchanged.
+  // Confirm: POST /confirm — the only write. The turn runs off the lock, so the
+  // response is the transient `confirming` record; re-rendering into the working
+  // panel lets its poll observe the settle and hand off to the created task's
+  // detail (where the existing Start control launches it). A synchronous
+  // `confirmed` settle hands off straight away; a `failed` confirm (lost session
+  // / write failure) shows its outcome — no task created, repo unchanged.
   async function onIntakeConfirm(intakeId, button) {
     const statusEl = document.querySelector(".intake-status");
     setControlBusy(button, statusEl, true);
@@ -1624,9 +1749,12 @@
         { method: "POST" }
       );
       if (rec.status === "confirmed" && rec.created_task_id && rec.repo_name) {
-        location.hash = taskHash(rec.repo_name, rec.created_task_id);
+        handoffToCreatedTask(rec); // synchronous settle (e.g. a test executor)
       } else {
-        rerender(renderIntakeReview(intakeId)); // failed / unexpected → show it
+        // Async path: the transient `confirming` record re-renders into the
+        // working panel, whose poll performs the same handoff once the write
+        // settles (or shows a `failed` outcome).
+        rerender(renderIntakeReview(intakeId));
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
@@ -1948,11 +2076,13 @@
   }
 
   async function router() {
-    // Leaving any view aborts an in-flight log stream so it stops reading.
+    // Leaving any view aborts an in-flight log stream and stops an intake poll so
+    // neither keeps reading after navigation.
     if (activeStream) {
       activeStream.abort();
       activeStream = null;
     }
+    stopIntakePoll();
     if (!getToken()) {
       renderLogin();
       return;
