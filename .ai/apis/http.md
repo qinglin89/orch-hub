@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-12
-verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # APIs: HTTP
@@ -151,9 +151,10 @@ verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
   request}`.
 - Source: resolves `repo_id` through registry discovery, then delegates gates
   and draft creation to the app's single `IntakeManager`.
-- Shape: returns the serialized `IntakeRecord` with HTTP 201. Draft-turn agent
-  failure still returns the created record with status `failed`; pre-creation
-  gate refusals use 4xx responses.
+- Shape: returns the serialized transient `IntakeRecord` with HTTP 201
+  (`status: drafting`, no draft yet) immediately after the record is persisted.
+  Clients poll `GET /api/intakes/{intake_id}` for the settled
+  `awaiting_review` draft or `failed` outcome.
 - Errors: unknown repo returns 404; empty request returns 400; repo already has
   an in-flight intake or readiness fails returns 409, with readiness `reasons`
   included.
@@ -165,7 +166,8 @@ verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 
 ## `GET /api/intakes/{intake_id}`
 
-- Purpose: fetch one intake's current draft/status.
+- Purpose: fetch one intake's current draft/status; this is the polling target
+  while a mutating intake turn is transient.
 - Shape: `IntakeRecord.to_dict()`, including the complete draft when present.
 - Errors: unknown intakes return 404.
 
@@ -173,16 +175,19 @@ verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 
 - Purpose: fetch one intake record plus metadata-only lifecycle/revision audit
   events.
-- Shape: `{"record": IntakeRecord.to_dict(), "events": [IntakeEvent...]}`.
+- Shape: the current `IntakeRecord.to_dict()` fields flattened at top level
+  plus `"events": [IntakeEvent...]`.
 
 ## `POST /api/intakes/{intake_id}/revise`
 
 - Purpose: send non-empty human feedback back to the same intake session and
   return a revised complete draft for review.
 - Source: delegates to `IntakeManager.revise_intake`.
-- Shape: serialized `IntakeRecord`; wrong lifecycle state returns 409; empty
-  feedback returns 400; a lost session or agent-turn failure returns status
-  `failed` in the record.
+- Shape: serialized transient `IntakeRecord` (`status: revising`) returned
+  immediately; poll `GET /api/intakes/{intake_id}` for the settled
+  `awaiting_review` draft or `failed` outcome. Wrong lifecycle state returns
+  409; empty feedback returns 400; a lost session can fail synchronously as a
+  `failed` record.
 
 ## `POST /api/intakes/{intake_id}/confirm`
 
@@ -191,14 +196,17 @@ verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 - Source: delegates to `IntakeManager.confirm_intake`, which records
   `confirmed` only after the created task appears through task inventory with
   frontmatter status `pending` or `blocked`.
-- Shape: serialized `IntakeRecord`. A failed/unverified confirm is an auditable
-  record with status `failed`, not a transport 5xx.
+- Shape: serialized transient `IntakeRecord` (`status: confirming`) returned
+  immediately; poll `GET /api/intakes/{intake_id}` for `confirmed` plus
+  `created_task_id` or a `failed` outcome. A failed/unverified confirm is an
+  auditable record with status `failed`, not a transport 5xx.
 
 ## `POST /api/intakes/{intake_id}/cancel`
 
 - Purpose: cancel a draft/review intake without writing target repo task files.
-- Shape: serialized `IntakeRecord` with status `cancelled`; wrong lifecycle
-  state returns 409.
+- Shape: serialized `IntakeRecord` with status `cancelled`; legal from
+  `drafting`, `awaiting_review`, and `revising`. Wrong lifecycle state,
+  including `confirming`, returns 409.
 
 ## `GET /api/escalations`
 
@@ -261,7 +269,9 @@ verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
 - Intake-manager errors map to client-actionable statuses: `UnknownIntakeError`
   → 404; `IntakeBusyError`, `IntakeNotReadyError`, and `IntakeStateError` →
   409; empty request/feedback `ValueError` → 400. Agent failures are lifecycle
-  outcomes in the returned intake record.
+  outcomes in the intake record. Mutating intake routes persist and return
+  transient records (`drafting`/`revising`/`confirming`) before the slow agent
+  turn finishes; clients poll `GET /api/intakes/{id}` for the resting result.
 - The dashboard repo/task status layout consumes these APIs directly: repo
   cards use `/api/repos` for readiness/latest commit/housekeeping warning
   state, `/api/runs` for the tri-state run signal, and `/api/tasks` for active

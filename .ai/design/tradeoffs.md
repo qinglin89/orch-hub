@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # Design: Tradeoffs
@@ -138,6 +138,20 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
   small per-process reminder mechanism.
 - Consequence: a hub restart re-notifies a still-open question once; an answered
   question is no longer pending, so it never re-fires.
+
+## Tradeoff: off-lock intake turns vs synchronous request turns
+
+- Chose: persist a transient intake status under the manager lock, return that
+  record immediately, and run the slow draft/revise/confirm agent turn through
+  an injected executor outside the lock.
+- Reason: remote intake turns can take long enough to freeze unrelated reads and
+  dashboard pages if they run under the request/manager lock; submitting outside
+  the non-reentrant lock also lets synchronous test executors re-acquire the
+  lock during finalize without deadlocking.
+- Consequence: clients must poll `GET /api/intakes/{id}` until the record
+  settles; finalizers re-load and settle only the expected transient status so
+  cancel wins over draft/revise completion, and startup `reconcile_orphans()`
+  marks abandoned transient records `failed` without target-repo mutation.
 
 ## Tradeoff: shared core before dashboard
 

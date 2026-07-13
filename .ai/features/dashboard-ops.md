@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-12
-verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # Features: Dashboard Ops
@@ -15,9 +15,9 @@ run observation, answering waiting questions, run history, and logs.
 Modules: api, web.
 
 APIs: public `GET /`, `GET /app.js`, `GET /styles.css`; protected
-repo/task/run/escalation/log/history HTTP APIs, including the run-scoped task
-file route. Log streaming uses the bearer-authenticated SSE endpoint through
-`fetch`/ReadableStream, not browser `EventSource`.
+repo/task/run/escalation/log/history/intake HTTP APIs, including the run-scoped
+task file route. Log streaming uses the bearer-authenticated SSE endpoint
+through `fetch`/ReadableStream, not browser `EventSource`.
 
 Implemented behavior:
 
@@ -68,6 +68,10 @@ Implemented behavior:
   `GET /api/runs/{run_id}/task`, shows the active/archived source, and is used
   by the log view's task back-link so run task links still open after close-out
   archives the task. The Tasks page remains active-task-only.
+- The remote-intake review view polls `GET /api/intakes/{id}` while an intake
+  status is `drafting`, `revising`, or `confirming`; it shows live status,
+  elapsed time, and a safe-to-navigate-away note, stops polling on resting
+  statuses, and tears down the single poll handle on navigation like live logs.
 
 ## Notifications
 
@@ -183,12 +187,14 @@ Implemented behavior:
   (`intake.json` plus metadata-only `events.jsonl`) and enforces one in-flight
   intake per repo after readiness passes.
 - Draft and revise turns produce hub-owned proposals only. They are not active
-  tasks, are not returned by task inventory, and are not launchable.
+  tasks, are not returned by task inventory, and are not launchable. Draft,
+  revise, and confirm turns run off the manager lock after persisting transient
+  status; clients observe the settled outcome by polling the intake record.
 - The dashboard repo-detail view starts intake; the intake review view shows the
   complete proposed task file, index entry, notes, status, and audit events with
-  Confirm, Request changes, and Cancel outcomes. Confirmed intakes re-fetch task
-  inventory and route to the created task detail so the existing Start control
-  launches it.
+  Confirm, Request changes, and Cancel outcomes. In-flight turns show a live
+  working panel with elapsed time; confirmed intakes route to the created task
+  detail so the existing Start control launches it.
 - The concrete default backend is `ClaudeIntakeAgent`, a headless Claude CLI
   adapter that drives `/intake-task` with structured draft/confirm envelopes,
   session resume, read-only `--permission-mode plan` draft/revise turns, and a
@@ -199,6 +205,8 @@ Implemented behavior:
   invalid-status, agent-failure, cancellation, and lost-session outcomes record
   `failed`/`cancelled` and do not surface a launchable task. In-process
   failed/unverified confirms roll back the proposed task file and `index.md`.
+- Startup reconciliation marks orphaned persisted transient intakes as `failed`
+  so they stop holding the repo intake slot; it does not mutate target repos.
 
 ## IM Bot Control
 

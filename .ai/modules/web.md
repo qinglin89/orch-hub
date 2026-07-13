@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-12
-verified-against: 9d8c98871d20cb8010264c4aeab341c61090b115
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # Modules: Web and Operations
@@ -36,6 +36,9 @@ intake routes are `POST /api/intakes`, `GET /api/intakes`,
 `POST /api/intakes/{intake_id}/confirm`, and
 `POST /api/intakes/{intake_id}/cancel`; manager errors map to 404/409/400 and
 agent-turn failures are returned as auditable intake records rather than 5xx.
+Mutating intake routes return transient records
+(`drafting`/`revising`/`confirming`) immediately; clients poll
+`GET /api/intakes/{intake_id}` for the settled outcome.
 The default intake backend is `ClaudeIntakeAgent`. The
 recent-log route adds a nested `diagnostic` from
 `spawn.out` only when the orchestrator log is absent and the capture is
@@ -90,8 +93,12 @@ history while normal task views stay active-only.
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete
 draft task file and index row plus metadata-only history, Request changes posts
-to revise, Cancel terminates the intake, and Confirm re-fetches task inventory
-before routing to the created task's existing detail/Start flow.
+to revise, Cancel terminates the intake, and Confirm creates the task. While
+draft/revise/confirm is transient, the review view shows an in-flight panel with
+status, elapsed time from `updated_ts`, a safe-to-navigate-away note, and a poll
+of `GET /api/intakes/{id}`; the poll uses one module-level handle that is torn
+down on navigation like the log stream. A confirmed intake routes to the created
+task's existing detail/Start flow.
 
 ## Launchd Operations
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-08
-verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # Conventions
@@ -76,6 +76,9 @@ verified-against: ad8c79d6782abbf5c670550a9d4a7d6963088fae
   of starting real orchestrator subprocesses.
 - Prefer testing structured return values before testing text formatting.
 - Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
+- For non-trivial `orch_hub/web/app.js` behavior, the committed suite only pins
+  served-asset boundaries; when no JS runner is available, macOS JavaScriptCore
+  (`jsc`) can compile-check the SPA and run a small stubbed-browser harness.
 
 ## Dependencies
 

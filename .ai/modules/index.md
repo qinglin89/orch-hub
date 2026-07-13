@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # Modules
@@ -17,7 +17,7 @@ verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 | Housekeeping | `orch_hub/housekeeping.py` | Implemented display-only `.ai/.housekeeping-pending` marker detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, and contained active/archive raw task-content reads |
-| Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with draft/revise/confirm/cancel semantics and inventory-verified confirmation |
+| Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, and per-repo serialization |
 | Run monitor | `orch_hub/monitor.py` | Implemented resident daemon-thread status scanner for proactive notification delivery |
@@ -26,7 +26,7 @@ verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/probe notification formatters |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including status layout, recent commits, task-detail run controls, run-scoped task-file view, and remote intake review loop |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including status layout, recent commits, task-detail run controls, run-scoped task-file view, and polled remote intake review loop |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |

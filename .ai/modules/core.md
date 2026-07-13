@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-13
+verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 ---
 
 # Modules: Core
@@ -149,13 +149,25 @@ Responsibility: own the remote intake-task lifecycle and hub-owned audit state.
 one in-flight intake per repo, and readiness, then drives an injected
 `IntakeAgent` through draft, revise, confirm, and cancel turns.
 
+Draft, revise, and confirm turns persist a transient status
+(`drafting`/`revising`/`confirming`) under the manager lock, submit the slow
+agent turn through an injected executor outside the lock, then re-acquire the
+lock to finalize. Submitting outside the non-reentrant lock is load-bearing for
+synchronous test executors. Finalizers re-load the record and settle only the
+expected transient status; a cancel that landed during draft/revise wins, the
+finished turn is discarded, and cancelled intakes are never resurrected.
+`confirming` is deliberately non-cancellable because the write may already have
+landed.
+
 Draft/revise turns return complete proposals and leave target repos unchanged.
 Only `confirm_intake` calls the agent write path. Confirmation is verified via
 `list_repo_tasks`: the created id must appear in the target repo inventory with
 frontmatter status `pending` or `blocked`. Missing/index-only/no-write,
 invalid-status, agent-failure, lost-session, and unverified outcomes become
 `failed` rather than `confirmed`; in-process failed/unverified confirms restore
-the proposed task file and `.ai-tasks/index.md` snapshot.
+the proposed task file and `.ai-tasks/index.md` snapshot. On manager startup,
+`reconcile_orphans()` fails persisted transient records as lost sessions so
+they stop holding the repo intake slot; it never mutates the target repo.
 
 ## Intake Agent
 
