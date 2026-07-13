@@ -1089,6 +1089,69 @@ def test_answer_escalation_empty_answer_is_400(tmp_path, monkeypatch):
     assert resp.status_code == 400
 
 
+# -- run sessions (per-session context) ----------------------------------------
+
+
+ORCH_SESSION_LOG = [
+    "[03:00:10] --- dev plan-gate start: sid=pg backend=claude:x@max status_before=in_progress",
+    "[03:05:00] run finished: status=finished context≈100000 tokens",
+    "[03:05:00] --- dev plan-gate end: sid=pg",
+    "[03:05:01] --- dev session start: sid=dev1 backend=claude:x@max status_before=in_progress",
+    "[03:20:00] run finished: status=finished context≈150000 tokens",
+    "[03:20:00] --- dev session end: sid=dev1 status=final_review",
+]
+
+
+def test_get_run_sessions_live_returns_parsed_summary(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], ORCH_SESSION_LOG)
+
+    resp = client.get(f"/api/runs/{started['run_id']}/sessions")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == started["run_id"]
+    assert body["context_budget"] == 200_000
+    assert [(s["kind"], s["sid"], s["turns"], s["context_tokens"]) for s in body["sessions"]] == [
+        ("plan-gate", "pg", 1, 100000),
+        ("session", "dev1", 1, 150000),
+    ]
+    assert body["sessions"][0]["role"] == "dev"
+    assert body["sessions"][1]["end_status"] == "final_review"
+
+
+def test_get_run_sessions_no_log_is_empty_and_200(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)  # no orchestrator log yet
+
+    resp = client.get(f"/api/runs/{started['run_id']}/sessions")
+
+    assert resp.status_code == 200  # missing data is graceful, never a 5xx
+    body = resp.json()
+    assert body["sessions"] == []
+    assert body["context_budget"] == 200_000
+
+
+def test_get_run_sessions_ended_served_from_snapshot_after_log_deleted(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    log_path = write_run_log(manager, started["run_id"], ORCH_SESSION_LOG)
+    spawner.procs[0].returncode = 0
+    client.get("/api/runs")  # observe the end -> snapshot persisted
+    log_path.unlink()  # repo-side log cleaned up afterward
+
+    body = client.get(f"/api/runs/{started['run_id']}/sessions").json()
+
+    assert [s["sid"] for s in body["sessions"]] == ["pg", "dev1"]  # survived deletion
+
+
+def test_get_run_sessions_unknown_run_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get("/api/runs/20990101T000000Z-nope-x/sessions")
+    assert resp.status_code == 404
+
+
 # -- run logs ------------------------------------------------------------------
 
 
@@ -1258,6 +1321,7 @@ def test_run_and_escalation_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.post("/api/runs/anything/stop").status_code == 401
     assert unauthed.get("/api/runs/anything/logs").status_code == 401
     assert unauthed.get("/api/runs/anything/logs/stream").status_code == 401
+    assert unauthed.get("/api/runs/anything/sessions").status_code == 401
     assert unauthed.get("/api/escalations").status_code == 401
     assert unauthed.post(
         "/api/runs/anything/escalations/1/answer", json={"answer": "go"}

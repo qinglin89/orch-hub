@@ -78,6 +78,7 @@ from .models import (
     RunHistoryEntry,
     RunRecord,
     RunStatus,
+    SessionsSnapshot,
 )
 from .notifications import (
     Notification,
@@ -86,6 +87,7 @@ from .notifications import (
     run_end_notification,
 )
 from .readiness import check_readiness
+from .sessions import read_live, read_snapshot, write_snapshot
 from .task_store import STATUS_MISSING, STATUS_UNKNOWN, list_repo_tasks
 
 _log = logging.getLogger(__name__)
@@ -523,6 +525,27 @@ class RunManager:
             run_dir = self._run_dir_for(run_id)
             return self._status(run_dir, self._refresh(run_dir, _load_record(run_dir)))
 
+    def read_sessions(self, run_id: str) -> SessionsSnapshot:
+        """Return one run's per-session context summary.
+
+        A live run is parsed from its current repo-side log; an ended run is
+        served from the snapshot persisted at its end (which survives repo-side
+        log cleanup), falling back to a live parse only when no snapshot exists (a
+        run predating this field, or one whose end this hub never observed).
+        Unknown ids raise :class:`UnknownRunError`. The resolve+refresh runs under
+        the lock — brief, and the point where a just-observed end persists the
+        snapshot — while the log parse / snapshot read runs outside it, like the
+        logs route resolves via :meth:`get_run` then reads off the lock.
+        """
+        with self._lock:
+            run_dir = self._run_dir_for(run_id)
+            record = self._refresh(run_dir, _load_record(run_dir))
+            live = record.error is None and record.ended_ts is None
+        if live:
+            return read_live(record)
+        snapshot = read_snapshot(run_dir)
+        return snapshot if snapshot is not None else read_live(record)
+
     def stop_run(self, run_id: str) -> bool:
         """Request a graceful stop by writing the run's ``stop.flag``.
 
@@ -628,6 +651,11 @@ class RunManager:
                 exit_code=updated.exit_code,
             ),
         )
+        # Snapshot the parsed per-session summary once, now that the process has
+        # exited and its log is complete, so the summary survives later cleanup of
+        # the repo-side log. Like the notification below, it runs a single time per
+        # run (settled records return early above) and is fully isolated.
+        self._snapshot_sessions(run_dir, updated)
         # Fire exactly once, at the live->ended transition (this branch runs a
         # single time per run; settled records return early above). Classify
         # here so the notification carries the same completed/stopped/error/ended
@@ -635,6 +663,22 @@ class RunManager:
         state, detail = self._classify_end(updated)
         self._emit(run_end_notification(updated, state, detail))
         return updated
+
+    def _snapshot_sessions(self, run_dir: Path, record: RunRecord) -> None:
+        """Persist the run's per-session summary at the live->ended transition.
+
+        Isolation is the invariant, mirroring :meth:`_emit`: a parse or IO failure
+        here must never propagate into run state. The log is read once (a bounded
+        streaming scan) and the snapshot written atomically; on any failure the run
+        still ends cleanly with no snapshot, and an ended run with no snapshot
+        falls back to a live parse on read (:meth:`read_sessions`).
+        """
+        try:
+            write_snapshot(run_dir, read_live(record))
+        except Exception:
+            # Never let snapshotting touch run state; a missing snapshot is a
+            # graceful degradation, not an error. Log only the (non-secret) run id.
+            _log.warning("session snapshot failed for run %s", record.run_id)
 
     def _emit(self, notification: Notification) -> None:
         """Deliver a notification best-effort; never raise into run state.

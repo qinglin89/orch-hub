@@ -24,6 +24,7 @@ from orch_hub.history import (
     read_events,
 )
 from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport
+from orch_hub.sessions import read_snapshot
 from orch_hub.runs import (
     CAFFEINATE,
     BlockedTaskError,
@@ -1158,3 +1159,136 @@ def test_multiple_plan_revisions_each_notify(tmp_path):
         f"{TASK_ID}\nplan ready for review",
         f"{TASK_ID}\nplan ready for review",
     ]
+
+
+# -- per-session context snapshot (sessions.json) ------------------------------
+
+
+def write_orch_log(repo: ManagedRepo, lines: list[str], *, stamp: str = "20260708T030000Z") -> Path:
+    """Drop an orchestrator-style log into the run's real ``log_dir``.
+
+    The stamp matches ``FIXED_NOW`` (the run's ``started_ts``) so the log locator
+    attributes it to the run, and the filename shape mirrors the deployed
+    orchestrator's ``<utc-ts>-<task-id>.log``.
+    """
+    log_dir = repo.path / ".cursor" / "orchestrator" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{stamp}-{TASK_ID}.log"
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
+ORCH_LOG_LINES = [
+    "[03:00:10] --- dev session start: sid=dev1 backend=claude:x@max status_before=in_progress",
+    "[03:10:00] run finished: status=finished context≈150000 tokens",
+    "[03:10:00] --- dev session end: sid=dev1 status=final_review",
+    "[03:11:00] --- review session start: sid=(pending) backend=codex:y@xhigh status_before=final_review",
+    "[03:15:00] run finished: tool=codex exit=0 status=finished context≈90000 tokens",
+    "[03:15:00] --- review session end: sid=rev1 status=completed+archived",
+]
+
+
+def sessions_json(manager: RunManager, run_id: str) -> Path:
+    return manager.runs_dir / run_id / "sessions.json"
+
+
+def test_run_end_persists_sessions_snapshot(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # observe the end -> snapshot written once
+
+    snap = read_snapshot(manager.runs_dir / record.run_id)
+    assert snap is not None
+    assert [(s.role, s.kind, s.sid, s.context_tokens) for s in snap.sessions] == [
+        ("dev", "session", "dev1", 150000),
+        ("review", "session", "rev1", 90000),
+    ]
+
+
+def test_read_sessions_survives_repo_side_log_deletion(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    log_path = write_orch_log(repo, ORCH_LOG_LINES)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # persists the snapshot
+    log_path.unlink()  # repo-side log cleaned up afterward
+
+    snap = manager.read_sessions(record.run_id)
+    assert [s.sid for s in snap.sessions] == ["dev1", "rev1"]  # served from snapshot
+
+
+def test_read_sessions_live_parses_current_log(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    # Only the first (still-open) dev session has been written so far.
+    write_orch_log(repo, ORCH_LOG_LINES[:2])
+
+    snap = manager.read_sessions(record.run_id)
+    assert len(snap.sessions) == 1
+    only = snap.sessions[0]
+    assert only.sid == "dev1"
+    assert only.open is True  # no end line yet: a live, open session
+    assert only.context_tokens == 150000
+    assert not sessions_json(manager, record.run_id).exists()  # no snapshot while live
+
+
+def test_read_sessions_unknown_run_raises(tmp_path):
+    manager, _, _ = make_manager(tmp_path)
+    with pytest.raises(UnknownRunError):
+        manager.read_sessions("20990101T000000Z-nope-x")
+
+
+def test_read_sessions_falls_back_to_live_parse_when_no_snapshot(tmp_path):
+    # A run that ended before this field shipped has no sessions.json; the read
+    # falls back to parsing whatever repo-side log remains.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES)
+    end_run(spawner, 0)
+    manager.list_runs()
+    sessions_json(manager, record.run_id).unlink()  # simulate a pre-field run
+
+    snap = manager.read_sessions(record.run_id)
+    assert [s.sid for s in snap.sessions] == ["dev1", "rev1"]
+
+
+def test_ended_run_with_no_log_persists_empty_snapshot(tmp_path):
+    # Ended while the hub was down and the log was already cleaned: the snapshot
+    # is legitimately empty, and a present-empty snapshot is not re-parsed.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)  # no orchestrator log written
+
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    assert sessions_json(manager, record.run_id).exists()
+    assert manager.read_sessions(record.run_id).sessions == ()
+
+
+def test_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
+    # A parse/IO failure in snapshotting must be swallowed like a notifier
+    # failure: the run still ends and classifies, only the snapshot is missing.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES)
+
+    def boom(_record):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("orch_hub.runs.read_live", boom)
+    end_run(spawner, 0)
+    status = only_status(manager)  # must not raise
+
+    assert status.state == "ended"
+    assert read_record(manager, record.run_id)["ended_ts"] is not None
+    assert not sessions_json(manager, record.run_id).exists()

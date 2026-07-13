@@ -400,6 +400,88 @@ class RunHistoryEntry:
         }
 
 
+CONTEXT_BUDGET_TOKENS = 200_000
+"""Soft display reference for per-session context: one effective context window
+(~200k tokens, the protocol's ``session-est`` sizing). It is a line the dashboard
+renders context against, never a cap — a real dev session's context can exceed it
+(an observed run peaked at ~278k). Kept here as shared domain data so the
+snapshot's default does not depend on the sessions module."""
+
+
+@dataclass(frozen=True)
+class SessionSummary:
+    """One protocol session (or its plan-gate) parsed from a run's log.
+
+    The orchestrator log brackets each session between ``--- {role} session
+    start``/``end`` markers (and each dev plan-gate between ``--- {role} plan-gate
+    start``/``end``); the per-turn ``run finished: ... context≈N tokens`` lines in
+    between report that conversation's context size. This is the parsed summary of
+    one such bracket — deliberately *not* a task or run status, but display/audit
+    metadata derived from log text (see :mod:`orch_hub.sessions`).
+
+    ``role`` is ``dev``/``review``; ``kind`` distinguishes a normal ``session``
+    from a dev ``plan-gate`` (the planning pre-session, which loops its own
+    turns). ``sid`` is the backend session id, reconciled to the real value when
+    the start line logged ``(pending)`` and the end line revealed it (``None``
+    while still pending). ``turns`` counts the bracket's ``run finished`` lines;
+    ``context_tokens`` is the latest one's ``context≈`` (monotonic within a
+    conversation, so latest ≈ peak; ``None`` with zero turns). Each session is a
+    fresh backend conversation, so context is per-session, not cumulative across
+    the run. ``status_before`` is the task status logged at start; ``end_status``
+    the status at end (``None`` for a plan-gate, which logs no end status, and for
+    a still-open session). ``start_hms`` is the ``HH:MM:SS`` time-of-day of the
+    start line — a display stamp only, never a duration source (the log carries no
+    date and wraps past midnight). ``open`` is True when no end line was seen: a
+    live session's trailing bracket, or a truncated tail.
+    """
+
+    role: str
+    kind: str
+    sid: str | None = None
+    turns: int = 0
+    context_tokens: int | None = None
+    status_before: str | None = None
+    end_status: str | None = None
+    start_hms: str | None = None
+    open: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "role": self.role,
+            "kind": self.kind,
+            "sid": self.sid,
+            "turns": self.turns,
+            "context_tokens": self.context_tokens,
+            "status_before": self.status_before,
+            "end_status": self.end_status,
+            "start_hms": self.start_hms,
+            "open": self.open,
+        }
+
+
+@dataclass(frozen=True)
+class SessionsSnapshot:
+    """A run's ordered per-session summaries plus the context-budget reference.
+
+    ``sessions`` is in log order (each plan-gate immediately before its sibling
+    dev session). ``context_budget`` is the soft display reference
+    (:data:`CONTEXT_BUDGET_TOKENS`) the dashboard renders context against; it is
+    carried on the snapshot so a persisted audit keeps the value it was written
+    with even if the constant later changes. An empty ``sessions`` is a valid
+    snapshot — a run with no log yet, a log cleaned before its end was observed,
+    or one with no parseable markers.
+    """
+
+    sessions: tuple[SessionSummary, ...] = ()
+    context_budget: int = CONTEXT_BUDGET_TOKENS
+
+    def to_dict(self) -> dict:
+        return {
+            "sessions": [summary.to_dict() for summary in self.sessions],
+            "context_budget": self.context_budget,
+        }
+
+
 @dataclass(frozen=True)
 class IntakeDraft:
     """A complete proposed task, as an intake agent drafts it before any write.

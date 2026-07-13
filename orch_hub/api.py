@@ -614,6 +614,22 @@ def create_app(
             ),
         }
 
+    @app.get("/api/runs/{run_id}/sessions")
+    def get_run_sessions(run_id: str) -> dict:
+        """Return one run's per-session context summary (live-parsed or persisted).
+
+        Resolves the run by ``run_id`` (unknown → 404), then returns its ordered
+        per-session summaries plus the context-budget reference. A live run is
+        parsed from its current orchestrator log on demand (located from the run
+        record, never a client path); an ended run is served from the snapshot
+        persisted at its end, so the summary survives later cleanup of the
+        repo-side log. A run with no log yet, or one whose log was already cleaned,
+        is a 200 with an empty ``sessions`` list — missing data is graceful, never
+        a 5xx.
+        """
+        snapshot = manager.read_sessions(run_id)  # UnknownRunError → 404
+        return {"run_id": run_id, **snapshot.to_dict()}
+
     @app.get("/api/runs/{run_id}/logs")
     def get_run_logs(run_id: str, tail: int = DEFAULT_TAIL_LINES) -> dict:
         """Return a bounded recent tail of one run's orchestrator log.
