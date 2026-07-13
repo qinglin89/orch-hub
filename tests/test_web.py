@@ -137,6 +137,18 @@ def test_stop_control_posts_run_stop():
     assert "Stop run" in body
 
 
+def test_stop_control_renders_requested_state_from_the_record():
+    # A requested stop is observable server state, not transient button text: the
+    # run control reads run.stop_requested and renders the disabled "Stop
+    # requested" button from it, so a reload keeps showing it instead of
+    # re-enabling Stop (the post-POST transient text in onStopSubmit remains the
+    # immediate-feedback path). Asserted at the served-asset boundary.
+    body = app_js()
+    assert "run.stop_requested" in body
+    assert "Stop requested" in body
+    assert "disabled>Stop requested" in body
+
+
 def test_blocked_task_offers_acknowledgement_checkbox():
     # A blocked task is launchable only with an explicit acknowledgement; the
     # control exposes a checkbox rather than silently acknowledging for the user.

@@ -613,6 +613,43 @@ def test_stop_run_rejects_unknown_and_ended_runs(tmp_path):
     assert only_status(manager).state == "error"
 
 
+def test_live_run_exposes_stop_requested_across_reads(tmp_path):
+    # A requested stop is observable server state, not transient button text: it
+    # is derived on every status read, so it survives a reload. A fresh live run
+    # has none; after stop_run every render carries stop_requested=True while the
+    # run stays live (a stop is a request, not a kill).
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+
+    status = only_status(manager)
+    assert status.state == "active"
+    assert status.stop_requested is False
+    assert status.to_dict()["stop_requested"] is False
+
+    manager.stop_run(record.run_id)
+    status = only_status(manager)
+    assert status.state == "active"
+    assert status.stop_requested is True
+    assert status.to_dict()["stop_requested"] is True
+
+
+def test_terminal_run_leaves_stop_requested_false(tmp_path):
+    # A finished run carries its stop in the classified state/detail
+    # (STATE_STOPPED), not in the running-run stop_requested overlay, which stays
+    # False for terminal records — no new field semantics past the live window.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    manager.stop_run(record.run_id)
+    spawner.procs[0].returncode = 0  # honored at a session boundary
+
+    status = only_status(manager)
+    assert status.state == "stopped"
+    assert status.stop_requested is False
+    assert status.to_dict()["stop_requested"] is False
+
+
 # -- listing, live states, reattach ----------------------------------------------
 
 

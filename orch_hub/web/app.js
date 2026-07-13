@@ -1041,11 +1041,23 @@
     const foot = `</section>`;
 
     if (run && LIVE_STATES.has(run.state)) {
+      // The stop control is driven by the server's run state, not client memory:
+      // once stop_requested is set on the record, every render (a reload, another
+      // device) shows the disabled "Stop requested" button until the run ends.
+      // onStopSubmit still applies the same disabled+text transiently for
+      // immediate feedback before the next fetch confirms it.
+      const requested = !!run.stop_requested;
+      const stopButton = requested
+        ? `<button type="submit" class="btn-danger" disabled>Stop requested</button>`
+        : `<button type="submit" class="btn-danger">Stop run</button>`;
+      const stopNote = requested
+        ? "Stop requested; the run ends at a boundary."
+        : "";
       return (
         head +
         `<form class="stop-form" data-run="${escapeHtml(run.run_id)}">
-          <button type="submit" class="btn-danger">Stop run</button>
-          <span class="control-status" role="status"></span>
+          ${stopButton}
+          <span class="control-status" role="status">${stopNote}</span>
         </form>
         <p class="muted">Stops at the next session boundary; a pending
           question's wait is aborted (README §5.5).</p>` +

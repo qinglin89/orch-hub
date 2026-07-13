@@ -957,6 +957,26 @@ def test_stop_run_ended_is_409(tmp_path, monkeypatch):
     assert resp.status_code == 409
 
 
+def test_running_run_reports_stop_requested_across_reads(tmp_path, monkeypatch):
+    # The stop is durable server state, so every read after POST /stop — a page
+    # reload, a second device — sees stop_requested=True while the run is live,
+    # instead of the client re-enabling Stop because its transient flag was lost.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    run_id = started["run_id"]
+
+    assert started["stop_requested"] is False
+    assert client.get(f"/api/runs/{run_id}").json()["stop_requested"] is False
+    assert client.get("/api/runs").json()["runs"][0]["stop_requested"] is False
+
+    client.post(f"/api/runs/{run_id}/stop")
+
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["state"] == "active"  # still live; a stop is a request
+    assert detail["stop_requested"] is True
+    assert client.get("/api/runs").json()["runs"][0]["stop_requested"] is True
+
+
 # -- escalations: list ---------------------------------------------------------
 
 

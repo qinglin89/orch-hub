@@ -323,12 +323,21 @@ class RunStatus:
     (``waiting`` = a control-dir question is pending a human answer), and
     ``completed``/``stopped``/``error``/``ended`` for finished runs.
     ``pending`` counts unanswered control-dir questions.
+
+    ``stop_requested`` is True only while the run is *live* and a graceful stop
+    has been requested (its ``stop.flag`` exists). It is server-derived on every
+    render, so a reloaded dashboard — or another device — keeps showing the
+    disabled "Stop requested" control from run state rather than transient
+    client button text. A finished run leaves it False: a stop it honored is
+    already conveyed by the ``stopped`` state/detail, so the field carries no
+    separate terminal semantics.
     """
 
     record: RunRecord
     state: str
     detail: str | None = None
     pending: int = 0
+    stop_requested: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -336,6 +345,7 @@ class RunStatus:
             "state": self.state,
             "detail": self.detail,
             "pending_questions": self.pending,
+            "stop_requested": self.stop_requested,
         }
 
 

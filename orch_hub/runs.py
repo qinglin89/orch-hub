@@ -819,10 +819,15 @@ class RunManager:
         if record.ended_ts is None:
             pending = pending_questions(record.control_dir)
             self._notify_new_questions(record, pending)
+            # Derived on every status read (not cached client-side), so a stop
+            # requested earlier stays visible across dashboard reloads until the
+            # run actually ends and re-classifies. Terminal runs skip this: their
+            # stop, if any, is already carried by _classify_end's stopped state.
             return RunStatus(
                 record=record,
                 state=STATE_WAITING if pending else STATE_ACTIVE,
                 pending=len(pending),
+                stop_requested=stop_requested(record.control_dir),
             )
         state, detail = self._classify_end(record)
         return RunStatus(record=record, state=state, detail=detail)
