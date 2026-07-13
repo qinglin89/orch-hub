@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 29515ffc32699ee33332719dcad301209e8e9ebb
+last-updated: 2026-07-13
+verified-against: 43c276722a202b443f555680804c045756a94a6a
 ---
 
 # Features: Run Control
@@ -115,6 +115,10 @@ Implemented behavior:
   input` notification the first time its live-run `pending_questions` scan sees
   each `(run_id, seq)`. Dedup is in-memory, so rescans do not duplicate pushes
   in one hub process and a restart re-notifies a still-open question once.
+  `plan-gate` questions use compact push text (`plan ready for review`) instead
+  of the full plan banner; other question prompts are still included but bounded
+  so oversized banners do not break delivery. The full prompt remains available
+  through the dashboard/control-dir/log surfaces.
 
 ## Log Viewing
 

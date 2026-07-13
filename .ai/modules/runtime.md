@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+last-updated: 2026-07-13
+verified-against: 43c276722a202b443f555680804c045756a94a6a
 ---
 
 # Modules: Runtime
@@ -47,9 +47,11 @@ pending-question notifications fire from `_status` when the existing
 `pending_questions` scan first sees a question. API reads and the resident
 `RunMonitor` both drive this same status path. Question push dedup is an
 in-memory `(run_id, seq)` set, so rescans do not duplicate pushes within one
-hub process and a restart re-notifies a still-open question once. Delivery goes
-through `_emit`, which dispatches best-effort work off the lock by default and
-swallows backend exceptions so notification failures cannot corrupt run state.
+hub process and a restart re-notifies a still-open question once. Plan-gate
+question pushes keep the same trigger path but use compact notification text so
+the full plan report does not enter the Bark/APNs payload. Delivery goes through
+`_emit`, which dispatches best-effort work off the lock by default and swallows
+backend exceptions so notification failures cannot corrupt run state.
 
 ## Run Monitor
 
@@ -134,7 +136,11 @@ Formatters are pure: `run_end_notification(record, state, detail)` turns the
 run manager's completed/stopped/error/ended classification into device text,
 `question_notification(repo_name, task_id, question)` formats a newly observed
 pending control-dir question as `needs input`, and `probe_notification()` builds
-the harmless delivery-check payload used by `orch-hub notify test`. The module
-does not decide when notifications fire; `RunManager` owns live-run trigger
-policy and isolation, while the CLI sends probes directly so failures affect
-only the command exit code.
+the harmless delivery-check payload used by `orch-hub notify test`.
+`question_notification` keys plan-gate compaction off `question.kind ==
+"plan-gate"` and emits the fixed prompt `plan ready for review`; every other
+question keeps leading prompt content bounded by `QUESTION_PROMPT_MAX_CHARS`.
+The complete question text remains in the dashboard, the control-dir question,
+and the orchestrator log. The module does not decide when notifications fire;
+`RunManager` owns live-run trigger policy and isolation, while the CLI sends
+probes directly so failures affect only the command exit code.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+verified-against: 43c276722a202b443f555680804c045756a94a6a
 ---
 
 # Features: Dashboard Ops
@@ -110,7 +110,10 @@ Implemented behavior:
 - Pending-question notifications fire from `_status` while the run is live,
   reusing the existing `pending_questions` scan. Each question is de-duped by
   in-memory `(run_id, seq)`; answered questions are filtered out before
-  notification and never fire.
+  notification and never fire. Plan-gate pending-question pushes replace the
+  full plan report with compact text, while non-plan-gate prompts are bounded;
+  complete question content remains available in the dashboard, control-dir
+  question file, and orchestrator log.
 - API/dashboard reads still refresh run status, but they are no longer required
   for timely pushes because the resident monitor drives the same status path.
 - Launchd deploy/update surface `ORCH_HUB_BARK_URL` into the installed plist,

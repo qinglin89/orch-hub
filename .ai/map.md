@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+verified-against: 43c276722a202b443f555680804c045756a94a6a
 ---
 
 # Project Map
@@ -14,7 +14,7 @@ verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, stop/end classification, protected HTTP start/list/get/stop routes |
-| Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; Bark pending-question push fires once per observed `(run_id, seq)` |
+| Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; Bark pending-question push fires once per observed `(run_id, seq)` with compact plan-gate text and bounded non-plan prompts |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, repo/task run-state status layout, housekeeping warnings, cc-codex Start dialog with optional plan-gate flag, run history, run-scoped task-file view, recent commits, and recent/live log views |
 | Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store | implemented; readiness-gated draft/revise/confirm/cancel flow with hub-owned draft/audit state, off-lock transient agent turns polled by the dashboard review view, Claude CLI backend, complete draft review, and confirmation verified through task inventory as `pending`/`blocked` before a task becomes launchable |
