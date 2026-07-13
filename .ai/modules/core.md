@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # Modules: Core
@@ -74,7 +74,9 @@ questions, run state, run history, and intake state.
 `GET /api/repos` stay identical and always include `commit` (`null` when
 unavailable) plus `housekeeping_pending`.
 `TaskSummary` carries `task_id`, task-file `status`, optional index summary,
-and blockers;
+and blockers; `SessionSummary`/`SessionsSnapshot` describe per-protocol-session
+context usage parsed from orchestrator logs, and `SessionEst` is the typed
+frontmatter `session-est: current/total` read for run-history rollups.
 `RepoTaskInventory` pairs a `ManagedRepo` with `index_present` and ordered
 tasks. `Question` carries filename-authoritative `seq`, display/audit fields,
 parse error, answered state, stripped valid `answer`, and answer repair error;
@@ -137,7 +139,7 @@ and redirect output.
 
 Location: `orch_hub/task_store.py`
 
-Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads. It also parses five-column `id | title | status | session-est | blockers` indexes, using `title` as the summary there while preserving the legacy positional third-column summary for other table layouts. It then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access. Both raw-content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.
+Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads. It also parses five-column `id | title | status | session-est | blockers` indexes, using `title` as the summary there while preserving the legacy positional third-column summary for other table layouts. It then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access; `read_session_est(repo, task_id)` reads active-then-archive frontmatter `session-est: current/total` into `SessionEst | None`, with only genuine active-file absence falling through to archive and malformed/missing values degrading to unknown. Raw content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.
 
 ## Intake Manager
 

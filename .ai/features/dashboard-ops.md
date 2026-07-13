@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 43c276722a202b443f555680804c045756a94a6a
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # Features: Dashboard Ops
@@ -44,8 +44,9 @@ Implemented behavior:
   unavailable" and readable empty history shows "No commits found". It also
   renders the full housekeeping warning near the top when the marker is pending.
 - Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
-  content, shows current/most-recent run state, links to logs, and renders
-  answer forms for waiting questions from `/api/escalations`.
+  content, shows current/most-recent run state, links to logs, renders live
+  per-session context strips from `GET /api/runs/{run_id}/sessions` for active
+  runs, and renders answer forms for waiting questions from `/api/escalations`.
 - Task detail Start opens a cc-codex launch-options dialog and posts
   `extra_args` with fixed `["--backend", "cc-codex"]` plus only changed
   overrides for `--dev-agent`, `--dev-model`, `--dev-effort`,
@@ -57,7 +58,11 @@ Implemented behavior:
 - Start is hidden or replaced with an explanation when the dashboard already
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
-- Run history uses `GET /api/history/runs` newest-first.
+- Run history uses `GET /api/history/runs` newest-first, grouped client-side by
+  `(repo, task)`. Each task group shows per-run session strips from persisted
+  snapshots plus a rollup of observed dev sessions vs frontmatter
+  `session-est`, peak per-session context, and summed run wall-clock from
+  `started_ts`/`ended_ts`.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls

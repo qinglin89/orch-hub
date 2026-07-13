@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # APIs: HTTP
@@ -88,7 +88,9 @@ verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 - Source: delegates to `RunManager.recent_runs(limit=...)`, which refreshes
   run state and reads each run's `events.jsonl`.
 - Shape: `{"runs": [RunHistoryEntry.to_dict(), ...]}` where each entry embeds
-  the normal `RunStatus` fields plus `events`.
+  the normal `RunStatus` fields plus `events`, persisted session snapshot fields
+  (`sessions`, `context_budget`), and `session_est` (`{"current","total"}` or
+  `null` when unknown).
 - Query: `limit` defaults to 50 and is clamped to `0..200`.
 
 ## `GET /api/runs/{run_id}`
@@ -110,6 +112,18 @@ verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
 - Boundary: this route is run-scoped and non-index-gated so historical run task
   links survive archival; `/api/tasks` and `/api/repos/{repo_id}/tasks/{task_id}`
   remain active-only and provide no general archived-task listing.
+
+## `GET /api/runs/{run_id}/sessions`
+
+- Purpose: return per-protocol-session context usage for one run.
+- Source: resolves `run_id` through `RunManager.read_sessions`. Live runs parse
+  the current repo-side orchestrator log; ended runs serve the persisted
+  `sessions.json` snapshot written next to `run.json`, falling back to log parse
+  only for pre-field runs with no snapshot.
+- Shape: `{"run_id", "sessions", "context_budget"}`. Each session has
+  `role`, `kind` (`session` or `plan-gate`), `sid`, `turns`, `context_tokens`,
+  `status_before`, `end_status`, `start_hms`, and `open`. Empty or partial data
+  is HTTP 200; unknown runs return HTTP 404.
 
 ## `POST /api/runs/{run_id}/stop`
 

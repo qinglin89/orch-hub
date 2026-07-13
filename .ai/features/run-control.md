@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 43c276722a202b443f555680804c045756a94a6a
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # Features: Run Control
@@ -16,7 +16,8 @@ cross-repo runs may overlap.
 Modules: runs, config, control_dir, models, readiness, task_store.
 
 APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
-`GET /api/runs/{run_id}`, `POST /api/runs/{run_id}/stop`.
+`GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/sessions`,
+`POST /api/runs/{run_id}/stop`.
 
 Implemented behavior:
 
@@ -50,6 +51,10 @@ Implemented behavior:
   `RunStatus` payloads, expose start/list/get/stop behavior, and map launch/run
   manager errors to 4xx JSON responses (`RepoBusyError` and ended/blocked
   states use 409; unknown runs use 404).
+- Per-session context usage is log-derived: live runs parse the current
+  orchestrator log on demand, terminal runs serve the `sessions.json` snapshot
+  persisted at the observed live-to-ended transition. Parsing failures are
+  isolated from run state.
 
 ## Control-dir File Channel
 
@@ -169,7 +174,8 @@ metadata for later inspection without copying human answer text into history.
 
 Modules: history, runs, api, models, control_dir.
 
-APIs: `GET /api/history/runs`, `GET /api/runs/{run_id}/task`.
+APIs: `GET /api/history/runs`, `GET /api/runs/{run_id}/task`,
+`GET /api/runs/{run_id}/sessions`.
 
 Implemented behavior:
 
@@ -186,12 +192,18 @@ Implemented behavior:
 - Answer audit events record responder and question metadata (`seq`, question
   timestamp/kind/banner/message) but deliberately exclude the answer text.
 - `GET /api/history/runs` returns recent runs newest-first with the normal
-  serialized run status plus embedded persisted events; `limit` defaults to 50
-  and is clamped to `0..200`.
+  serialized run status plus embedded persisted events, per-run persisted
+  session snapshots (`sessions`, `context_budget`), and the task's typed
+  `session_est` (`null` when unknown); `limit` defaults to 50 and is clamped to
+  `0..200`.
 - `GET /api/runs/{run_id}/task` reads the task file through the persisted run
   identity: active `.ai-tasks/<task_id>.md` first, then
   `.ai-tasks/archive/<task_id>.md`. It returns `source:
   "active"|"archived"|null`, `present`, and `content`; archived tasks remain
   reachable only through a run record, not through the active task inventory.
+- `GET /api/runs/{run_id}/sessions` returns `{run_id, sessions,
+  context_budget}`. Unknown runs are 404; live runs parse the current log;
+  ended runs prefer the persisted snapshot and still return 200 with empty or
+  partial data when logs are absent or malformed.
 - History readback treats missing `events.jsonl` as empty history and surfaces
   unreadable or malformed event lines as `history_error` events.

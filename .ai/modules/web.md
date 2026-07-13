@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # Modules: Web and Operations
@@ -18,7 +18,8 @@ escalation, log, and history routes over one `RunManager` instance plus a
 lifespan-owned `RunMonitor`, plus protected intake routes over one
 `IntakeManager`. Implemented run
 routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`,
-`GET /api/runs/{run_id}/task`, and `POST /api/runs/{run_id}/stop`;
+`GET /api/runs/{run_id}/task`, `GET /api/runs/{run_id}/sessions`, and
+`POST /api/runs/{run_id}/stop`;
 implemented escalation routes are
 `GET /api/escalations` and
 `POST /api/runs/{run_id}/escalations/{seq}/answer`; implemented log routes are
@@ -61,12 +62,13 @@ defines the static app container and bottom navigation; the shell assets are
 served uncached by the API so updates reach browsers on the next load. `app.js`
 owns token entry/localStorage, bearer `fetch` calls, hash routing,
 repo/task/detail/run views, repo/task run-state signals, recent commits,
-task-detail Start/Stop run controls, waiting-question answer forms, run
-history, a run-scoped task-file view, remote intake start/review views, and
-recent/live log views; `styles.css` holds the mobile layout. The dashboard reads only HTTP payloads, uses `fetch` +
-`ReadableStream.getReader()` for SSE log streaming so the bearer header is
-present, aborts active streams on navigation/reload/pause, and writes untrusted
-log/task data as escaped HTML or text nodes.
+task-detail Start/Stop run controls, live per-session context strips,
+waiting-question answer forms, grouped run history with est-vs-actual rollups,
+a run-scoped task-file view, remote intake start/review views, and recent/live
+log views; `styles.css` holds the mobile layout. The dashboard reads only HTTP
+payloads, uses `fetch` + `ReadableStream.getReader()` for SSE log streaming so
+the bearer header is present, aborts active streams on navigation/reload/pause,
+and writes untrusted log/task data as escaped HTML or text nodes.
 
 Repo cards show readiness plus a bare leading run-state dot before the repo name
 (yellow waiting, green active, gray idle; state word only in title/aria text);
@@ -89,6 +91,13 @@ route's `spawn.out` diagnostic and falls back to it when a live stream ends
 before any orchestrator log line is seen; its task back-link routes to
 `#/runs/{run_id}/task` so archived task files stay reachable through run
 history while normal task views stay active-only.
+
+Task detail fetches `GET /api/runs/{run_id}/sessions` for live runs only and
+renders compact protocol-session strips against the returned context budget.
+Run history consumes the embedded `sessions`/`context_budget` and `session_est`
+fields from `GET /api/history/runs`, groups runs by `(repo, task)`, and shows
+observed dev-session count vs estimate, peak context, and summed wall-clock from
+run-record ISO timestamps.
 
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 5cb8b539d2a0d5ff5e8d1e0343bd8ae4951152dc
+last-updated: 2026-07-13
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # Features: Core
@@ -69,6 +69,9 @@ Implemented behavior:
   `present` and raw `content`; raw reads require normalized index membership
   and resolved containment under `.ai-tasks`, so symlinked files outside the
   task dir are not disclosed.
+- Exact-id run-history helpers can read archived task files after close-out and
+  parse active-then-archive `session-est: current/total` into a typed
+  `SessionEst`; malformed or missing estimates degrade to unknown.
 
 ## HTTP API Foundation
 

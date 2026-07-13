@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-13
-verified-against: 43c276722a202b443f555680804c045756a94a6a
+verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
 ---
 
 # Modules: Runtime
@@ -39,6 +39,15 @@ answer), then bare exit code. Broken run dirs surface as `error` states and do
 not block repo launches when no repo attribution is available. The manager
 appends `run_started`, `run_ended`, `stop_requested`, and `answer_recorded`
 events and exposes newest-first `recent_runs(limit=...)` history entries.
+
+The manager persists per-session context snapshots when a run transitions from
+live to ended: it parses the repo-side orchestrator log once into `sessions.json`
+beside `run.json`, isolated so parse/IO failures cannot affect run state.
+`read_sessions(run_id)` serves live runs from the current log, ended runs from
+the persisted snapshot, and falls back to live parsing only for pre-field runs
+with no snapshot. `recent_runs()` embeds each run's persisted snapshot plus the
+current active-or-archived `session-est` value, deduped per `(repo, task)` and
+degraded to unknown on task-file read failures.
 
 The manager also owns notification trigger timing when a notifier is
 configured: run-end notifications fire once at the observed live-to-ended
@@ -119,6 +128,20 @@ follows appended complete lines with byte offsets and a raw-bytes pending
 buffer, sends idle heartbeat comments, and ends with `event: end` on run death
 or log rotation. File reads run inline on the event loop in v1; move them to a
 thread only if connection count grows.
+
+## Sessions
+
+Location: `orch_hub/sessions.py`
+
+Responsibility: parse orchestrator run logs into per-protocol-session context
+usage without changing the orchestrator contract. The parser recognizes
+timestamp-prefixed `--- {role} session start/end` and dev `plan-gate`
+boundaries plus `run finished: ... context≈N tokens` turn lines, reconciles
+`(pending)` session ids when the end marker reveals the real id, counts turns,
+keeps the latest/peak context figure, and tolerates missing, truncated, orphaned,
+or mid-write lines as partial data. `read_live(record)` locates and parses the
+current repo-side log; `write_snapshot`/`read_snapshot` atomically persist and
+tolerantly load `sessions.json`.
 
 ## Notifications
 
