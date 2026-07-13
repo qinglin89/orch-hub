@@ -37,6 +37,28 @@ indefinitely. Delivery is best-effort, so a timeout is just a dropped
 notification, never a run-state failure.
 """
 
+PLAN_GATE_KIND = "plan-gate"
+"""Control-dir ``kind`` for a ``--plan-gate`` confirmation question.
+
+Mirrors ``control_dir.QUESTION_KINDS`` as a local literal (this presentation
+module deliberately does not import the adapter, the same way ``_END_LABELS``
+mirrors ``runs.STATE_*`` rather than importing it). ``kind`` is the stable
+contract for spotting a plan-gate question; the banner *text* is not, so
+formatting keys off this, never off substring-sniffing the plan report.
+"""
+
+QUESTION_PROMPT_MAX_CHARS = 500
+"""Max characters of question prompt carried in a push body.
+
+Push delivery (Bark → APNs) silently drops a payload past a few KB, and one
+plan-gate banner alone can reach ~12 KB (``PLAN_GATE_BANNER_CHARS`` in the
+orchestrator), so an unbounded prompt loses the whole notification. A plan-gate
+prompt is replaced with a fixed compact summary and never reaches this bound;
+every other prompt is truncated to it. 500 chars stays far under the payload
+ceiling even in multi-byte UTF-8, still fits a lock-screen preview, and the
+full text remains in the dashboard, the control-dir question, and the log.
+"""
+
 
 @dataclass(frozen=True)
 class Notification:
@@ -172,11 +194,34 @@ def question_notification(
     question notifies once. It shares the terminal-state shape: ``title`` names
     the repo, ``body`` is the task id plus the question prompt, and ``group``
     clusters a repo's notifications into one device thread.
+
+    The prompt is size-guarded so the push always delivers: a ``plan-gate``
+    banner (the full multi-KB plan report) is replaced with a fixed compact
+    summary, and every other prompt is bounded to
+    ``QUESTION_PROMPT_MAX_CHARS``. The complete plan/prompt stays in the
+    dashboard, the control-dir question file, and the orchestrator log.
     """
     repo = repo_name or "?"
-    prompt = question.message or question.banner or f"question #{question.seq}"
-    body = f"{task_id or '(unknown task)'}\n{prompt}"
+    body = f"{task_id or '(unknown task)'}\n{_question_prompt(question)}"
     return Notification(title=f"{repo}: needs input", body=body, group=repo)
+
+
+def _question_prompt(question: Question) -> str:
+    """Return the size-bounded prompt text for a question push.
+
+    A ``plan-gate`` question's banner is the full plan report — too large to
+    deliver — so it collapses to a fixed summary that only announces a plan is
+    waiting. Any other prompt keeps its useful leading content, truncated to
+    ``QUESTION_PROMPT_MAX_CHARS`` (with an ellipsis) so an oversized banner (a
+    traceback, a long ruling) still delivers. The result never exceeds that
+    bound.
+    """
+    if question.kind == PLAN_GATE_KIND:
+        return "plan ready for review"
+    prompt = question.message or question.banner or f"question #{question.seq}"
+    if len(prompt) <= QUESTION_PROMPT_MAX_CHARS:
+        return prompt
+    return prompt[:QUESTION_PROMPT_MAX_CHARS].rstrip() + "…"
 
 
 def probe_notification() -> Notification:

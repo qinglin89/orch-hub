@@ -15,6 +15,7 @@ import pytest
 from orch_hub.config import Config
 from orch_hub.models import Question, RunRecord
 from orch_hub.notifications import (
+    QUESTION_PROMPT_MAX_CHARS,
     BarkNotifier,
     Notification,
     build_notifier,
@@ -163,6 +164,47 @@ def test_question_notification_falls_back_to_seq_when_textless():
     q = Question(seq=7, path=Path("/x/007-question.json"))
     note = question_notification("repo-a", "task-x", q)
     assert note.body == "task-x\nquestion #7"
+
+
+def test_question_notification_plan_gate_is_compact_and_omits_the_plan():
+    # The plan-gate banner carries the full ~12 KB plan report; the push must
+    # not include it or it silently fails to deliver.
+    plan = "## Goal\n" + ("do the thing " * 2000)  # >> the payload limit
+    q = Question(
+        seq=2,
+        path=Path("/x/002-question.json"),
+        kind="plan-gate",
+        banner=plan,
+        message=plan,
+    )
+    note = question_notification("repo-a", "task-x", q)
+
+    assert note.title == "repo-a: needs input"
+    assert note.group == "repo-a"
+    assert note.body == "task-x\nplan ready for review"
+    assert "do the thing" not in note.body  # no plan content leaked
+
+
+def test_question_notification_bounds_a_large_non_plan_gate_prompt():
+    # A non-plan-gate banner (e.g. a run-error traceback) is still bounded so an
+    # oversized prompt cannot break delivery — its leading content is kept.
+    prompt = "Traceback: " + ("x" * 5000)
+    q = Question(seq=4, path=Path("/x/004-question.json"), message=prompt)
+    note = question_notification("repo-a", "task-x", q)
+
+    body = note.body
+    assert body.startswith("task-x\nTraceback: ")
+    assert body.endswith("…")
+    # prompt portion (after "task-x\n") is bounded; ellipsis adds one char.
+    prompt_out = body.split("\n", 1)[1]
+    assert len(prompt_out) <= QUESTION_PROMPT_MAX_CHARS + 1
+
+
+def test_question_notification_keeps_a_prompt_at_the_bound_verbatim():
+    prompt = "y" * QUESTION_PROMPT_MAX_CHARS
+    q = Question(seq=5, path=Path("/x/005-question.json"), message=prompt)
+    note = question_notification("repo-a", "task-x", q)
+    assert note.body == f"task-x\n{prompt}"  # exactly at the bound: no ellipsis
 
 
 # -- probe_notification formatting ---------------------------------------------

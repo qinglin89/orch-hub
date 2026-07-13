@@ -1103,3 +1103,58 @@ def test_fresh_manager_re_notifies_a_still_open_question(tmp_path):
     manager_b.list_runs()  # fresh process, empty de-dup set
 
     assert len(notifier_b.notifications) == 1  # re-notifies the still-open question
+
+
+def test_plan_gate_question_fires_one_compact_notification(tmp_path):
+    # A plan-gate banner carries the full ~12 KB plan report; the push must stay
+    # deliverable, so it drops the plan for a fixed compact summary.
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    plan = "PLAN CONFIRMATION (--plan-gate):\n" + ("consider the tradeoffs " * 800)
+    write_question(record.control_dir, 1, kind="plan-gate", banner=plan, message=plan)
+    status = only_status(manager)
+
+    assert status.state == "waiting"
+    assert len(notifier.notifications) == 1
+    note = notifier.notifications[0]
+    assert note.title == "repo-a: needs input"
+    assert TASK_ID in note.body
+    assert "plan ready for review" in note.body
+    assert "consider the tradeoffs" not in note.body  # plan not leaked into push
+    assert len(note.body) < 200  # comfortably under any push payload ceiling
+
+
+def test_repeated_scans_of_a_plan_gate_seq_do_not_duplicate(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+    write_question(record.control_dir, 1, kind="plan-gate", banner="the plan")
+
+    manager.list_runs()
+    manager.get_run(record.run_id)
+    manager.list_runs()
+
+    assert len(notifier.notifications) == 1
+
+
+def test_multiple_plan_revisions_each_notify(tmp_path):
+    # Each plan-gate round writes a new seq'd question; per-(run_id, seq) de-dup
+    # lets every revision notify while rescans of one revision stay single.
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+    record = manager.start_run(repo, TASK_ID)
+
+    write_question(record.control_dir, 1, kind="plan-gate", banner="plan rev 1")
+    manager.list_runs()
+    write_question(record.control_dir, 2, kind="plan-gate", banner="plan rev 2")
+    manager.list_runs()
+
+    assert [n.body for n in notifier.notifications] == [
+        f"{TASK_ID}\nplan ready for review",
+        f"{TASK_ID}\nplan ready for review",
+    ]
