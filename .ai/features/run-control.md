@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # Features: Run Control
@@ -89,6 +89,11 @@ Implemented behavior:
   fields atomically with a same-dir temp file plus rename, refuses to overwrite
   an existing valid answer, and repairs malformed answer files by atomic
   rewrite.
+- `normalize_answer(text, mode, kind)` is a pure helper for explicit answer
+  modes. It mirrors the orchestrator discussion marker regex and strict
+  plan-gate confirm-word parser, fills empty plan-gate `answer` with `confirm`,
+  passes `stop` through before every guard, and refuses mode/kind mismatches
+  instead of silently reinterpreting a button press.
 - `request_stop(control_dir)` writes an idempotent empty `stop.flag` and raises
   `FileNotFoundError` if the run dir does not exist.
 - Tests cover discovery, parsing, pending/answered state, stale and malformed
@@ -115,10 +120,13 @@ Implemented behavior:
   `Question`.
 - The answer route identifies questions by `(run_id, seq)` and writes through
   `control_dir.write_answer`, preserving duplicate-answer protection, malformed
-  answer repair, empty-answer rejection, and responder audit fields.
-- The dashboard task detail view renders inline answer boxes for waiting runs,
-  submits with responder `"dashboard"`, and re-renders after the answer file is
-  written.
+  answer repair, empty-answer rejection, and responder audit fields. Omitted
+  request `mode` is the legacy verbatim path; explicit `"answer"`/`"discuss"`
+  modes are normalized fail-closed against question `kind` before writing.
+- The dashboard task detail view renders two explicit-mode buttons for waiting
+  runs: Discuss/Answer normally, Feedback/Confirm for `plan-gate`. Plan-gate
+  Confirm can submit an empty box for one-tap approval; 400 guard details render
+  inline; `"stop"` remains valid in every mode/kind.
 - When a notifier is configured, `RunManager._status` fires a Bark `needs
   input` notification the first time its live-run `pending_questions` scan sees
   each `(run_id, seq)`. Dedup is in-memory, so rescans do not duplicate pushes
@@ -192,8 +200,9 @@ Implemented behavior:
   `answer_recorded` events. Stop events are written only for the first
   idempotent stop request; end events include the observed exit code when the
   hub has it.
-- Answer audit events record responder and question metadata (`seq`, question
-  timestamp/kind/banner/message) but deliberately exclude the answer text.
+- Answer audit events record responder, optional answer `mode`, and question
+  metadata (`seq`, question timestamp/kind/banner/message) but deliberately
+  exclude the answer text.
 - `GET /api/history/runs` returns recent runs newest-first with the normal
   serialized run status plus embedded persisted events, per-run persisted
   session snapshots (`sessions`, `context_budget`), and the task's typed

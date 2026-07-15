@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # Modules: Runtime
@@ -42,7 +42,8 @@ evidence (`stop.flag` or a valid `"stop"` answer), then bare exit code. Broken
 run dirs surface as `error` states and do not block repo launches when no repo
 attribution is available. The manager appends `run_started`, `run_ended`,
 `stop_requested`, and `answer_recorded` events and exposes newest-first
-`recent_runs(limit=...)` history entries.
+`recent_runs(limit=...)` history entries. Answer events include optional
+`mode` metadata (`answer`/`discuss`/`null`) but never the answer text.
 
 The manager persists per-session context snapshots when a run transitions from
 live to ended: it parses the repo-side orchestrator log once into `sessions.json`
@@ -93,7 +94,8 @@ one sorted-key JSON object per line. `read_events(run_dir)` returns
 lines.
 
 The module is storage-only: it does not parse task files, inspect control-dir
-answers, decide event timing, or store human answer text.
+answers, decide event timing, or store human answer text. It round-trips the
+optional answer `mode` field for `answer_recorded` audit events.
 
 ## Control Dir
 
@@ -109,6 +111,13 @@ responder="orch-hub")` atomically writes the mirrored `NNN-answer.json` with
 `stop.flag`; `stop_requested` and `stop_answered` support run-end
 classification. Existing valid answers raise `DuplicateAnswerError`; malformed
 answers can be repaired by atomic rewrite.
+
+The module also owns pure answer-mode normalization constants and helpers that
+mirror the deployed orchestrator parser: discussion markers match
+`^(?:[?？]|discuss\s*:)` case-insensitively, plan-gate approval is a strict bare
+confirm word after stripping/lowercasing, and `stop` bypasses every mode/kind
+guard. `normalize_answer` is used only for explicit API modes; omitted mode is
+the answer route's legacy verbatim path.
 
 ## Logs
 

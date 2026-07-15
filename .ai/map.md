@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # Project Map
@@ -12,16 +12,16 @@ verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only; commit and housekeeping metadata are best-effort/display-only data |
 | Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries after normalizing bare-id or full-cell Markdown-link Task cells to safe bare ids; also supports five-column `id|title|status|session-est|blockers` indexes with `title` as summary; otherwise summaries use the legacy positional third column; task frontmatter supplies authoritative status/blockers; normal single-task content reads are index-gated and contained under `.ai-tasks`; exact-id archived content and typed `session-est` reads are available for run-scoped history access |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
-| Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, and writes idempotent `stop.flag` |
+| Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, mirrors answer-mode parser rules for explicit mode normalization, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, sessions, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, live-only `stop_requested` overlay, stop/end classification, per-session context snapshots parsed from logs, protected HTTP start/list/get/sessions/stop routes |
-| Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; answers are audited via control-dir files and metadata-only history events; Bark pending-question push fires once per observed `(run_id, seq)` with compact plan-gate text and bounded non-plan prompts |
+| Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; omitted-mode answers stay legacy verbatim, explicit answer/discuss modes are normalized fail-closed by question kind, answers are audited via control-dir files plus metadata-only history events carrying mode, and Bark pending-question push fires once per observed `(run_id, seq)` with compact plan-gate text and bounded non-plan prompts |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
-| Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, repo/task run-state status layout, reload-stable Stop requested control from run state, housekeeping warnings, cc-codex Start dialog with optional plan-gate flag, live session context strips, grouped run history with est-vs-actual rollups, run-scoped task-file view, recent commits, and recent/live log views |
+| Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, repo/task run-state status layout, reload-stable Stop requested control from run state, housekeeping warnings, cc-codex Start dialog with optional plan-gate flag, kind-aware question answer buttons, live session context strips, grouped run history with est-vs-actual rollups, run-scoped task-file view, recent commits, and recent/live log views |
 | Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store | implemented; readiness-gated draft/revise/confirm/cancel flow with hub-owned draft/audit state, off-lock transient agent turns polled by the dashboard review view, Claude CLI backend, complete draft review, and confirmation verified through task inventory as `pending`/`blocked` before a task becomes launchable |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, config, runs, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL` config; run manager owns terminal/pending-question triggers and isolation; CLI `notify test` probes delivery directly with launchd-plist fallback and URL redaction |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging and operations CLI; plist template is source of truth; lifecycle commands manage only the fixed service label, not orchestrator runs |
-| Run history and audit | history, runs, sessions, api, models, control_dir, task_store | implemented; per-run `events.jsonl`, launch-time task status on run records, lifecycle/stop/answer metadata events, per-run session snapshots and task `session-est` embedded for history views, no answer text copied into history, run-scoped task-file reads can reach archived tasks without listing archive contents |
+| Run history and audit | history, runs, sessions, api, models, control_dir, task_store | implemented; per-run `events.jsonl`, launch-time task status on run records, lifecycle/stop/answer metadata events including answer mode but not answer text, per-run session snapshots and task `session-est` embedded for history views, and run-scoped task-file reads can reach archived tasks without listing archive contents |
 
 ## Feature -> APIs
 
@@ -58,13 +58,13 @@ verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 | intake | Own remote intake lifecycle, hub-owned intake records/events, readiness and repo-busy gates, off-lock transient draft/revise/confirm turns, read-only draft/revise/cancel semantics, startup orphan reconciliation, and inventory-verified confirm/rollback |
 | intake_agent | Drive a Claude CLI `/intake-task` session with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, append run history events, snapshot/serve session context, and trigger isolated notifications |
-| history | Append/read per-run JSONL audit/history events without storing answer text |
-| control_dir | Implement question/answer/stop file-channel handling |
+| history | Append/read per-run JSONL audit/history events without storing answer text; round-trip answer mode metadata |
+| control_dir | Implement question/answer/stop file-channel handling and pure answer-mode normalization |
 | logs | Locate, read, and stream orchestrator logs from run records |
 | sessions | Parse per-protocol-session context usage from orchestrator logs and persist/load `sessions.json` snapshots |
 | api | FastAPI app factory, pure-ASGI bearer auth middleware, public dashboard shell, health/repo/task/run/run-task/escalation/log/history route wiring, uvicorn entry point |
 | notifications | Backend-agnostic notification payloads, Bark backend, notifier protocol, and run/question/probe formatters |
-| web | Mobile dashboard SPA assets, including teardown-scoped live log streaming and intake polling |
+| web | Mobile dashboard SPA assets, including kind-aware answer controls, teardown-scoped live log streaming, and intake polling |
 | docs | Launchd operator documentation |
 | deploy | Launchd plist template and future deployment templates |
 

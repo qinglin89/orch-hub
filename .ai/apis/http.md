@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # APIs: HTTP
@@ -238,11 +238,21 @@ verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
   responder.
 - Source: locates the question with `control_dir.list_questions`, writes via
   `control_dir.write_answer`, then records answer-audit metadata through
-  `RunManager.audit_answer`; no orchestrator code is imported.
+  `RunManager.audit_answer`; no orchestrator code is imported. Explicit
+  `mode` values (`"answer"` or `"discuss"`) are normalized by
+  `control_dir.normalize_answer` against the question `kind` before writing;
+  omitted `mode` is the legacy path and writes the submitted answer verbatim.
+- Body: `{"answer": str, "responder": str|null, "mode": "answer"|"discuss"|null}`.
+  `mode` is optional. Explicit modes fail closed with HTTP 400 if button intent
+  would not match the orchestrator parse: marker-prefixed non-plan answers must
+  use `discuss`; plan-gate approval uses `answer` with empty text or a bare
+  confirm word; plan-gate feedback uses `discuss` and rejects bare confirm
+  words. `stop` passes through in every mode/kind.
 - Shape: `{"run_id": ..., "seq": ..., "answered": true, "responder": ...,
   "answer": ...}`.
-  The response echoes the submitted answer for the immediate caller, but
-  persisted history deliberately excludes answer text.
+  The response echoes the normalized/written answer for the immediate caller,
+  but persisted history deliberately excludes answer text while recording the
+  answer `mode` metadata.
 
 ## Current HTTP Behavior
 
@@ -282,8 +292,8 @@ verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
 - Run-manager/control-dir errors map to client-actionable statuses:
   `UnknownRunError` → 404; `RepoBusyError`, `RunEndedError`,
   `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
-  empty answer `ValueError` → 400. `LaunchBlockedError` includes `reasons`;
-  `BlockedTaskError` includes `acknowledge_required: true`.
+  empty answer or answer-mode guard `ValueError` → 400. `LaunchBlockedError`
+  includes `reasons`; `BlockedTaskError` includes `acknowledge_required: true`.
 - Intake-manager errors map to client-actionable statuses: `UnknownIntakeError`
   → 404; `IntakeBusyError`, `IntakeNotReadyError`, and `IntakeStateError` →
   409; empty request/feedback `ValueError` → 400. Agent failures are lifecycle

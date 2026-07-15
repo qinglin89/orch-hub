@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # Features: Dashboard Ops
@@ -47,6 +47,9 @@ Implemented behavior:
   content, shows current/most-recent run state, links to logs, renders live
   per-session context strips from `GET /api/runs/{run_id}/sessions` for active
   runs, and renders answer forms for waiting questions from `/api/escalations`.
+  Waiting-question forms send explicit answer modes: ordinary questions show
+  Discuss/Answer, plan gates show Feedback/Confirm, Confirm allows empty input
+  for one-tap approval, and guard 400 details appear inline.
 - Task detail Start opens a cc-codex launch-options dialog and posts
   `extra_args` with fixed `["--backend", "cc-codex"]` plus only changed
   overrides for `--dev-agent`, `--dev-model`, `--dev-effort`,

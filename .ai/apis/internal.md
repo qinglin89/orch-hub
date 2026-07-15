@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # APIs: Internal Interfaces
@@ -96,9 +96,10 @@ live/end state and support reattach from disk by pid probe; observed ends append
 `run_ended`. `stop_run` delegates to `control_dir.request_stop`, appends
 `stop_requested` only on the first idempotent write, and refuses ended or
 broken runs so a post-mortem flag cannot rewrite end classification.
-`audit_answer` appends responder/question metadata after a control-dir answer
-write, without copying answer text. `recent_runs` returns newest-first
-`RunHistoryEntry` values from run records plus `events.jsonl`.
+`audit_answer` appends responder/question metadata plus optional answer `mode`
+after a control-dir answer write, without copying answer text. `recent_runs`
+returns newest-first `RunHistoryEntry` values from run records plus
+`events.jsonl`.
 
 ## Control Dir Store
 
@@ -115,6 +116,11 @@ Malformed answers keep the question pending and can be repaired with
 `write_answer`. Valid answer files are never overwritten. `request_stop` writes
 an empty `stop.flag` and requires the run dir to exist; `stop_requested` and
 `stop_answered` are read helpers for run classification.
+`normalize_answer(text, mode=..., kind=...)` mirrors the orchestrator's
+discussion-marker and strict plan-gate confirm parsing for explicit dashboard
+button intent. It prepends/refuses discussion markers or plan-gate confirm words
+so mode and parser outcome cannot silently diverge; omitted API `mode` skips
+this helper for legacy verbatim writes.
 
 ## Log Store
 
@@ -142,7 +148,8 @@ Output: append-only `events.jsonl` plus `RunEvent` readback.
 Behavior: `append_event` writes one JSON object per line. `read_events` returns
 an empty tuple for missing history and `history_error` events for corrupt or
 unreadable history lines. History is metadata-only; answer text remains in the
-control-dir answer file, not in `events.jsonl`.
+control-dir answer file, not in `events.jsonl`. `answer_recorded` events may
+carry `mode` (`answer`, `discuss`, or `null` for legacy omitted-mode callers).
 
 ## Notifier
 

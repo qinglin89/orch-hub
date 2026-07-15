@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 8a93e1feb98b3c5e80d9fe1cbc63d244f7f68756
+last-updated: 2026-07-16
+verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 ---
 
 # Modules: Web and Operations
@@ -52,6 +52,9 @@ propagate. Browser log tailing uses `fetch`/ReadableStream with the standard
 bearer header, not `EventSource` or query tokens. `RegistryError` returns HTTP
 500; unknown repo/task lookups and unknown runs return HTTP 404; launch/run
 state conflicts return HTTP 409 with structured details where useful.
+The escalation answer route preserves omitted-mode legacy writes but normalizes
+explicit `mode: "answer"|"discuss"` against question kind before writing and
+audits the mode without copying answer text into history.
 
 ## Web UI
 
@@ -96,6 +99,10 @@ while normal task views stay active-only.
 
 Task detail fetches `GET /api/runs/{run_id}/sessions` for live runs only and
 renders compact protocol-session strips against the returned context budget.
+Waiting-question forms render two kind-aware explicit-mode buttons:
+Discuss/Answer for ordinary escalations and Feedback/Confirm for `plan-gate`;
+plan-gate Confirm may post empty text for one-tap approval, while other empty
+replies are blocked locally and server-side guards still own correctness.
 Run history consumes the embedded `sessions`/`context_budget` and `session_est`
 fields from `GET /api/history/runs`, groups runs by `(repo, task)`, and shows
 observed dev-session count vs estimate, peak context, and summed wall-clock from
