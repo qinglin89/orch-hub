@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "10d041d2ff1a2bdbb66ddbac9345a48d8c305c5ba47b0142a7c2d163db5c907c",
+  "canonical_payload_sha256": "4e4b8024951f9f517056f0f1f8d5c8f7c629286fb2c5e63c15fbd9e434dbcb47",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
@@ -87,8 +87,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "bddee926a2dd370e8beef481639243885ed9adfd72002af1abed809c37209857",
-      "canonical_size_bytes": 32186,
+      "canonical_sha256": "9b41c54e4429141c24488e86918ff1f2b0769d83cad699555b57685fa4be7cf3",
+      "canonical_size_bytes": 34966,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
@@ -99,8 +99,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "1c7eb7587c278c97bf77c8d279538dca17df1d57944436fc1fb236136ae95030",
-      "canonical_size_bytes": 117122,
+      "canonical_sha256": "86c7dae0e2a215706650726768305d197e305fdfd6b9a7e9996270f3fd5228e6",
+      "canonical_size_bytes": 122301,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -117,8 +117,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "b7c49c0adf9425b92f2bf618ac51a943724836e2a1593ce2d8ba81bc3a76f392",
-      "canonical_size_bytes": 89774,
+      "canonical_sha256": "508c929e87e343d421c3c4981fba9337f9ccf38bd1bc391e87c40e1c5692a08a",
+      "canonical_size_bytes": 95862,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
@@ -177,6 +177,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "6a0452b803dcb9d09e9f689b406d9cc45696d8f9",
+  "source_git_commit": "acc03f48b5d8cf36507d0ddb245cd87d40993771",
   "source_repo": "ai-native-deployment"
 }
