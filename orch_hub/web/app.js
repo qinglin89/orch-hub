@@ -892,8 +892,27 @@
     </section>`;
   }
 
+  // The two buttons are kind-aware but map to the same two hub answer `mode`s:
+  // `discuss` (a clarifying turn / plan feedback) and `answer` (a binding reply
+  // / plan approval). A plan-gate confirmation loop (orchestrator README §5.8)
+  // reads as Feedback/Confirm; every other escalation as Discuss/Answer. The hub
+  // reconciles each mode with the question's kind and refuses a mismatch with a
+  // 400 shown inline, so a mistyped marker/confirm can never silently land on
+  // the wrong side of the orchestrator's parser — the button carries the intent.
   function questionForm(runId, q) {
     const prompt = q.banner || q.message || "";
+    const planGate = q.kind === "plan-gate";
+    const discussLabel = planGate ? "Feedback" : "Discuss";
+    const answerLabel = planGate ? "Confirm" : "Answer";
+    const placeholder = planGate
+      ? "Leave empty to confirm, or type feedback"
+      : "Type a reply";
+    // Names both buttons and calls out the two special inputs: an empty box is a
+    // one-tap plan approval (the hub fills the confirm word), and "stop" aborts
+    // the run in any mode/kind.
+    const hint = planGate
+      ? `${answerLabel} approves the plan — an empty box is enough; ${discussLabel} sends plan changes. Type "stop" to end the run.`
+      : `${answerLabel} sends a binding reply; ${discussLabel} asks a clarifying question first. Type "stop" to end the run.`;
     return `<div class="question">
       ${prompt ? `<p class="q-prompt">${escapeHtml(prompt)}</p>` : ""}
       ${
@@ -912,11 +931,15 @@
       }
       <form class="answer-form" data-run="${escapeHtml(runId)}" data-seq="${q.seq}">
         <textarea class="answer-input" rows="3"
-          placeholder='Type an answer — "stop" ends the run'></textarea>
+          placeholder="${escapeHtml(placeholder)}"></textarea>
         <div class="answer-actions">
-          <button type="submit">Send answer</button>
+          <button type="button" class="answer-discuss" data-mode="discuss">${discussLabel}</button>
+          <button type="button" class="answer-send" data-mode="answer"${
+            planGate ? ' data-allow-empty="1"' : ""
+          }>${answerLabel}</button>
           <span class="answer-status error-text" role="alert"></span>
         </div>
+        <p class="answer-hint muted">${escapeHtml(hint)}</p>
       </form>
     </div>`;
   }
@@ -931,38 +954,52 @@
 
   function wireAnswerForms() {
     document.querySelectorAll(".answer-form").forEach((form) => {
-      form.addEventListener("submit", async (ev) => {
-        ev.preventDefault();
-        const runId = form.dataset.run;
-        const seq = form.dataset.seq;
-        const input = form.querySelector(".answer-input");
-        const statusEl = form.querySelector(".answer-status");
-        const button = form.querySelector("button");
-        statusEl.textContent = "";
-        const answer = input.value.trim();
-        if (!answer) {
-          statusEl.textContent = "Enter an answer first.";
-          return;
-        }
-        button.disabled = true;
-        try {
-          await api(
-            "/api/runs/" +
-              encodeURIComponent(runId) +
-              "/escalations/" +
-              encodeURIComponent(seq) +
-              "/answer",
-            { method: "POST", body: { answer, responder: "dashboard" } }
-          );
-          router(); // re-render: the question is answered, the run leaves `waiting`
-        } catch (err) {
-          if (err instanceof ApiError && err.status === 401) return; // login shown
-          button.disabled = false;
-          statusEl.textContent =
-            err instanceof ApiError ? err.message : "Failed to send answer.";
-        }
+      // Each button carries its own `mode`; a click sends that intent. The
+      // buttons are type="button" (no implicit form submit), so an accidental
+      // Enter can't fire a binding Answer/Confirm on a control surface.
+      form.querySelectorAll("button[data-mode]").forEach((button) => {
+        button.addEventListener("click", () => sendAnswer(form, button));
       });
     });
+  }
+
+  // Post one question's answer with the clicked button's explicit `mode`
+  // (discuss / answer). Empty text is only allowed on the plan-gate Confirm
+  // button (marked data-allow-empty — the hub fills the confirm word for a
+  // one-tap approval); every other empty reply is blocked here to match the
+  // server's non-empty refusal without a round-trip. A guard 400 (mode/kind
+  // mismatch) rides the existing inline error path.
+  async function sendAnswer(form, button) {
+    const runId = form.dataset.run;
+    const seq = form.dataset.seq;
+    const mode = button.dataset.mode;
+    const allowEmpty = button.dataset.allowEmpty === "1";
+    const input = form.querySelector(".answer-input");
+    const statusEl = form.querySelector(".answer-status");
+    const buttons = form.querySelectorAll("button[data-mode]");
+    statusEl.textContent = "";
+    const answer = input.value.trim();
+    if (!answer && !allowEmpty) {
+      statusEl.textContent = "Enter a reply first.";
+      return;
+    }
+    buttons.forEach((b) => (b.disabled = true));
+    try {
+      await api(
+        "/api/runs/" +
+          encodeURIComponent(runId) +
+          "/escalations/" +
+          encodeURIComponent(seq) +
+          "/answer",
+        { method: "POST", body: { answer, responder: "dashboard", mode } }
+      );
+      router(); // re-render: the question is answered, the run leaves `waiting`
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      buttons.forEach((b) => (b.disabled = false));
+      statusEl.textContent =
+        err instanceof ApiError ? err.message : "Failed to send answer.";
+    }
   }
 
   // ---- run controls (start / stop) ----

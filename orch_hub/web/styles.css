@@ -705,6 +705,7 @@ code {
 .answer-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
@@ -719,12 +720,24 @@ code {
   cursor: pointer;
 }
 
+/* The discuss/feedback button is the secondary intent — outlined, not filled —
+   so the binding Answer/Confirm reads as the primary action beside it. */
+.answer-actions .answer-discuss {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+
 .answer-actions button:disabled {
   opacity: 0.6;
   cursor: default;
 }
 
 .answer-status {
+  margin: 0;
+}
+
+.answer-hint {
   margin: 0;
 }
 

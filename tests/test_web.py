@@ -597,3 +597,85 @@ def test_run_history_rollup_shows_peak_context_and_wall_clock():
     assert "fmtDuration" in body
     assert "wall-clock" in body
     assert "started_ts" in body and "ended_ts" in body
+
+
+# ---- kind-aware answer-mode buttons (2026-07-16-escalation-mode-buttons) ------
+#
+# Session-2 web slice: the single "Send answer" button is replaced by a
+# kind-aware two-button form. Each button carries an explicit answer `mode` the
+# hub normalizes against the question's kind — Discuss/Answer for an ordinary
+# escalation, Feedback/Confirm for a plan-gate. A plan-gate approval is one tap
+# on an empty box; a guard 400 rides the existing inline error path; a hint names
+# "stop". Asserted at the served-asset boundary (no JS runtime in this suite),
+# like the run-control / intake checks above; each maps to a scope/acceptance
+# line. The mode *dispatch* itself (which button → which mode, empty-confirm) was
+# verified locally with a jsc stubbed-browser harness (task session log); the
+# committed suite deliberately does not depend on that runtime.
+
+
+def styles_css() -> str:
+    """The served dashboard stylesheet (public shell asset)."""
+    return unauthed_client().get("/styles.css").text
+
+
+def test_answer_form_sends_two_explicit_modes_through_one_sender():
+    body = app_js()
+    # Two buttons, each declaring its intent as an explicit `mode` (the two
+    # ANSWER_MODES the hub normalizes), wired to one sender that threads that
+    # mode into the POST body. The buttons are clicked, not submitted, so the
+    # single pre-mode "Send answer" submit button is gone.
+    assert 'data-mode="discuss"' in body
+    assert 'data-mode="answer"' in body
+    assert "sendAnswer(form, button)" in body  # per-button click dispatch
+    assert "const mode = button.dataset.mode;" in body
+    assert 'body: { answer, responder: "dashboard", mode }' in body  # mode in body
+    assert "Send answer" not in body  # the pre-mode single button is gone
+
+
+def test_answer_buttons_are_kind_aware():
+    body = app_js()
+    # Labels switch on the plan-gate kind: an ordinary escalation reads as
+    # Discuss/Answer, a plan-gate confirmation loop as Feedback/Confirm.
+    assert 'q.kind === "plan-gate"' in body
+    assert '"Discuss"' in body and '"Answer"' in body
+    assert '"Feedback"' in body and '"Confirm"' in body
+
+
+def test_plan_gate_approval_is_one_tap_on_empty():
+    body = app_js()
+    # The plan-gate answer (Confirm) button is the one empty-allowed input: it
+    # carries data-allow-empty and the sender lets an empty box through only for
+    # it (the hub fills the confirm word). Every other empty reply is blocked
+    # locally to match the server's non-empty refusal without a round-trip.
+    assert 'data-allow-empty="1"' in body
+    assert 'button.dataset.allowEmpty === "1"' in body
+    assert "if (!answer && !allowEmpty)" in body
+    assert "Enter a reply first." in body
+
+
+def test_answer_form_hint_names_stop_ending_the_run():
+    body = app_js()
+    # A hint line under the buttons names that "stop" ends the run (task scope);
+    # the escaped hint keeps the literal word so it survives escapeHtml.
+    assert "answer-hint" in body
+    assert "to end the run" in body
+    assert "stop" in body
+
+
+def test_answer_guard_400_uses_the_inline_error_path():
+    body = app_js()
+    # A fail-closed guard 400 (mode/kind mismatch) surfaces through the same
+    # inline answer-status path as before: the ApiError message (the 400 detail)
+    # is written into the status span, not swallowed to a generic failure.
+    assert "answer-status" in body
+    assert (
+        'err instanceof ApiError ? err.message : "Failed to send answer."'
+        in body
+    )
+
+
+def test_discuss_button_has_a_distinct_secondary_style():
+    css = styles_css()
+    # The discuss/feedback (secondary) button is visually distinct from the
+    # filled primary Answer/Confirm button so the binding action is unambiguous.
+    assert ".answer-discuss" in css
