@@ -12,6 +12,7 @@ import itertools
 import json
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from orch_hub import api
@@ -1107,6 +1108,178 @@ def test_answer_escalation_empty_answer_is_400(tmp_path, monkeypatch):
         f"/api/runs/{started['run_id']}/escalations/1/answer", json={"answer": "   "}
     )
     assert resp.status_code == 400
+
+
+# -- escalations: answer mode / kind normalization -----------------------------
+#
+# The route reconciles the request ``mode`` with the question ``kind`` through
+# ``normalize_answer`` before writing (control_dir mirrors the orchestrator's
+# own parse; the pure-helper matrix is unit-tested in test_control_dir.py). Here
+# the same cells go end-to-end: the written answer file, the fail-closed 400s,
+# the ``mode`` audit metadata, and back-compat with an omitted field.
+
+
+def answer(client, run_id, seq=1, **body):
+    return client.post(f"/api/runs/{run_id}/escalations/{seq}/answer", json=body)
+
+
+def answer_file_text(control: Path, seq: int = 1) -> str:
+    return json.loads((control / f"{seq:03d}-answer.json").read_text())["answer"]
+
+
+def audit_of(manager, run_id):
+    events = read_events(manager.runs_dir / run_id)
+    assert [e.kind for e in events] == [KIND_RUN_STARTED, KIND_ANSWER_RECORDED]
+    return events[-1].to_dict()
+
+
+def test_answer_no_mode_is_back_compat(tmp_path, monkeypatch):
+    # An omitted ``mode`` keeps a plain binding answer's behavior: verbatim
+    # write, and the audit records the default ``answer`` mode.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="Need a ruling")  # no kind -> non-plan-gate
+
+    resp = answer(client, started["run_id"], answer="  proceed with plan B  ")
+    assert resp.status_code == 200
+    assert resp.json()["answer"] == "proceed with plan B"
+    assert answer_file_text(control) == "proceed with plan B"
+    assert audit_of(manager, started["run_id"])["mode"] == "answer"
+
+
+def test_answer_discuss_mode_prepends_marker_and_audits_mode(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="Need a ruling")
+
+    resp = answer(client, started["run_id"], answer="what about plan C?", mode="discuss")
+    assert resp.status_code == 200
+    # The orchestrator will strip the marker and route the rest into the session.
+    assert answer_file_text(control) == "discuss: what about plan C?"
+    audit = audit_of(manager, started["run_id"])
+    assert audit["mode"] == "discuss"
+    assert "plan C" not in json.dumps(audit)  # intent metadata only, no answer text
+
+
+def test_answer_discuss_mode_keeps_existing_marker(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="Need a ruling")
+
+    resp = answer(client, started["run_id"], answer="? already asking", mode="discuss")
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "? already asking"
+
+
+def test_answer_mode_refuses_marker_prefixed_text_fail_closed(tmp_path, monkeypatch):
+    # A marker in answer mode would be silently reinterpreted as a discussion
+    # turn: refuse it, and write nothing.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="Need a ruling")
+
+    resp = answer(client, started["run_id"], answer="? sneaky", mode="answer")
+    assert resp.status_code == 400
+    assert "discussion marker" in resp.json()["detail"]
+    assert not (control / "001-answer.json").exists()  # nothing written
+    # No answer_recorded event either — the guard fired before the write.
+    assert [e.kind for e in read_events(manager.runs_dir / started["run_id"])] == [
+        KIND_RUN_STARTED
+    ]
+
+
+def test_answer_plan_gate_empty_confirms_in_one_tap(tmp_path, monkeypatch):
+    # A plan-gate approval is one tap on empty input: the hub fills ``confirm``.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, kind="plan-gate", banner="Plan OK?")
+
+    resp = answer(client, started["run_id"], answer="", mode="answer")
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "confirm"
+    assert audit_of(manager, started["run_id"])["mode"] == "answer"
+
+
+def test_answer_plan_gate_confirm_word_is_verbatim(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, kind="plan-gate", banner="Plan OK?")
+
+    resp = answer(client, started["run_id"], answer="  Approve  ", mode="answer")
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "Approve"  # write_answer strips
+
+
+def test_answer_plan_gate_answer_mode_refuses_feedback(tmp_path, monkeypatch):
+    # Free text on the [Confirm] button would be parsed as feedback, not
+    # approval — a button/parse mismatch — so it fails closed.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, kind="plan-gate", banner="Plan OK?")
+
+    resp = answer(client, started["run_id"], answer="revise the wording", mode="answer")
+    assert resp.status_code == 400
+    assert "plan approval" in resp.json()["detail"]
+    assert not (control / "001-answer.json").exists()
+
+
+def test_answer_plan_gate_discuss_sends_feedback(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, kind="plan-gate", banner="Plan OK?")
+
+    resp = answer(client, started["run_id"], answer="tighten the scope", mode="discuss")
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "tighten the scope"
+    assert audit_of(manager, started["run_id"])["mode"] == "discuss"
+
+
+def test_answer_plan_gate_discuss_refuses_bare_confirm_word(tmp_path, monkeypatch):
+    # A bare confirm word in discuss mode would approve instead of discuss.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, kind="plan-gate", banner="Plan OK?")
+
+    resp = answer(client, started["run_id"], answer="confirm", mode="discuss")
+    assert resp.status_code == 400
+    assert "plan-approval word" in resp.json()["detail"]
+    assert not (control / "001-answer.json").exists()
+
+
+@pytest.mark.parametrize("kind", [None, "plan-gate"])
+@pytest.mark.parametrize("mode", ["answer", "discuss"])
+def test_answer_stop_passes_through_every_mode_and_kind(tmp_path, monkeypatch, kind, mode):
+    # ``stop`` aborts the run before any marker/confirm parsing, so it is
+    # written verbatim regardless of mode/kind (never discuss-prefixed).
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    fields = {"banner": "?"} if kind is None else {"kind": kind, "banner": "Plan OK?"}
+    write_question(control, **fields)
+
+    resp = answer(client, started["run_id"], answer="stop", mode=mode)
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "stop"
+
+
+def test_answer_invalid_mode_is_422(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="Need a ruling")
+
+    resp = answer(client, started["run_id"], answer="go", mode="bogus")
+    assert resp.status_code == 422  # rejected by request-model validation
+    assert not (control / "001-answer.json").exists()
 
 
 # -- run sessions (per-session context) ----------------------------------------

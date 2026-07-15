@@ -17,10 +17,13 @@ import pytest
 
 from orch_hub.control_dir import (
     DEFAULT_RESPONDER,
+    PLAN_GATE_CONFIRM_WORDS,
     QUESTION_KINDS,
     STOP_FLAG_NAME,
+    AnswerModeError,
     DuplicateAnswerError,
     list_questions,
+    normalize_answer,
     pending_questions,
     request_stop,
     stop_answered,
@@ -375,3 +378,109 @@ def test_question_to_dict_is_stable_and_excludes_path(tmp_path):
         "answer": None,
         "answer_error": None,
     }
+
+
+# -- answer-mode normalization (matrix mode x kind) ---------------------------
+#
+# ``normalize_answer`` mirrors the orchestrator's own answer parsing (README
+# §5/§5.8) so a dashboard button's intent can never silently mismatch the
+# parse. Every matrix cell below is also exercised end-to-end through the HTTP
+# answer route in ``tests/test_api.py``; these unit cases pin the pure helper.
+
+PLAN_GATE = "plan-gate"
+
+
+@pytest.mark.parametrize(
+    "text, mode, kind, expected",
+    [
+        # non-plan-gate / answer: verbatim (marker-free binding answers).
+        ("go", "answer", None, "go"),
+        ("  keep padding  ", "answer", None, "  keep padding  "),
+        ("go", "answer", "blocked", "go"),  # any non-plan-gate kind is uniform
+        # non-plan-gate / discuss: prepend unless already marker-prefixed.
+        ("what about X?", "discuss", None, "discuss: what about X?"),
+        ("  trim then prepend  ", "discuss", None, "discuss: trim then prepend"),
+        ("? already marked", "discuss", None, "? already marked"),
+        ("？全角 marked", "discuss", None, "？全角 marked"),
+        ("discuss: already", "discuss", None, "discuss: already"),
+        ("DISCUSS: upper", "discuss", None, "DISCUSS: upper"),  # marker is ci
+        ("discuss : spaced", "discuss", "run-error", "discuss : spaced"),
+        # plan-gate / answer: empty -> confirm; bare confirm word -> verbatim.
+        ("", "answer", PLAN_GATE, "confirm"),
+        ("   ", "answer", PLAN_GATE, "confirm"),
+        ("confirm", "answer", PLAN_GATE, "confirm"),
+        ("  Approve  ", "answer", PLAN_GATE, "  Approve  "),
+        ("确认", "answer", PLAN_GATE, "确认"),
+        # plan-gate / discuss: feedback verbatim (non-confirm text).
+        ("please tweak step 2", "discuss", PLAN_GATE, "please tweak step 2"),
+        ("confirm the wording please", "discuss", PLAN_GATE, "confirm the wording please"),
+    ],
+)
+def test_normalize_answer_matrix_pass(text, mode, kind, expected):
+    assert normalize_answer(text, mode=mode, kind=kind) == expected
+
+
+@pytest.mark.parametrize(
+    "text, mode, kind",
+    [
+        # stop aborts the run in every mode/kind, before marker/confirm parsing,
+        # so it is written verbatim (never discuss-prefixed, never refused).
+        ("stop", "answer", None),
+        ("STOP", "discuss", None),
+        ("  Stop  ", "answer", PLAN_GATE),
+        ("stop", "discuss", PLAN_GATE),
+    ],
+)
+def test_normalize_answer_stop_passthrough(text, mode, kind):
+    assert normalize_answer(text, mode=mode, kind=kind) == text
+
+
+@pytest.mark.parametrize(
+    "text, mode, kind, detail_substr",
+    [
+        # non-plan-gate / answer: a marker would be reinterpreted as discussion.
+        ("? sneaky", "answer", None, "discussion marker"),
+        ("discuss: sneaky", "answer", None, "discussion marker"),
+        ("？全角 sneaky", "answer", "blocked", "discussion marker"),
+        # plan-gate / answer: only a bare confirm word (or empty) approves.
+        ("revise the plan", "answer", PLAN_GATE, "plan approval"),
+        ("confirm please", "answer", PLAN_GATE, "plan approval"),
+        # plan-gate / discuss: a bare confirm word would approve, not discuss.
+        ("confirm", "discuss", PLAN_GATE, "plan-approval word"),
+        ("  YES  ", "discuss", PLAN_GATE, "plan-approval word"),
+        ("确认", "discuss", PLAN_GATE, "plan-approval word"),
+    ],
+)
+def test_normalize_answer_matrix_guard_rejects(text, mode, kind, detail_substr):
+    with pytest.raises(AnswerModeError) as excinfo:
+        normalize_answer(text, mode=mode, kind=kind)
+    assert detail_substr in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "text, mode, kind",
+    [
+        ("", "answer", None),  # non-plan-gate answer, empty -> existing 400
+        ("   ", "answer", "blocked"),
+        ("", "discuss", None),  # discussion needs text
+        ("   ", "discuss", None),
+        ("", "discuss", PLAN_GATE),  # empty is legal only as plan-gate answer
+        ("   ", "discuss", PLAN_GATE),
+    ],
+)
+def test_normalize_answer_empty_keeps_existing_non_empty_error(text, mode, kind):
+    with pytest.raises(ValueError) as excinfo:
+        normalize_answer(text, mode=mode, kind=kind)
+    assert "non-empty" in str(excinfo.value)
+
+
+def test_normalize_answer_empty_confirm_fill_is_a_recognized_word():
+    # The plan-gate empty-answer fill must be a word the orchestrator's parser
+    # actually accepts as approval, or a one-tap Confirm would silently fail.
+    filled = normalize_answer("", mode="answer", kind=PLAN_GATE)
+    assert filled.strip().lower() in PLAN_GATE_CONFIRM_WORDS
+
+
+def test_normalize_answer_rejects_unknown_mode():
+    with pytest.raises(AnswerModeError):
+        normalize_answer("go", mode="bogus", kind=None)

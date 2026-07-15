@@ -633,13 +633,20 @@ class RunManager:
             return newly_requested
 
     def audit_answer(
-        self, run_id: str, question: Question, *, responder: str
+        self,
+        run_id: str,
+        question: Question,
+        *,
+        responder: str,
+        mode: str | None = None,
     ) -> None:
         """Persist answer audit metadata after a control-dir answer is written.
 
         The answer text is intentionally excluded: the control-dir answer file
         is the consumed contract artifact, while history keeps metadata for
-        later inspection without copying potentially sensitive content.
+        later inspection without copying potentially sensitive content. ``mode``
+        is the answer's button intent (``answer``/``discuss``), recorded as
+        metadata alongside the responder; it is never the answer text.
         """
         with self._lock:
             run_dir = self._run_dir_for(run_id)
@@ -658,6 +665,7 @@ class RunManager:
                     question_banner=question.banner,
                     question_message=question.message,
                     responder=responder,
+                    mode=mode,
                 ),
             )
 
@@ -988,6 +996,7 @@ def _run_event(
     question_banner: str | None = None,
     question_message: str | None = None,
     responder: str | None = None,
+    mode: str | None = None,
 ) -> RunEvent:
     """Build an audit event from persisted run identity."""
     return RunEvent(
@@ -1007,4 +1016,5 @@ def _run_event(
         question_banner=question_banner,
         question_message=question_message,
         responder=responder,
+        mode=mode,
     )

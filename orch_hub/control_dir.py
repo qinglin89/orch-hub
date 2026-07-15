@@ -49,6 +49,57 @@ Informational only — unknown kinds are surfaced as-is, never rejected, so a
 newer orchestrator cannot break the hub.
 """
 
+PLAN_GATE_KIND = "plan-gate"
+"""The one ``kind`` whose answer parsing differs (README §5.8): its confirmation
+loop has no discussion-marker channel; every non-confirm answer is feedback."""
+
+STOP_ANSWER = "stop"
+"""The answer that aborts the whole run. The orchestrator matches it (README §5,
+``answer.lower() == "stop"``) before any marker/confirm parsing, so it is written
+verbatim in every answer mode/kind."""
+
+DISCUSSION_MARKER_RE = re.compile(r"^(?:[?？]|discuss\s*:)", re.IGNORECASE)
+"""Mirror of the orchestrator's ``DISCUSSION_MARKER_RE`` (README §5). On a
+non-``plan-gate`` escalation with a live/resumable session, an answer whose
+stripped text matches this is a discussion turn — the marker is stripped and the
+rest sent into that session — not a binding answer. Mirrored verbatim so the
+hub's mode guards match exactly what the orchestrator will parse."""
+
+PLAN_GATE_CONFIRM_WORDS = frozenset(
+    {
+        "confirm",
+        "confirmed",
+        "approve",
+        "approved",
+        "proceed",
+        "yes",
+        "y",
+        "ok",
+        "okay",
+        "确认",
+        "同意",
+        "批准",
+        "通过",
+        "继续",
+        "可以",
+        "开始",
+        "开工",
+        "执行",
+        "实施",
+    }
+)
+"""Mirror of the orchestrator's plan-gate approval set (README §5.8): a standalone
+word matched as ``answer.strip().lower()``; an approval word with any extra text
+is feedback, not confirmation. Mirrored so a [Confirm] tap and a [Feedback] guard
+agree with the parser. Mirror-drift is accepted (task notes): an upstream-added
+word the hub lacks slips past the [Feedback] guard (no worse than today's typed
+answer); a word the hub keeps but upstream dropped over-rejects (safe direction)."""
+
+ANSWER_MODES = ("answer", "discuss")
+"""Explicit dashboard intent for an answer: ``answer`` = a binding answer / plan
+approval; ``discuss`` = a clarifying turn / plan feedback. Default is ``answer``
+so an omitted field keeps a plain binding answer's behavior."""
+
 STOP_FLAG_NAME = "stop.flag"
 
 DEFAULT_RESPONDER = "orch-hub"
@@ -64,6 +115,17 @@ class DuplicateAnswerError(Exception):
 
     The orchestrator may have consumed the existing answer already, so
     overwriting it would falsify the audit record without reaching anyone.
+    """
+
+
+class AnswerModeError(ValueError):
+    """Raised when an answer's text cannot be reconciled with its declared
+    ``mode`` for the question's ``kind``.
+
+    A fail-closed guard (see :func:`normalize_answer`) so a button's intent can
+    never silently land on the wrong side of the orchestrator's answer parser.
+    Subclasses :class:`ValueError` so the answer route's existing 400 handling
+    catches it alongside :func:`write_answer`'s empty-answer rejection.
     """
 
 
@@ -132,6 +194,97 @@ def write_answer(
     tmp.write_text(json.dumps(payload, indent=1), encoding="utf-8")
     os.replace(tmp, answer_path)
     return answer_path
+
+
+def normalize_answer(text: str, *, mode: str, kind: str | None) -> str:
+    """Reconcile a dashboard button ``mode`` with a question's ``kind``.
+
+    Returns the exact answer text to hand :func:`write_answer`, or raises
+    :class:`AnswerModeError` (→ HTTP 400) when the two cannot be reconciled
+    fail-closed. The returned string is what the orchestrator's own parser (see
+    :data:`DISCUSSION_MARKER_RE`, :data:`PLAN_GATE_CONFIRM_WORDS`) then
+    interprets, so this *is* the guard that keeps button intent and parse
+    outcome aligned — nothing is silently reinterpreted.
+
+    ``mode`` is :data:`ANSWER_MODES`; only ``kind == "plan-gate"`` parses
+    differently (README §5.8), every other/unknown/absent ``kind`` is an
+    ordinary escalation. Rules (task normalization matrix):
+
+    - ``stop`` (strip+casefold) → verbatim in every mode/kind: the orchestrator
+      aborts on it before any marker/confirm parsing.
+    - Empty text is legal only as plan-gate + ``answer`` (the hub fills the
+      literal ``confirm`` so a one-tap approval needs no typed text); every
+      other empty answer keeps the existing non-empty 400.
+    - non-plan-gate / ``discuss`` → prepend ``discuss: `` unless already
+      marker-prefixed; non-plan-gate / ``answer`` → verbatim, but a
+      marker-prefixed text is refused so it cannot become a discussion turn.
+    - plan-gate / ``discuss`` → verbatim feedback, but a bare confirm word is
+      refused (the parser would read it as approval); plan-gate / ``answer`` →
+      a bare confirm word is verbatim, any other non-empty text is refused (use
+      discuss for plan feedback).
+    """
+    if mode not in ANSWER_MODES:
+        raise AnswerModeError(f"mode must be one of {', '.join(ANSWER_MODES)}")
+    stripped = text.strip()
+    is_plan_gate = kind == PLAN_GATE_KIND
+
+    # `stop` aborts the run and is matched before any marker/confirm parsing, so
+    # it bypasses every mode/kind guard in every mode.
+    if stripped.casefold() == STOP_ANSWER:
+        return text
+
+    # Empty is meaningful only as a plan-gate approval, where the hub fills the
+    # canonical confirm word so a bare [Confirm] tap needs no typed text.
+    if not stripped:
+        if is_plan_gate and mode == "answer":
+            return "confirm"  # canonical approval word (in PLAN_GATE_CONFIRM_WORDS)
+        raise ValueError("answer must be a non-empty string")
+
+    if is_plan_gate:
+        return _normalize_plan_gate_answer(text, stripped, mode)
+    return _normalize_escalation_answer(text, stripped, mode)
+
+
+def _normalize_escalation_answer(text: str, stripped: str, mode: str) -> str:
+    """Normalize a non-``plan-gate`` escalation answer (``stripped`` non-empty)."""
+    marked = DISCUSSION_MARKER_RE.match(stripped) is not None
+    if mode == "discuss":
+        # Already a marker → send as-is; else make the discussion intent explicit
+        # so the orchestrator routes it into the escalation's live session.
+        return text if marked else f"discuss: {stripped}"
+    # mode == "answer": a marker-prefixed answer would be silently reinterpreted
+    # as a discussion turn, so refuse it fail-closed.
+    if marked:
+        raise AnswerModeError(
+            "answer starts with a discussion marker (?, ？, or 'discuss:') and "
+            "would be read as a discussion turn — use Discuss, or remove the "
+            "marker to send a binding answer"
+        )
+    return text
+
+
+def _normalize_plan_gate_answer(text: str, stripped: str, mode: str) -> str:
+    """Normalize a ``plan-gate`` answer (``stripped`` non-empty)."""
+    is_confirm_word = stripped.lower() in PLAN_GATE_CONFIRM_WORDS
+    if mode == "discuss":
+        # Plan-gate has no marker channel: every non-confirm answer is feedback
+        # to the planning session. Only a bare confirm word is dangerous (it
+        # would approve instead of discuss), so refuse exactly that.
+        if is_confirm_word:
+            raise AnswerModeError(
+                "this text is a plan-approval word and would confirm the plan — "
+                "use Confirm to approve, or reword the feedback"
+            )
+        return text
+    # mode == "answer": approving the current plan. A bare confirm word is the
+    # approval; any other non-empty text on the Confirm button is ambiguous and
+    # would be parsed as feedback, not approval, so refuse it fail-closed.
+    if is_confirm_word:
+        return text
+    raise AnswerModeError(
+        "plan approval takes no free text — leave it empty (or send a single "
+        "confirm word) to confirm, or use Feedback to send plan changes"
+    )
 
 
 def request_stop(control_dir: Path) -> bool:

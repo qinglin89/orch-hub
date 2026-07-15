@@ -80,6 +80,7 @@ def _event_from_dict(data: dict, *, default_run_id: str) -> RunEvent:
         question_banner=_str_field(data, "question_banner"),
         question_message=_str_field(data, "question_message"),
         responder=_str_field(data, "responder"),
+        mode=_str_field(data, "mode"),
     )
 
 

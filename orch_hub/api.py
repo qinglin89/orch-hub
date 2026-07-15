@@ -29,6 +29,7 @@ from __future__ import annotations
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -41,6 +42,7 @@ from .control_dir import (
     DEFAULT_RESPONDER,
     DuplicateAnswerError,
     list_questions,
+    normalize_answer,
     pending_questions,
     write_answer,
 )
@@ -197,10 +199,19 @@ class AnswerRequest(BaseModel):
 
     ``responder`` is recorded in the answer file's audit fields; it defaults to
     the control-dir adapter's ``orch-hub`` when the client sends nothing.
+
+    ``mode`` is the answer's explicit intent — ``answer`` (a binding answer /
+    plan approval) or ``discuss`` (a clarifying turn / plan feedback). It defaults
+    to ``answer`` so an omitted field keeps a plain binding answer's behavior; the
+    route reconciles it with the question's ``kind`` through
+    :func:`orch_hub.control_dir.normalize_answer` before writing, failing closed
+    (400) rather than letting button intent silently mismatch the orchestrator's
+    parse. An unrecognized ``mode`` is rejected by validation (422).
     """
 
     answer: str
     responder: str | None = None
+    mode: Literal["answer", "discuss"] = "answer"
 
 
 class StartIntakeRequest(BaseModel):
@@ -723,10 +734,14 @@ def create_app(
         """Write the answer file for one pending question, auditing the responder.
 
         The run is located by ``run_id`` (unknown → 404) and the question by
-        ``seq`` within its control dir (unknown → 404). The write goes through
-        :func:`orch_hub.control_dir.write_answer`, so a pre-existing valid
-        answer is refused (409) and an empty/whitespace answer is rejected
-        (400); ``"stop"`` is a legitimate answer that aborts the run.
+        ``seq`` within its control dir (unknown → 404). ``req.mode`` is reconciled
+        with the question's ``kind`` by
+        :func:`orch_hub.control_dir.normalize_answer` — a fail-closed guard that
+        either yields the exact text to write or rejects the request (400) so a
+        button's intent can never silently land on the wrong side of the
+        orchestrator parser. The normalized text goes through
+        :func:`orch_hub.control_dir.write_answer`, so a pre-existing valid answer
+        is refused (409); ``"stop"`` is a legitimate answer that aborts the run.
         """
         status = manager.get_run(run_id)
         control_dir = status.record.control_dir
@@ -744,16 +759,19 @@ def create_app(
             )
         responder = req.responder or DEFAULT_RESPONDER
         try:
-            write_answer(question, req.answer, responder=responder)
+            answer = normalize_answer(req.answer, mode=req.mode, kind=question.kind)
+            write_answer(question, answer, responder=responder)
         except ValueError as exc:
+            # AnswerModeError (guard) and write_answer's empty-answer ValueError
+            # both surface as a 400 with an actionable detail.
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        manager.audit_answer(run_id, question, responder=responder)
+        manager.audit_answer(run_id, question, responder=responder, mode=req.mode)
         return {
             "run_id": run_id,
             "seq": seq,
             "answered": True,
             "responder": responder,
-            "answer": req.answer.strip(),
+            "answer": answer.strip(),
         }
 
     # -- remote intake-task ----------------------------------------------------

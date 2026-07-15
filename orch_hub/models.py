@@ -355,7 +355,10 @@ class RunEvent:
 
     Event files deliberately store metadata only. Human answer text is not part
     of this model; the control-dir answer file is the contract artifact that
-    contains the exact answer consumed by the orchestrator.
+    contains the exact answer consumed by the orchestrator. On an
+    ``answer_recorded`` event, ``mode`` records the answer's button intent
+    (:data:`orch_hub.control_dir.ANSWER_MODES` — ``answer``/``discuss``), which is
+    intent metadata, not the answer text.
     """
 
     ts: str
@@ -374,6 +377,7 @@ class RunEvent:
     question_banner: str | None = None
     question_message: str | None = None
     responder: str | None = None
+    mode: str | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -393,6 +397,7 @@ class RunEvent:
             "question_banner": self.question_banner,
             "question_message": self.question_message,
             "responder": self.responder,
+            "mode": self.mode,
         }
 
 
