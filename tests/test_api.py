@@ -1135,7 +1135,7 @@ def audit_of(manager, run_id):
 
 def test_answer_no_mode_is_back_compat(tmp_path, monkeypatch):
     # An omitted ``mode`` keeps a plain binding answer's behavior: verbatim
-    # write, and the audit records the default ``answer`` mode.
+    # write, and no button intent is recorded in the audit (mode is None).
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     started = start_a_run(client, repo)
     control = control_dir_of(manager, started["run_id"])
@@ -1145,7 +1145,38 @@ def test_answer_no_mode_is_back_compat(tmp_path, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()["answer"] == "proceed with plan B"
     assert answer_file_text(control) == "proceed with plan B"
-    assert audit_of(manager, started["run_id"])["mode"] == "answer"
+    assert audit_of(manager, started["run_id"])["mode"] is None
+
+
+def test_answer_no_mode_marker_prefixed_is_back_compat(tmp_path, monkeypatch):
+    # A no-mode request with a discussion-marker answer must NOT hit the
+    # answer-mode guard: with no declared button intent it is written verbatim,
+    # exactly as before the ``mode`` field existed, for the orchestrator to parse
+    # as a discussion turn.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, banner="Need a ruling")  # no kind -> non-plan-gate
+
+    resp = answer(client, started["run_id"], answer="? clarify the constraint")
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "? clarify the constraint"
+    assert audit_of(manager, started["run_id"])["mode"] is None
+
+
+def test_answer_no_mode_plan_gate_feedback_is_back_compat(tmp_path, monkeypatch):
+    # A no-mode plan-gate answer that is not a confirm word must NOT hit the
+    # plan-gate answer guard: with no declared button intent it is written
+    # verbatim for the orchestrator to parse as plan feedback (today's behavior).
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    control = control_dir_of(manager, started["run_id"])
+    write_question(control, kind="plan-gate", banner="Plan OK?")
+
+    resp = answer(client, started["run_id"], answer="revise step 2")
+    assert resp.status_code == 200
+    assert answer_file_text(control) == "revise step 2"
+    assert audit_of(manager, started["run_id"])["mode"] is None
 
 
 def test_answer_discuss_mode_prepends_marker_and_audits_mode(tmp_path, monkeypatch):

@@ -200,18 +200,24 @@ class AnswerRequest(BaseModel):
     ``responder`` is recorded in the answer file's audit fields; it defaults to
     the control-dir adapter's ``orch-hub`` when the client sends nothing.
 
-    ``mode`` is the answer's explicit intent — ``answer`` (a binding answer /
-    plan approval) or ``discuss`` (a clarifying turn / plan feedback). It defaults
-    to ``answer`` so an omitted field keeps a plain binding answer's behavior; the
-    route reconciles it with the question's ``kind`` through
+    ``mode`` is the dashboard button's explicit intent — ``answer`` (a binding
+    answer / plan approval) or ``discuss`` (a clarifying turn / plan feedback).
+    An explicit mode is reconciled with the question's ``kind`` through
     :func:`orch_hub.control_dir.normalize_answer` before writing, failing closed
     (400) rather than letting button intent silently mismatch the orchestrator's
-    parse. An unrecognized ``mode`` is rejected by validation (422).
+    parse. An unrecognized value is rejected by validation (422).
+
+    ``mode`` is optional and defaults to ``None`` = no declared button intent: a
+    request that omits it (a legacy/pre-``mode`` client, including the current
+    single-input dashboard) is written verbatim exactly as before this field
+    existed, skipping normalization. The fail-closed guards apply only to the
+    explicit modes the button pair sends, so an omitted ``mode`` behaves exactly
+    as today (back-compat).
     """
 
     answer: str
     responder: str | None = None
-    mode: Literal["answer", "discuss"] = "answer"
+    mode: Literal["answer", "discuss"] | None = None
 
 
 class StartIntakeRequest(BaseModel):
@@ -734,14 +740,17 @@ def create_app(
         """Write the answer file for one pending question, auditing the responder.
 
         The run is located by ``run_id`` (unknown → 404) and the question by
-        ``seq`` within its control dir (unknown → 404). ``req.mode`` is reconciled
-        with the question's ``kind`` by
+        ``seq`` within its control dir (unknown → 404). An explicit ``req.mode``
+        is reconciled with the question's ``kind`` by
         :func:`orch_hub.control_dir.normalize_answer` — a fail-closed guard that
         either yields the exact text to write or rejects the request (400) so a
         button's intent can never silently land on the wrong side of the
-        orchestrator parser. The normalized text goes through
-        :func:`orch_hub.control_dir.write_answer`, so a pre-existing valid answer
-        is refused (409); ``"stop"`` is a legitimate answer that aborts the run.
+        orchestrator parser. An omitted ``mode`` (``None``) declares no button
+        intent and is written verbatim, preserving the pre-``mode`` behavior for
+        legacy clients (back-compat). Either way the text goes through
+        :func:`orch_hub.control_dir.write_answer`, so an empty/whitespace answer
+        is rejected (400), a pre-existing valid answer is refused (409); ``"stop"``
+        is a legitimate answer that aborts the run.
         """
         status = manager.get_run(run_id)
         control_dir = status.record.control_dir
@@ -759,7 +768,15 @@ def create_app(
             )
         responder = req.responder or DEFAULT_RESPONDER
         try:
-            answer = normalize_answer(req.answer, mode=req.mode, kind=question.kind)
+            if req.mode is None:
+                # No declared button intent: preserve the pre-``mode`` path and
+                # write the answer verbatim (back-compat). write_answer still
+                # rejects an empty/whitespace answer.
+                answer = req.answer
+            else:
+                answer = normalize_answer(
+                    req.answer, mode=req.mode, kind=question.kind
+                )
             write_answer(question, answer, responder=responder)
         except ValueError as exc:
             # AnswerModeError (guard) and write_answer's empty-answer ValueError

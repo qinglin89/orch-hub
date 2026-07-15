@@ -96,9 +96,11 @@ word the hub lacks slips past the [Feedback] guard (no worse than today's typed
 answer); a word the hub keeps but upstream dropped over-rejects (safe direction)."""
 
 ANSWER_MODES = ("answer", "discuss")
-"""Explicit dashboard intent for an answer: ``answer`` = a binding answer / plan
-approval; ``discuss`` = a clarifying turn / plan feedback. Default is ``answer``
-so an omitted field keeps a plain binding answer's behavior."""
+"""The two explicit dashboard button intents: ``answer`` = a binding answer /
+plan approval; ``discuss`` = a clarifying turn / plan feedback.
+:func:`normalize_answer` requires one of these. A request that omits ``mode`` is
+back-compat state owned by the API route (written verbatim, skipping
+normalization), not one of these explicit intents."""
 
 STOP_FLAG_NAME = "stop.flag"
 
