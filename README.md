@@ -1,17 +1,66 @@
 # orch-hub
 
 A long-lived local control plane for AI coding orchestrators. It runs on your
-Mac and is meant to be driven remotely (iPhone/iPad or another machine) over a
-private network, coordinating the per-repository orchestrator programs that run
+Mac and is driven remotely (iPhone/iPad or another machine) over a private
+network, coordinating the per-repository orchestrator programs that run
 dev/review loops over `.ai-tasks/`.
 
-This repository implements the core application slices — repo discovery, launch
-readiness, and task inventory — plus a first **HTTP service foundation** that
-exposes them behind **bearer-token auth**. The remaining surfaces (orchestrator
-runs, question relay, logs, notifications, dashboard) are planned and
-intentionally not built yet.
+The implemented v1 surface covers the full loop: repo discovery and launch
+readiness, task inventory, orchestrator run lifecycle (start / stop / reattach
+with per-repo serialization), remote question answering, log tailing and
+streaming, run history and audit, a mobile-first dashboard with an operations
+overview, Bark push notifications, remote task intake, fail-closed bearer-token
+auth, and launchd packaging for resident operation. The only planned-but-unbuilt
+surface is IM bot control.
 
-## What this slice does
+## Why: bounded working sets over unbounded project time
+
+A production-grade project is not one or two agent sessions. From idea to
+launch it is months of work — hundreds of sessions, thousands of decisions —
+and the dominant failure mode of long-running AI-assisted development is not
+model capability but **drift**: context that accumulates without curation until
+neither the human nor the agent can face it.
+
+orch-hub is the operating surface for a protocol stack (`.ai-tasks/` task
+lifecycle + `.ai/` curated memory) designed around one invariant:
+**the working set stays bounded while the project grows without bound.**
+
+- **Tasks are sized to a context window.** Every task carries a session
+  estimate where one session ≈ one effective context window (~200k tokens);
+  larger work is sliced by an explicit session plan, not absorbed as sprawl.
+  The agent on day 1 and the agent in month 12 face the same shape: a
+  constant eager set of project invariants, one task file, and a routed
+  handful of relevant docs.
+- **Memory is curated, not accumulated.** Completed tasks pass through an
+  absorption gate: findings that survive admission tests (derivation cost,
+  stability, leverage) are distilled into a timeless snapshot (`.ai/`); the
+  rest is archived. The corpus grows, but it stays routable — each session
+  loads a constant-shaped slice, never the whole history.
+- **The human interface converges too.** The operator sees the same
+  operations surface in month 12 as on day 1: which repos are ready, which
+  runs wait on an answer, what the backlog is. Portfolio state, not chat
+  history.
+
+Session-level tooling (remote session control, cloud sessions) bounds a single
+execution in *space* — one conversation, one context. orch-hub and its
+protocol bound the project in *time* — a year of development stays operable as
+a sequence of window-sized, completable tasks. The two compose rather than
+compete: the hub delegates execution downward and owns the layer above.
+
+This invariant is maintained, not free: it rests on intake decomposition
+quality, absorption fidelity at task completion, and staleness discipline in
+the snapshot — enforced by session hooks, admission tests, and housekeeping.
+
+### The unit of control is a portfolio, not a session
+
+The hub's remote surface is not "reattach to a conversation". It is the
+operating state of every managed repo at once: readiness, task backlogs with
+status and blockers, at most one live run per repo, escalations awaiting a
+human answer, run history with est-vs-actual rollups, and confirmed-only task
+intake. Sessions are transient executors inside that lifecycle; the lifecycle
+is the durable object.
+
+## Repo discovery and readiness
 
 - Discovers managed repos from **ai-native-development** — the same registry
   the deployment tooling already maintains. orch-hub does not keep its own repo
@@ -240,7 +289,7 @@ never touch real repos or the real ai-native-development registry.
 
 ## Not implemented yet (by design)
 
-- Bark notifications; remote intake-task; IM bot control.
+- IM bot control.
 
-The core functions (`discover_repos`, `check_readiness`) are written to be
-reused unchanged by those future surfaces.
+The core application services are written to be reused unchanged by that
+future surface.
