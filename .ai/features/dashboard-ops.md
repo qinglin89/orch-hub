@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-20
-verified-against: b675a46862727c04c66f86fb0f0dbec93e28ace8
+verified-against: a5fc57d3bb19492f19777dfae70b73e8b92e879b
 ---
 
 # Features: Dashboard Ops
@@ -46,7 +46,11 @@ Implemented behavior:
   pending" warning when `/api/repos` reports `housekeeping_pending`.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
-  `index_present`, and `missing`/`unknown` sentinel semantics.
+  `index_present`, and `missing`/`unknown` sentinel semantics. The all-tasks
+  view filters the fetched payload client-side by repo/status plus
+  case-insensitive text over task id, summary, repo, status, and blockers;
+  it shows visible-of-total counts, has one Clear action, distinguishes empty
+  inventory from no matches, and keeps missing-index cards visible by default.
 - Task cards show live run state only as a left-border accent (yellow waiting,
   green active), with no separate dot/word row, kept distinct from the
   frontmatter status badge so protocol `blocked` is not confused with runtime

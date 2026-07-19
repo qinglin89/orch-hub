@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-20
-verified-against: b675a46862727c04c66f86fb0f0dbec93e28ace8
+verified-against: a5fc57d3bb19492f19777dfae70b73e8b92e879b
 ---
 
 # Modules: Web and Operations
@@ -68,8 +68,8 @@ defines the static app container and bottom navigation; the shell assets are
 served uncached by the API so updates reach browsers on the next load. `app.js`
 owns token entry/localStorage, bearer `fetch` calls, hash routing,
 an Operations Overview default landing route, repo/task/detail/run views,
-repo/task run-state signals, recent commits, task-detail Start/Stop run
-controls, live per-session context strips,
+repo/task run-state signals, searchable/counted all-tasks inventory, recent
+commits, task-detail Start/Stop run controls, live per-session context strips,
 waiting-question answer forms, filterable/counted/collapsible grouped run
 history with est-vs-actual rollups, a run-scoped task-file view, remote intake
 start/review views, and recent/live log views; `styles.css` holds the mobile
@@ -92,6 +92,12 @@ shared repo payload when `.ai/.housekeeping-pending` exists.
 Task cards use only left-border run accents, with no dot/word row, distinct
 from frontmatter status badges. Repo detail adds a recent-commits section with
 unavailable and empty-history states.
+
+The all-tasks view consumes one `/api/tasks` payload per route entry, then
+filters client-side by repo/status and case-insensitive task text (id, summary,
+repo, status, blockers). It keeps missing-index cards outside status/search
+filters, shows visible-of-total task counts, distinguishes empty inventory from
+no matches, and has one Clear action for all task filters.
 
 Run controls stay frontend-only over the existing API: Start posts
 `{repo_id, task_id, acknowledge_blocked, extra_args}` to `POST /api/runs` from a
