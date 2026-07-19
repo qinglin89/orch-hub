@@ -20,8 +20,12 @@
   const LIVE_STATES = new Set(["active", "waiting"]); // run states that badge a repo
   const DEFAULT_LOG_TAIL = 200; // initial log lines to request (matches the API default)
   const INTAKE_POLL_MS = 2000; // review-view poll cadence for an in-flight intake turn
+  const OVERVIEW_REFRESH_MS = 15000; // Overview background auto-refresh cadence (passive dashboard)
+  const OVERVIEW_HISTORY_LIMIT = 12; // recent-run window fetched for the outcomes panel
+  const OVERVIEW_OUTCOME_COUNT = 5; // ended runs shown in the outcomes panel
   let activeStream = null; // AbortController for the in-flight SSE log stream, if any
   let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
+  let activeOverviewRefresh = null; // { cancelled, timer } for the Overview auto-refresh, if any
   // Known task-file statuses in protocol order; the sentinels are data
   // problems (file missing / status unparseable), not runnable states.
   const KNOWN_STATUSES = [
@@ -2352,14 +2356,16 @@
 
   // ---- operations overview ----
   //
-  // A single landing screen that aggregates the four existing protected APIs
-  // (/api/repos, /api/tasks, /api/runs, /api/escalations) into: a summary-metric
-  // row, a prioritized "needs attention" panel (waiting-for-answer runs, then
-  // readiness failures, then housekeeping), and a "current activity" panel of
-  // live runs. It adds no HTTP API — every figure is derived client-side from
-  // payloads the other views already consume, and each urgent item deep-links to
-  // the operational view that acts on it (a waiting run → its task detail, where
-  // the answer form lives; a repo problem → repo detail; a live run → its logs).
+  // A single landing screen that aggregates the existing protected APIs
+  // (/api/repos, /api/tasks, /api/runs, /api/escalations, /api/history/runs)
+  // into: a summary-metric row, a prioritized "needs attention" panel
+  // (waiting-for-answer runs, then readiness failures, then housekeeping), a
+  // "current activity" panel of live runs, and a "recent outcomes" panel of the
+  // last few ended runs. It adds no HTTP API — every figure is derived
+  // client-side from payloads the other views already consume, and each item
+  // deep-links to the operational view that acts on it (a waiting run → its task
+  // detail, where the answer form lives; a repo problem → repo detail; a live or
+  // ended run → its logs).
   //
   // Aggregation is done by small pure, DOM-free helpers so a count always agrees
   // with its source view (they reuse taskCountsByRepo / LIVE_STATES / repoRunState
@@ -2368,7 +2374,8 @@
   // Best-effort fetch: each source degrades to null on a non-401 failure so one
   // outage can't blank the unrelated panels (a null source shows "—" / an
   // "unavailable" note, never a wrong "nothing here"); a 401 still re-gates.
-  // Bounded refresh + recent outcomes are session-2.
+  // While the Overview is the routed view a bounded background refresh (a chained
+  // setTimeout — never setInterval — torn down by router()) silently repaints it.
 
   // Fetch one overview source, degrading a non-401 failure to null (its panel
   // then shows a placeholder) while a 401 rethrows so the shared login gate that
@@ -2607,26 +2614,136 @@
     return head + `<ul class="list">${live.map(activityCard).join("")}</ul>` + foot;
   }
 
+  // One ended run in the recent-outcomes panel: its end-state badge (completed →
+  // ok, error → bad, stopped/ended → neutral, via runBadge) over repo · task,
+  // linking to its log tail (which itself back-links to the task file). No live
+  // accent — these are finished runs; the live ones are in current activity.
+  function recentOutcomeCard(run) {
+    const meta = [run.repo_name, run.task_id].filter(Boolean).join(" · ");
+    return (
+      `<li class="card run">` +
+      `<a class="card-link" href="${logsHash(run.run_id)}">` +
+      `<div class="card-head">` +
+      `<span class="run-id">${escapeHtml(run.run_id)}</span>` +
+      `<span class="badges">${runBadge(run.state)}</span>` +
+      `</div>` +
+      (meta ? `<div class="muted">${escapeHtml(meta)}</div>` : "") +
+      `</a></li>`
+    );
+  }
+
+  // The most recent ended runs from /api/history/runs (already newest-first):
+  // drop the live ones (they're in current activity) and cap the list so the
+  // Overview stays glanceable rather than duplicating the full Runs page.
+  function recentOutcomeList(history, max) {
+    const ended = (history || []).filter((r) => !LIVE_STATES.has(r.state));
+    return ended.slice(0, max || OVERVIEW_OUTCOME_COUNT);
+  }
+
+  // The "recent outcomes" panel. A null source reads as "unavailable"; an empty
+  // ended set (only live runs, or none yet) as "no recent runs".
+  function recentOutcomesPanel(history) {
+    const head = `<section class="section"><h2>Recent outcomes</h2>`;
+    const foot = `</section>`;
+    if (history === null)
+      return head + `<p class="muted">Recent outcomes are unavailable.</p>` + foot;
+    const outcomes = recentOutcomeList(history, OVERVIEW_OUTCOME_COUNT);
+    if (!outcomes.length)
+      return head + `<p class="muted">No recent runs.</p>` + foot;
+    return (
+      head +
+      `<ul class="list">${outcomes.map(recentOutcomeCard).join("")}</ul>` +
+      foot
+    );
+  }
+
+  // ---- overview data + paint + bounded refresh ----
+  //
+  // renderOverview is split into loadOverview (fetch+normalize) and paintOverview
+  // (build the DOM) so the background refresh can repaint in place without the
+  // initial "Loading…" flash, then a chained-setTimeout refresh (never
+  // setInterval — no overlapping requests) keeps it current until navigation.
+
+  // Fetch every overview source in parallel and normalize each to its panel data:
+  // null = the source failed (its panel degrades to a placeholder), [] = loaded
+  // but empty. overviewSource swallows non-401 errors to null, so Promise.all
+  // only rejects on a 401 (api() already re-gated; the caller returns).
+  async function loadOverview() {
+    const [reposData, tasksData, runsData, escData, historyData] =
+      await Promise.all([
+        overviewSource("/api/repos"),
+        overviewSource("/api/tasks"),
+        overviewSource("/api/runs"),
+        overviewSource("/api/escalations"),
+        overviewSource("/api/history/runs?limit=" + OVERVIEW_HISTORY_LIMIT),
+      ]);
+    return {
+      repos: reposData ? reposData.repos || [] : null,
+      taskRepos: tasksData ? tasksData.repos || [] : null,
+      runs: runsData ? runsData.runs || [] : null,
+      escalations: escData ? escData.escalations || [] : null,
+      history: historyData ? historyData.runs || [] : null,
+    };
+  }
+
+  // Repaint the whole Overview from a loadOverview() snapshot. Each panel reads
+  // its own source independently, so one null source degrades only its panel; a
+  // full repaint is safe because the Overview is links/cards with no form inputs
+  // to clobber. The lower three panels share a wrapper the responsive CSS lays
+  // out two-up on wider screens.
+  function paintOverview(data) {
+    view().innerHTML =
+      overviewMetrics(data.repos, data.taskRepos, data.runs, data.escalations) +
+      `<div class="overview-panels">` +
+      attentionPanel(data.repos, data.runs, data.escalations) +
+      currentActivityPanel(data.runs) +
+      recentOutcomesPanel(data.history) +
+      `</div>`;
+  }
+
+  // Tear down the Overview background refresh (mirrors stopIntakePoll): cancel the
+  // handle and clear its pending timer so no queued tick paints into a left view.
+  function stopOverviewRefresh() {
+    if (activeOverviewRefresh) {
+      activeOverviewRefresh.cancelled = true;
+      if (activeOverviewRefresh.timer) clearTimeout(activeOverviewRefresh.timer);
+      activeOverviewRefresh = null;
+    }
+  }
+
+  // Silently refresh the Overview while it is the routed view. A chained
+  // setTimeout — never setInterval — so a slow multi-source load can't overlap
+  // the next fetch; a staleness guard before each paint/reschedule drops a tick
+  // that outlived its view (router() calls stopOverviewRefresh on navigation),
+  // and a 401 ends the loop (api() already re-gated) rather than rescheduling.
+  function startOverviewRefresh() {
+    stopOverviewRefresh();
+    const refresh = { cancelled: false, timer: null };
+    activeOverviewRefresh = refresh;
+    const tick = async () => {
+      if (refresh.cancelled) return;
+      let data = null;
+      try {
+        data = await loadOverview();
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) return; // login shown
+        // Non-401 source failures are already absorbed to null by overviewSource,
+        // so this is unexpected; drop this tick and reschedule below rather than
+        // kill the refresh.
+      }
+      if (refresh.cancelled || activeOverviewRefresh !== refresh) return; // left / superseded
+      if (data) paintOverview(data);
+      refresh.timer = setTimeout(tick, OVERVIEW_REFRESH_MS);
+    };
+    refresh.timer = setTimeout(tick, OVERVIEW_REFRESH_MS);
+  }
+
+  // The Overview landing view: an initial load behind a "Loading…" placeholder,
+  // then a bounded background refresh that repaints in place until navigation.
   async function renderOverview() {
     view().innerHTML = centerHtml("Loading overview…");
-    // Parallel fetch of the four sources; overviewSource swallows non-401 errors
-    // to null, so Promise.all only rejects on a 401 (already handled by api() —
-    // router() then returns to the shown login gate).
-    const [reposData, tasksData, runsData, escData] = await Promise.all([
-      overviewSource("/api/repos"),
-      overviewSource("/api/tasks"),
-      overviewSource("/api/runs"),
-      overviewSource("/api/escalations"),
-    ]);
-    // null = source failed (panel degrades); [] = loaded but empty.
-    const repos = reposData ? reposData.repos || [] : null;
-    const taskRepos = tasksData ? tasksData.repos || [] : null;
-    const runs = runsData ? runsData.runs || [] : null;
-    const escalations = escData ? escData.escalations || [] : null;
-    view().innerHTML =
-      overviewMetrics(repos, taskRepos, runs, escalations) +
-      attentionPanel(repos, runs, escalations) +
-      currentActivityPanel(runs);
+    paintOverview(await loadOverview());
+    startOverviewRefresh();
   }
 
   // ---- router ----
@@ -2672,13 +2789,14 @@
   }
 
   async function router() {
-    // Leaving any view aborts an in-flight log stream and stops an intake poll so
-    // neither keeps reading after navigation.
+    // Leaving any view aborts an in-flight log stream and stops the intake poll
+    // and the Overview refresh so none keep reading/painting after navigation.
     if (activeStream) {
       activeStream.abort();
       activeStream = null;
     }
     stopIntakePoll();
+    stopOverviewRefresh();
     if (!getToken()) {
       renderLogin();
       return;

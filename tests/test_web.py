@@ -778,3 +778,74 @@ def test_overview_metric_tiles_use_the_shared_status_colours():
     # Attention rows reuse the run-accent left border, colour-coded by kind.
     assert ".overview-attention .attn.attn-waiting" in css
     assert ".attn.attn-not-ready" in css
+
+
+# ---- operations overview (2026-07-17-operations-overview-dashboard, session-2) --
+#
+# session-2 completes the Overview: a "recent outcomes" panel (the last few ended
+# runs from /api/history/runs), a bounded background refresh that repaints in
+# place while the Overview is routed and tears down on navigation (a chained
+# setTimeout — never setInterval — so requests never overlap), refined per-panel
+# partial-error placeholders, and Overview-scoped responsive polish. Still no new
+# HTTP API and still asserted at the served-asset boundary (no JS runtime in this
+# suite); the refresh lifecycle + aggregation were verified with a jsc
+# stubbed-browser harness (session log). Each check maps to a scope/acceptance
+# line.
+
+
+def test_overview_recent_outcomes_from_history_api():
+    body = app_js()
+    # Recent outcomes come from the existing history payload — no new route — as a
+    # fifth best-effort source with a bounded window.
+    assert '"/api/history/runs?limit="' in body
+    assert "OVERVIEW_HISTORY_LIMIT" in body
+    assert "recentOutcomesPanel" in body
+    assert "recentOutcomeCard" in body
+    assert "recentOutcomeList" in body
+    assert "Recent outcomes" in body
+    # Only ended runs are shown (live runs stay in current activity), newest-first
+    # and capped so the Overview stays glanceable.
+    assert "!LIVE_STATES.has(r.state)" in body
+    assert "OVERVIEW_OUTCOME_COUNT" in body
+    # Each outcome deep-links to its log tail (which back-links to the task file).
+    assert "logsHash(run.run_id)" in body
+
+
+def test_overview_bounded_refresh_lifecycle():
+    body = app_js()
+    # A single module-level refresh handle with start/stop, mirroring the intake
+    # poll's teardown discipline.
+    assert "activeOverviewRefresh" in body
+    assert "startOverviewRefresh" in body
+    assert "stopOverviewRefresh" in body
+    assert "OVERVIEW_REFRESH_MS" in body
+    # A chained setTimeout, never setInterval, so a slow multi-source load can't
+    # overlap the next fetch.
+    assert "setTimeout(" in body
+    assert "setInterval(" not in body
+    # The refresh is torn down on navigation, right beside the intake poll.
+    assert "stopIntakePoll();\n    stopOverviewRefresh();" in body
+    # render is split so a refresh tick repaints without the initial loader flash.
+    assert "function loadOverview" in body
+    assert "function paintOverview" in body
+
+
+def test_overview_panels_degrade_independently():
+    body = app_js()
+    # Each panel reads its own source and shows its own "unavailable" placeholder,
+    # so one failed source never blanks the unrelated panels.
+    assert "Attention data is unavailable." in body
+    assert "Run activity is unavailable." in body
+    assert "Recent outcomes are unavailable." in body
+    # An empty (not failed) ended set is distinct from an unavailable source.
+    assert "No recent runs." in body
+
+
+def test_overview_panels_are_responsive():
+    css = styles_css()
+    # The lower panels share a wrapper laid out two-up on a wider screen, while the
+    # priority "needs attention" panel spans the full width.
+    assert ".overview-panels" in css
+    assert "min-width: 640px" in css
+    assert "grid-column: 1 / -1" in css
+    assert ".overview-panels > .overview-attention" in css
