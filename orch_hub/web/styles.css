@@ -509,8 +509,10 @@ code {
   outline-offset: 2px;
 }
 
-/* Filtered group/run tally above the run-history list. */
-.run-count {
+/* Filtered result tally above a list: run-history groups/runs and the
+   all-tasks view's visible-of-total count. */
+.run-count,
+.task-count {
   margin: -4px 0 12px;
   font-size: 12px;
 }

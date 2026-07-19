@@ -692,6 +692,86 @@ def test_run_history_runs_stay_linked_to_logs_after_navigation():
     assert "logsHash(run.run_id)" in body
 
 
+# ---- all-tasks search + result controls (2026-07-17-task-search-controls) -----
+#
+# The all-tasks view gains a free-text search that composes with the existing
+# repo/status dropdowns (client-side, no API change, no refetch): a case-
+# insensitive substring over task id, summary, repo name, status, and blocker
+# text; a visible-of-total count; a one-action Clear; a no-match state distinct
+# from an empty inventory; and preserved missing-index / sentinel visibility.
+# Asserted at the served-asset boundary (no JS runtime in this suite), like the
+# run-history filter checks above; the actual search/compose/count/clear
+# *dispatch* was driven under a jsc stubbed-browser harness recorded in the task
+# session log (39/39). Each check maps to a scope/acceptance line.
+
+
+def test_all_tasks_offers_a_search_control():
+    body = app_js()
+    # A text search on the all-tasks view, composed client-side over the held
+    # filter state (one predicate), so typing re-filters without a refetch.
+    assert 'id="f-search"' in body
+    assert 'type="search"' in body
+    assert "taskFilters.search" in body
+    assert "matchesTaskSearch" in body
+    # Live filtering on input, and the free-text value survives view re-entry.
+    assert 'document.getElementById("f-search").addEventListener("input"' in body
+
+
+def test_task_search_matches_id_summary_repo_status_and_blockers():
+    body = app_js()
+    # One case-insensitive, trimmed substring over exactly the human-scanned
+    # fields: id, summary, repo name, status, and every blocker entry.
+    assert "[task.task_id, task.summary, repoName, task.status]" in body
+    assert ".concat(task.blockers || [])" in body
+    assert "taskFilters.search.trim().toLowerCase()" in body
+    assert ".join(\" \")" in body and ".toLowerCase()" in body
+
+
+def test_task_search_composes_with_repo_and_status_filters():
+    body = app_js()
+    # AND across repo (selectedRepos), status (exact), and search (substring):
+    # all three gate the same task loop, empty = wildcard.
+    assert "repos.filter((r) => r.name === taskFilters.repo)" in body
+    assert "taskFilters.status && task.status !== taskFilters.status" in body
+    assert "if (!matchesTaskSearch(task, repo.name)) continue;" in body
+
+
+def test_all_tasks_shows_visible_and_total_counts():
+    body = app_js()
+    # A live count line reporting how many tasks are shown out of the whole
+    # inventory (the stable denominator), announced politely for assistive tech.
+    assert 'id="task-count"' in body
+    assert "aria-live=\"polite\"" in body
+    assert "Showing ${visible} of ${total} task" in body
+
+
+def test_all_tasks_offers_a_clear_filters_action():
+    body = app_js()
+    # One Clear control that resets every task filter back to the full set.
+    assert 'id="f-clear"' in body
+    assert ".filters-clear" in styles_css()
+    assert 'taskFilters.repo = "";' in body
+    assert 'taskFilters.status = "";' in body
+    assert 'taskFilters.search = "";' in body
+
+
+def test_all_tasks_no_match_names_a_clear_recovery_distinct_from_empty():
+    body = app_js()
+    # Active-filter no-match identifies filters are active and points at Clear;
+    # a truly empty inventory is a separate message.
+    assert "No tasks match the current filters. Use Clear to reset." in body
+    assert "No tasks found." in body
+
+
+def test_all_tasks_preserves_missing_index_and_sentinel_visibility():
+    body = app_js()
+    # Missing-index cards follow the repo filter only (pushed before the search-
+    # gated task loop), so status/search never silently hide a repo-level gap.
+    assert "if (!repo.index_present) cards.push(missingIndexCard(repo.name));" in body
+    # The no-match note is appended, not a replacement, so problem cards remain.
+    assert "cards.push(" in body
+
+
 # ---- kind-aware answer-mode buttons (2026-07-16-escalation-mode-buttons) ------
 #
 # Session-2 web slice: the single "Send answer" button is replaced by a

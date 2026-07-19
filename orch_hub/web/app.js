@@ -555,29 +555,68 @@
   }
 
   // Filters are held in the closure and applied client-side, so changing a
-  // filter never refetches — task inventory is read once per view entry.
-  const taskFilters = { repo: "", status: "" };
+  // filter never refetches — task inventory is read once per view entry. The
+  // free-text `search` composes with repo/status as AND (see matchesTaskSearch)
+  // and persists across view re-entry like the run-history task filter.
+  const taskFilters = { repo: "", status: "", search: "" };
   // Repo-detail status filter (repo is fixed by the route); reset when it no
   // longer matches the repo's task statuses.
   let repoDetailStatus = "";
 
+  // Case-insensitive substring search over the fields a human scans a task by:
+  // id, summary, repo name, status, and any blocker text. Empty/whitespace query
+  // is a wildcard. A sentinel task (missing/unknown) still matches on its id,
+  // repo, or status text, so a targeted search never silently drops a problem row.
+  function matchesTaskSearch(task, repoName) {
+    const q = taskFilters.search.trim().toLowerCase();
+    if (!q) return true;
+    const hay = [task.task_id, task.summary, repoName, task.status]
+      .concat(task.blockers || [])
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(q);
+  }
+
+  // Repaint just the count line + task list from the held filters; the filter
+  // controls stay put so the search box keeps focus/caret across keystrokes
+  // (mirrors renderRunGroups). Missing-index cards follow the repo filter only —
+  // a repo-level data gap, not a task row — so status/search never hide them and
+  // they are excluded from the task tally. `total` is the whole inventory (all
+  // repos/statuses), the stable denominator behind the "X of Y" count.
   function renderTaskList(repos, liveByRepoTask) {
     const selectedRepos = taskFilters.repo
       ? repos.filter((r) => r.name === taskFilters.repo)
       : repos;
+    let total = 0;
+    for (const repo of repos) total += (repo.tasks || []).length;
     const cards = [];
+    let visible = 0;
     for (const repo of selectedRepos) {
       if (!repo.index_present) cards.push(missingIndexCard(repo.name));
       const byTask = (liveByRepoTask && liveByRepoTask[repo.name]) || {};
       for (const task of repo.tasks || []) {
         if (taskFilters.status && task.status !== taskFilters.status) continue;
+        if (!matchesTaskSearch(task, repo.name)) continue;
         cards.push(taskCard(task, repo.name, byTask[task.task_id]));
+        visible += 1;
       }
     }
-    const list = document.getElementById("task-list");
-    list.innerHTML = cards.length
-      ? cards.join("")
-      : `<li class="center">No tasks match these filters.</li>`;
+    // No task matched: separate an empty inventory from an active-filter
+    // no-match, and name the always-present Clear control as the recovery action.
+    // Any missing-index cards stay above this note rather than being replaced.
+    if (!visible)
+      cards.push(
+        total
+          ? `<li class="center">No tasks match the current filters. Use Clear to reset.</li>`
+          : `<li class="center">No tasks found.</li>`
+      );
+    document.getElementById("task-list").innerHTML = cards.join("");
+    const countEl = document.getElementById("task-count");
+    if (countEl)
+      countEl.textContent = `Showing ${visible} of ${total} task${
+        total === 1 ? "" : "s"
+      }`;
   }
 
   async function renderTasks() {
@@ -615,7 +654,13 @@
             "All statuses"
           )}</select>
         </label>
+        <label>Search
+          <input id="f-search" type="search" placeholder="Search tasks"
+                 value="${escapeHtml(taskFilters.search)}" />
+        </label>
+        <button id="f-clear" class="filters-clear" type="button">Clear</button>
       </div>
+      <p id="task-count" class="task-count muted" aria-live="polite"></p>
       <ul id="task-list" class="list"></ul>`;
     document.getElementById("f-repo").addEventListener("change", (ev) => {
       taskFilters.repo = ev.target.value;
@@ -623,6 +668,21 @@
     });
     document.getElementById("f-status").addEventListener("change", (ev) => {
       taskFilters.status = ev.target.value;
+      renderTaskList(repos, liveByRepoTask);
+    });
+    document.getElementById("f-search").addEventListener("input", (ev) => {
+      taskFilters.search = ev.target.value;
+      renderTaskList(repos, liveByRepoTask);
+    });
+    // Clear resets every task filter and repaints the full inventory; the DOM
+    // control values are reset explicitly since only the count/list repaint.
+    document.getElementById("f-clear").addEventListener("click", () => {
+      taskFilters.repo = "";
+      taskFilters.status = "";
+      taskFilters.search = "";
+      document.getElementById("f-repo").value = "";
+      document.getElementById("f-status").value = "";
+      document.getElementById("f-search").value = "";
       renderTaskList(repos, liveByRepoTask);
     });
     renderTaskList(repos, liveByRepoTask);
