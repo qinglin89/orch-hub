@@ -2711,15 +2711,15 @@
     }
   }
 
-  // Silently refresh the Overview while it is the routed view. A chained
-  // setTimeout — never setInterval — so a slow multi-source load can't overlap
-  // the next fetch; a staleness guard before each paint/reschedule drops a tick
-  // that outlived its view (router() calls stopOverviewRefresh on navigation),
-  // and a 401 ends the loop (api() already re-gated) rather than rescheduling.
-  function startOverviewRefresh() {
-    stopOverviewRefresh();
-    const refresh = { cancelled: false, timer: null };
-    activeOverviewRefresh = refresh;
+  // Drive the chained background refresh on the handle renderOverview registered
+  // before the initial load. A chained setTimeout — never setInterval — so a
+  // slow multi-source load can't overlap the next fetch; a staleness guard
+  // (refresh.cancelled || activeOverviewRefresh !== refresh) before each
+  // paint/reschedule drops a tick that outlived its view (router() calls
+  // stopOverviewRefresh on navigation), and a 401 ends the loop (api() already
+  // re-gated) rather than rescheduling. The caller owns handle creation, so this
+  // just schedules the first tick — it does not stop/replace the active handle.
+  function startOverviewRefresh(refresh) {
     const tick = async () => {
       if (refresh.cancelled) return;
       let data = null;
@@ -2740,10 +2740,30 @@
 
   // The Overview landing view: an initial load behind a "Loading…" placeholder,
   // then a bounded background refresh that repaints in place until navigation.
+  // The refresh handle is registered BEFORE the initial load so a navigation
+  // during that first multi-source fetch tears it down (router() ->
+  // stopOverviewRefresh cancels it and nulls activeOverviewRefresh); the same
+  // staleness guard after the await then drops a stale load. Without it, a load
+  // that outlived its view would repaint the destination view and start a
+  // detached refresh loop that keeps polling after navigation away.
   async function renderOverview() {
     view().innerHTML = centerHtml("Loading overview…");
-    paintOverview(await loadOverview());
-    startOverviewRefresh();
+    stopOverviewRefresh();
+    const refresh = { cancelled: false, timer: null };
+    activeOverviewRefresh = refresh;
+    let data;
+    try {
+      data = await loadOverview();
+    } catch (err) {
+      // A 401 already re-gated via api(); drop our handle so no refresh survives
+      // the login gate, then let router() render login (matches the pre-fix
+      // behavior where the initial 401 never left a handle).
+      if (activeOverviewRefresh === refresh) activeOverviewRefresh = null;
+      throw err;
+    }
+    if (refresh.cancelled || activeOverviewRefresh !== refresh) return; // navigated away mid-load
+    paintOverview(data);
+    startOverviewRefresh(refresh);
   }
 
   // ---- router ----
