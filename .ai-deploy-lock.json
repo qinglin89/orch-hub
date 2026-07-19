@@ -1,6 +1,84 @@
 {
-  "canonical_payload_sha256": "4e4b8024951f9f517056f0f1f8d5c8f7c629286fb2c5e63c15fbd9e434dbcb47",
+  "canonical_payload_sha256": "cec19abe4a7ee64945ca177277a135f225a5360e35a35239c64009f3684532af",
   "deployed_files": [
+    {
+      "canonical_relative_path": "canonical/meta/init.md",
+      "canonical_sha256": "56150f42e554a27a18287aae0bff545b0638c3225a2b40bfa75e08568a915033",
+      "canonical_size_bytes": 10135,
+      "target_relative_path": ".ai-protocol/meta/init.md"
+    },
+    {
+      "canonical_relative_path": "canonical/meta/memory.md",
+      "canonical_sha256": "8deeddbdee4ebd4425728c78c005abbf56bf6bc32331684fb6953b225100b17f",
+      "canonical_size_bytes": 5316,
+      "target_relative_path": ".ai-protocol/meta/memory.md"
+    },
+    {
+      "canonical_relative_path": "canonical/meta/taskfile.md",
+      "canonical_sha256": "4be3afdc25918dd25ddda997643ffd5359f5f1c65e0aab5b51943fd7854f83cd",
+      "canonical_size_bytes": 8496,
+      "target_relative_path": ".ai-protocol/meta/taskfile.md"
+    },
+    {
+      "canonical_relative_path": "canonical/protocols/conduct.md",
+      "canonical_sha256": "0161cfc59f686830023ffaf82ed7172d09ebda7d808464fa0c36de114b5a8663",
+      "canonical_size_bytes": 2176,
+      "target_relative_path": ".ai-protocol/protocols/conduct.md"
+    },
+    {
+      "canonical_relative_path": "canonical/protocols/dev-advancement.md",
+      "canonical_sha256": "6ce80afa75ea28df38599abfba278b918c6ba243d9e2104e6f62a5ecd884f96b",
+      "canonical_size_bytes": 3056,
+      "target_relative_path": ".ai-protocol/protocols/dev-advancement.md"
+    },
+    {
+      "canonical_relative_path": "canonical/protocols/dev-remediation.md",
+      "canonical_sha256": "08f2f689135ba48cded625b3f76c4ded2b6ac674631d884f9cd61dd526ae5e84",
+      "canonical_size_bytes": 2283,
+      "target_relative_path": ".ai-protocol/protocols/dev-remediation.md"
+    },
+    {
+      "canonical_relative_path": "canonical/protocols/intake.md",
+      "canonical_sha256": "252a0fec9da308bfbb3163291fc0903803fc93253e7662689b733d2405786fbe",
+      "canonical_size_bytes": 3175,
+      "target_relative_path": ".ai-protocol/protocols/intake.md"
+    },
+    {
+      "canonical_relative_path": "canonical/protocols/plan.md",
+      "canonical_sha256": "30d3b5e290437b311e5a4008f4d1ac3689b29085d74a1cbc155419102cc34a40",
+      "canonical_size_bytes": 2230,
+      "target_relative_path": ".ai-protocol/protocols/plan.md"
+    },
+    {
+      "canonical_relative_path": "canonical/protocols/review.md",
+      "canonical_sha256": "147ddbf43e972498384af012b807e9081d53a58eb8d03bc4eb55ff29122c70d2",
+      "canonical_size_bytes": 6788,
+      "target_relative_path": ".ai-protocol/protocols/review.md"
+    },
+    {
+      "canonical_relative_path": "canonical/workflow/rolemapping.md",
+      "canonical_sha256": "3c8eb1b71afc1bfa63639f2a68bae3342f98cf3b682df1f6f03445516bc703f3",
+      "canonical_size_bytes": 5189,
+      "target_relative_path": ".ai-protocol/workflow/rolemapping.md"
+    },
+    {
+      "canonical_relative_path": "canonical/workflow/runbook.md",
+      "canonical_sha256": "09ff259acef326380597b77718a973f8cc8feb58b3fc9fae0381a39283f732e8",
+      "canonical_size_bytes": 10019,
+      "target_relative_path": ".ai-protocol/workflow/runbook.md"
+    },
+    {
+      "canonical_relative_path": "canonical/workflow/skills/closeout.md",
+      "canonical_sha256": "f80cd869f4fc4bfea2935db3a83c93af5334b6098e1a7ba7e6463dc934e8f2ab",
+      "canonical_size_bytes": 2328,
+      "target_relative_path": ".ai-protocol/workflow/skills/closeout.md"
+    },
+    {
+      "canonical_relative_path": "canonical/workflow/skills/session-end.md",
+      "canonical_sha256": "e7a09b82ff815f51e4eac8821aeebf459fd6cfa10c8ff20fb399d9f113a6367b",
+      "canonical_size_bytes": 3540,
+      "target_relative_path": ".ai-protocol/workflow/skills/session-end.md"
+    },
     {
       "canonical_relative_path": "canonical/claude/hooks/session-start-housekeeping-check.sh",
       "canonical_sha256": "f7fd85c3a7b4ef1c58c0783445c842e22972c46614c84386268cefe41d52b36b",
@@ -9,8 +87,8 @@
     },
     {
       "canonical_relative_path": "canonical/claude/hooks/stop-context-check.sh",
-      "canonical_sha256": "22271068cb07aecda874327faeb6401400c719e9d26dcf6085056fa072f04153",
-      "canonical_size_bytes": 7801,
+      "canonical_sha256": "cfc89e399e6cff375b933b98493756f38abfeef4a8fc8014ba665217d7de5c3b",
+      "canonical_size_bytes": 7590,
       "target_relative_path": ".claude/hooks/stop-context-check.sh"
     },
     {
@@ -27,32 +105,32 @@
     },
     {
       "canonical_relative_path": "canonical/codex/README.md",
-      "canonical_sha256": "bf47b5708749b2f949c9d3b7fcc7efcfd8bb56dad8744a8095beb8b5ed67721f",
-      "canonical_size_bytes": 5181,
+      "canonical_sha256": "30d8cf188d6597da7c68d6f4bda6c13fb2c21c814dee6a9f2047d480004c1c49",
+      "canonical_size_bytes": 5367,
       "target_relative_path": ".codex/README.md"
     },
     {
       "canonical_relative_path": "canonical/codex/config.toml.template",
-      "canonical_sha256": "5a27fdb06794f46e75c8c42700ffcdad5a6aec5b9c610ecbef57f376776c5a38",
-      "canonical_size_bytes": 1224,
+      "canonical_sha256": "63b5d85a030b4f97692e319803fa41999a1efe8700bb632e0068bd494251cfae",
+      "canonical_size_bytes": 1211,
       "target_relative_path": ".codex/config.toml"
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/session-start.sh",
-      "canonical_sha256": "66db55f0c25805e7cb7b0a9600cdd6a72f18a2bb820b721deae23e5674c582d2",
-      "canonical_size_bytes": 6422,
+      "canonical_sha256": "81e6bd9e353e5e20bc7031cf2dff5eaed0de94b9cd68fd8a423a4a7aeaa99784",
+      "canonical_size_bytes": 6303,
       "target_relative_path": ".codex/hooks/session-start.sh"
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/stop-context-check.sh",
-      "canonical_sha256": "4a5b07b595f2ed5c2f17ba90d6adfaebbcfcd3d77d192d26ea60da89a902ecfe",
-      "canonical_size_bytes": 8648,
+      "canonical_sha256": "d661966742bbf3b0859eddbaa11d1444e9e2c72f9df256b40189b93a35f8ac32",
+      "canonical_size_bytes": 8435,
       "target_relative_path": ".codex/hooks/stop-context-check.sh"
     },
     {
       "canonical_relative_path": "canonical/codex/review-workflow.md",
-      "canonical_sha256": "0614312354fdf15bd3a8748065841cedb7f16cb79c723fa7d6db653df3e5a6b4",
-      "canonical_size_bytes": 655,
+      "canonical_sha256": "1fa3ab8b92e431644f51dd8dcfcbe5bf0921ceebc3176ad632994c4566f9beb6",
+      "canonical_size_bytes": 651,
       "target_relative_path": ".codex/review-workflow.md"
     },
     {
@@ -63,14 +141,14 @@
     },
     {
       "canonical_relative_path": "canonical/cursor/hooks/session-start.sh",
-      "canonical_sha256": "59008b8a2c6fa76b8444b2902a552dac74c6cdda8a474b471b2cca6b1cea9eb8",
-      "canonical_size_bytes": 4535,
+      "canonical_sha256": "5e28b19ed9a40b55d722f6693c8c1bee3f5fcf0d57bdf82832097d620b8ea85c",
+      "canonical_size_bytes": 4811,
       "target_relative_path": ".cursor/hooks/session-start.sh"
     },
     {
       "canonical_relative_path": "canonical/cursor/hooks/stop-context-check.sh",
-      "canonical_sha256": "a7dd45cc0e6a16225278ff1cce26ba212ab317b5fd776a4dd3590258ef4ac623",
-      "canonical_size_bytes": 8389,
+      "canonical_sha256": "6a94662940da55b25ceb3ec4f7c2db0fabf89b0ca6beb9d7e1e3c5ebccc30ede",
+      "canonical_size_bytes": 7862,
       "target_relative_path": ".cursor/hooks/stop-context-check.sh"
     },
     {
@@ -87,21 +165,447 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "9b41c54e4429141c24488e86918ff1f2b0769d83cad699555b57685fa4be7cf3",
-      "canonical_size_bytes": 34966,
+      "canonical_sha256": "da12d0238860270378f3ef06f3942d8b0bccee7317acfea877a9a6f5dc09063f",
+      "canonical_size_bytes": 33496,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
-      "canonical_relative_path": "canonical/orchestrator/automation-mode.md",
-      "canonical_sha256": "40e28dcbc2eebfdcac62098808ce6d230966250e62d5f5a6f48a09d969ecdaf6",
-      "canonical_size_bytes": 3008,
-      "target_relative_path": ".cursor/orchestrator/automation-mode.md"
+      "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
+      "canonical_sha256": "8df29dbab2afb4fbfc227bfd34365a86bb8a884216f068ceffce3cb8cb147852",
+      "canonical_size_bytes": 125642,
+      "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
-      "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "86c7dae0e2a215706650726768305d197e305fdfd6b9a7e9996270f3fd5228e6",
-      "canonical_size_bytes": 122301,
-      "target_relative_path": ".cursor/orchestrator/orchestrator.py"
+      "canonical_relative_path": "canonical/orchestrator/prompts/README.md",
+      "canonical_sha256": "f74cd5c46d9c9ba57e8b5a56abdd4a2304715d8a2077e144cd12115f224ee2d1",
+      "canonical_size_bytes": 2899,
+      "target_relative_path": ".cursor/orchestrator/prompts/README.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/approved-plan-gate.md",
+      "canonical_sha256": "3022e1bb958b6af7e535e5c3cc1c1c48b88a0c226f32860432297392c3833176",
+      "canonical_size_bytes": 348,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/approved-plan-gate.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/automation-wrapper.md",
+      "canonical_sha256": "b015cc3f44370813c3b9ab037339e121da5a04b1583399300158d06ed5a23f6b",
+      "canonical_size_bytes": 84,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/automation-wrapper.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-claim.md",
+      "canonical_sha256": "bfa391da45ddb2c8bc4ebcd5d52969860bc544f9e2ad435d7dee1007efb8de16",
+      "canonical_size_bytes": 101,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-claim.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-dev-claim-status.md",
+      "canonical_sha256": "33e9b11174265b1bdad56940e872f4814136c23d6f1a8daebb2a2ca61994b23a",
+      "canonical_size_bytes": 54,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-dev-claim-status.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-dev-est-unknown.md",
+      "canonical_sha256": "e360717b9c947fb40ff40319a26d1c243e8c8a9762b27d3292264616e6ad9d1f",
+      "canonical_size_bytes": 60,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-dev-est-unknown.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-dev-est.md",
+      "canonical_sha256": "ccf8d7cf71ecd1efd01a13ba944fec90bcce7b2acdc5f186c8137e38394c690c",
+      "canonical_size_bytes": 86,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-dev-est.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-dev-prefetch.md",
+      "canonical_sha256": "79cfbe245b4da1381ec0635e167a428b32d8d29a75c73f7e070f1c6fd0d13cd4",
+      "canonical_size_bytes": 63,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-dev-prefetch.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-est-undershoot.md",
+      "canonical_sha256": "fe0903a7486ae4bdb2939e72a271375b1ec2f0f237b4de894770f3939525ba7e",
+      "canonical_size_bytes": 49,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-est-undershoot.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-header.md",
+      "canonical_sha256": "abda6accdbccc85005dc44095ce7420792a7f2de5a9e5f6a87ef4bfc14ed69bc",
+      "canonical_size_bytes": 58,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-header.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-review-est.md",
+      "canonical_sha256": "a27a773cbc4383cc1af157468307e8eb03c3391e140652d7f17e91c523658d2e",
+      "canonical_size_bytes": 72,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-review-est.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checklist-review-pending.md",
+      "canonical_sha256": "8837780ceeee962a2a56702d3afe1e4b5a760bb042dc926e3d1ffb08d91e5715",
+      "canonical_size_bytes": 46,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checklist-review-pending.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/checks-preview-header.md",
+      "canonical_sha256": "8326ec2095607f866144eefb7188293fc22aa2b128ade50f9d5ff083fa271f29",
+      "canonical_size_bytes": 149,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/checks-preview-header.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/closeout.md",
+      "canonical_sha256": "ff089f57951d7f7422c80a5992fca27c7ffad5235f8749933540c69fc204b8ea",
+      "canonical_size_bytes": 333,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/closeout.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/conduct-annex.md",
+      "canonical_sha256": "52de97aba431e63cd4be951e8db9c68133b45ace91acf501451d115600eed512",
+      "canonical_size_bytes": 2134,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/conduct-annex.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/dev-advancement-wrapper.md",
+      "canonical_sha256": "548978383b2860f64ddcb1b2b4f025494afd5f78a924f4355b82b865cd73e75f",
+      "canonical_size_bytes": 131,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/dev-advancement-wrapper.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/dev-invocation.md",
+      "canonical_sha256": "620b444aa34ce826f827c3c1a8ab2b4f08af234e2684550413d15ca480545017",
+      "canonical_size_bytes": 123,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/dev-invocation.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/dev-pre-re-est.md",
+      "canonical_sha256": "ab59b2d5523da5223545d9e7214db6cd3dc8aa0bed20be34a2f4aa12a0530df2",
+      "canonical_size_bytes": 119,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/dev-pre-re-est.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/dev-remediation-wrapper.md",
+      "canonical_sha256": "b15496336a5a5d8bb82105a9b1243a75e1f332964aae704f3ad2f8e83b4afc2a",
+      "canonical_size_bytes": 131,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/dev-remediation-wrapper.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/dev-remediation.md",
+      "canonical_sha256": "a54480790b3d4d4ecc5e039e756bbeab9ef06bc4c74ad4347ba2673813ec9a83",
+      "canonical_size_bytes": 188,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/dev-remediation.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/est-undershoot-note.md",
+      "canonical_sha256": "e3d53b38bb331af6d3788fabb8220336168fe280538d3a80d3e5f47ef2dc6d5a",
+      "canonical_size_bytes": 50,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/est-undershoot-note.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/human-ruling.md",
+      "canonical_sha256": "0e0d2b61813eec80d56cdd138e233a731497b78877ce51e6f9501972ac15091d",
+      "canonical_size_bytes": 52,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/human-ruling.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/plan-gate.md",
+      "canonical_sha256": "d00882f06615ddfd34abd4416e718eca59557df3374a9aab98c43cb8a7207fbf",
+      "canonical_size_bytes": 650,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/plan-gate.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/plan-rule-wrapper.md",
+      "canonical_sha256": "23c5eae1279ffcb1d83c29cc4d1c6fdab87571c55b011d35592dbb7f55a1fe33",
+      "canonical_size_bytes": 110,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/plan-rule-wrapper.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/preamble-native-note.md",
+      "canonical_sha256": "88213e2ce4f8dbc8e5aa99ff6ec85301e05c5429b607166954898e3d874b3ecc",
+      "canonical_size_bytes": 259,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/preamble-native-note.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/review-independence.md",
+      "canonical_sha256": "46ea1a0623c1ffd5ef9e58062d3a86ed01ce94b54e1e29d876344b92e869539a",
+      "canonical_size_bytes": 232,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/review-independence.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/review-invocation.md",
+      "canonical_sha256": "82a1d34219e089c23261f180719897f75d0448910db6c9b215bf97e0635f0e15",
+      "canonical_size_bytes": 71,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/review-invocation.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/review-rule-wrapper.md",
+      "canonical_sha256": "e68693d1a7bedfe69b36838b757682095b7c2335fd1ed04d79f7afdc1ee094a8",
+      "canonical_size_bytes": 116,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/review-rule-wrapper.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/sid-line-from-hook.md",
+      "canonical_sha256": "7e79efaf6ea50fdb512768f06f583116dca7dc1d75cd8597f5724058c380179e",
+      "canonical_size_bytes": 123,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/sid-line-from-hook.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/sid-line.md",
+      "canonical_sha256": "1e83245f9e7ffe06f01f8c70147edb4768b6be74c714fc8877caab762f108e34",
+      "canonical_size_bytes": 28,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/sid-line.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/stall-ruling.md",
+      "canonical_sha256": "f34fea4fe77f636962ca84f675655ef19d36d153c5f0b02fdf17405b4cafd6e3",
+      "canonical_size_bytes": 35,
+      "target_relative_path": ".cursor/orchestrator/prompts/entry/stall-ruling.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/answered-continue.md",
+      "canonical_sha256": "0118962ac061b27d499cf2d88d942a058a086066d33bce4a3251e96fbec6ad22",
+      "canonical_size_bytes": 120,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/answered-continue.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-agent-replied.md",
+      "canonical_sha256": "38ceee8f1ae884e8712579ca05c7c2cbc9978f6840b6af8b671f1fa3ac0de0fc",
+      "canonical_size_bytes": 30,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-agent-replied.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-blocked.md",
+      "canonical_sha256": "733e01700ec09de6e8a2b59273ae8450e57daf683b9b1d8d1f5744b8dc3a68a4",
+      "canonical_size_bytes": 100,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-blocked.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-closeout-incomplete.md",
+      "canonical_sha256": "f468412377ff654175315bdd4f35280f8e9f42a04747707804bc4d054f152f36",
+      "canonical_size_bytes": 76,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-closeout-incomplete.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-convergence.md",
+      "canonical_sha256": "774abe253a1b21ea75b4e24c9998bc385ba9ea0f7c54cd64f4f73ad0e5556aa7",
+      "canonical_size_bytes": 180,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-convergence.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-discussion-unavailable.md",
+      "canonical_sha256": "2c9bcb4db26fb945c917dffa8c07f8eea265c3e8d48a59db542f24cb1ce459fc",
+      "canonical_size_bytes": 85,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-discussion-unavailable.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-dispute.md",
+      "canonical_sha256": "25339138bd8af15fffcc7ad14454f308509499c679b8e266796e25af51e06328",
+      "canonical_size_bytes": 228,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-dispute.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-final-review-stall.md",
+      "canonical_sha256": "0a0bb09f264535cb27a451aaaea39d206cc5d2eef44a4ba3158278c3115d30cc",
+      "canonical_size_bytes": 142,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-final-review-stall.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-followups-exhausted.md",
+      "canonical_sha256": "24352ee023c7bf8fa2c554cf9b640b03a4197264499a244d8024062bcf912e3b",
+      "canonical_size_bytes": 130,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-followups-exhausted.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-native-closeout-incomplete.md",
+      "canonical_sha256": "f365d947dca50274b4f75cd4d60f9ad1f69d2d320eddc68d3fb119a7b1d1e7e1",
+      "canonical_size_bytes": 123,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-native-closeout-incomplete.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-no-reply.md",
+      "canonical_sha256": "27ebcbe54959bf9d97ac788daf12a84c1d19e199c7aa6fb1ce466f2bf774cc65",
+      "canonical_size_bytes": 49,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-no-reply.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-plan-gate.md",
+      "canonical_sha256": "2ab81edd10f9327bb26c58684754f3a0eb3d756f06647c168bf985fbfb5a0065",
+      "canonical_size_bytes": 68,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-plan-gate.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-request.md",
+      "canonical_sha256": "4153c50bd77095ea2b7110104ca488073d26f942e5bddcae7781a435545422b7",
+      "canonical_size_bytes": 139,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-request.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-run-error.md",
+      "canonical_sha256": "da750fffd4f55b1bd3bb39a8ef60d8fb26ab5b721c836b464922cfc4a0ebe746",
+      "canonical_size_bytes": 146,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-run-error.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/banner-wrapup-exhausted.md",
+      "canonical_sha256": "8b7f2486f901518372bc45ffa5e62d87303229bee61a267f5a77341e921c8dd1",
+      "canonical_size_bytes": 190,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/banner-wrapup-exhausted.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/blocked-resume.md",
+      "canonical_sha256": "1fd62fc15609972df5c5d36cbedb3853c3bf82bc0c8b54ffd535833758d4b922",
+      "canonical_size_bytes": 323,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/blocked-resume.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/blocked-violation.md",
+      "canonical_sha256": "721a4f3d0c0bbe2312a10273012e46c91d52722d9ac6be5e2dd3c548ced143cb",
+      "canonical_size_bytes": 68,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/blocked-violation.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/clean-howto.md",
+      "canonical_sha256": "f33c3eb50be4fc7c13f614ef80c1a55ef817c62497c0cdefbe411ba6af3e8fb3",
+      "canonical_size_bytes": 263,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/clean-howto.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/closeout-incomplete.md",
+      "canonical_sha256": "c353c20e83229e14a449b990ca1695e50a887a97629bfe1bd1bb989621ff3fe7",
+      "canonical_size_bytes": 234,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/closeout-incomplete.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/discussion-hint.md",
+      "canonical_sha256": "a1ad5622ff6a802469b2819e9acf021dac6dcb969cbfe59f7c9f2c54f752ca8c",
+      "canonical_size_bytes": 121,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/discussion-hint.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/discussion-turn.md",
+      "canonical_sha256": "e8acb77f320763880c94066b9d2d59f6d4d7b5f903ee00b6a54e2f68f3524159",
+      "canonical_size_bytes": 385,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/discussion-turn.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/human-instruction.md",
+      "canonical_sha256": "26db22f69329d8ca28cb48d5b9f86a2b78a02a35528a5ad7c7bae55d3f067994",
+      "canonical_size_bytes": 45,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/human-instruction.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-confirm-instruction.md",
+      "canonical_sha256": "6af3b8942a626e130cb36c84f35d974754089cf5c528017f6bc8b9bf610e85a9",
+      "canonical_size_bytes": 157,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-confirm-instruction.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-feedback.md",
+      "canonical_sha256": "e2a5614dc86387b3b167746be3072f378f20d6c776dc6fc0cfa2eef49d97bb1b",
+      "canonical_size_bytes": 681,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-feedback.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-headline-proposes.md",
+      "canonical_sha256": "2cdf86ab26637eff2a9250d4424bbe893d453cb9794472d54612e777ff5c7848",
+      "canonical_size_bytes": 41,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-headline-proposes.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-headline-replied.md",
+      "canonical_sha256": "7f3c9207043e7f5edc9b6de0933269c54d8f04feb14551f01a9d9ae47dc58170",
+      "canonical_size_bytes": 40,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-headline-replied.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-headline-revised.md",
+      "canonical_sha256": "2d329e3681a5969b56b2c925c23baacf1ca24913c90ba13821edd2832cb23a5a",
+      "canonical_size_bytes": 72,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-headline-revised.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-headline-unchanged.md",
+      "canonical_sha256": "487afc6bbfd47db351f73535a9b07c4f712f4d249a48e52d9557a01292d52261",
+      "canonical_size_bytes": 226,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-headline-unchanged.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-no-reply.md",
+      "canonical_sha256": "67f7d4967380dede4b0d0b0a33b68455f8bb089f48113f6b31b76ed20ce641c6",
+      "canonical_size_bytes": 50,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-no-reply.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-truncation-note.md",
+      "canonical_sha256": "27ca53e71393f29343f900229d52c688e2cd78147c51d2fc759f5d0677611456",
+      "canonical_size_bytes": 67,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-truncation-note.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-warning-dirty-tree.md",
+      "canonical_sha256": "991f648c891e342eeae122f81951bffc8ca13daf24646f7edd9ca60d989afb86",
+      "canonical_size_bytes": 138,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-warning-dirty-tree.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-warning-keep.md",
+      "canonical_sha256": "5c88ff76c220106ec7f23b734df0889be0fb0d5a70614042f9b1dda79b56813c",
+      "canonical_size_bytes": 234,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-warning-keep.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/plan-warning-no-heading.md",
+      "canonical_sha256": "79437da51c97e0a3150bb13c3774c9aa4e06b09a6d0245dde8035d498ea5d2a4",
+      "canonical_size_bytes": 141,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/plan-warning-no-heading.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/run-error-retry.md",
+      "canonical_sha256": "bfd924e783c5263c4f134b5e0975fc16bc51a4fd7c3f9d7600a435e1cc28853a",
+      "canonical_size_bytes": 145,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/run-error-retry.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/violation-fix.md",
+      "canonical_sha256": "f3811dd980f1d6dc77824c7cdb3faaeb27072f4ae6a76ecc8a456a43efaf291f",
+      "canonical_size_bytes": 369,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/violation-fix.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/wrapup-note-advancement.md",
+      "canonical_sha256": "dbdfb5ca19dbe13e75111a644624c57ec7dc5893dfd95dffa82f5540e56fb66b",
+      "canonical_size_bytes": 50,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/wrapup-note-advancement.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/wrapup-note-remediation.md",
+      "canonical_sha256": "71c3e1bf435d096d94687ebd61f9f8a219ea57276496bf41e8478256647139c3",
+      "canonical_size_bytes": 169,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/wrapup-note-remediation.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/wrapup-note-review.md",
+      "canonical_sha256": "0aeb5023a278d1f7b4b2abb69a9d78f45dce7187194482f82211cb30b2e1d393",
+      "canonical_size_bytes": 77,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/wrapup-note-review.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/wrapup-plan-advancement.md",
+      "canonical_sha256": "9a11946fd3cf655299bd2951e5d9523828227e86701b1738f18f585aed5e9c05",
+      "canonical_size_bytes": 121,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/wrapup-plan-advancement.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/wrapup.md",
+      "canonical_sha256": "b35e6b86af96507239d87edaa18de83b672759a55f5674083b0e35d17a80d610",
+      "canonical_size_bytes": 520,
+      "target_relative_path": ".cursor/orchestrator/prompts/midflight/wrapup.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/postcheck-contract.md",
+      "canonical_sha256": "0af2e6e6be2a44abf5becc9605adcd1455172e715047ddf2cdad583974852ade",
+      "canonical_size_bytes": 2295,
+      "target_relative_path": ".cursor/orchestrator/prompts/postcheck-contract.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/requirements.txt",
@@ -111,72 +615,36 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/smoke_hooks.py",
-      "canonical_sha256": "0e523524d11c6c4acea8dd0c64b5a090561e72d901a09f1f513ea688a8d8e630",
-      "canonical_size_bytes": 3781,
+      "canonical_sha256": "b0197953d004e840c7abe1638e286ca9c33d5a996f1122943da23f67b0d1f403",
+      "canonical_size_bytes": 3780,
       "target_relative_path": ".cursor/orchestrator/smoke_hooks.py"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "508c929e87e343d421c3c4981fba9337f9ccf38bd1bc391e87c40e1c5692a08a",
-      "canonical_size_bytes": 95862,
+      "canonical_sha256": "107c1276d2fd56636fbd29209a519008b74add6b1330443cf44998237ae323e5",
+      "canonical_size_bytes": 102201,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
       "canonical_relative_path": "canonical/cursor/rules/protocol.mdc",
-      "canonical_sha256": "f20ed8151069b57ae0a98141ee9e084c0f52cdb7fbecbc9e48a8fcead181563e",
-      "canonical_size_bytes": 1922,
+      "canonical_sha256": "1819866d390903ca7b9f1aad32433700277cdb83e8de58d2d9bc5059ae8e9383",
+      "canonical_size_bytes": 2152,
       "target_relative_path": ".cursor/rules/protocol.mdc"
     },
     {
       "canonical_relative_path": "canonical/cursor/rules/review-workflow.mdc",
-      "canonical_sha256": "9e403e2d015c9200fd264448178115d66c44cfa5be5a87a2d8857d53879a9d9d",
-      "canonical_size_bytes": 743,
+      "canonical_sha256": "47ebfa9ce5d07723de8ff14597fbd239b6aaf70cbad773d7c62d831df8a84d2c",
+      "canonical_size_bytes": 739,
       "target_relative_path": ".cursor/rules/review-workflow.mdc"
     },
     {
       "canonical_relative_path": "canonical/repo-root/CLAUDE.md",
-      "canonical_sha256": "7f60a44399bce947afe981d15cce68c55949d9f87867e2240800394b28e9c1dd",
-      "canonical_size_bytes": 33,
+      "canonical_sha256": "4ed660367da616e6a0a368182cd8d3e0c2a1b0a6119347372294dde32f243026",
+      "canonical_size_bytes": 1080,
       "target_relative_path": "CLAUDE.md"
-    },
-    {
-      "canonical_relative_path": "canonical/repo-root/ai-coding-init-v2.md",
-      "canonical_sha256": "cf0b1fefa70ef00f0bb3000907e29cd847349b5df3d0eeb91aa045f096378d5c",
-      "canonical_size_bytes": 9998,
-      "target_relative_path": "ai-coding-init-v2.md"
-    },
-    {
-      "canonical_relative_path": "canonical/repo-root/ai-coding-memory-v2.md",
-      "canonical_sha256": "c3e464ce6a34b33814b48cf5691bf1dec8158e5012e5f45bf3f38eb6195e7e1c",
-      "canonical_size_bytes": 5001,
-      "target_relative_path": "ai-coding-memory-v2.md"
-    },
-    {
-      "canonical_relative_path": "canonical/repo-root/ai-coding-review-v2.md",
-      "canonical_sha256": "7efae94e3dafb8043267fbcfd9a45cb5b946ce2987276c19938622358ba5b445",
-      "canonical_size_bytes": 6939,
-      "target_relative_path": "ai-coding-review-v2.md"
-    },
-    {
-      "canonical_relative_path": "canonical/repo-root/ai-coding-tasks-v2-tmp.md",
-      "canonical_sha256": "2709aacca4b9bcf76c50f1a0db5e6435a88df400da7d504e0ae93321e0794252",
-      "canonical_size_bytes": 3238,
-      "target_relative_path": "ai-coding-tasks-v2-tmp.md"
-    },
-    {
-      "canonical_relative_path": "canonical/repo-root/ai-coding-tasks-v2.md",
-      "canonical_sha256": "c3ec2cc4114bd39ac28952356d09786fe7452782664ccd0906b35ca851936d08",
-      "canonical_size_bytes": 7064,
-      "target_relative_path": "ai-coding-tasks-v2.md"
-    },
-    {
-      "canonical_relative_path": "canonical/repo-root/ai-coding-v2.md",
-      "canonical_sha256": "bcb86ba830654307f5b68d27f5a5eab7212145baa19e2cb08efeb15baccc4cf6",
-      "canonical_size_bytes": 9447,
-      "target_relative_path": "ai-coding-v2.md"
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "acc03f48b5d8cf36507d0ddb245cd87d40993771",
+  "source_git_commit": "1ef2f2034e3fd79688c43ec805537e4d44882dc7",
   "source_repo": "ai-native-deployment"
 }

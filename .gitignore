@@ -1,5 +1,6 @@
 # BEGIN ai-native-deployment
 /.ai-deploy-manifest.json
+/.ai-protocol/
 /.cursor/
 /.codex/
 /.claude/
