@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-19
+verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 ---
 
 # Features: Dashboard Ops
@@ -25,6 +25,18 @@ Implemented behavior:
   shell. It stores the bearer token in `localStorage`, attaches
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
+- The Operations Overview is the default authenticated landing route
+  (`#/overview`). It remains client-side over existing protected APIs,
+  parallel-fetching repos, tasks, live runs, escalations, and run history into
+  summary metrics, prioritized attention items, current activity, and recent
+  outcomes. Waiting questions, readiness failures, housekeeping, live runs, and
+  ended runs deep-link to existing task/repo/log views.
+- Overview fetches are per-source best-effort: non-401 failures degrade only
+  the affected panel to an unavailable state, while 401 still returns to the
+  login gate. Its route-scoped refresh uses a chained timeout, registers its
+  cancellation handle before the initial load, drops stale paints after
+  navigation, and tears down through the router so requests never overlap or
+  keep polling after the view is left.
 - Repo list renders readiness from `/api/repos` and a tri-state run signal from
   `/api/runs` as a bare leading dot before the repo name: yellow waiting, green
   active non-waiting, gray idle; the state word exists only in title/aria text.

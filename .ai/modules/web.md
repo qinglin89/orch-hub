@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-19
+verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 ---
 
 # Modules: Web and Operations
@@ -64,14 +64,21 @@ Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
 defines the static app container and bottom navigation; the shell assets are
 served uncached by the API so updates reach browsers on the next load. `app.js`
 owns token entry/localStorage, bearer `fetch` calls, hash routing,
-repo/task/detail/run views, repo/task run-state signals, recent commits,
-task-detail Start/Stop run controls, live per-session context strips,
+an Operations Overview default landing route, repo/task/detail/run views,
+repo/task run-state signals, recent commits, task-detail Start/Stop run
+controls, live per-session context strips,
 waiting-question answer forms, grouped run history with est-vs-actual rollups,
 a run-scoped task-file view, remote intake start/review views, and recent/live
 log views; `styles.css` holds the mobile layout. The dashboard reads only HTTP
 payloads, uses `fetch` + `ReadableStream.getReader()` for SSE log streaming so
 the bearer header is present, aborts active streams on navigation/reload/pause,
 and writes untrusted log/task data as escaped HTML or text nodes.
+
+The Overview route (`#/overview`) aggregates existing protected repo/task/run/
+escalation/history payloads into summary metrics, prioritized attention, live
+activity, and recent outcomes; each non-401 source failure degrades only its
+panel, and its chained background refresh is registered before the initial load
+so router teardown cancels stale paints and polling after navigation.
 
 Repo cards show readiness plus a bare leading run-state dot before the repo name
 (yellow waiting, green active, gray idle; state word only in title/aria text);

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-19
+verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 ---
 
 # APIs: HTTP
@@ -20,6 +20,12 @@ verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 - Cache: each response sends `Cache-Control: no-store` so mobile browsers fetch
   the current shell after service updates rather than serving stale JS/CSS from
   heuristic cache.
+- Dashboard behavior: `#/overview` is the default authenticated landing route
+  and derives its metrics, attention list, live activity, and recent outcomes
+  from the existing protected repo/task/run/escalation/history APIs; it adds no
+  Overview-specific HTTP API. Non-401 source failures degrade only the affected
+  panel, 401 re-enters the login gate, and route teardown cancels its chained
+  refresh before stale loads can repaint or keep polling.
 
 ## `GET /api/repos`
 

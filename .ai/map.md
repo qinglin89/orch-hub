@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-19
+verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 ---
 
 # Project Map
@@ -16,7 +16,7 @@ verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 | Run lifecycle | runs, sessions, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, live-only `stop_requested` overlay, stop/end classification, per-session context snapshots parsed from logs, protected HTTP start/list/get/sessions/stop routes |
 | Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; omitted-mode answers stay legacy verbatim, explicit answer/discuss modes are normalized fail-closed by question kind, answers are audited via control-dir files plus metadata-only history events carrying mode, and Bark pending-question push fires once per observed `(run_id, seq)` with compact plan-gate text and bounded non-plan prompts |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
-| Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, repo/task run-state status layout, reload-stable Stop requested control from run state, housekeeping warnings, cc-codex Start dialog with optional plan-gate flag, kind-aware question answer buttons, live session context strips, grouped run history with est-vs-actual rollups, run-scoped task-file view, recent commits, and recent/live log views |
+| Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, default Operations Overview over existing repo/task/run/escalation/history APIs with route-scoped refresh, repo/task run-state status layout, reload-stable Stop requested control from run state, housekeeping warnings, cc-codex Start dialog with optional plan-gate flag, kind-aware question answer buttons, live session context strips, grouped run history with est-vs-actual rollups, run-scoped task-file view, recent commits, and recent/live log views |
 | Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store | implemented; readiness-gated draft/revise/confirm/cancel flow with hub-owned draft/audit state, off-lock transient agent turns polled by the dashboard review view, Claude CLI backend, complete draft review, and confirmation verified through task inventory as `pending`/`blocked` before a task becomes launchable |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
 | Notifications | notifications, config, runs, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL` config; run manager owns terminal/pending-question triggers and isolation; CLI `notify test` probes delivery directly with launchd-plist fallback and URL redaction |
@@ -34,7 +34,7 @@ verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 | Run lifecycle | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/sessions`, `POST /api/runs/{run_id}/stop` |
 | Human question relay | `GET /api/escalations`, `POST /api/runs/{run_id}/escalations/{seq}/answer` |
 | Log viewing | `GET /api/runs/{run_id}/logs`, `GET /api/runs/{run_id}/logs/stream` |
-| Mobile dashboard | `GET /`, `GET /app.js`, `GET /styles.css`; protected repo/task/run/escalation/log/history/commit APIs including `GET /api/runs/{run_id}/task` and `GET /api/runs/{run_id}/sessions` |
+| Mobile dashboard | `GET /`, `GET /app.js`, `GET /styles.css`; protected repo/task/run/escalation/log/history/commit APIs including Overview data sources, `GET /api/runs/{run_id}/task`, and `GET /api/runs/{run_id}/sessions` |
 | Remote intake-task | `POST /api/intakes`, `GET /api/intakes`, `GET /api/intakes/{intake_id}`, `GET /api/intakes/{intake_id}/history`, `POST /api/intakes/{intake_id}/revise`, `POST /api/intakes/{intake_id}/confirm`, `POST /api/intakes/{intake_id}/cancel` |
 | Auth and private access | `ORCH_HUB_TOKEN`, `Authorization: Bearer <token>`, public `GET /api/health`, protected docs/API routes |
 | Notifications | internal notifier interface, `ORCH_HUB_BARK_URL`, Bark POST backend, CLI `orch-hub notify test` |
@@ -64,7 +64,7 @@ verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
 | sessions | Parse per-protocol-session context usage from orchestrator logs and persist/load `sessions.json` snapshots |
 | api | FastAPI app factory, pure-ASGI bearer auth middleware, public dashboard shell, health/repo/task/run/run-task/escalation/log/history route wiring, uvicorn entry point |
 | notifications | Backend-agnostic notification payloads, Bark backend, notifier protocol, and run/question/probe formatters |
-| web | Mobile dashboard SPA assets, including kind-aware answer controls, teardown-scoped live log streaming, and intake polling |
+| web | Mobile dashboard SPA assets, including Operations Overview aggregation/refresh, kind-aware answer controls, teardown-scoped live log streaming, and intake polling |
 | docs | Launchd operator documentation |
 | deploy | Launchd plist template and future deployment templates |
 
