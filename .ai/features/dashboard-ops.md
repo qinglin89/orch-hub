@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-19
-verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Features: Dashboard Ops
@@ -97,10 +97,11 @@ Implemented behavior:
 
 Status: implemented
 
-Description: Notify when a pending question is first observed and when a run
-reaches a terminal state. Bark is the v1 backend.
+Description: Notify when a pending question is first observed, when a run
+reaches a terminal state, and when an intake draft/revision is ready for
+review. Bark is the v1 backend.
 
-Modules: notifications, config, runs, monitor, launchd, api, cli.
+Modules: notifications, config, runs, intake, monitor, launchd, api, cli.
 
 Implemented behavior:
 
@@ -114,9 +115,9 @@ Implemented behavior:
 - `Notification` carries title/body/optional group. `BarkNotifier` sends JSON
   to the configured endpoint with a bounded timeout and injectable transport;
   the URL is treated as secret and is never logged.
-- The API app builds the default `RunManager` with `build_notifier(config)`.
-  Production delivery uses the run manager's daemon-thread dispatch; tests can
-  inject synchronous dispatch.
+- The API app builds the default `RunManager` and `IntakeManager` with
+  `build_notifier(config)`. Production delivery uses manager-owned
+  daemon-thread dispatch; tests can inject synchronous dispatch.
 - The FastAPI lifespan starts a resident `RunMonitor` over the app's
   `RunManager`; it calls `list_runs()` on a 30s interval, is created without
   starting a thread at app construction, and stops cleanly on shutdown.
@@ -134,6 +135,12 @@ Implemented behavior:
   full plan report with compact text, while non-plan-gate prompts are bounded;
   complete question content remains available in the dashboard, control-dir
   question file, and orchestrator log.
+- Intake-ready notifications fire exactly once from `IntakeManager` draft/revise
+  success finalizers after the record is persisted to `awaiting_review`.
+  Payloads carry only repo, intake id, and draft/revision iteration metadata;
+  failed, cancelled/discarded, confirmed, and still-running intake turns do not
+  emit. A `None` notifier is a no-op and backend failures are swallowed without
+  changing `intake.json` or `events.jsonl`.
 - API/dashboard reads still refresh run status, but they are no longer required
   for timely pushes because the resident monitor drives the same status path.
 - Launchd deploy/update surface `ORCH_HUB_BARK_URL` into the installed plist,
@@ -197,7 +204,7 @@ Description: Let the user type a request remotely, review the full proposed
 task file and index entry, revise or cancel it, and only on explicit
 confirmation write the new task into the target repo.
 
-Modules: intake, intake_agent, api, web, models, readiness, task_store.
+Modules: intake, intake_agent, api, web, models, readiness, task_store, notifications.
 
 APIs: protected `POST /api/intakes`, `GET /api/intakes`,
 `GET /api/intakes/{id}`, `GET /api/intakes/{id}/history`,
@@ -213,6 +220,9 @@ Implemented behavior:
   tasks, are not returned by task inventory, and are not launchable. Draft,
   revise, and confirm turns run off the manager lock after persisting transient
   status; clients observe the settled outcome by polling the intake record.
+- Successful draft/revise turns that settle to `awaiting_review` emit one
+  metadata-only intake-ready Bark notification when configured; failures,
+  cancellations/discards, and confirmation do not notify.
 - The dashboard repo-detail view starts intake; the intake review view shows the
   complete proposed task file, index entry, notes, status, and audit events with
   Confirm, Request changes, and Cancel outcomes. In-flight turns show a live

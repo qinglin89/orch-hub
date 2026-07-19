@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Design Principles and Decisions
@@ -38,7 +38,7 @@ verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
   `orch_hub.control_dir`.
 - Duplicating orchestrator log filename attribution outside `orch_hub.logs`.
 - Copying human answer text into history/audit records.
-- Letting notification delivery failures affect run records, history, or
+- Letting notification delivery failures affect run/intake records, history, or
   control-dir state.
 - Logging Bark endpoint URLs or device keys.
 - Passing bearer tokens in log-stream query strings.

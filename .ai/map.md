@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-19
-verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Project Map
@@ -17,9 +17,9 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 | Human question relay | control_dir, runs, api, notifications, models, web | implemented over live run control dirs; omitted-mode answers stay legacy verbatim, explicit answer/discuss modes are normalized fail-closed by question kind, answers are audited via control-dir files plus metadata-only history events carrying mode, and Bark pending-question push fires once per observed `(run_id, seq)` with compact plan-gate text and bounded non-plan prompts |
 | Log viewing | logs, runs, api | implemented; locate logs from `RunRecord`, return bounded recent tails, fall back to non-empty `spawn.out` diagnostics when no orchestrator log exists, and stream SSE with bearer-header auth |
 | Mobile dashboard | api, web | implemented mobile-first single-page v1; public static shell, localStorage bearer token, protected API fetches, default Operations Overview over existing repo/task/run/escalation/history APIs with route-scoped refresh, repo/task run-state status layout, reload-stable Stop requested control from run state, housekeeping warnings, cc-codex Start dialog with optional plan-gate flag, kind-aware question answer buttons, live session context strips, grouped run history with est-vs-actual rollups, run-scoped task-file view, recent commits, and recent/live log views |
-| Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store | implemented; readiness-gated draft/revise/confirm/cancel flow with hub-owned draft/audit state, off-lock transient agent turns polled by the dashboard review view, Claude CLI backend, complete draft review, and confirmation verified through task inventory as `pending`/`blocked` before a task becomes launchable |
+| Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store, notifications | implemented; readiness-gated draft/revise/confirm/cancel flow with hub-owned draft/audit state, off-lock transient agent turns polled by the dashboard review view, Claude CLI backend, complete draft review, metadata-only intake-ready push after successful draft/revision, and confirmation verified through task inventory as `pending`/`blocked` before a task becomes launchable |
 | Auth and private access | api, config | implemented pure-ASGI bearer-token middleware; Tailscale-only/private exposure remains required; SSE uses header auth via fetch streams, not query tokens |
-| Notifications | notifications, config, runs, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL` config; run manager owns terminal/pending-question triggers and isolation; CLI `notify test` probes delivery directly with launchd-plist fallback and URL redaction |
+| Notifications | notifications, config, runs, intake, monitor, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL` config; run manager owns terminal/pending-question triggers, intake manager owns intake-ready draft/revision triggers, delivery is isolated, and CLI `notify test` probes delivery directly with launchd-plist fallback and URL redaction |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging and operations CLI; plist template is source of truth; lifecycle commands manage only the fixed service label, not orchestrator runs |
 | Run history and audit | history, runs, sessions, api, models, control_dir, task_store | implemented; per-run `events.jsonl`, launch-time task status on run records, lifecycle/stop/answer metadata events including answer mode but not answer text, per-run session snapshots and task `session-est` embedded for history views, and run-scoped task-file reads can reach archived tasks without listing archive contents |
 
@@ -55,7 +55,7 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 | cli | Human and JSON repo readiness output; launchd command dispatch; notification delivery-check dispatch |
 | launchd | Resolve launchd deployment settings including optional Bark URL, expose installed-plist Bark URL lookup, render/install plist from template, install/update package, run launchctl lifecycle commands, and probe service status |
 | task_store | Parse `.ai-tasks` indexes, including Markdown-link Task cells, and task frontmatter into repo task inventories; read contained active or archived task file bodies and typed `session-est` by exact id |
-| intake | Own remote intake lifecycle, hub-owned intake records/events, readiness and repo-busy gates, off-lock transient draft/revise/confirm turns, read-only draft/revise/cancel semantics, startup orphan reconciliation, and inventory-verified confirm/rollback |
+| intake | Own remote intake lifecycle, hub-owned intake records/events, readiness and repo-busy gates, off-lock transient draft/revise/confirm turns, read-only draft/revise/cancel semantics, startup orphan reconciliation, intake-ready notification triggers, and inventory-verified confirm/rollback |
 | intake_agent | Drive a Claude CLI `/intake-task` session with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, enforce per-repo serialization, classify live/end status, append run history events, snapshot/serve session context, and trigger isolated notifications |
 | history | Append/read per-run JSONL audit/history events without storing answer text; round-trip answer mode metadata |
@@ -63,7 +63,7 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 | logs | Locate, read, and stream orchestrator logs from run records |
 | sessions | Parse per-protocol-session context usage from orchestrator logs and persist/load `sessions.json` snapshots |
 | api | FastAPI app factory, pure-ASGI bearer auth middleware, public dashboard shell, health/repo/task/run/run-task/escalation/log/history route wiring, uvicorn entry point |
-| notifications | Backend-agnostic notification payloads, Bark backend, notifier protocol, and run/question/probe formatters |
+| notifications | Backend-agnostic notification payloads, Bark backend, notifier protocol, and run/question/intake/probe formatters |
 | web | Mobile dashboard SPA assets, including Operations Overview aggregation/refresh, kind-aware answer controls, teardown-scoped live log streaming, and intake polling |
 | docs | Launchd operator documentation |
 | deploy | Launchd plist template and future deployment templates |

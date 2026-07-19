@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # APIs: Internal Interfaces
@@ -47,7 +47,8 @@ non-bare filenames, requires the file target to resolve under the resolved
 Input: managed repo, natural-language request, optional revision feedback, and
 explicit confirm/cancel operations.
 
-Output: persisted `IntakeRecord` values and metadata-only intake events.
+Output: persisted `IntakeRecord` values, metadata-only intake events, and
+optional intake-ready notification dispatch.
 
 Behavior: `IntakeManager` gates start on request text, one in-flight intake per
 repo, and readiness. It stores records under `<data_dir>/intake/<id>/` and
@@ -57,6 +58,8 @@ reported/draft task id is visible through `list_repo_tasks` with status
 `pending` or `blocked`; otherwise it records `failed`. Failed/unverified
 in-process confirms restore the proposed task file and `.ai-tasks/index.md`
 snapshot. Cancel is allowed before confirming and writes no target repo files.
+Successful draft/revise finalizers emit one metadata-only notification after
+`awaiting_review` persistence; failures, cancels/discards, and confirms do not.
 
 ## Intake Agent
 
@@ -160,12 +163,14 @@ Output: best-effort delivery through a configured backend.
 Behavior: `build_notifier(config)` returns `BarkNotifier` when
 `Config.bark_url` is set, otherwise `None`. Bark sends JSON to the configured
 full endpoint, which includes the device key and must not be logged. The run
-manager owns live-run trigger timing and isolation: terminal notifications fire
-at the observed live-to-ended transition, pending-question notifications fire
-once per observed `(run_id, seq)`, and backend exceptions are swallowed without
-changing run records, history, or control-dir files. `orch-hub notify test`
-delivers a probe directly through the same notifier factory so delivery failure
-is visible to the CLI exit code while remaining outside run state.
+manager owns trigger timing and isolation for its domain: `RunManager` fires
+terminal notifications at the observed live-to-ended transition and
+pending-question notifications once per observed `(run_id, seq)`;
+`IntakeManager` fires intake-ready notifications after successful
+draft/revision settlement. Backend exceptions are swallowed without changing
+run records, intake records, history, or control-dir files. `orch-hub notify
+test` delivers a probe directly through the same notifier factory so delivery
+failure is visible to the CLI exit code while remaining outside manager state.
 
 ## Launchd Service Template
 

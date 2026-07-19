@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-19
-verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Modules: Web and Operations
@@ -40,8 +40,11 @@ agent-turn failures are returned as auditable intake records rather than 5xx.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.
-The default intake backend is `ClaudeIntakeAgent`. The
-recent-log route adds a nested `diagnostic` from
+The default intake backend is `ClaudeIntakeAgent`. Default run and intake
+managers are both built with `build_notifier(config)`; run-ended /
+pending-question and intake-ready delivery failures stay isolated in the owning
+manager and never become route errors. The recent-log route adds a nested
+`diagnostic` from
 `spawn.out` only when the orchestrator log is absent and the capture is
 non-empty. Module-level `app` supports
 `uvicorn orch_hub.api:app`; `run(host=None, port=None)` and the `orch-hub-api`

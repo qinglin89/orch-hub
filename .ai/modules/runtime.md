@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Modules: Runtime
@@ -171,12 +171,16 @@ disabled.
 Formatters are pure: `run_end_notification(record, state, detail)` turns the
 run manager's completed/stopped/error/ended classification into device text,
 `question_notification(repo_name, task_id, question)` formats a newly observed
-pending control-dir question as `needs input`, and `probe_notification()` builds
-the harmless delivery-check payload used by `orch-hub notify test`.
+pending control-dir question as `needs input`,
+`intake_ready_notification(record)` formats a draft/revision that settled to
+`awaiting_review`, and `probe_notification()` builds the harmless
+delivery-check payload used by `orch-hub notify test`.
 `question_notification` keys plan-gate compaction off `question.kind ==
 "plan-gate"` and emits the fixed prompt `plan ready for review`; every other
 question keeps leading prompt content bounded by `QUESTION_PROMPT_MAX_CHARS`.
 The complete question text remains in the dashboard, the control-dir question,
-and the orchestrator log. The module does not decide when notifications fire;
-`RunManager` owns live-run trigger policy and isolation, while the CLI sends
-probes directly so failures affect only the command exit code.
+and the orchestrator log. Intake-ready payloads carry only repo, intake id, and
+draft/revision iteration metadata. The module does not decide when
+notifications fire; `RunManager` owns live-run trigger policy, `IntakeManager`
+owns intake trigger policy, and the CLI sends probes directly so failures
+affect only the command exit code.

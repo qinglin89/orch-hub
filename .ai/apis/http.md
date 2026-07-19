@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-19
-verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # APIs: HTTP
@@ -266,8 +266,10 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 - `create_app(config=None, *, run_manager=None, intake_manager=None)` captures `Config.from_env()`
   by default, is testable with an explicit `Config`, and holds one `RunManager`
   instance for run, run-task, escalation, log, and background-monitor scans plus
-  one `IntakeManager` instance for remote intake routes. The default intake
-  backend is `ClaudeIntakeAgent`.
+  one `IntakeManager` instance for remote intake routes. Default managers are
+  built with `build_notifier(config)`: run-ended/pending-question and
+  intake-ready notifications share the configured Bark path, and `None` keeps
+  delivery disabled. The default intake backend is `ClaudeIntakeAgent`.
 - The app constructs a `RunMonitor` over that manager, exposes it as
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.

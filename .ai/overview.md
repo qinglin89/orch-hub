@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Project Overview
@@ -22,9 +22,9 @@ read/write orchestrator question, answer, and stop files, launch/list/stop/
 reattach orchestrator subprocess runs with per-repo serialization, answer
 waiting questions remotely, retrieve or stream run logs, persist run lifecycle
 plus answer-audit metadata, serve the dashboard, push Bark notifications for
-pending questions and terminal run states, and run a confirmed remote intake
-loop that drafts a task before writing it to the target repo. Later slices add
-IM bot control.
+pending questions, terminal run states, and intake drafts/revisions ready for
+review, and run a confirmed remote intake loop that drafts a task before
+writing it to the target repo. Later slices add IM bot control.
 
 ## Users
 
@@ -41,8 +41,9 @@ IM bot control.
 - Surface orchestrator human input requests remotely, collect answers, and deliver them back through the implemented control-dir file channel.
 - Stream or tail orchestrator logs to the dashboard.
 - Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
-- Push mobile notifications for pending questions and terminal run states via
-  Bark when `ORCH_HUB_BARK_URL` is configured.
+- Push mobile notifications for pending questions, terminal run states, and
+  intake drafts/revisions ready for review via Bark when `ORCH_HUB_BARK_URL`
+  is configured.
 - Draft, revise, confirm, or cancel new task proposals remotely while keeping
   target repo `.ai-tasks/` files unchanged until explicit confirmation.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.

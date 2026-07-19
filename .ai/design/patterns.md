@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Design: Patterns
@@ -36,9 +36,10 @@ verified-against: 30c1e08a6e706cab2d922417cf0024aa2920c5f7
   answer file consumed by the orchestrator.
 - Classify finished runs from stable evidence in order: task
   completed/archived, hub stop evidence, then exit code.
-- Keep notification trigger policy in `RunManager`: terminal notifications fire
-  at the live-to-ended transition, and pending-question notifications ride the
-  existing `_status` scan of `pending_questions`.
+- Keep notification trigger policy in the owning manager: `RunManager` fires
+  terminal notifications at the live-to-ended transition and pending-question
+  notifications from the existing `_status` scan; `IntakeManager` fires
+  intake-ready notifications from successful draft/revise finalizers.
 - Treat `None` as the only disabled-notification mechanism; do not add a
   parallel null-object flag. A configured notifier receives `Notification`
   objects with title/body/group.

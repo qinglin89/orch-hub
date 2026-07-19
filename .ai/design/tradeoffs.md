@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Design: Tradeoffs
@@ -120,14 +120,16 @@ verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
   empty means disabled; new required fields are a breaking change that requires
   updating the installed CLI first.
 
-## Tradeoff: best-effort notifier boundary vs notification-owned run state
+## Tradeoff: best-effort notifier boundary vs notification-owned state
 
-- Chose: `RunManager` owns trigger timing and isolates delivery through `_emit`.
-- Reason: notification failure must not affect `run.json`, `events.jsonl`, or
-  the control-dir channel, and run/end/question classification already belongs
-  in the run manager.
+- Chose: the domain manager that observes the event owns trigger timing and
+  isolates delivery through `_emit`.
+- Reason: notification failure must not affect `run.json`, intake records,
+  `events.jsonl`, or the control-dir channel; run/end/question classification
+  belongs in `RunManager`, while draft/revision readiness belongs in
+  `IntakeManager`.
 - Consequence: `BarkNotifier` may raise for direct callers, but production
-  delivery runs off the lock through an injected dispatch and logs only
+  manager delivery runs off the lock through an injected dispatch and logs only
   exception type plus non-secret notification title.
 
 ## Tradeoff: in-memory question dedup vs persisted notification ledger

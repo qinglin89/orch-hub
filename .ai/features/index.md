@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-19
-verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Features
@@ -16,10 +16,10 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
 | Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including Operations Overview, run start/stop controls, session context strips, grouped run history, and run-scoped task-file view |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
-| Notifications | implemented | notifications, config, runs, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
+| Notifications | implemented | notifications, config, runs, intake, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
 | Run history and audit | implemented | history, runs, sessions, api, models, control_dir, task_store | `GET /api/history/runs`, `GET /api/runs/{id}/task`, `GET /api/runs/{id}/sessions` |
-| Remote intake-task | implemented | intake, intake_agent, api, web, models, readiness, task_store | `POST /api/intakes`, `GET /api/intakes`, `GET /api/intakes/{id}` polling, `GET /api/intakes/{id}/history`, `POST /api/intakes/{id}/revise|confirm|cancel` |
+| Remote intake-task | implemented | intake, intake_agent, api, web, models, readiness, task_store, notifications | `POST /api/intakes`, `GET /api/intakes`, `GET /api/intakes/{id}` polling, `GET /api/intakes/{id}/history`, `POST /api/intakes/{id}/revise|confirm|cancel` |
 | IM bot control | future | notifications or bot adapter, api | future bot callback interface |
 
 ## Detail Files

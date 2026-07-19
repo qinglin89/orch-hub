@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-19
-verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Modules
@@ -17,7 +17,7 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 | Housekeeping | `orch_hub/housekeeping.py` | Implemented display-only `.ai/.housekeeping-pending` marker detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, typed `session-est`, and contained active/archive task reads |
-| Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, and inventory-verified confirmation |
+| Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session snapshot handling, and per-repo serialization |
 | Run monitor | `orch_hub/monitor.py` | Implemented resident daemon-thread status scanner for proactive notification delivery |
@@ -26,7 +26,7 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | Sessions | `orch_hub/sessions.py` | Implemented tolerant parsing and persistence of per-protocol-session context usage from orchestrator logs |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake routes, and uvicorn entry point |
-| Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/probe notification formatters |
+| Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/intake/probe notification formatters |
 | Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including Operations Overview aggregation/refresh, status layout, recent commits, task-detail run controls/session strips, grouped run history rollups, run-scoped task-file view, and polled remote intake review loop |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
@@ -47,8 +47,9 @@ verified-against: 3ae31d49797bd59ae83ed0cf2a8e202f68687e57
 - Git metadata is display-only and never gates readiness or run launch.
 - Housekeeping marker state is display-only and never gates readiness or run launch.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
-- Intake manager owns intake state and the confirmation postcondition; API/web
-  layers do not treat drafts as active tasks or decide whether a confirm landed.
+- Intake manager owns intake state, intake-ready notification trigger timing,
+  and the confirmation postcondition; API/web layers do not treat drafts as
+  active tasks or decide whether a confirm landed.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
 - History serializes run/audit metadata only; `RunManager` decides when events
   are written.

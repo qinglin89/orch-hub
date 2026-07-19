@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Modules: Core
@@ -145,11 +145,13 @@ Responsibility: parse active task files without importing protocol or orchestrat
 
 Location: `orch_hub/intake.py`
 
-Responsibility: own the remote intake-task lifecycle and hub-owned audit state.
+Responsibility: own the remote intake-task lifecycle, hub-owned audit state,
+and intake-ready notification trigger timing.
 `IntakeManager` stores each intake under `<data_dir>/intake/<intake_id>/` with
 `intake.json` and metadata-only `events.jsonl`, gates start on non-empty input,
 one in-flight intake per repo, and readiness, then drives an injected
-`IntakeAgent` through draft, revise, confirm, and cancel turns.
+`IntakeAgent` through draft, revise, confirm, and cancel turns. It accepts an
+optional notifier and dispatch seam; `None` disables delivery work.
 
 Draft, revise, and confirm turns persist a transient status
 (`drafting`/`revising`/`confirming`) under the manager lock, submit the slow
@@ -162,6 +164,9 @@ finished turn is discarded, and cancelled intakes are never resurrected.
 landed.
 
 Draft/revise turns return complete proposals and leave target repos unchanged.
+When either turn successfully settles the record to `awaiting_review`, the
+manager fires one best-effort metadata-only intake-ready notification after
+persistence; cancel/discard, failure, and confirm paths do not emit.
 Only `confirm_intake` calls the agent write path. Confirmation is verified via
 `list_repo_tasks`: the created id must appear in the target repo inventory with
 frontmatter status `pending` or `blocked`. Missing/index-only/no-write,

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-19
+verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 ---
 
 # Architecture
@@ -94,7 +94,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
 | Commit metadata | Target repo git history | display-only; never gates readiness or launch |
 | Housekeeping marker | Target repo `.ai/.housekeeping-pending` | display-only dashboard/API warning; never gates readiness or launch |
-| Notifications | Derived from run state and pending questions | delivery is best-effort and must not affect state writes |
+| Notifications | Derived from run state, pending questions, and intake draft/revision state | delivery is best-effort and must not affect state writes |
 
 ## Core Flows
 
@@ -133,7 +133,9 @@ calls the agent write turn. The manager records `confirmed` only after the
 created task round-trips through the frontmatter-authoritative task inventory as
 `pending` or `blocked`; failed, cancelled, unverified, or interrupted intakes
 stay outside active task inventory and roll back the task file/index paths they
-were authorized to touch when the process is still alive.
+were authorized to touch when the process is still alive. When a draft or
+revision settles to `awaiting_review`, the manager emits one metadata-only
+intake-ready notification off the state-critical path when Bark is configured.
 
 ## Component Boundaries
 
@@ -151,7 +153,7 @@ were authorized to touch when the process is still alive.
 - History stores run and answer-audit metadata; it does not decide event timing.
 - Logs are located from run records only; API and UI callers never pass local
   paths.
-- Notification delivery is isolated from state persistence.
+- Notification delivery is isolated from run/intake state persistence.
 - API, CLI, dashboard, launchd, and future bot surfaces stay as adapters over
   shared application services.
 
@@ -183,7 +185,8 @@ were authorized to touch when the process is still alive.
 - Human answers are auditable, but history must not duplicate answer text.
 - Log access is scoped to known run records.
 - Readiness must fail closed before launch.
-- Notification delivery must never corrupt run, history, or control-dir state.
+- Notification delivery must never corrupt run, intake, history, or control-dir
+  state.
 - Bark URLs embed device-key secrets and must not be logged.
 
 ## Related Memory
