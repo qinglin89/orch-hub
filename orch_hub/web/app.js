@@ -1513,6 +1513,22 @@
     return rem ? `${hrs}h ${rem}m` : `${hrs}h`;
   }
 
+  // A DOM-attribute-safe, collision-free group identity: repo_path (the est
+  // dedup key) with a repo_name fallback, plus task_id, each percent-encoded and
+  // joined by a literal "|". Encoding keeps the join injective (a raw "|" inside
+  // either part becomes "%7C") and the result plain ASCII, so it doubles as the
+  // `data-group-key` the collapse toggle reads back — the internal Map below can
+  // afford a raw-NUL separator, but an HTML attribute can't (the parser rewrites
+  // U+0000 to U+FFFD). All runs in a group share (repo, task), so the group key
+  // is groupKey(any one of its runs).
+  function groupKey(run) {
+    return (
+      encodeURIComponent(run.repo_path || run.repo_name || "") +
+      "|" +
+      encodeURIComponent(run.task_id || "")
+    );
+  }
+
   // Group the flat history list by (repo, task), preserving newest-first order:
   // the list is already newest-first, so a group's first appearance — and each
   // run within it — stays newest-first. Keyed on repo_path (the backend's est
@@ -1597,29 +1613,133 @@
       </li>`;
   }
 
-  // One task group: header (task id + repo + run count), the est-vs-actual
-  // rollup, then the group's run cards newest-first via the shared card builder.
+  // One task group: a collapse-toggle header (task id + repo + run count), the
+  // est-vs-actual rollup, then the group's run cards newest-first via the shared
+  // card builder. The header is a real <button> (aria-expanded) so collapse is
+  // keyboard-operable and screen-reader-legible; a collapsed group keeps its
+  // header + rollup summary and only hides the run-card list — via the
+  // `.collapsed` CSS, not by dropping the cards, and with no effect on ordering
+  // or the rollup. Collapsed state is keyed by the stable group key so it
+  // survives a filter re-render; the key rides `data-group-key` for the toggle.
   function taskGroupCard(group) {
     const runCount = group.runs.length;
+    const key = groupKey(group.runs[0]); // group is non-empty; all runs share it
+    const collapsed = collapsedGroups.has(key);
     const cards = group.runs.map(historyRunCard).join("");
     return (
-      `<section class="task-group">` +
-      `<header class="task-group-head">` +
+      `<section class="task-group${collapsed ? " collapsed" : ""}" ` +
+      `data-group-key="${escapeHtml(key)}">` +
+      `<button class="task-group-head" type="button" aria-expanded="${
+        collapsed ? "false" : "true"
+      }">` +
+      `<span class="tg-caret" aria-hidden="true"></span>` +
       `<span class="tg-task">${escapeHtml(
         group.task_id || "(unknown task)"
       )}</span>` +
       `<span class="tg-meta muted">${escapeHtml(
         group.repo_name || ""
       )} · ${runCount} run${runCount === 1 ? "" : "s"}</span>` +
-      `</header>` +
+      `</button>` +
       taskRollup(group) +
       `<ul class="list">${cards}</ul>` +
       `</section>`
     );
   }
 
-  // Run history: recent runs newest-first from the history endpoint, grouped by
-  // (repo, task) into per-task cards. Each run taps through to its log tail.
+  // ---- run-history navigation: compose-over-payload filters + collapse ----
+  //
+  // Discovery controls layered on the same /api/history/runs payload — no API
+  // change and no refetch on change: the flat list is fetched once per view
+  // entry and re-filtered client-side, mirroring the task-list filters. Filters
+  // compose as AND — repo (exact name), run state (exact), and a case-insensitive
+  // task-id substring. Filtering the flat, newest-first list *before* grouping
+  // keeps ordering intact and lets the per-group rollup and the count line
+  // describe exactly the runs shown. Held in the closure and applied client-side,
+  // so they persist across view re-entry like the task filters.
+  const runFilters = { repo: "", state: "", task: "" };
+  // Collapsed groups persist across filter re-renders (and view re-entry), keyed
+  // by the stable group key; a stale key for a group no longer present is inert.
+  const collapsedGroups = new Set();
+
+  // Canonical run-state order for the state dropdown (live states first, then end
+  // classifications); any unknown state (forward compat) sorts after, mirroring
+  // the task-status ordering helper.
+  const RUN_STATE_ORDER = [
+    "active",
+    "waiting",
+    "completed",
+    "stopped",
+    "error",
+    "ended",
+  ];
+  function orderedRunStates(runs) {
+    const seen = new Set();
+    for (const run of runs) if (run.state) seen.add(run.state);
+    const known = RUN_STATE_ORDER.filter((s) => seen.has(s));
+    const extra = [...seen].filter((s) => !RUN_STATE_ORDER.includes(s)).sort();
+    return [...known, ...extra];
+  }
+
+  // Distinct repo names present in the history payload, alpha-sorted for a stable
+  // dropdown (history rows have no inherent repo order).
+  function historyRepoNames(runs) {
+    const seen = new Set();
+    for (const run of runs) if (run.repo_name) seen.add(run.repo_name);
+    return [...seen].sort();
+  }
+
+  // AND across the three filters; an empty filter is a wildcard. The task filter
+  // is a trimmed, case-insensitive substring on task_id; repo and state are exact.
+  function matchesRunFilters(run) {
+    if (runFilters.repo && run.repo_name !== runFilters.repo) return false;
+    if (runFilters.state && run.state !== runFilters.state) return false;
+    const q = runFilters.task.trim().toLowerCase();
+    if (q && !String(run.task_id || "").toLowerCase().includes(q)) return false;
+    return true;
+  }
+
+  // Toggle one group's collapsed state from a delegated header click. Run cards
+  // are <a> links inside the same section, so a card tap never resolves to the
+  // header button; a click outside any header is ignored.
+  function onRunGroupClick(ev) {
+    const head = ev.target.closest(".task-group-head");
+    if (!head) return;
+    const section = head.closest(".task-group");
+    if (!section) return;
+    const key = section.getAttribute("data-group-key");
+    const collapsed = section.classList.toggle("collapsed");
+    head.setAttribute("aria-expanded", collapsed ? "false" : "true");
+    if (collapsed) collapsedGroups.add(key);
+    else collapsedGroups.delete(key);
+  }
+
+  // Partial re-render: filter the fetched runs, regroup, and repaint only the
+  // count line + group list (the filter controls stay put, keeping focus/caret).
+  // Newest-first survives (filter preserves order; grouping keeps first-seen).
+  // Empty *history* is handled upstream in renderRuns; an empty result here means
+  // the filters excluded everything — a distinct no-match state.
+  function renderRunGroups(allRuns) {
+    const groupsEl = document.getElementById("run-groups");
+    const countEl = document.getElementById("run-count");
+    const filtered = allRuns.filter(matchesRunFilters);
+    const groups = groupRunsByTask(filtered);
+    if (!groups.length) {
+      countEl.textContent = "";
+      groupsEl.innerHTML = `<p class="center">No runs match these filters.</p>`;
+      return;
+    }
+    const g = groups.length;
+    const r = filtered.length;
+    countEl.textContent = `${g} group${g === 1 ? "" : "s"} · ${r} run${
+      r === 1 ? "" : "s"
+    }`;
+    groupsEl.innerHTML = groups.map(taskGroupCard).join("");
+  }
+
+  // Run history: recent runs newest-first from the history endpoint. Fetched
+  // once, then filtered/grouped client-side into collapsible per-task cards, each
+  // run tapping through to its log tail. Empty payload and no-match are distinct
+  // states; a clear-filters button restores the full newest-first set.
   async function renderRuns() {
     view().innerHTML = centerHtml("Loading runs…");
     const data = await api("/api/history/runs");
@@ -1628,7 +1748,66 @@
       view().innerHTML = centerHtml("No runs recorded yet.");
       return;
     }
-    view().innerHTML = groupRunsByTask(runs).map(taskGroupCard).join("");
+    const repoNames = historyRepoNames(runs);
+    const states = orderedRunStates(runs);
+    // Drop a persisted filter the current payload can no longer satisfy, so a
+    // stale value never yields a permanent phantom no-match (mirrors the task
+    // filters). The free-text task filter is left as typed.
+    if (runFilters.repo && !repoNames.includes(runFilters.repo))
+      runFilters.repo = "";
+    if (runFilters.state && !states.includes(runFilters.state))
+      runFilters.state = "";
+    view().innerHTML = `
+      <div class="filters">
+        <label>Repo
+          <select id="rf-repo">${optionList(
+            repoNames,
+            runFilters.repo,
+            "All repos"
+          )}</select>
+        </label>
+        <label>State
+          <select id="rf-state">${optionList(
+            states,
+            runFilters.state,
+            "All states"
+          )}</select>
+        </label>
+        <label>Task
+          <input id="rf-task" type="search" placeholder="Filter by task id"
+                 value="${escapeHtml(runFilters.task)}" />
+        </label>
+        <button id="rf-clear" class="filters-clear" type="button">Clear</button>
+      </div>
+      <p id="run-count" class="run-count muted" aria-live="polite"></p>
+      <div id="run-groups"></div>`;
+    document.getElementById("rf-repo").addEventListener("change", (ev) => {
+      runFilters.repo = ev.target.value;
+      renderRunGroups(runs);
+    });
+    document.getElementById("rf-state").addEventListener("change", (ev) => {
+      runFilters.state = ev.target.value;
+      renderRunGroups(runs);
+    });
+    document.getElementById("rf-task").addEventListener("input", (ev) => {
+      runFilters.task = ev.target.value;
+      renderRunGroups(runs);
+    });
+    document.getElementById("rf-clear").addEventListener("click", () => {
+      runFilters.repo = "";
+      runFilters.state = "";
+      runFilters.task = "";
+      document.getElementById("rf-repo").value = "";
+      document.getElementById("rf-state").value = "";
+      document.getElementById("rf-task").value = "";
+      renderRunGroups(runs);
+    });
+    // One delegated listener on the stable group container survives the partial
+    // re-renders above (they replace its innerHTML, not the node itself).
+    document
+      .getElementById("run-groups")
+      .addEventListener("click", onRunGroupClick);
+    renderRunGroups(runs);
   }
 
   // ---- run-scoped task view (active or archived) ----

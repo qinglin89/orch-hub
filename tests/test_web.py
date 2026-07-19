@@ -573,8 +573,10 @@ def test_run_history_groups_runs_by_task_with_est_rollup():
     assert "taskRollup" in body
     assert "task-group" in body
     assert "task-rollup" in body
-    # renderRuns builds group cards rather than a flat run list.
-    assert "groupRunsByTask(runs).map(taskGroupCard)" in body
+    # The runs view builds grouped task cards rather than a flat run list; the
+    # grouping now runs over the filtered set inside the partial re-render.
+    assert "groupRunsByTask(filtered)" in body
+    assert "groups.map(taskGroupCard)" in body
 
 
 def test_run_history_rollup_counts_dev_sessions_against_est():
@@ -597,6 +599,97 @@ def test_run_history_rollup_shows_peak_context_and_wall_clock():
     assert "fmtDuration" in body
     assert "wall-clock" in body
     assert "started_ts" in body and "ended_ts" in body
+
+
+# ---- run-history navigation: filters + counts + collapse ---------------------
+# (2026-07-17-run-history-navigation)
+#
+# The Runs view gains client-side discovery over the same /api/history/runs
+# payload (no API change, no refetch): repo + run-state + task-id-substring
+# filters that compose as AND, an accurate filtered group/run count, per-group
+# collapse that keeps the summary, a clear-filters reset, and a no-match state
+# distinct from empty history — while every visible run stays linked to its log
+# view and newest-first grouping is preserved. Asserted here at the served-asset
+# boundary (no JS runtime in this suite), like the run-control / rollup checks
+# above; the actual filter/collapse *dispatch* was driven under a jsc
+# stubbed-browser harness recorded in the task session log. Each check maps to a
+# scope/acceptance line.
+
+
+def test_run_history_offers_repo_state_task_filters():
+    body = app_js()
+    # Three discovery controls on the runs view.
+    assert 'id="rf-repo"' in body
+    assert 'id="rf-state"' in body
+    assert 'id="rf-task"' in body
+    # Composed client-side over the fetched payload (held filter state, one
+    # predicate), so changing a filter re-filters without a refetch.
+    assert "runFilters" in body
+    assert "matchesRunFilters" in body
+    # Dropdown domains come from the payload itself, not a new API.
+    assert "historyRepoNames" in body
+    assert "orderedRunStates" in body
+
+
+def test_run_history_filters_compose_as_and_over_the_three_fields():
+    body = app_js()
+    # All three fields are consulted in the same predicate (AND; empty =
+    # wildcard). Task is a trimmed case-insensitive substring on task_id;
+    # repo/state are exact matches.
+    assert "runFilters.repo" in body
+    assert "runFilters.state" in body
+    assert "runFilters.task" in body
+    assert "run.repo_name !== runFilters.repo" in body
+    assert "run.state !== runFilters.state" in body
+    assert 'String(run.task_id || "").toLowerCase().includes(q)' in body
+
+
+def test_run_history_shows_filtered_group_and_run_counts():
+    body = app_js()
+    # A count line whose values come from the filtered groups/runs, so it tracks
+    # the active filters rather than the whole payload.
+    assert 'id="run-count"' in body
+    assert "groups.length" in body
+    assert "filtered.length" in body
+    assert "group" in body and "run" in body
+
+
+def test_run_history_groups_are_collapsible_without_losing_summary():
+    body = app_js()
+    css = styles_css()
+    # Each group header is a real button toggling collapsed state, tracked by a
+    # stable per-group key so a filter re-render preserves it.
+    assert 'class="task-group-head" type="button"' in body
+    assert "aria-expanded" in body
+    assert "data-group-key" in body
+    assert "collapsedGroups" in body
+    # Delegated toggle on the stable container (survives partial re-renders).
+    assert "onRunGroupClick" in body
+    assert 'classList.toggle("collapsed")' in body
+    # Collapse hides only the run-card list; header + rollup summary stay.
+    assert ".task-group.collapsed .list" in css
+    assert ".tg-caret" in css
+
+
+def test_run_history_offers_a_clear_filters_action():
+    body = app_js()
+    # A clear control that resets all three filters back to the full set.
+    assert 'id="rf-clear"' in body
+    assert ".filters-clear" in styles_css()
+
+
+def test_run_history_distinguishes_empty_history_from_no_match():
+    body = app_js()
+    # Two distinct states: an empty payload vs. a non-empty payload the filters
+    # exclude entirely.
+    assert "No runs recorded yet." in body
+    assert "No runs match these filters." in body
+
+
+def test_run_history_runs_stay_linked_to_logs_after_navigation():
+    body = app_js()
+    # Every rendered run card still taps through to its existing log tail.
+    assert "logsHash(run.run_id)" in body
 
 
 # ---- kind-aware answer-mode buttons (2026-07-16-escalation-mode-buttons) ------
