@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-20
+verified-against: b675a46862727c04c66f86fb0f0dbec93e28ace8
 ---
 
 # Modules
@@ -27,7 +27,7 @@ verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 | Sessions | `orch_hub/sessions.py` | Implemented tolerant parsing and persistence of per-protocol-session context usage from orchestrator logs |
 | API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/intake/probe notification formatters |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including Operations Overview aggregation/refresh, status layout, recent commits, task-detail run controls/session strips, grouped run history rollups, run-scoped task-file view, and polled remote intake review loop |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile dashboard SPA assets, including Operations Overview aggregation/refresh, status layout, recent commits, task-detail run controls/session strips, filterable/collapsible grouped run-history rollups, run-scoped task-file view, and polled remote intake review loop |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |

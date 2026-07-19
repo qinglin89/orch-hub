@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-20
+verified-against: b675a46862727c04c66f86fb0f0dbec93e28ace8
 ---
 
 # Modules: Web and Operations
@@ -70,12 +70,13 @@ owns token entry/localStorage, bearer `fetch` calls, hash routing,
 an Operations Overview default landing route, repo/task/detail/run views,
 repo/task run-state signals, recent commits, task-detail Start/Stop run
 controls, live per-session context strips,
-waiting-question answer forms, grouped run history with est-vs-actual rollups,
-a run-scoped task-file view, remote intake start/review views, and recent/live
-log views; `styles.css` holds the mobile layout. The dashboard reads only HTTP
-payloads, uses `fetch` + `ReadableStream.getReader()` for SSE log streaming so
-the bearer header is present, aborts active streams on navigation/reload/pause,
-and writes untrusted log/task data as escaped HTML or text nodes.
+waiting-question answer forms, filterable/counted/collapsible grouped run
+history with est-vs-actual rollups, a run-scoped task-file view, remote intake
+start/review views, and recent/live log views; `styles.css` holds the mobile
+layout. The dashboard reads only HTTP payloads, uses `fetch` +
+`ReadableStream.getReader()` for SSE log streaming so the bearer header is
+present, aborts active streams on navigation/reload/pause, and writes untrusted
+log/task data as escaped HTML or text nodes.
 
 The Overview route (`#/overview`) aggregates existing protected repo/task/run/
 escalation/history payloads into summary metrics, prioritized attention, live
@@ -114,9 +115,12 @@ Discuss/Answer for ordinary escalations and Feedback/Confirm for `plan-gate`;
 plan-gate Confirm may post empty text for one-tap approval, while other empty
 replies are blocked locally and server-side guards still own correctness.
 Run history consumes the embedded `sessions`/`context_budget` and `session_est`
-fields from `GET /api/history/runs`, groups runs by `(repo, task)`, and shows
-observed dev-session count vs estimate, peak context, and summed wall-clock from
-run-record ISO timestamps.
+fields from `GET /api/history/runs`, filters the already-fetched newest-first
+list by repo, run state, and task-id text before grouping by `(repo, task)`,
+shows filtered group/run counts plus distinct empty/no-match states, preserves
+log links on visible run cards, and lets each task group collapse without
+hiding its rollup. Rollups show observed dev-session count vs estimate, peak
+context, and summed wall-clock from run-record ISO timestamps.
 
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete

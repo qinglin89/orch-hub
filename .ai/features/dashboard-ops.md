@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-20
+verified-against: b675a46862727c04c66f86fb0f0dbec93e28ace8
 ---
 
 # Features: Dashboard Ops
@@ -74,10 +74,13 @@ Implemented behavior:
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
 - Run history uses `GET /api/history/runs` newest-first, grouped client-side by
-  `(repo, task)`. Each task group shows per-run session strips from persisted
-  snapshots plus a rollup of observed dev sessions vs frontmatter
-  `session-est`, peak per-session context, and summed run wall-clock from
-  `started_ts`/`ended_ts`.
+  `(repo, task)`. Repo/state/task-id filters compose client-side over the
+  fetched payload before grouping; the view shows filtered group/run counts,
+  distinguishes empty history from no matches, and lets task groups collapse
+  while keeping each group's header and rollup visible. Each task group shows
+  per-run session strips from persisted snapshots plus a rollup of observed dev
+  sessions vs frontmatter `session-est`, peak per-session context, and summed
+  run wall-clock from `started_ts`/`ended_ts`.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls
