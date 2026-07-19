@@ -68,6 +68,7 @@ from .models import (
     ManagedRepo,
     ReadinessReport,
 )
+from .notifications import Notification, Notifier, intake_ready_notification
 from .readiness import check_readiness
 from .task_store import list_repo_tasks
 
@@ -241,6 +242,21 @@ def _thread_executor(run: Callable[[], None]) -> None:
     threading.Thread(target=run, daemon=True, name="orch-hub-intake").start()
 
 
+def _thread_notify_dispatch(deliver: Callable[[], None]) -> None:
+    """Default notification dispatch: deliver on a short-lived daemon thread.
+
+    Mirrors the run manager's ``_thread_dispatch``. An intake-ready push is
+    emitted from a finalize step, which holds the manager lock, so a slow or
+    hung Bark backend must never stall the finalize (nor an unrelated repo's
+    intake): delivery runs off the lock on a daemon thread that never blocks
+    interpreter shutdown. Tests inject a synchronous dispatch
+    (``lambda deliver: deliver()``) for deterministic assertions.
+    """
+    threading.Thread(
+        target=deliver, daemon=True, name="orch-hub-intake-notify"
+    ).start()
+
+
 def _slug(value: str) -> str:
     """Make a repo name safe as an intake-dir path component."""
     return _SLUG.sub("-", value).strip("-") or "x"
@@ -376,6 +392,13 @@ class IntakeManager:
     turn off the manager lock (a daemon thread in production; a synchronous
     ``lambda run: run()`` in tests).
 
+    ``notifier`` is the optional push backend (``None`` disables notifications
+    with no delivery work at all, mirroring the run manager); it fires one
+    metadata-only ``intake ready`` push each time a draft or revision settles to
+    ``awaiting_review``. ``notify_dispatch`` runs each delivery off the manager
+    lock — a daemon thread by default so a slow Bark backend never stalls a
+    finalize; tests inject a synchronous dispatch.
+
     The invariant the tests pin down: the target repo is unchanged until an
     explicit :meth:`confirm_intake`, because only that method reaches the
     agent's write path. Drafting, revision, cancellation, agent failure, and a
@@ -398,12 +421,16 @@ class IntakeManager:
         readiness_checker: Callable[[ManagedRepo, Config], ReadinessReport] = check_readiness,
         clock: Callable[[], dt.datetime] = _utc_now,
         executor: IntakeExecutor = _thread_executor,
+        notifier: Notifier | None = None,
+        notify_dispatch: IntakeExecutor = _thread_notify_dispatch,
     ):
         self._config = config
         self._agent: IntakeAgent = agent if agent is not None else _UnavailableIntakeAgent()
         self._readiness_checker = readiness_checker
         self._clock = clock
         self._executor = executor
+        self._notifier = notifier
+        self._notify_dispatch = notify_dispatch
         self._lock = threading.Lock()
         # Live conversational handles by intake id. Not persisted: a hub restart
         # drops them, so a non-terminal intake whose handle is gone is treated as
@@ -499,6 +526,10 @@ class IntakeManager:
             updated_ts=self._clock().isoformat(),
         )
         _write_record(intake_dir, updated)
+        # Draft settled to awaiting_review: notify best-effort, off the lock. The
+        # cancel-race branch above returns before this, so a discarded turn (and
+        # every failure path, which never reaches here) fires nothing.
+        self._emit(intake_ready_notification(updated))
 
     # -- revise ---------------------------------------------------------------
 
@@ -594,6 +625,9 @@ class IntakeManager:
             task_id=result.draft.task_id,
             detail=_summarize_feedback(feedback),
         )
+        # Revision settled to awaiting_review: notify best-effort, off the lock —
+        # same success-only trigger as the initial draft.
+        self._emit(intake_ready_notification(updated))
 
     # -- confirm --------------------------------------------------------------
 
@@ -867,6 +901,35 @@ class IntakeManager:
         mutating call returns at once with the transient record.
         """
         self._executor(run)
+
+    def _emit(self, notification: Notification) -> None:
+        """Deliver a notification best-effort; never raise into intake state.
+
+        Mirrors :meth:`orch_hub.runs.RunManager._emit`. Isolation is the
+        invariant: a backend failure (network down, bad Bark key) must not
+        corrupt ``intake.json`` / ``events.jsonl``. This is called from a
+        finalize step under the manager lock, so delivery runs through the
+        injected dispatch (a daemon thread in production) off the lock, and the
+        backend call is wrapped so any exception is logged, not propagated. A
+        ``None`` notifier short-circuits — no dispatch work at all.
+        """
+        notifier = self._notifier
+        if notifier is None:
+            return
+
+        def deliver() -> None:
+            try:
+                notifier.notify(notification)
+            except Exception as exc:  # noqa: BLE001 - delivery is best-effort
+                # Log the exception *type* and the (non-secret) title only; a
+                # Bark URL embeds a device key, so never log transport detail.
+                _log.warning(
+                    "intake notification delivery failed (%s): %s",
+                    type(exc).__name__,
+                    notification.title,
+                )
+
+        self._notify_dispatch(deliver)
 
     def _finalize_failure(
         self, intake_dir: Path, intake_id: str, expected: str, reason: str

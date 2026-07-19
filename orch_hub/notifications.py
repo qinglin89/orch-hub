@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from .models import Question, RunRecord
+from .models import IntakeRecord, Question, RunRecord
 
 if TYPE_CHECKING:
     from .config import Config
@@ -222,6 +222,31 @@ def _question_prompt(question: Question) -> str:
     if len(prompt) <= QUESTION_PROMPT_MAX_CHARS:
         return prompt
     return prompt[:QUESTION_PROMPT_MAX_CHARS].rstrip() + "…"
+
+
+def intake_ready_notification(record: IntakeRecord) -> Notification:
+    """Format the notification for an intake draft/revision ready for review.
+
+    The intake manager fires this from a finalize step when a draft or revision
+    settles to ``awaiting_review``, so the operator learns the intake agent has
+    produced a proposal without watching the dashboard. It shares the shape of
+    the other formatters: ``title`` names the repo, ``group`` clusters a repo's
+    notifications into one device thread, and ``body`` carries only intake
+    identity and status metadata — the intake id and whether this is the initial
+    draft or a numbered revision (``record.iteration``: 0 = initial draft).
+
+    Deliberately metadata-only: the operator's request, the proposed task body,
+    and any internal agent handle stay out of the push by construction — the
+    formatter never reads those fields. The complete proposal stays in the
+    dashboard intake-review view and the hub-owned intake record.
+    """
+    repo = record.repo_name or "?"
+    if record.iteration > 0:
+        descriptor = f"revision {record.iteration} ready for review"
+    else:
+        descriptor = "draft ready for review"
+    body = f"{record.intake_id}\n{descriptor}"
+    return Notification(title=f"{repo}: intake ready", body=body, group=repo)
 
 
 def probe_notification() -> Notification:

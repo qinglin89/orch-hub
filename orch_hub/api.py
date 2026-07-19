@@ -268,9 +268,12 @@ def create_app(
     ``/intake-task`` driver over ``claude -p``). If ``claude`` is unavailable the
     drafting turn fails cleanly and the intake is recorded as ``failed`` — the
     same graceful, auditable outcome the earlier unavailable-agent default gave,
-    now actually functional wherever the CLI is installed. Tests inject one wired
-    with a fake agent so the read-only-until-confirm invariant is exercised
-    through the HTTP surface without launching a real intake session.
+    now actually functional wherever the CLI is installed. It shares the run
+    manager's push notifier (:func:`~orch_hub.notifications.build_notifier`), so
+    a draft or revision reaching ``awaiting_review`` fires one metadata-only
+    ``intake ready`` Bark push when ``ORCH_HUB_BARK_URL`` is set. Tests inject
+    one wired with a fake agent so the read-only-until-confirm invariant is
+    exercised through the HTTP surface without launching a real intake session.
 
     A :class:`~orch_hub.monitor.RunMonitor` over that manager is started on
     lifespan startup and stopped on shutdown, so run-ended / pending-question
@@ -289,7 +292,11 @@ def create_app(
     intake = (
         intake_manager
         if intake_manager is not None
-        else IntakeManager(resolved, agent=ClaudeIntakeAgent())
+        else IntakeManager(
+            resolved,
+            agent=ClaudeIntakeAgent(),
+            notifier=build_notifier(resolved),
+        )
     )
     monitor = RunMonitor(manager)
 

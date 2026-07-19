@@ -13,12 +13,13 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import Config
-from orch_hub.models import Question, RunRecord
+from orch_hub.models import IntakeDraft, IntakeRecord, Question, RunRecord
 from orch_hub.notifications import (
     QUESTION_PROMPT_MAX_CHARS,
     BarkNotifier,
     Notification,
     build_notifier,
+    intake_ready_notification,
     probe_notification,
     question_notification,
     run_end_notification,
@@ -205,6 +206,66 @@ def test_question_notification_keeps_a_prompt_at_the_bound_verbatim():
     q = Question(seq=5, path=Path("/x/005-question.json"), message=prompt)
     note = question_notification("repo-a", "task-x", q)
     assert note.body == f"task-x\n{prompt}"  # exactly at the bound: no ellipsis
+
+
+# -- intake_ready_notification formatting --------------------------------------
+
+
+def _intake_record(**overrides) -> IntakeRecord:
+    """An awaiting-review intake record carrying a full request + draft body.
+
+    The request and drafted task body are populated with sentinel strings so the
+    formatting tests can prove the push carries neither — the notification is
+    metadata-only by construction.
+    """
+    draft = IntakeDraft(
+        task_id="2026-07-19-add-widget",
+        summary="Add a widget",
+        task_file="---\nid: 2026-07-19-add-widget\n---\n\nSECRET-TASK-BODY\n",
+        index_entry="| 2026-07-19-add-widget | Add a widget | pending | 0/2 | [] |",
+    )
+    fields = {
+        "intake_id": "20260719T040000Z-repo-a-intake",
+        "repo_name": "repo-a",
+        "repo_path": Path("/repos/repo-a"),
+        "request": "SECRET-REQUEST-TEXT",
+        "status": "awaiting_review",
+        "draft": draft,
+        "iteration": 0,
+        "agent_ref": "SECRET-SESSION-ID",
+    }
+    fields.update(overrides)
+    return IntakeRecord(**fields)
+
+
+def test_intake_ready_notification_initial_draft():
+    note = intake_ready_notification(_intake_record(iteration=0))
+    assert note.title == "repo-a: intake ready"
+    assert note.group == "repo-a"  # clusters into the repo's device thread
+    assert note.body == "20260719T040000Z-repo-a-intake\ndraft ready for review"
+
+
+def test_intake_ready_notification_revision_names_the_iteration():
+    note = intake_ready_notification(_intake_record(iteration=2))
+    assert note.title == "repo-a: intake ready"
+    assert note.body == "20260719T040000Z-repo-a-intake\nrevision 2 ready for review"
+
+
+def test_intake_ready_notification_excludes_request_body_and_handle():
+    # Metadata only: neither the operator's request, the drafted task body, nor
+    # the internal agent handle may reach the push payload.
+    note = intake_ready_notification(_intake_record())
+    blob = f"{note.title}\n{note.body}\n{note.group}"
+    assert "SECRET-REQUEST-TEXT" not in blob
+    assert "SECRET-TASK-BODY" not in blob
+    assert "SECRET-SESSION-ID" not in blob
+    assert "/repos/repo-a" not in blob  # nor the repo filesystem path
+
+
+def test_intake_ready_notification_falls_back_when_repo_name_is_empty():
+    note = intake_ready_notification(_intake_record(repo_name=""))
+    assert note.title == "?: intake ready"
+    assert note.group == "?"
 
 
 # -- probe_notification formatting ---------------------------------------------

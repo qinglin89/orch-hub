@@ -269,12 +269,24 @@ def make_manager(
     readiness=passing_readiness,
     clock: FakeClock | None = None,
     executor=sync_executor,
+    notifier=None,
+    notify_dispatch=None,
 ) -> tuple[IntakeManager, FakeIntakeAgent, FakeClock]:
     agent = agent if agent is not None else FakeIntakeAgent()
     clock = clock if clock is not None else FakeClock()
     config = Config(ai_native_path=root / "ai-native", data_dir=root / "hub-data")
     manager = IntakeManager(
-        config, agent=agent, readiness_checker=readiness, clock=clock, executor=executor
+        config,
+        agent=agent,
+        readiness_checker=readiness,
+        clock=clock,
+        executor=executor,
+        notifier=notifier,
+        # Deliver inline (not on the production daemon thread) so notification
+        # assertions are deterministic; it is only invoked when a notifier is set.
+        notify_dispatch=notify_dispatch
+        if notify_dispatch is not None
+        else (lambda deliver: deliver()),
     )
     return manager, agent, clock
 
@@ -1002,3 +1014,155 @@ def test_reconcile_orphans_preserves_resting_states_and_returns_nothing(tmp_path
     manager2, _, _ = make_manager(tmp_path, clock=clock)
     assert manager2.reconcile_orphans() == []
     assert manager2.get_intake(started.intake_id).status == STATUS_AWAITING_REVIEW
+
+
+# -- intake-ready notifications -----------------------------------------------
+#
+# A draft or revision that settles to awaiting_review fires exactly one
+# metadata-only "intake ready" push through the injected notifier; every other
+# outcome (cancel-race, turn failure, confirm) fires nothing. Delivery is
+# best-effort and isolated: a failing backend never changes the settled record.
+# Dispatch is synchronous in these tests (see make_manager), so a push is
+# observable immediately after the turn settles.
+
+
+class RecordingNotifier:
+    """Captures every delivered notification (synchronous dispatch in tests)."""
+
+    def __init__(self):
+        self.notifications: list = []
+
+    def notify(self, notification) -> None:
+        self.notifications.append(notification)
+
+
+class RaisingNotifier:
+    """A backend that always fails, to prove delivery failures are isolated."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def notify(self, notification) -> None:
+        self.calls += 1
+        raise OSError("bark unreachable")
+
+
+def test_successful_draft_emits_one_intake_ready_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+
+    record = settle(manager, manager.start_intake(repo, REQUEST))
+    assert record.status == STATUS_AWAITING_REVIEW
+
+    assert len(notifier.notifications) == 1
+    note = notifier.notifications[0]
+    assert note.title == "repo-a: intake ready"
+    assert note.group == "repo-a"
+    assert note.body == f"{record.intake_id}\ndraft ready for review"
+    # Metadata only: the operator's request never rides the push.
+    assert REQUEST not in note.body
+
+
+def test_each_revision_emits_its_own_intake_ready_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+
+    record = settle(manager, manager.start_intake(repo, REQUEST))  # push 1: draft
+    settle(manager, manager.revise_intake(record.intake_id, "make it smaller"))
+
+    assert len(notifier.notifications) == 2
+    assert notifier.notifications[0].body.endswith("draft ready for review")
+    assert notifier.notifications[1].body.endswith("revision 1 ready for review")
+
+
+def test_confirm_emits_no_intake_ready_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+
+    record = settle(manager, manager.start_intake(repo, REQUEST))  # push 1: draft
+    confirmed = settle(manager, manager.confirm_intake(record.intake_id))
+    assert confirmed.status == STATUS_CONFIRMED
+
+    # A confirm settling to confirmed is not an awaiting_review event: no push.
+    assert len(notifier.notifications) == 1
+    assert notifier.notifications[0].body.endswith("draft ready for review")
+
+
+def test_failed_draft_turn_emits_no_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    agent = FakeIntakeAgent(draft_error=RuntimeError("backend down"))
+    manager, _, _ = make_manager(tmp_path, agent=agent, notifier=notifier)
+
+    failed = settle(manager, manager.start_intake(repo, REQUEST))
+    assert failed.status == STATUS_FAILED
+    assert notifier.notifications == []
+
+
+def test_failed_revision_turn_emits_no_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    agent = FakeIntakeAgent(revise_error=RuntimeError("backend down"))
+    manager, _, _ = make_manager(tmp_path, agent=agent, notifier=notifier)
+
+    record = settle(manager, manager.start_intake(repo, REQUEST))  # push 1: draft
+    failed = settle(manager, manager.revise_intake(record.intake_id, "smaller"))
+    assert failed.status == STATUS_FAILED
+    # Only the initial draft notified; the failed revision fired nothing more.
+    assert len(notifier.notifications) == 1
+
+
+def test_cancel_during_drafting_turn_emits_no_notification(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    agent = BlockingIntakeAgent()
+    executor = ThreadExecutor()
+    manager, _, _ = make_manager(
+        tmp_path, agent=agent, executor=executor, notifier=notifier
+    )
+
+    transient = manager.start_intake(repo, REQUEST)
+    assert agent.started.wait(timeout=5)  # draft turn in flight, blocked off-lock
+
+    # Cancel lands mid-turn; releasing the blocked draft, finalize sees a
+    # cancelled (non-drafting) record and DISCARDS the result before the emit, so
+    # a discarded turn fires nothing.
+    manager.cancel_intake(transient.intake_id)
+    agent.release.set()
+    executor.join()
+
+    assert manager.get_intake(transient.intake_id).status == STATUS_CANCELLED
+    assert notifier.notifications == []
+
+
+def test_notifier_failure_does_not_change_the_settled_intake(tmp_path):
+    repo = make_repo(tmp_path)
+    notifier = RaisingNotifier()
+    manager, _, _ = make_manager(tmp_path, notifier=notifier)
+
+    record = settle(manager, manager.start_intake(repo, REQUEST))
+
+    assert notifier.calls == 1  # delivery was attempted...
+    # ...and the failure is swallowed: the draft still settled to awaiting_review
+    # with its draft intact, and the persisted record is unchanged by the drop.
+    assert record.status == STATUS_AWAITING_REVIEW
+    assert record.draft is not None
+    assert read_record_json(manager, record.intake_id)["status"] == STATUS_AWAITING_REVIEW
+
+
+def test_no_notifier_configured_does_no_dispatch_work(tmp_path):
+    repo = make_repo(tmp_path)
+    dispatched: list = []
+    manager, _, _ = make_manager(
+        tmp_path,
+        notifier=None,
+        notify_dispatch=lambda deliver: dispatched.append(deliver),
+    )
+
+    record = settle(manager, manager.start_intake(repo, REQUEST))
+
+    assert record.status == STATUS_AWAITING_REVIEW  # settles normally
+    assert dispatched == []  # a None notifier short-circuits before any dispatch
