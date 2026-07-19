@@ -238,7 +238,8 @@
 
   function setActiveTab(path) {
     let tab = "/repos";
-    if (path.startsWith("/tasks")) tab = "/tasks";
+    if (path.startsWith("/overview")) tab = "/overview";
+    else if (path.startsWith("/tasks")) tab = "/tasks";
     else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
       a.classList.toggle("active", a.dataset.tab === tab);
@@ -2349,9 +2350,292 @@
     });
   }
 
+  // ---- operations overview ----
+  //
+  // A single landing screen that aggregates the four existing protected APIs
+  // (/api/repos, /api/tasks, /api/runs, /api/escalations) into: a summary-metric
+  // row, a prioritized "needs attention" panel (waiting-for-answer runs, then
+  // readiness failures, then housekeeping), and a "current activity" panel of
+  // live runs. It adds no HTTP API — every figure is derived client-side from
+  // payloads the other views already consume, and each urgent item deep-links to
+  // the operational view that acts on it (a waiting run → its task detail, where
+  // the answer form lives; a repo problem → repo detail; a live run → its logs).
+  //
+  // Aggregation is done by small pure, DOM-free helpers so a count always agrees
+  // with its source view (they reuse taskCountsByRepo / LIVE_STATES / repoRunState
+  // vocabulary) and so the behaviour is unit-testable off a stubbed browser.
+  //
+  // Best-effort fetch: each source degrades to null on a non-401 failure so one
+  // outage can't blank the unrelated panels (a null source shows "—" / an
+  // "unavailable" note, never a wrong "nothing here"); a 401 still re-gates.
+  // Bounded refresh + recent outcomes are session-2.
+
+  // Fetch one overview source, degrading a non-401 failure to null (its panel
+  // then shows a placeholder) while a 401 rethrows so the shared login gate that
+  // api() already showed still wins.
+  async function overviewSource(path) {
+    try {
+      return await api(path);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      return null;
+    }
+  }
+
+  // Repos ready vs total from the /api/repos payload.
+  function readinessSummary(repos) {
+    let ready = 0;
+    for (const r of repos || []) if (r.readiness && r.readiness.ready) ready++;
+    return { ready, total: (repos || []).length };
+  }
+
+  // Total active task rows across all repos, reusing the same per-repo inventory
+  // count the repo cards show so the overview total agrees with them (NOT a raw
+  // `.ai-tasks/` file count).
+  function totalActiveTasks(taskRepos) {
+    const counts = taskCountsByRepo(taskRepos);
+    let n = 0;
+    for (const name in counts) n += counts[name];
+    return n;
+  }
+
+  // The live runs (active or waiting) from the /api/runs payload — the same
+  // LIVE_STATES partition the repo/task run signals use.
+  function liveRunList(runs) {
+    return (runs || []).filter((r) => LIVE_STATES.has(r.state));
+  }
+
+  // A one-line, length-bounded prompt for a waiting-item detail: the question
+  // banner or message collapsed to one line and clipped so a long plan report
+  // doesn't dominate the overview. Empty when there's no readable prompt.
+  function shortPrompt(question, max) {
+    if (!question) return "";
+    const oneLine = String(question.banner || question.message || "")
+      .replace(/\s+/g, " ")
+      .trim();
+    if (!oneLine) return "";
+    const limit = max || 120;
+    return oneLine.length > limit ? oneLine.slice(0, limit - 1) + "…" : oneLine;
+  }
+
+  // The waiting-for-answer attention items: every waiting run (authoritative for
+  // "a run is blocked on a human") merged with the escalation question text by
+  // run_id. Building from runs first means a waiting run whose question file is
+  // unparseable still surfaces (escalations list it too, but this stays robust to
+  // a partial fetch); the escalation, when present, fills in the prompt.
+  function waitingAttentionItems(runs, escalations) {
+    const byRun = new Map();
+    for (const run of runs || []) {
+      if (run.state !== "waiting") continue;
+      byRun.set(run.run_id, {
+        run_id: run.run_id,
+        repo_name: run.repo_name,
+        task_id: run.task_id,
+        question: null,
+      });
+    }
+    for (const esc of escalations || []) {
+      const item = byRun.get(esc.run_id) || {
+        run_id: esc.run_id,
+        repo_name: esc.repo_name,
+        task_id: esc.task_id,
+        question: null,
+      };
+      if (esc.question) item.question = esc.question;
+      byRun.set(esc.run_id, item);
+    }
+    return [...byRun.values()];
+  }
+
+  // One summary-metric tile: a big value over a label, coloured by `kind`
+  // (warn/ok/run) via the shared badge colour vocabulary.
+  function metricTile(value, label, kind) {
+    return (
+      `<div class="metric${kind ? " " + kind : ""}">` +
+      `<span class="metric-value">${escapeHtml(value)}</span>` +
+      `<span class="metric-label">${escapeHtml(label)}</span>` +
+      `</div>`
+    );
+  }
+
+  // The summary-metric row. A null source shows "—" so a failed fetch reads as
+  // "unknown", never a misleading zero.
+  function overviewMetrics(repos, taskRepos, runs, escalations) {
+    const tiles = [];
+    if (repos) {
+      const r = readinessSummary(repos);
+      const kind = r.total && r.ready < r.total ? "warn" : r.total ? "ok" : "";
+      tiles.push(metricTile(r.ready + "/" + r.total, "repos ready", kind));
+    } else {
+      tiles.push(metricTile("—", "repos ready", ""));
+    }
+    tiles.push(
+      metricTile(
+        taskRepos ? String(totalActiveTasks(taskRepos)) : "—",
+        "active tasks",
+        ""
+      )
+    );
+    const liveCount = runs ? liveRunList(runs).length : null;
+    tiles.push(
+      metricTile(
+        liveCount === null ? "—" : String(liveCount),
+        "live runs",
+        liveCount ? "run" : ""
+      )
+    );
+    const waitingCount =
+      runs === null && escalations === null
+        ? null
+        : waitingAttentionItems(runs, escalations).length;
+    tiles.push(
+      metricTile(
+        waitingCount === null ? "—" : String(waitingCount),
+        "awaiting answer",
+        waitingCount ? "warn" : ""
+      )
+    );
+    return `<div class="overview-metrics">${tiles.join("")}</div>`;
+  }
+
+  // One "needs attention" row: a deep-linked card with a colour-coded left-border
+  // accent by `item.kind` (waiting/not-ready/housekeeping), a status badge, and an
+  // optional sub-line + detail. `item.badge` is pre-built badge HTML.
+  function attentionRow(item) {
+    const sub = item.sub
+      ? `<span class="attn-sub muted">${escapeHtml(item.sub)}</span>`
+      : "";
+    const detail = item.detail
+      ? `<div class="attn-detail muted">${escapeHtml(item.detail)}</div>`
+      : "";
+    return (
+      `<li class="card attn attn-${item.kind}">` +
+      `<a class="card-link" href="${item.href}">` +
+      `<div class="card-head">` +
+      `<span class="attn-title">${escapeHtml(item.title)}</span>` +
+      `<span class="badges">${item.badge}</span>` +
+      `</div>${sub}${detail}</a></li>`
+    );
+  }
+
+  // The prioritized "needs attention" panel. Order is by urgency: waiting-for-
+  // answer (a run is blocked on you) first, then readiness failures (they block
+  // launching), then housekeeping (a maintenance nudge). When every source failed
+  // it says so rather than a false "nothing needs attention".
+  function attentionPanel(repos, runs, escalations) {
+    const head = `<section class="section overview-attention"><h2>Needs attention</h2>`;
+    const foot = `</section>`;
+    if (repos === null && runs === null && escalations === null)
+      return head + `<p class="muted">Attention data is unavailable.</p>` + foot;
+    const items = [];
+    for (const w of waitingAttentionItems(runs, escalations)) {
+      items.push({
+        kind: "waiting",
+        badge: badge("waiting", "warn"),
+        title: w.task_id || w.run_id,
+        sub: w.repo_name,
+        detail: shortPrompt(w.question, 120),
+        // The actionable target is the task detail (the answer form lives there),
+        // falling back to the run's logs when the run carries no task id.
+        href:
+          w.repo_name && w.task_id
+            ? taskHash(w.repo_name, w.task_id)
+            : logsHash(w.run_id),
+      });
+    }
+    for (const r of repos || []) {
+      if (r.readiness && !r.readiness.ready)
+        items.push({
+          kind: "not-ready",
+          badge: badge("not ready", "bad"),
+          title: r.name,
+          sub: "readiness failed",
+          detail: (r.readiness.checks || []).map((c) => c.name).join(", "),
+          href: repoHash(r.name),
+        });
+    }
+    for (const r of repos || []) {
+      if (r.housekeeping_pending)
+        items.push({
+          kind: "housekeeping",
+          badge: badge("housekeeping", "warn"),
+          title: r.name,
+          sub: "housekeeping pending",
+          detail: "",
+          href: repoHash(r.name),
+        });
+    }
+    if (!items.length)
+      return (
+        head + `<p class="muted">Nothing needs attention right now.</p>` + foot
+      );
+    return (
+      head +
+      `<ul class="list attention-list">${items.map(attentionRow).join("")}</ul>` +
+      foot
+    );
+  }
+
+  // One live run in the current-activity panel: a run-accented card linking to
+  // its logs (watching progress); the waiting ones also appear in the attention
+  // panel, where their task link answers the question.
+  function activityCard(run) {
+    const accent = run.state === "waiting" ? " run-waiting" : " run-active";
+    const meta = [run.repo_name, run.task_id].filter(Boolean).join(" · ");
+    return (
+      `<li class="card run${accent}">` +
+      `<a class="card-link" href="${logsHash(run.run_id)}">` +
+      `<div class="card-head">` +
+      `<span class="run-id">${escapeHtml(run.run_id)}</span>` +
+      `<span class="badges">${runBadge(run.state)}</span>` +
+      `</div>` +
+      (meta ? `<div class="muted">${escapeHtml(meta)}</div>` : "") +
+      `</a></li>`
+    );
+  }
+
+  // The "current activity" panel of live runs (active + waiting). A null source
+  // reads as "unavailable"; an empty live set as "no live runs".
+  function currentActivityPanel(runs) {
+    const head = `<section class="section"><h2>Current activity</h2>`;
+    const foot = `</section>`;
+    if (runs === null)
+      return head + `<p class="muted">Run activity is unavailable.</p>` + foot;
+    const live = liveRunList(runs);
+    if (!live.length)
+      return head + `<p class="muted">No live runs.</p>` + foot;
+    return head + `<ul class="list">${live.map(activityCard).join("")}</ul>` + foot;
+  }
+
+  async function renderOverview() {
+    view().innerHTML = centerHtml("Loading overview…");
+    // Parallel fetch of the four sources; overviewSource swallows non-401 errors
+    // to null, so Promise.all only rejects on a 401 (already handled by api() —
+    // router() then returns to the shown login gate).
+    const [reposData, tasksData, runsData, escData] = await Promise.all([
+      overviewSource("/api/repos"),
+      overviewSource("/api/tasks"),
+      overviewSource("/api/runs"),
+      overviewSource("/api/escalations"),
+    ]);
+    // null = source failed (panel degrades); [] = loaded but empty.
+    const repos = reposData ? reposData.repos || [] : null;
+    const taskRepos = tasksData ? tasksData.repos || [] : null;
+    const runs = runsData ? runsData.runs || [] : null;
+    const escalations = escData ? escData.escalations || [] : null;
+    view().innerHTML =
+      overviewMetrics(repos, taskRepos, runs, escalations) +
+      attentionPanel(repos, runs, escalations) +
+      currentActivityPanel(runs);
+  }
+
   // ---- router ----
   function currentPath() {
-    return location.hash.replace(/^#/, "") || "/repos";
+    // The Overview is the default authenticated landing view (an empty hash),
+    // so a fresh load / sign-in / `location.hash = ""` opens the ops overview
+    // rather than the repo list. An unknown *non-empty* path still falls back to
+    // the repo list in matchRoute — only the empty-hash default moved here.
+    return location.hash.replace(/^#/, "") || "/overview";
   }
 
   // Segment router: repo/task detail routes carry ids in the path, so match on
@@ -2383,6 +2667,7 @@
       return () => renderIntakeReview(seg[1]);
     if (seg[0] === "repos" && seg.length >= 2)
       return () => renderRepoDetail(seg[1]);
+    if (seg[0] === "overview") return renderOverview;
     return renderRepos;
   }
 

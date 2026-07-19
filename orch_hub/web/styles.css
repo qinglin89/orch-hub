@@ -318,6 +318,87 @@ code {
   border-left: 3px solid var(--ok-fg);
 }
 
+/* ---- operations overview ---- */
+
+/* Summary-metric row: two tiles per row on a phone, four once there's room. */
+.overview-metrics {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+
+@media (min-width: 520px) {
+  .overview-metrics {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.metric-value {
+  font-size: 22px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* Colour the figure by the shared status vocabulary (ok/warn/run). */
+.metric.ok .metric-value {
+  color: var(--ok-fg);
+}
+.metric.warn {
+  border-color: var(--warn-fg);
+}
+.metric.warn .metric-value {
+  color: var(--warn-fg);
+}
+.metric.run .metric-value {
+  color: var(--run-fg);
+}
+
+/* "Needs attention" rows reuse the task-card run-accent idiom: a colour-coded
+   left border by problem kind so the most urgent items read at a glance. */
+.overview-attention .attn {
+  border-left: 3px solid var(--border);
+}
+.overview-attention .attn.attn-waiting {
+  border-left-color: var(--warn-fg);
+}
+.overview-attention .attn.attn-not-ready {
+  border-left-color: var(--bad-fg);
+}
+.overview-attention .attn.attn-housekeeping {
+  border-left-color: var(--warn-fg);
+}
+
+.attn-title {
+  font-weight: 650;
+  word-break: break-word;
+}
+
+.attn-sub {
+  display: block;
+  margin-top: 4px;
+}
+
+.attn-detail {
+  margin-top: 4px;
+  word-break: break-word;
+}
+
 /* ---- recent commits (repo detail) ---- */
 
 .commits {

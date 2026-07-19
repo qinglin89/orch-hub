@@ -679,3 +679,102 @@ def test_discuss_button_has_a_distinct_secondary_style():
     # The discuss/feedback (secondary) button is visually distinct from the
     # filled primary Answer/Confirm button so the binding action is unambiguous.
     assert ".answer-discuss" in css
+
+
+# ---- operations overview (2026-07-17-operations-overview-dashboard, session-1) --
+#
+# A client-side Overview aggregates the four existing protected APIs (/api/repos,
+# /api/tasks, /api/runs, /api/escalations) into a summary-metric row, a
+# prioritized "needs attention" panel (waiting-for-answer runs, then readiness
+# failures, then housekeeping), and a current-activity panel of live runs. It is a
+# nav entry and the default authenticated landing view, and each urgent item
+# deep-links to the operational view that acts on it. No new HTTP API. Asserted at
+# the served-asset boundary (no JS runtime in this suite); the pure aggregation
+# itself was verified with a jsc stubbed-browser harness (session log). Recent
+# outcomes + bounded refresh are session-2. Each check maps to a scope line.
+
+
+def index_html() -> str:
+    """The served dashboard shell HTML (public shell asset)."""
+    return unauthed_client().get("/").text
+
+
+def test_overview_is_nav_entry_and_default_landing():
+    body = app_js()
+    html = index_html()
+    # A first-position Overview nav tab...
+    assert 'data-tab="/overview"' in html
+    assert 'href="#/overview"' in html
+    # ...routed to renderOverview, marked active, and the empty-hash default view.
+    assert "renderOverview" in body
+    assert 'seg[0] === "overview"' in body
+    assert 'path.startsWith("/overview")' in body
+    assert '|| "/overview"' in body  # currentPath's empty-hash default moved here
+
+
+def test_overview_aggregates_the_four_existing_apis_best_effort():
+    body = app_js()
+    # It consumes exactly the existing protected payloads — no new route added.
+    for path in ('"/api/repos"', '"/api/tasks"', '"/api/runs"', '"/api/escalations"'):
+        assert path in body
+    # Parallel fetch through one best-effort wrapper: a non-401 source failure
+    # degrades to null (that panel only); a 401 rethrows and re-gates.
+    assert "overviewSource" in body
+    assert "Promise.all" in body
+
+
+def test_overview_summary_metrics_reuse_source_counts():
+    body = app_js()
+    assert "overviewMetrics" in body
+    assert "overview-metrics" in body
+    assert "readinessSummary" in body  # repos ready/total
+    assert "taskCountsByRepo" in body  # active-task count agrees with the repo cards
+    assert "LIVE_STATES" in body  # live-run count from the shared run partition
+    assert "awaiting answer" in body  # the waiting-for-answer metric
+
+
+def test_overview_attention_panel_prioritizes_actionable_items():
+    body = app_js()
+    assert "attentionPanel" in body
+    assert "Needs attention" in body
+    # Waiting-for-answer is built from waiting runs merged with escalations, so a
+    # waiting run whose question file is unparseable still surfaces (not only the
+    # live-run-scoped /api/escalations list).
+    assert "waitingAttentionItems" in body
+    assert 'run.state !== "waiting"' in body
+    # Readiness failures and housekeeping are the other actionable repo problems,
+    # surfaced with their own overview sub-labels.
+    assert "readiness failed" in body
+    assert "housekeeping pending" in body
+
+
+def test_overview_urgent_items_deep_link_to_operational_views():
+    body = app_js()
+    # The attention list deep-links each item to the view that acts on it: a
+    # waiting item to the task detail (where the answer form lives), a repo
+    # problem to repo detail, a live run to its logs.
+    assert "attention-list" in body
+    assert "taskHash(" in body
+    assert "repoHash(" in body
+    assert "logsHash(" in body
+
+
+def test_overview_current_activity_lists_live_runs():
+    body = app_js()
+    assert "currentActivityPanel" in body
+    assert "Current activity" in body
+    assert "No live runs" in body
+
+
+def test_overview_metric_tiles_use_the_shared_status_colours():
+    css = styles_css()
+    # The summary-metric row is a responsive grid, and a tile's figure is coloured
+    # by the shared ok/warn/run vocabulary so the overview reads consistently with
+    # the badges elsewhere.
+    assert ".overview-metrics" in css
+    assert ".metric-value" in css
+    for kind in (".metric.ok", ".metric.warn", ".metric.run"):
+        assert kind in css
+    # Attention rows reuse the run-accent left border, colour-coded by kind.
+    assert ".overview-attention .attn.attn-waiting" in css
+    assert ".attn.attn-not-ready" in css
