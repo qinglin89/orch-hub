@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-20
-verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
+verified-against: 1ab6f87d248bdb0d7c350186aee3cf9659b848b5
 ---
 
 # Features: Dashboard Ops
@@ -42,10 +42,12 @@ Implemented behavior:
   cancellation handle before the initial load, drops stale paints after
   navigation, and tears down through the router so requests never overlap or
   keep polling after the view is left.
-- Router-owned post-await landing/error work is guarded by a monotonic route
-  generation so superseded route completions cannot steal focus or paint the
-  shared error view over a newer route; feature-level poll/stream/refresh handles
-  still own their own cancellation.
+- Route generation is the stale-view ownership guard: router bumps it on every
+  entry; routed handlers, `rerender`, and intake action success/error paths
+  capture before their own await/POST and skip stale paints, landing, error
+  views, or handoffs. Non-router re-renders with no navigation capture the live
+  generation and still paint; feature-level poll/stream/refresh handles still
+  own their own cancellation.
 - Repo list renders readiness from `/api/repos` and a tri-state run signal from
   `/api/runs` as a bare leading dot before the repo name: yellow waiting, green
   active non-waiting, gray idle; the state word exists only in title/aria text.

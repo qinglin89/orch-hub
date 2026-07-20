@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-20
-verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
+verified-against: 1ab6f87d248bdb0d7c350186aee3cf9659b848b5
 ---
 
 # Modules: Web and Operations
@@ -83,9 +83,13 @@ Every routed view renders one visible `h1.page-title`; router/full-view
 repaints sync it into `document.title` and move focus there, while background
 Overview refreshes, intake ticks, and log appends do not move focus. The main
 `#view` is not an ARIA live region; scoped status/alert/count regions carry the
-announcements. Router-owned post-await landing/error work is guarded by a
-monotonic route generation, alongside feature-owned cancellation handles for
-streams, intake polling, and Overview refresh.
+announcements. A monotonic route generation guards stale route completions:
+router-owned landing/error work, each handler's own post-await paint, `rerender`
+landing/error work, and intake action post-POST paint/navigation all drop when a
+newer route owns the view. Capture point matters: action guards are captured
+before the action POST, while non-router re-renders with no navigation capture
+the live generation and still paint. Feature-owned cancellation handles remain
+responsible for streams, intake polling, and Overview refresh.
 
 The Overview route (`#/overview`) aggregates existing protected repo/task/run/
 escalation/history payloads into summary metrics, prioritized attention, live
