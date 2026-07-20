@@ -76,11 +76,21 @@ def test_keyboard_smoke_actually_ran(harness_output: str):
 
 @pytest.mark.parametrize(
     "scenario",
-    ["login:", "nav:", "task:", "dialog:", "intake:", "outline (", "log:"],
+    [
+        "login:",
+        "nav:",
+        "task:",
+        "dialog:",
+        "intake:",
+        "outline (",
+        "log:",
+        "stale route:",
+    ],
 )
 def test_keyboard_smoke_covers_each_acceptance_surface(harness_output: str, scenario: str):
     # The task's acceptance names the surfaces the keyboard smoke test must
-    # cover; pin that each one is still exercised so a future edit can't quietly
+    # cover, plus `stale route:` for the predictable-focus regression a review
+    # caught; pin that each one is still exercised so a future edit can't quietly
     # drop a scenario and keep a green suite.
     assert any(
         ln.startswith("ok - " + scenario) for ln in harness_output.splitlines()

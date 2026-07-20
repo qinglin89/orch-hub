@@ -559,9 +559,26 @@ globalThis.TextDecoder = function () {
 
 var ROUTES = {};   // "METHOD path" (query stripped) -> payload
 var CALLS = [];    // every request, for assertions
+var DEFERRED = {}; // "METHOD path" -> a promise holding that route's response open
 
 function route(method, path, payload) {
   ROUTES[method + " " + path] = payload;
+}
+
+// Hold a route's response open until the scenario releases it. Every other stub
+// resolves immediately, so this is the only way to park a route handler mid-await
+// and navigate on top of it — i.e. to exercise a stale route completion.
+function defer(method, path) {
+  var key = method + " " + path;
+  var release;
+  DEFERRED[key] = new Promise(function (resolve) {
+    release = resolve;
+  });
+  return function () {
+    delete DEFERRED[key];
+    release();
+    return flush();
+  };
 }
 
 globalThis.fetch = function (path, init) {
@@ -570,24 +587,32 @@ globalThis.fetch = function (path, init) {
   var bare = String(path).split("?")[0];
   CALLS.push({ method: method, path: bare, body: body, init: init });
   var payload = ROUTES[method + " " + bare];
-  if (payload === undefined) {
-    return Promise.resolve({
-      ok: false,
-      status: 404,
-      statusText: "Not Found",
-      json: function () {
-        return Promise.resolve({ detail: "no stub for " + method + " " + bare });
-      },
-    });
-  }
-  return Promise.resolve({
-    ok: true,
-    status: 200,
-    statusText: "OK",
-    json: function () {
-      return Promise.resolve(payload);
-    },
-  });
+  var response =
+    payload === undefined
+      ? {
+          ok: false,
+          status: 404,
+          statusText: "Not Found",
+          json: function () {
+            return Promise.resolve({
+              detail: "no stub for " + method + " " + bare,
+            });
+          },
+        }
+      : {
+          ok: true,
+          status: 200,
+          statusText: "OK",
+          json: function () {
+            return Promise.resolve(payload);
+          },
+        };
+  var gate = DEFERRED[method + " " + bare];
+  return gate
+    ? gate.then(function () {
+        return response;
+      })
+    : Promise.resolve(response);
 };
 
 /* --------------------------------------------------- keyboard interactions */
@@ -1102,6 +1127,51 @@ async function scenarioHeadingOutline() {
   check("log: log lines are written as text", out.textContent.indexOf("dev session started") !== -1, out.textContent);
 }
 
+// Every route handler awaits a payload, so a slow route can resolve long after
+// the user has navigated on. Such a stale completion must not touch the view it
+// no longer owns: not by moving focus (the user is already operating the newer
+// page, and being thrown back to its heading is exactly the unpredictable focus
+// the task forbids) and not by painting its error over it.
+async function scenarioStaleRoute() {
+  installRoutes({ waiting: false });
+
+  // A stale success. renderOverview's own guard skips the paint, but the router
+  // invocation behind it used to land on the view regardless.
+  var releaseOverview = defer("GET", "/api/repos");
+  await navigate("#/overview"); // parks: loadOverview awaits the held-open source
+  check(
+    "stale route: the overview route is parked mid-load",
+    doc.getElementById("view").textContent.indexOf("Loading overview") !== -1,
+    doc.getElementById("view").textContent.slice(0, 60)
+  );
+
+  await navigate("#/tasks");
+  eq("stale route: the newer route rendered", pageHeading().textContent.trim(), "Tasks");
+  var filter = doc.getElementById("f-repo");
+  filter.focus(); // the user has tabbed in and is operating the new page
+
+  await releaseOverview();
+  activeIs("stale route: a stale load leaves focus alone", filter);
+  eq("stale route: the newer view survives", pageHeading().textContent.trim(), "Tasks");
+  eq("stale route: document.title still names it", doc.title, "Tasks · orch-hub");
+
+  // A stale failure: an unknown run 404s, and that error view must not overwrite
+  // the route the user moved to.
+  var releaseGhost = defer("GET", "/api/runs/ghost");
+  await navigate("#/runs/ghost/logs"); // parks awaiting the 404
+  await navigate("#/tasks");
+  var filterAgain = doc.getElementById("f-repo");
+  filterAgain.focus();
+
+  await releaseGhost();
+  eq(
+    "stale route: a stale failure paints no error over the newer view",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+  activeIs("stale route: a stale failure leaves focus alone", filterAgain);
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -1112,6 +1182,7 @@ async function scenarioHeadingOutline() {
     await scenarioRunOptions();
     await scenarioIntakeReview();
     await scenarioHeadingOutline();
+    await scenarioStaleRoute();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

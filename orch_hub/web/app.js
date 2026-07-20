@@ -35,6 +35,7 @@
   let activeStream = null; // AbortController for the in-flight SSE log stream, if any
   let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
   let activeOverviewRefresh = null; // { cancelled, timer } for the Overview auto-refresh, if any
+  let routeGeneration = 0; // bumped by every router() entry; see router()
   // Known task-file statuses in protocol order; the sentinels are data
   // problems (file missing / status unparseable), not runnable states.
   const KNOWN_STATUSES = [
@@ -3231,6 +3232,12 @@
   }
 
   async function router() {
+    // Claim this navigation's generation before anything can await: a later
+    // router() entry (hashchange, login submit, Retry) bumps it and thereby
+    // marks this invocation stale. Route handlers await network payloads, so a
+    // slow route can still resolve long after the user moved on — and its
+    // post-await work would then act on a view it no longer owns.
+    const generation = ++routeGeneration;
     // Leaving any view aborts an in-flight log stream and stops the intake poll
     // and the Overview refresh so none keep reading/painting after navigation.
     if (activeStream) {
@@ -3247,12 +3254,21 @@
     const path = currentPath();
     setActiveTab(path);
     const handler = matchRoute(path);
+    let failure = null;
     try {
       await handler();
     } catch (err) {
+      failure = err;
+    }
+    // A newer route claimed the generation while this handler was awaiting: that
+    // invocation owns the view now, so a stale completion must neither paint its
+    // error over the newer view nor move focus out of it — which would rip a
+    // keyboard user back to the top of a page they were already operating.
+    if (generation !== routeGeneration) return;
+    if (failure) {
       // A 401 already rendered (and landed on) the login gate.
-      if (err instanceof ApiError && err.status === 401) return;
-      renderError(err);
+      if (failure instanceof ApiError && failure.status === 401) return;
+      renderError(failure);
     }
     // Name the new page and put focus at its start, so a keyboard/screen-reader
     // user arrives on the destination instead of the link they activated.
