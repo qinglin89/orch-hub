@@ -1244,6 +1244,83 @@ async function scenarioStaleRoute() {
   );
   activeIs("stale route: a stale re-render leaves focus alone", lastFilter);
 
+  // The delayed-start case: an intake control re-enters its render only AFTER
+  // its own POST resolves. Guarding at that re-entry is too late — by then the
+  // navigation has already bumped the generation, so the late re-entry adopts
+  // the NEWER route's generation as its own and paints anyway. The guard has to
+  // be captured when the button is pressed.
+  installRoutes({ waiting: false });
+  await navigate("#/intakes/i1");
+  var releaseCancel = defer("POST", "/api/intakes/i1/cancel");
+  pressEnter(doc.querySelector(".intake-cancel")); // parks on the POST itself
+  await flush();
+  await navigate("#/tasks");
+  var actionFilter = doc.getElementById("f-repo");
+  actionFilter.focus();
+  var beforeRelease = CALLS.length;
+
+  await releaseCancel();
+  eq(
+    "stale route: a stale intake action paints nothing over the newer view",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+  eq(
+    "stale route: document.title survives a stale intake action",
+    doc.title,
+    "Tasks · orch-hub"
+  );
+  activeIs("stale route: a stale intake action leaves focus alone", actionFilter);
+  check(
+    "stale route: a stale intake action never re-enters its render",
+    CALLS.slice(beforeRelease).every(function (c) {
+      return c.path !== "/api/intakes/i1/history";
+    }),
+    "the superseded action re-read the intake and repainted the loading view"
+  );
+
+  // The same for the confirm handoff, which steals the URL rather than the view:
+  // a late success would route the user to the created task's detail, off the
+  // page they navigated to.
+  route("POST", "/api/intakes/i1/confirm", {
+    intake_id: "i1",
+    repo_name: REPO,
+    status: "confirmed",
+    created_task_id: TASK,
+  });
+  await navigate("#/intakes/i1");
+  var releaseConfirm = defer("POST", "/api/intakes/i1/confirm");
+  pressEnter(doc.querySelector(".intake-confirm"));
+  await flush();
+  await navigate("#/tasks");
+
+  await releaseConfirm();
+  eq("stale route: a stale confirm hands off nowhere", location.hash, "#/tasks");
+  eq(
+    "stale route: a stale confirm leaves the newer view alone",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+
+  // Starting an intake routes to the new review view on success, and its POST
+  // runs the readiness checks (git / aii-2 subprocesses), so it can easily
+  // outlive the repo page it was submitted from.
+  route("POST", "/api/intakes", { intake_id: "i1" });
+  await navigate("#/repos/" + REPO);
+  type(doc.getElementById("intake-request"), "Add a thing");
+  var releaseStart = defer("POST", "/api/intakes");
+  pressEnter(doc.querySelector(".intake-form button"));
+  await flush();
+  await navigate("#/tasks");
+
+  await releaseStart();
+  eq("stale route: a stale intake start routes nowhere", location.hash, "#/tasks");
+  eq(
+    "stale route: a stale intake start leaves the newer view alone",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+
   // A stale log view costs more than a paint: router() aborts the active stream
   // on its way out, so a handler that ran on regardless would open a fresh SSE
   // stream after that teardown — a reader nothing cancels, feeding a <pre> that

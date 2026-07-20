@@ -326,6 +326,12 @@
   // Re-entering a handler WITHOUT a navigation (the log view's Reload, the
   // intake control re-renders, the intake poll's settle) captures the live
   // generation and is therefore never superseded — those repaints still land.
+  //
+  // WHERE the capture happens is the whole contract. An action that re-enters a
+  // handler only AFTER its own request resolves (the intake controls post first,
+  // then re-render) has to capture before that request: a guard taken at the
+  // late re-entry captures the generation of the route the user has meanwhile
+  // moved to, so it can never see itself as stale. Capture when the user acts.
   function routeGuard() {
     const generation = routeGeneration;
     return () => generation !== routeGeneration;
@@ -2163,14 +2169,21 @@
       return;
     }
     if (button) button.disabled = true;
+    const superseded = routeGuard(); // captured before the POST, not after it
     try {
       const rec = await api("/api/intakes", {
         method: "POST",
         body: { repo_id: form.dataset.repo, request },
       });
+      // Readiness checks shell out to git/aii-2, so this POST can outlive the
+      // view. Routing after the user moved on would drag them off the page they
+      // chose; the intake is not lost — repo detail surfaces the repo's
+      // in-flight intake, and the draft still pushes when it is ready.
+      if (superseded()) return;
       location.hash = intakeHash(rec.intake_id);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the form and its status line are gone
       if (button) button.disabled = false;
       const existing = err instanceof ApiError && err.body && err.body.intake_id;
       if (existing) {
@@ -2495,12 +2508,19 @@
   // / write failure) shows its outcome — no task created, repo unchanged.
   async function onIntakeConfirm(intakeId, button) {
     const statusEl = document.querySelector(".intake-status");
+    const superseded = routeGuard(); // captured before the POST, not after it
     setControlBusy(button, statusEl, true);
     try {
       const rec = await api(
         "/api/intakes/" + encodeURIComponent(intakeId) + "/confirm",
         { method: "POST" }
       );
+      // The user navigated away while the write was in flight. The turn runs on
+      // the hub either way and its outcome lands in the intake record, so
+      // dropping the follow-up costs nothing — whereas handing off would yank
+      // them off the page they chose, and re-rendering would paint the intake
+      // over it.
+      if (superseded()) return;
       if (rec.status === "confirmed" && rec.created_task_id && rec.repo_name) {
         handoffToCreatedTask(rec); // synchronous settle (e.g. a test executor)
       } else {
@@ -2511,6 +2531,7 @@
       }
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the button and its status line are gone
       setControlBusy(button, statusEl, false);
       if (statusEl) {
         statusEl.classList.add("error-text");
@@ -2523,14 +2544,17 @@
   // (with its back-link and audit trail).
   async function onIntakeCancel(intakeId, button) {
     const statusEl = document.querySelector(".intake-status");
+    const superseded = routeGuard(); // captured before the POST, not after it
     setControlBusy(button, statusEl, true);
     try {
       await api("/api/intakes/" + encodeURIComponent(intakeId) + "/cancel", {
         method: "POST",
       });
+      if (superseded()) return; // a newer route owns the view
       rerender(renderIntakeReview(intakeId));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the button and its status line are gone
       setControlBusy(button, statusEl, false);
       if (statusEl) {
         statusEl.classList.add("error-text");
@@ -2559,14 +2583,17 @@
       return;
     }
     if (button) button.disabled = true;
+    const superseded = routeGuard(); // captured before the POST, not after it
     try {
       await api("/api/intakes/" + encodeURIComponent(intakeId) + "/revise", {
         method: "POST",
         body: { feedback },
       });
+      if (superseded()) return; // a newer route owns the view
       rerender(renderIntakeReview(intakeId));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the form and its status line are gone
       if (button) button.disabled = false;
       if (statusEl) {
         statusEl.classList.add("error-text");
