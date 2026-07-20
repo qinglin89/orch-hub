@@ -14,8 +14,13 @@
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
+    <!-- Skip link: first thing in the tab order, jumps past the header chrome.
+         The href is inert (app.js preventDefaults it and focuses #view) because
+         a real `#view` navigation would be read by the hash router as a route. -->
+    <a class="skip-link" id="skip-link" href="#view">Skip to main content</a>
+
     <header class="app-header">
-      <h1 class="app-title">orch-hub</h1>
+      <span class="app-title">orch-hub</span>
       <button
         id="signout-btn"
         class="icon-btn"
@@ -27,10 +32,18 @@
       </button>
     </header>
 
-    <!-- app.js renders the login gate or the routed view into #view -->
-    <main id="view" class="view" aria-live="polite"></main>
+    <!-- app.js renders the login gate or the routed view into #view, each
+         starting with an `h1.page-title` that names the page. `tabindex="-1"`
+         makes the region a programmatic focus target for the skip link and for
+         a route change that renders no heading.
+         Deliberately NOT an aria-live region: the whole view is repainted by
+         the Overview auto-refresh, the intake poll, and every log line, which
+         would make a live region narrate the entire page every few seconds.
+         Announcements are scoped to the small regions that actually change
+         (counts, control status, alerts) plus the post-navigation heading. -->
+    <main id="view" class="view" tabindex="-1"></main>
 
-    <nav id="nav" class="tabbar" hidden>
+    <nav id="nav" class="tabbar" aria-label="Primary" hidden>
       <a href="#/overview" data-tab="/overview">Overview</a>
       <a href="#/repos" data-tab="/repos">Repos</a>
       <a href="#/tasks" data-tab="/tasks">Tasks</a>

@@ -1022,3 +1022,196 @@ def test_overview_panels_are_responsive():
     assert "min-width: 640px" in css
     assert "grid-column: 1 / -1" in css
     assert ".overview-panels > .overview-attention" in css
+
+
+# ---- dashboard accessibility (2026-07-17-dashboard-accessibility) -------------
+#
+# Structural a11y wiring pinned at the served-asset boundary, like every other
+# SPA check above. The *behaviour* these enable — focus actually moving on a
+# route change, Escape closing the launch dialog, focus returning to its opener,
+# every control reachable by Tab — is driven for real against this app.js under
+# a stubbed browser in tests/test_web_keyboard.py; these tests guard the markup
+# and stylesheet contract that behaviour rests on. Each maps to a scope line.
+
+
+def test_shell_offers_a_skip_link_into_a_focusable_main():
+    html = index_html()
+    body = app_js()
+    # A skip link is the document's first tab stop...
+    assert 'class="skip-link"' in html
+    assert 'id="skip-link"' in html
+    # ...whose href is inert on purpose: a real "#view" navigation would be read
+    # by the hash router as a route, so app.js preventDefaults and focuses #view.
+    assert 'document.getElementById("skip-link")' in body
+    assert "ev.preventDefault();" in body
+    # The main region is a programmatic focus target (the skip-link destination
+    # and the fallback for a view that renders no heading).
+    assert 'id="view" class="view" tabindex="-1"' in html
+
+
+def test_view_region_is_not_a_live_region():
+    # The whole view is repainted by the Overview auto-refresh, the intake poll,
+    # and every streamed log line. As an aria-live region that made assistive
+    # tech narrate the entire page every few seconds, so announcements moved to
+    # the small regions a human actually acted on. Pinned as a negative: the
+    # <main> element must carry no aria-live.
+    html = index_html()
+    main_tag = html[html.index("<main") : html.index(">", html.index("<main")) + 1]
+    assert "aria-live" not in main_tag
+    # The narrow polite regions (filter result counts) are still live.
+    assert 'aria-live="polite"' in app_js()
+
+
+def test_primary_navigation_is_named_and_marks_the_current_tab():
+    html = index_html()
+    body = app_js()
+    assert '<nav id="nav" class="tabbar" aria-label="Primary"' in html
+    # Active tab state is exposed semantically, not by colour alone.
+    assert 'a.setAttribute("aria-current", "page")' in body
+    assert 'a.removeAttribute("aria-current")' in body
+
+
+def test_every_view_opens_with_one_page_heading():
+    html = index_html()
+    body = app_js()
+    # The banner title is no longer an h1, so the per-view heading is the only
+    # one and always describes the current page.
+    assert '<span class="app-title">orch-hub</span>' in html
+    assert "<h1" not in html
+    # One shared builder emits `h1.page-title` as a programmatic focus target.
+    assert 'const pageTitle = (text, extraClass)' in body
+    assert '<h1 class="page-title' in body
+    assert 'tabindex="-1"' in body
+    # Every routed view names itself, including the loading placeholder.
+    assert "function loadingView" in body or "const loadingView" in body
+    for title in (
+        '"Operations overview"',
+        '"Repos"',
+        '"Tasks"',
+        '"Run history"',
+        '"Task intake"',
+        '"Connect to orch-hub"',
+    ):
+        assert title in body
+
+
+def test_navigation_moves_focus_and_names_the_document():
+    body = app_js()
+    # One landing helper: name the page in document.title, then focus its start.
+    assert "function syncDocumentTitle" in body
+    assert "function focusPageStart" in body
+    assert "function landOnView" in body
+    assert 'document.querySelector("#view .page-title")' in body
+    assert '" · orch-hub"' in body
+    # Called by the router (a navigation) and by rerender (an action that
+    # repaints the whole view) — the two moments the focused control is gone.
+    assert "landOnView();\n  }\n\n  function signOut" in body
+    assert "promise.then(landOnView)" in body
+
+
+def test_background_repaints_do_not_steal_focus():
+    body = app_js()
+    # The Overview heading lives outside the repainted region, so the refresh
+    # can neither destroy the focus target nor re-announce the page...
+    assert '`<div id="overview-body"></div>`' in body
+    assert 'document.getElementById("overview-body")' in body
+    # ...and a tick skips the repaint entirely while focus is inside that region.
+    assert "function focusInsideOverviewBody" in body
+    assert "if (data && !focusInsideOverviewBody()) paintOverview(data);" in body
+
+
+def test_disabled_controls_hand_focus_back():
+    body = app_js()
+    # Disabling the pressed button drops focus to <body>; a failed action must
+    # put it back rather than strand the keyboard user at the top of the page.
+    assert "function restoreFocus" in body
+    assert "if (!busy) restoreFocus(button);" in body
+    # A local validation refusal sends focus to the field that must be fixed.
+    assert "input.focus(); // send the keyboard user to the field they must fill" in body
+
+
+def test_launch_dialog_is_named_cancellable_and_restores_focus():
+    body = app_js()
+    # Named by its own heading...
+    assert '<dialog class="run-options" aria-labelledby="run-options-title">' in body
+    assert '<h3 id="run-options-title">Start run</h3>' in body
+    # ...dismissable from the keyboard (the no-showModal fallback has no native
+    # Escape, so app.js owns the key)...
+    assert 'if (ev.key === "Escape") closeRunOptions(dialog);' in body
+    # ...and focus returns to whatever opened it, on every dismissal path.
+    assert "let dialogOpener = null;" in body
+    assert 'dialog.addEventListener("close", () => restoreFocus(dialogOpener));' in body
+    # The fallback path focuses into the dialog by hand (showModal does it natively).
+    assert 'dialog.querySelector("select, input, textarea, button")' in body
+
+
+def test_form_controls_carry_accessible_names():
+    body = app_js()
+    # Every free-text control is named: explicit label/for where a visible label
+    # exists, aria-label where the design carries the context another way.
+    assert '<label for="token-input">Bearer token</label>' in body
+    assert 'aria-label="Reply to question ' in body
+    assert 'for="intake-request"' in body
+    assert 'for="intake-feedback"' in body
+    for field in ("f-repo", "f-status", "f-search", "rf-repo", "rf-state", "rf-task"):
+        assert f'<label for="{field}"' in body
+    for field in ("opt-dev-agent", "opt-dev-model", "opt-review-effort"):
+        assert f'<label for="{field}"' in body
+
+
+def test_scrollable_regions_are_keyboard_reachable():
+    body = app_js()
+    # A capped, scrolling block is unreachable by keyboard without tabindex.
+    assert '<pre class="task-content" tabindex="0" aria-label=' in body
+    assert 'id="log-output" class="log-output" tabindex="0"' in body
+    # The log body is deliberately not a live region — the ARIA log role implies
+    # one, which would narrate every streamed line. As with the EventSource check
+    # above, the negative is on the literal attribute; app.js's comment explains
+    # the decision without spelling it, so this stays a real guard.
+    assert 'role="log"' not in body
+    assert 'id="log-status" class="muted" role="status"' in body
+
+
+def test_focus_is_visible_everywhere_from_one_rule():
+    css = styles_css()
+    # A single zero-specificity rule covers links, buttons, form controls and
+    # programmatic targets, so no control can ship without an indicator.
+    assert ":where(a, button, input, select, textarea, summary, [tabindex]):focus-visible" in css
+    assert "outline: 2px solid var(--focus)" in css
+    assert "outline-offset: 2px" in css
+    # A card link fills its card, so its ring is drawn inside to avoid colliding
+    # with the neighbouring card.
+    assert ".card-link:focus-visible" in css
+    assert "outline-offset: -2px" in css
+    # The utilities the semantics rely on.
+    assert ".visually-hidden" in css
+    assert ".skip-link" in css
+    assert ".skip-link:focus" in css
+    assert ".page-title" in css
+
+
+def test_contrast_tokens_cover_filled_controls_in_both_themes():
+    css = styles_css()
+    # Text on an --accent fill needs its own token: dark mode's accent is light
+    # enough that white-on-accent failed AA.
+    assert "--accent-text: #ffffff" in css
+    assert "--accent-text: #0f1115" in css
+    assert "color: #fff" not in css  # no hard-coded white left on a themed fill
+    # Destructive fills need one colour that carries its text in BOTH themes;
+    # --bad-fg is a light pink in dark mode and was unusable as a button fill.
+    assert "--danger: #dc2626" in css
+    assert "background: var(--danger)" in css
+    assert "background: var(--bad-fg)" not in css
+    # Muted body text was just under 4.5:1 on the light background.
+    assert "--muted: #5c6370" in css
+    assert "--focus:" in css
+
+
+def test_interactive_controls_meet_a_minimum_target_size():
+    css = styles_css()
+    # Every compact control gets a floor; the tabbar/cards are already large.
+    assert css.count("min-height: 40px") >= 4  # primary + secondary + group head
+    assert css.count("min-height: 36px") >= 2  # icon + shared secondary buttons
+    assert "min-height: 32px" in css  # inline back/text links
+    # The only animated affordance honours a reduced-motion preference.
+    assert "prefers-reduced-motion: reduce" in css

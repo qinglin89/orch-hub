@@ -14,6 +14,15 @@
  * (with an inline answer box for waiting questions); run history; and a live/
  * recent log tail per run. The hash router tolerates unknown routes by falling
  * back to the repo list.
+ *
+ * Accessibility model: every view starts with exactly one `h1.page-title`
+ * naming the page. router() mirrors it into document.title and moves focus to
+ * it after a navigation, so a keyboard/screen-reader user lands on the new page
+ * instead of the control they activated; it is a plain focus move, never a
+ * trap. In-place repaints (Overview refresh, intake poll, log append, Reload)
+ * deliberately do NOT move focus and are NOT inside a live region — only small
+ * regions that a human acted on announce (`role="status"` control lines,
+ * `role="alert"` validation errors, the polite filter counts).
  */
 (function () {
   const TOKEN_KEY = "orch-hub-token";
@@ -222,6 +231,29 @@
 
   const centerHtml = (text) => `<p class="center">${escapeHtml(text)}</p>`;
 
+  // Every view opens with exactly one `h1.page-title` naming the page. It is the
+  // document outline's root (section headings are h2, their sub-headings h3),
+  // the post-navigation focus target, and the source of document.title — so a
+  // route always announces itself once, by name. `tabindex="-1"` makes it
+  // programmatically focusable without joining the tab order.
+  const pageTitle = (text, extraClass) =>
+    `<h1 class="page-title${
+      extraClass ? " " + extraClass : ""
+    }" tabindex="-1">${escapeHtml(text)}</h1>`;
+
+  // A loading placeholder that already carries the page heading, so the heading
+  // exists from the first paint and a slow route still has a focus target.
+  const loadingView = (title, text) => pageTitle(title) + centerHtml(text);
+
+  // A scrollable pre block (task file, index entry, …). `.task-content` caps its
+  // height and scrolls, so it needs `tabindex="0"` to be scrollable by keyboard
+  // at all, and a name to be worth landing on. Content stays escaped — these
+  // bodies are untrusted repo data.
+  const taskContentBlock = (text, label) =>
+    `<pre class="task-content" tabindex="0" aria-label="${escapeHtml(
+      label
+    )}">${escapeHtml(text)}</pre>`;
+
   // Build an in-app hash link. Each dynamic segment is encoded so a repo name
   // or task id is always exactly one path segment for the router to split back.
   const repoHash = (repo) => "#/repos/" + encodeURIComponent(repo);
@@ -240,21 +272,56 @@
     document.getElementById("nav").hidden = !authed;
   }
 
+  // Mark the current tab both visually (.active, a colour change) and
+  // semantically: `aria-current="page"` is the accessible-state channel, so the
+  // active tab is announced as such instead of relying on colour alone.
   function setActiveTab(path) {
     let tab = "/repos";
     if (path.startsWith("/overview")) tab = "/overview";
     else if (path.startsWith("/tasks")) tab = "/tasks";
     else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
-      a.classList.toggle("active", a.dataset.tab === tab);
+      const active = a.dataset.tab === tab;
+      a.classList.toggle("active", active);
+      if (active) a.setAttribute("aria-current", "page");
+      else a.removeAttribute("aria-current");
     });
+  }
+
+  // Mirror the rendered page heading into document.title, so the browser/AT
+  // window title tracks the route without every view repeating itself.
+  function syncDocumentTitle() {
+    const head = document.querySelector("#view .page-title");
+    const text = head ? head.textContent.trim() : "";
+    document.title = text ? text + " · orch-hub" : "orch-hub";
+  }
+
+  // Move focus to the routed view's page heading. The heading is
+  // `tabindex="-1"`, so this is a plain focus move: Tab continues into the view
+  // and Shift+Tab back out to the chrome — nothing is trapped.
+  function focusPageStart() {
+    const target = document.querySelector("#view .page-title") || view();
+    if (target && typeof target.focus === "function") target.focus();
+  }
+
+  // Land on a freshly rendered view: name it in document.title and put focus at
+  // its start. Called for a navigation (router) and for an action that repaints
+  // the whole view (rerender, the login gate) — i.e. exactly when the control
+  // the user was on has just been destroyed. Background repaints (the Overview
+  // refresh, an intake elapsed tick, a streamed log line) never call this.
+  function landOnView() {
+    syncDocumentTitle();
+    focusPageStart();
   }
 
   function renderError(err) {
     const msg =
       err instanceof ApiError ? err.message : "Something went wrong.";
     view().innerHTML =
-      `<div class="center"><p class="error-text">${escapeHtml(msg)}</p>` +
+      pageTitle("Error") +
+      `<div class="center"><p class="error-text" role="alert">${escapeHtml(
+        msg
+      )}</p>` +
       `<button class="retry-btn" id="retry-btn" type="button">Retry</button></div>`;
     document
       .getElementById("retry-btn")
@@ -262,15 +329,25 @@
   }
 
   // ---- login gate ----
+  // The login gate is reached three ways (no stored token, a mid-flight 401, and
+  // sign-out), only one of which goes through router() — so it does its own
+  // title sync and focus move rather than leaving them to the router.
+  // The token field carries a real <label>; a rejected-token message is an
+  // `role="alert"` so it is announced when it replaces the form in place.
   function renderLogin(message) {
     showChrome(false);
     view().innerHTML = `
       <section class="card login">
-        <h2>Connect to orch-hub</h2>
+        ${pageTitle("Connect to orch-hub")}
         <p class="muted">Paste the service bearer token
           (<code>ORCH_HUB_TOKEN</code>). It is stored only in this browser.</p>
-        ${message ? `<p class="error-text">${escapeHtml(message)}</p>` : ""}
+        ${
+          message
+            ? `<p class="error-text" role="alert">${escapeHtml(message)}</p>`
+            : ""
+        }
         <form id="login-form">
+          <label for="token-input">Bearer token</label>
           <input id="token-input" type="password" autocomplete="off"
             autocapitalize="off" spellcheck="false" placeholder="bearer token" />
           <button type="submit">Connect</button>
@@ -284,6 +361,7 @@
       setToken(value);
       router();
     });
+    landOnView();
   }
 
   // ---- run overlay helpers (shared by list + detail views) ----
@@ -417,7 +495,7 @@
   }
 
   async function renderRepos() {
-    view().innerHTML = centerHtml("Loading repos…");
+    view().innerHTML = loadingView("Repos", "Loading repos…");
     const reposData = await api("/api/repos");
     const repos = reposData.repos || [];
     let runsByRepo = {};
@@ -439,10 +517,12 @@
       if (err instanceof ApiError && err.status === 401) throw err;
     }
     if (!repos.length) {
-      view().innerHTML = centerHtml("No managed repos discovered.");
+      view().innerHTML =
+        pageTitle("Repos") + centerHtml("No managed repos discovered.");
       return;
     }
     view().innerHTML =
+      pageTitle("Repos") +
       `<ul class="list">` +
       repos
         .map((r) => repoCard(r, runsByRepo[r.name], taskCountByRepo[r.name]))
@@ -620,7 +700,7 @@
   }
 
   async function renderTasks() {
-    view().innerHTML = centerHtml("Loading tasks…");
+    view().innerHTML = loadingView("Tasks", "Loading tasks…");
     const data = await api("/api/tasks");
     const repos = data.repos || [];
     // Best-effort run overlay so task cards show run-state accents here too; a
@@ -639,26 +719,28 @@
     if (taskFilters.status && !statuses.includes(taskFilters.status))
       taskFilters.status = "";
     view().innerHTML = `
-      <div class="filters">
-        <label>Repo
+      ${pageTitle("Tasks")}
+      <div class="filters" role="search" aria-label="Filter tasks">
+        <label for="f-repo">Repo
           <select id="f-repo">${optionList(
             repoNames,
             taskFilters.repo,
             "All repos"
           )}</select>
         </label>
-        <label>Status
+        <label for="f-status">Status
           <select id="f-status">${optionList(
             statuses,
             taskFilters.status,
             "All statuses"
           )}</select>
         </label>
-        <label>Search
+        <label for="f-search">Search
           <input id="f-search" type="search" placeholder="Search tasks"
                  value="${escapeHtml(taskFilters.search)}" />
         </label>
-        <button id="f-clear" class="filters-clear" type="button">Clear</button>
+        <button id="f-clear" class="filters-clear" type="button">Clear
+          <span class="visually-hidden"> task filters</span></button>
       </div>
       <p id="task-count" class="task-count muted" aria-live="polite"></p>
       <ul id="task-list" class="list"></ul>`;
@@ -718,7 +800,7 @@
   }
 
   async function renderRepoDetail(repoName) {
-    view().innerHTML = centerHtml("Loading " + repoName + "…");
+    view().innerHTML = loadingView(repoName, "Loading " + repoName + "…");
     // Required: this repo's task inventory (single-repo envelope). An unknown
     // repo is a 404 the router surfaces as an error view.
     const data = await api("/api/repos/" + encodeURIComponent(repoName) + "/tasks");
@@ -726,6 +808,7 @@
     if (!entry) {
       view().innerHTML =
         `<a class="back-link" href="#/repos">← Repos</a>` +
+        pageTitle(repoName) +
         centerHtml("Repo not found.");
       return;
     }
@@ -802,7 +885,7 @@
     view().innerHTML = `
       <a class="back-link" href="#/repos">← Repos</a>
       <div class="detail-head">
-        <span class="name big">${escapeHtml(repoName)}</span>
+        ${pageTitle(repoName, "name big")}
         ${readyBadge}
       </div>
       <div class="path muted">${escapeHtml(repoPath || "")}</div>
@@ -811,7 +894,7 @@
       ${intakeSection(repoName, inflightIntake, readiness)}
       ${
         entry.index_present
-          ? `<div class="filters"><label>Status
+          ? `<div class="filters"><label for="rd-status">Status
               <select id="rd-status">${optionList(
                 statuses,
                 repoDetailStatus,
@@ -996,6 +1079,7 @@
       }
       <form class="answer-form" data-run="${escapeHtml(runId)}" data-seq="${q.seq}">
         <textarea class="answer-input" rows="3"
+          aria-label="Reply to question ${escapeHtml(q.seq)}"
           placeholder="${escapeHtml(placeholder)}"></textarea>
         <div class="answer-actions">
           <button type="button" class="answer-discuss" data-mode="discuss">${discussLabel}</button>
@@ -1046,6 +1130,7 @@
     const answer = input.value.trim();
     if (!answer && !allowEmpty) {
       statusEl.textContent = "Enter a reply first.";
+      input.focus(); // send the keyboard user to the field they must fill
       return;
     }
     buttons.forEach((b) => (b.disabled = true));
@@ -1064,7 +1149,18 @@
       buttons.forEach((b) => (b.disabled = false));
       statusEl.textContent =
         err instanceof ApiError ? err.message : "Failed to send answer.";
+      // Disabling the pressed button dropped focus to <body>; put it back so a
+      // keyboard user can retry from where they were (the role="alert" status
+      // has already announced why it failed).
+      restoreFocus(button);
     }
+  }
+
+  // Re-focus a control that was disabled while an action was in flight. A
+  // disabled element loses focus to <body>, so a failed action would otherwise
+  // strand a keyboard user at the top of the document.
+  function restoreFocus(el) {
+    if (el && !el.disabled && typeof el.focus === "function") el.focus();
   }
 
   // ---- run controls (start / stop) ----
@@ -1116,21 +1212,27 @@
   }
 
   // Re-render a view after an action, routing a hard error to the error view (a
-  // 401 already shows the login gate). Used by the intake control re-renders.
+  // 401 already shows the login gate). Used by the intake control re-renders and
+  // by the intake poll's settle. The repaint destroys the control that was
+  // pressed, so it lands on the new view the same way a navigation does.
   function rerender(promise) {
-    promise.catch((err) => {
+    promise.then(landOnView).catch((err) => {
       if (err instanceof ApiError && err.status === 401) return; // login shown
       renderError(err);
+      landOnView();
     });
   }
 
   // Toggle a control button's busy state and clear its status line when busy.
+  // Re-enabling also restores focus: disabling the pressed button dropped it to
+  // <body>, so without this a failed action strands a keyboard user.
   function setControlBusy(button, statusEl, busy) {
     if (button) button.disabled = busy;
     if (statusEl && busy) {
       statusEl.textContent = "";
       statusEl.classList.remove("error-text");
     }
+    if (!busy) restoreFocus(button);
   }
 
   // The Start/Stop control for a task, chosen from the run overlay the backend
@@ -1215,41 +1317,48 @@
     // orchestrator keeps its own default — only a changed field adds an arg
     // (see buildExtraArgs). The blocked-task acknowledgement moves inside the
     // dialog, so it is confirmed together with the launch.
+    // Each field carries an explicit for/id pair (only one options dialog is on
+    // the page at a time, so fixed ids are safe) and the dialog is named by its
+    // own heading through aria-labelledby, so the modal announces what it is.
     return (
       head +
       `<button type="button" class="open-run-options">Start run…</button>
-      <dialog class="run-options">
+      <dialog class="run-options" aria-labelledby="run-options-title">
         <form class="start-form" data-repo="${escapeHtml(
           repoName
         )}" data-task="${escapeHtml(detail.task_id)}" data-blocked="${
         blocked ? "1" : ""
       }">
-          <h3>Start run</h3>
+          <h3 id="run-options-title">Start run</h3>
           <p class="muted opts-note">Backend is fixed to <code>cc-codex</code>.
             Leave a field blank to use the orchestrator default; only changed
             fields are passed.</p>
-          <label>Dev agent
-            <select class="opt-dev-agent">
+          <label for="opt-dev-agent">Dev agent
+            <select id="opt-dev-agent" class="opt-dev-agent">
               <option value="">default</option>
               <option value="claude">claude</option>
               <option value="codex">codex</option>
             </select>
           </label>
-          <label>Dev model
-            <input type="text" class="opt-dev-model" autocapitalize="off"
-              autocomplete="off" spellcheck="false" placeholder="default" />
+          <label for="opt-dev-model">Dev model
+            <input type="text" id="opt-dev-model" class="opt-dev-model"
+              autocapitalize="off" autocomplete="off" spellcheck="false"
+              placeholder="default" />
           </label>
-          <label>Dev effort
-            <input type="text" class="opt-dev-effort" autocapitalize="off"
-              autocomplete="off" spellcheck="false" placeholder="default" />
+          <label for="opt-dev-effort">Dev effort
+            <input type="text" id="opt-dev-effort" class="opt-dev-effort"
+              autocapitalize="off" autocomplete="off" spellcheck="false"
+              placeholder="default" />
           </label>
-          <label>Review model
-            <input type="text" class="opt-review-model" autocapitalize="off"
-              autocomplete="off" spellcheck="false" placeholder="default" />
+          <label for="opt-review-model">Review model
+            <input type="text" id="opt-review-model" class="opt-review-model"
+              autocapitalize="off" autocomplete="off" spellcheck="false"
+              placeholder="default" />
           </label>
-          <label>Review effort
-            <input type="text" class="opt-review-effort" autocapitalize="off"
-              autocomplete="off" spellcheck="false" placeholder="default" />
+          <label for="opt-review-effort">Review effort
+            <input type="text" id="opt-review-effort" class="opt-review-effort"
+              autocapitalize="off" autocomplete="off" spellcheck="false"
+              placeholder="default" />
           </label>
           <label class="opt-toggle"><input type="checkbox" class="opt-plan-gate" />
             <span>Plan-gate: every dev session first proposes its goal and plan
@@ -1271,9 +1380,18 @@
     const openBtn = document.querySelector(".open-run-options");
     const dialog = document.querySelector(".run-options");
     if (openBtn && dialog) {
-      openBtn.addEventListener("click", () => openRunOptions(dialog));
+      openBtn.addEventListener("click", () => openRunOptions(dialog, openBtn));
       const cancel = dialog.querySelector(".cancel-run-options");
-      if (cancel) cancel.addEventListener("click", () => dialog.close());
+      if (cancel) cancel.addEventListener("click", () => closeRunOptions(dialog));
+      // Escape must dismiss the dialog. A native modal does that itself (and
+      // fires `close`); the no-showModal fallback below has no such behavior,
+      // so handle the key here — closeRunOptions is idempotent either way.
+      dialog.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") closeRunOptions(dialog);
+      });
+      // `close` fires for every dismissal path (Cancel, Escape, a successful
+      // launch), so focus restoration lives here once rather than per path.
+      dialog.addEventListener("close", () => restoreFocus(dialogOpener));
     }
     const startForm = document.querySelector(".start-form");
     if (startForm) startForm.addEventListener("submit", onStartSubmit);
@@ -1281,12 +1399,33 @@
     if (stopForm) stopForm.addEventListener("submit", onStopSubmit);
   }
 
-  // Open the options dialog. Prefer the native modal; fall back to a plain open
-  // attribute on the rare browser without <dialog>.showModal so the form is
-  // still reachable.
-  function openRunOptions(dialog) {
-    if (typeof dialog.showModal === "function") dialog.showModal();
-    else dialog.setAttribute("open", "");
+  // The control that opened the current dialog, so closing it can hand focus
+  // back instead of dropping the keyboard user at the top of the document.
+  let dialogOpener = null;
+
+  // Open the options dialog. Prefer the native modal (which scopes focus to the
+  // dialog and handles Escape); fall back to a plain open attribute on the rare
+  // browser without <dialog>.showModal so the form is still reachable — there,
+  // focus is moved to the first field by hand.
+  function openRunOptions(dialog, opener) {
+    dialogOpener = opener || null;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+      return;
+    }
+    dialog.setAttribute("open", "");
+    const first = dialog.querySelector("select, input, textarea, button");
+    if (first && typeof first.focus === "function") first.focus();
+  }
+
+  // Close it through whichever path opened it, then let the `close` handler
+  // restore focus. Closing an already-closed dialog is a no-op.
+  function closeRunOptions(dialog) {
+    if (typeof dialog.close === "function") dialog.close();
+    else {
+      dialog.removeAttribute("open");
+      restoreFocus(dialogOpener);
+    }
   }
 
   // The launch overrides, each as [orchestrator flag, field class]. Order fixes
@@ -1347,13 +1486,14 @@
           acknowledge_blocked: acknowledgeBlocked,
         },
       });
-      if (dialog && dialog.open) dialog.close();
+      if (dialog && dialog.open) closeRunOptions(dialog);
       router(); // now shows the live run + Stop control
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
       button.disabled = false;
       statusEl.classList.add("error-text");
       statusEl.textContent = controlErrorText(err, "Failed to start the run.");
+      restoreFocus(button); // refusal keeps the dialog open on its submit button
     }
   }
 
@@ -1382,11 +1522,12 @@
       button.disabled = false;
       statusEl.classList.add("error-text");
       statusEl.textContent = controlErrorText(err, "Failed to request stop.");
+      restoreFocus(button);
     }
   }
 
   async function renderTaskDetail(repoName, taskId) {
-    view().innerHTML = centerHtml("Loading task…");
+    view().innerHTML = loadingView(taskId, "Loading task…");
     // Required: the task's inventory fields + raw file body. Unknown repo/task
     // is a 404 the router surfaces as an error view.
     const detail = await api(
@@ -1461,7 +1602,7 @@
         : "";
     const contentSection = `<section class="section"><h2>Task file</h2>${
       detail.present
-        ? `<pre class="task-content">${escapeHtml(detail.content)}</pre>`
+        ? taskContentBlock(detail.content, detail.task_id)
         : `<p class="muted">The task file is absent.</p>`
     }</section>`;
 
@@ -1470,7 +1611,7 @@
         repoName
       )}</a>
       <div class="detail-head">
-        <span class="task-id big">${escapeHtml(detail.task_id)}</span>
+        ${pageTitle(detail.task_id, "task-id big")}
         ${badge(detail.status, statusBadgeKind(detail.status))}
       </div>
       ${detail.summary ? `<p class="summary">${escapeHtml(detail.summary)}</p>` : ""}
@@ -1801,11 +1942,12 @@
   // run tapping through to its log tail. Empty payload and no-match are distinct
   // states; a clear-filters button restores the full newest-first set.
   async function renderRuns() {
-    view().innerHTML = centerHtml("Loading runs…");
+    view().innerHTML = loadingView("Run history", "Loading runs…");
     const data = await api("/api/history/runs");
     const runs = data.runs || [];
     if (!runs.length) {
-      view().innerHTML = centerHtml("No runs recorded yet.");
+      view().innerHTML =
+        pageTitle("Run history") + centerHtml("No runs recorded yet.");
       return;
     }
     const repoNames = historyRepoNames(runs);
@@ -1818,26 +1960,28 @@
     if (runFilters.state && !states.includes(runFilters.state))
       runFilters.state = "";
     view().innerHTML = `
-      <div class="filters">
-        <label>Repo
+      ${pageTitle("Run history")}
+      <div class="filters" role="search" aria-label="Filter runs">
+        <label for="rf-repo">Repo
           <select id="rf-repo">${optionList(
             repoNames,
             runFilters.repo,
             "All repos"
           )}</select>
         </label>
-        <label>State
+        <label for="rf-state">State
           <select id="rf-state">${optionList(
             states,
             runFilters.state,
             "All states"
           )}</select>
         </label>
-        <label>Task
+        <label for="rf-task">Task
           <input id="rf-task" type="search" placeholder="Filter by task id"
                  value="${escapeHtml(runFilters.task)}" />
         </label>
-        <button id="rf-clear" class="filters-clear" type="button">Clear</button>
+        <button id="rf-clear" class="filters-clear" type="button">Clear
+          <span class="visually-hidden"> run filters</span></button>
       </div>
       <p id="run-count" class="run-count muted" aria-live="polite"></p>
       <div id="run-groups"></div>`;
@@ -1877,18 +2021,18 @@
   // surfaces — e.g. the log view's task back-link — and shows the file body with
   // an active/archived source badge; an absent file renders a muted note.
   async function renderRunTask(runId) {
-    view().innerHTML = centerHtml("Loading task…");
+    view().innerHTML = loadingView("Task file", "Loading task…");
     const data = await api("/api/runs/" + encodeURIComponent(runId) + "/task"); // unknown run → 404
     const taskId = data.task_id || runId;
     const sourceBadge = data.source ? badge(data.source) : "";
     const body = data.present
-      ? `<pre class="task-content">${escapeHtml(data.content)}</pre>`
+      ? taskContentBlock(data.content, taskId)
       : `<p class="muted">The task file for this run is not available
          (neither active nor archived).</p>`;
     view().innerHTML = `
       <a class="back-link" href="#/runs">← Runs</a>
       <div class="detail-head">
-        <span class="task-id big">${escapeHtml(taskId)}</span>
+        ${pageTitle(taskId, "task-id big")}
         ${sourceBadge}
       </div>
       <p><a class="text-link" href="${logsHash(runId)}">View logs →</a></p>
@@ -1935,7 +2079,9 @@
       `<p class="muted">Describe a new task in plain language. The hub drafts the
         full task file for you to review; nothing is written until you confirm.</p>
        <form class="intake-form" data-repo="${escapeHtml(repoName)}">
-         <textarea class="intake-request answer-input" rows="3"
+         <label class="visually-hidden" for="intake-request">Describe the new
+           task</label>
+         <textarea id="intake-request" class="intake-request answer-input" rows="3"
            placeholder="e.g. Add a CSV export button to the run history view"></textarea>
          <div class="control-actions">
            <button type="submit">Draft task…</button>
@@ -1968,6 +2114,7 @@
     const request = input ? input.value.trim() : "";
     if (!request) {
       if (statusEl) statusEl.textContent = "Describe the task first.";
+      if (input) input.focus();
       return;
     }
     if (button) button.disabled = true;
@@ -1989,6 +2136,7 @@
         statusEl.classList.add("error-text");
         statusEl.textContent = controlErrorText(err, "Failed to start intake.");
       }
+      restoreFocus(button);
     }
   }
 
@@ -2008,9 +2156,9 @@
         ${notes}
         <h3 class="intake-sub">Task file
           <code>.ai-tasks/${escapeHtml(draft.task_id)}.md</code></h3>
-        <pre class="task-content">${escapeHtml(draft.task_file)}</pre>
+        ${taskContentBlock(draft.task_file, "Proposed task file")}
         <h3 class="intake-sub">Index entry <code>.ai-tasks/index.md</code></h3>
-        <pre class="task-content">${escapeHtml(draft.index_entry)}</pre>
+        ${taskContentBlock(draft.index_entry, "Proposed index entry")}
       </section>`;
   }
 
@@ -2027,8 +2175,9 @@
           <span class="control-status intake-status" role="status"></span>
         </div>
         <form class="intake-revise-form">
-          <label class="intake-revise-label">Request changes
-            <textarea class="intake-feedback answer-input" rows="3"
+          <label class="intake-revise-label" for="intake-feedback">Request changes
+            <textarea id="intake-feedback" class="intake-feedback answer-input"
+              rows="3"
               placeholder="Describe what to change; the draft is revised in the same session"></textarea>
           </label>
           <div class="control-actions">
@@ -2174,7 +2323,7 @@
     // A fresh render supersedes any in-flight poll (this may BE the poll's settle
     // re-render); it restarts below if the new status is still transient.
     stopIntakePoll();
-    view().innerHTML = centerHtml("Loading intake…");
+    view().innerHTML = loadingView("Task intake", "Loading intake…");
     // Record + metadata-only audit events in one call. Unknown intake → 404 the
     // router surfaces as an error view.
     const data = await api(
@@ -2253,7 +2402,7 @@
     view().innerHTML = `
       ${back}
       <div class="detail-head">
-        <span class="name big">Task intake</span>
+        ${pageTitle("Task intake", "name big")}
         ${badge(data.status, intakeBadgeKind(data.status))}
       </div>
       ${
@@ -2357,6 +2506,7 @@
     const feedback = input ? input.value.trim() : "";
     if (!feedback) {
       if (statusEl) statusEl.textContent = "Describe the change first.";
+      if (input) input.focus();
       return;
     }
     if (button) button.disabled = true;
@@ -2373,6 +2523,7 @@
         statusEl.classList.add("error-text");
         statusEl.textContent = controlErrorText(err, "Failed to send changes.");
       }
+      restoreFocus(button);
     }
   }
 
@@ -2502,7 +2653,7 @@
       activeStream.abort();
       activeStream = null;
     }
-    view().innerHTML = centerHtml("Loading run…");
+    view().innerHTML = loadingView("Run log", "Loading run…");
     const run = await api("/api/runs/" + encodeURIComponent(runId)); // unknown → 404
     const live = LIVE_STATES.has(run.state);
     // The task link goes through the run-scoped task view (resolved from the run
@@ -2513,17 +2664,22 @@
           run.run_id
         )}">← ${escapeHtml(run.task_id)}</a>`
       : `<a class="back-link" href="#/runs">← Runs</a>`;
+    // The log body is `tabindex="0"` so its scroll region is keyboard-reachable,
+    // and deliberately carries no live-region role — the ARIA log role implies
+    // one, which would narrate every streamed line. The toolbar's status line
+    // carries the few announcements that matter: following, paused, ended,
+    // failed.
     view().innerHTML = `
       ${back}
       <div class="detail-head">
-        <span class="run-id big">${escapeHtml(run.run_id)}</span>
+        ${pageTitle(run.run_id, "run-id big")}
         ${runBadge(run.state)}
       </div>
       <div class="muted">${escapeHtml(
         [run.repo_name, run.task_id].filter(Boolean).join(" · ")
       )}</div>
       <div class="log-toolbar">
-        <span id="log-status" class="muted"></span>
+        <span id="log-status" class="muted" role="status"></span>
         <span class="log-actions">
           ${
             live
@@ -2533,7 +2689,8 @@
           <button id="log-reload" class="btn-secondary" type="button">Reload</button>
         </span>
       </div>
-      <pre id="log-output" class="log-output"></pre>`;
+      <pre id="log-output" class="log-output" tabindex="0"
+        aria-label="Run log output"></pre>`;
 
     const pre = document.getElementById("log-output");
     const statusEl = document.getElementById("log-status");
@@ -2559,6 +2716,9 @@
       if (activeStream === controller) activeStream = null;
       pauseBtn.hidden = true;
       statusEl.textContent = "Paused — Reload to resume.";
+      // Hiding the pressed button would drop focus to <body>; hand it to the
+      // Reload button beside it, which is the only way to resume.
+      restoreFocus(document.getElementById("log-reload"));
     });
     statusEl.textContent = "Following live…";
     let sawLine = false;
@@ -2925,19 +3085,42 @@
     };
   }
 
-  // Repaint the whole Overview from a loadOverview() snapshot. Each panel reads
-  // its own source independently, so one null source degrades only its panel; a
-  // full repaint is safe because the Overview is links/cards with no form inputs
-  // to clobber. The lower three panels share a wrapper the responsive CSS lays
-  // out two-up on wider screens.
+  // Repaint the Overview from a loadOverview() snapshot. Each panel reads its
+  // own source independently, so one null source degrades only its panel. The
+  // repaint is confined to `#overview-body`: the page heading lives outside it
+  // and survives, so a background refresh can neither destroy the focus target
+  // a navigation just landed on nor re-announce the page. The lower three panels
+  // share a wrapper the responsive CSS lays out two-up on wider screens.
   function paintOverview(data) {
-    view().innerHTML =
+    let body = document.getElementById("overview-body");
+    if (!body) {
+      view().innerHTML =
+        pageTitle("Operations overview") + `<div id="overview-body"></div>`;
+      body = document.getElementById("overview-body");
+    }
+    body.innerHTML =
       overviewMetrics(data.repos, data.taskRepos, data.runs, data.escalations) +
       `<div class="overview-panels">` +
       attentionPanel(data.repos, data.runs, data.escalations) +
       currentActivityPanel(data.runs) +
       recentOutcomesPanel(data.history) +
       `</div>`;
+  }
+
+  // True when focus sits on something inside the repaintable Overview body. A
+  // background repaint would destroy that node and strand the keyboard user at
+  // <body>, so a refresh tick skips the paint (and retries next tick) rather
+  // than ripping the list out from under them. Pointer/touch use leaves focus on
+  // <body>, so the ordinary mobile case still repaints every tick.
+  function focusInsideOverviewBody() {
+    const body = document.getElementById("overview-body");
+    const active = document.activeElement;
+    return !!(
+      body &&
+      active &&
+      active !== document.body &&
+      body.contains(active)
+    );
   }
 
   // Tear down the Overview background refresh (mirrors stopIntakePoll): cancel the
@@ -2971,7 +3154,7 @@
         // kill the refresh.
       }
       if (refresh.cancelled || activeOverviewRefresh !== refresh) return; // left / superseded
-      if (data) paintOverview(data);
+      if (data && !focusInsideOverviewBody()) paintOverview(data);
       refresh.timer = setTimeout(tick, OVERVIEW_REFRESH_MS);
     };
     refresh.timer = setTimeout(tick, OVERVIEW_REFRESH_MS);
@@ -2986,7 +3169,7 @@
   // that outlived its view would repaint the destination view and start a
   // detached refresh loop that keeps polling after navigation away.
   async function renderOverview() {
-    view().innerHTML = centerHtml("Loading overview…");
+    view().innerHTML = loadingView("Operations overview", "Loading overview…");
     stopOverviewRefresh();
     const refresh = { cancelled: false, timer: null };
     activeOverviewRefresh = refresh;
@@ -3067,9 +3250,13 @@
     try {
       await handler();
     } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return; // login shown
+      // A 401 already rendered (and landed on) the login gate.
+      if (err instanceof ApiError && err.status === 401) return;
       renderError(err);
     }
+    // Name the new page and put focus at its start, so a keyboard/screen-reader
+    // user arrives on the destination instead of the link they activated.
+    landOnView();
   }
 
   function signOut() {
@@ -3079,6 +3266,13 @@
   }
 
   document.getElementById("signout-btn").addEventListener("click", signOut);
+  // Skip link: the href is inert on purpose — letting it navigate to "#view"
+  // would be read by the hash router as a route change (and fall back to the
+  // repo list), so it moves focus to the main region directly instead.
+  document.getElementById("skip-link").addEventListener("click", (ev) => {
+    ev.preventDefault();
+    focusPageStart();
+  });
   window.addEventListener("hashchange", router);
   router();
 })();
