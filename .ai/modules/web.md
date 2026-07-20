@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-20
-verified-against: a5fc57d3bb19492f19777dfae70b73e8b92e879b
+verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
 ---
 
 # Modules: Web and Operations
@@ -67,16 +67,25 @@ Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
 defines the static app container and bottom navigation; the shell assets are
 served uncached by the API so updates reach browsers on the next load. `app.js`
 owns token entry/localStorage, bearer `fetch` calls, hash routing,
-an Operations Overview default landing route, repo/task/detail/run views,
-repo/task run-state signals, searchable/counted all-tasks inventory, recent
-commits, task-detail Start/Stop run controls, live per-session context strips,
-waiting-question answer forms, filterable/counted/collapsible grouped run
-history with est-vs-actual rollups, a run-scoped task-file view, remote intake
-start/review views, and recent/live log views; `styles.css` holds the mobile
-layout. The dashboard reads only HTTP payloads, uses `fetch` +
+route-level headings/focus/announcements, an Operations Overview default landing
+route, repo/task/detail/run views, repo/task run-state signals,
+searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
+run controls, live per-session context strips, waiting-question answer forms,
+filterable/counted/collapsible grouped run history with est-vs-actual rollups, a
+run-scoped task-file view, remote intake start/review views, and recent/live log
+views; `styles.css` holds the mobile layout. The dashboard reads only HTTP
+payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.
+
+Every routed view renders one visible `h1.page-title`; router/full-view
+repaints sync it into `document.title` and move focus there, while background
+Overview refreshes, intake ticks, and log appends do not move focus. The main
+`#view` is not an ARIA live region; scoped status/alert/count regions carry the
+announcements. Router-owned post-await landing/error work is guarded by a
+monotonic route generation, alongside feature-owned cancellation handles for
+streams, intake polling, and Overview refresh.
 
 The Overview route (`#/overview`) aggregates existing protected repo/task/run/
 escalation/history payloads into summary metrics, prioritized attention, live

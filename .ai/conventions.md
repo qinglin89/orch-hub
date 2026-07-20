@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
+last-updated: 2026-07-20
+verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
 ---
 
 # Conventions
@@ -76,9 +76,11 @@ verified-against: 16d166c038b4e7232be688c95c7b9a4b5f360518
   of starting real orchestrator subprocesses.
 - Prefer testing structured return values before testing text formatting.
 - Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
-- For non-trivial `orch_hub/web/app.js` behavior, the committed suite only pins
-  served-asset boundaries; when no JS runner is available, macOS JavaScriptCore
-  (`jsc`) can compile-check the SPA and run a small stubbed-browser harness.
+- For non-trivial `orch_hub/web/app.js` behavior, extend the committed
+  JavaScriptCore harness (`tests/keyboard_harness.js`, wrapped by
+  `tests/test_web_keyboard.py`), which drives the real SPA against a stubbed
+  browser and skips when no `jsc` is available; served-asset greps are for
+  static shell/boundary guarantees.
 
 ## Dependencies
 

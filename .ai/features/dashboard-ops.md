@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-20
-verified-against: a5fc57d3bb19492f19777dfae70b73e8b92e879b
+verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
 ---
 
 # Features: Dashboard Ops
@@ -25,6 +25,11 @@ Implemented behavior:
   shell. It stores the bearer token in `localStorage`, attaches
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
+- Accessibility is route-level infrastructure: every routed view starts with one
+  visible `h1.page-title`; router/full-view repaints mirror it into
+  `document.title` and move focus there; `#view` is not a live region, with
+  announcements scoped to status, alert, and filter-count regions; shared focus
+  styling and minimum target sizes cover dashboard controls.
 - The Operations Overview is the default authenticated landing route
   (`#/overview`). It remains client-side over existing protected APIs,
   parallel-fetching repos, tasks, live runs, escalations, and run history into
@@ -37,6 +42,10 @@ Implemented behavior:
   cancellation handle before the initial load, drops stale paints after
   navigation, and tears down through the router so requests never overlap or
   keep polling after the view is left.
+- Router-owned post-await landing/error work is guarded by a monotonic route
+  generation so superseded route completions cannot steal focus or paint the
+  shared error view over a newer route; feature-level poll/stream/refresh handles
+  still own their own cancellation.
 - Repo list renders readiness from `/api/repos` and a tri-state run signal from
   `/api/runs` as a bare leading dot before the repo name: yellow waiting, green
   active non-waiting, gray idle; the state word exists only in title/aria text.
