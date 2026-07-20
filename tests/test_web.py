@@ -1106,7 +1106,10 @@ def test_navigation_moves_focus_and_names_the_document():
     # Called by the router (a navigation) and by rerender (an action that
     # repaints the whole view) — the two moments the focused control is gone.
     assert "landOnView();\n  }\n\n  function signOut" in body
-    assert "promise.then(landOnView)" in body
+    # Scoped to rerender's body rather than pinned to one expression: whether it
+    # lands is guarded (a navigation during the re-render's fetch makes the
+    # landing stale), and that guard is behaviour the keyboard harness owns.
+    assert "landOnView();" in body[body.index("function rerender(") :][:400]
 
 
 def test_background_repaints_do_not_steal_focus():

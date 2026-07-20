@@ -1131,7 +1131,9 @@ async function scenarioHeadingOutline() {
 // the user has navigated on. Such a stale completion must not touch the view it
 // no longer owns: not by moving focus (the user is already operating the newer
 // page, and being thrown back to its heading is exactly the unpredictable focus
-// the task forbids) and not by painting its error over it.
+// the task forbids), not by painting its error over it, not by painting its own
+// content over it, and not by starting a stream for it. The mirror case is here
+// too: re-entering a handler without a navigation is not stale and must paint.
 async function scenarioStaleRoute() {
   installRoutes({ waiting: false });
 
@@ -1170,6 +1172,104 @@ async function scenarioStaleRoute() {
     "Tasks"
   );
   activeIs("stale route: a stale failure leaves focus alone", filterAgain);
+
+  // A stale handler's OWN content paint. Every routed handler writes #view after
+  // its payload resolves; without a guard the repo list lands on top of whatever
+  // route the user actually navigated to, leaving the URL, tab bar and
+  // document.title naming a page whose content is no longer on screen.
+  var releaseRepos = defer("GET", "/api/repos");
+  await navigate("#/repos"); // parks: renderRepos awaits the held-open repo list
+  await navigate("#/tasks");
+  var taskFilter = doc.getElementById("f-repo");
+  taskFilter.focus();
+
+  await releaseRepos();
+  eq(
+    "stale route: a stale handler paints no content over the newer view",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+  check(
+    "stale route: the newer view's own controls survive",
+    doc.getElementById("f-repo") === taskFilter,
+    "the tasks filters were replaced"
+  );
+  eq("stale route: document.title still names the newer view", doc.title, "Tasks · orch-hub");
+  var stillCurrent = doc.querySelectorAll(".tabbar a").filter(function (a) {
+    return a.getAttribute("aria-current") === "page";
+  });
+  eq(
+    "stale route: the active tab still matches the URL",
+    stillCurrent.length && stillCurrent[0].getAttribute("data-tab"),
+    "/tasks"
+  );
+  activeIs("stale route: a stale content paint leaves focus alone", taskFilter);
+
+  // The mirror case: re-entering a handler WITHOUT a navigation is not stale, so
+  // it must still repaint. The log view's Reload is the button-driven one.
+  await navigate("#/runs/" + RUN + "/logs");
+  route("GET", "/api/runs/" + RUN + "/logs", {
+    present: true,
+    truncated: false,
+    lines: ["08:31:00 reloaded"],
+  });
+  pressEnter(doc.getElementById("log-reload"));
+  await flush();
+  // Null-safe: a re-entry wrongly treated as stale skips its paint and strands
+  // the view on the loading placeholder, which has no log output at all.
+  var reloaded = doc.getElementById("log-output");
+  check(
+    "stale route: a re-render with no navigation still paints",
+    !!reloaded && reloaded.textContent.indexOf("reloaded") !== -1,
+    reloaded ? reloaded.textContent : "the view never painted its log output"
+  );
+
+  // rerender() is the other non-router path into a handler (intake controls, the
+  // intake poll's settle). Its landing work must go stale with the render it
+  // wraps — otherwise the skipped paint still rips focus to the newer page.
+  installRoutes({ waiting: false });
+  await navigate("#/intakes/i1");
+  var releaseIntake = defer("GET", "/api/intakes/i1/history");
+  pressEnter(doc.querySelector(".intake-cancel")); // POST, then rerender()
+  await flush(); // the re-render parks on the held-open history read
+  await navigate("#/tasks");
+  var lastFilter = doc.getElementById("f-repo");
+  lastFilter.focus();
+
+  await releaseIntake();
+  eq(
+    "stale route: a stale re-render paints nothing over the newer view",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+  activeIs("stale route: a stale re-render leaves focus alone", lastFilter);
+
+  // A stale log view costs more than a paint: router() aborts the active stream
+  // on its way out, so a handler that ran on regardless would open a fresh SSE
+  // stream after that teardown — a reader nothing cancels, feeding a <pre> that
+  // is no longer in the document.
+  route("GET", "/api/runs/" + RUN, {
+    run_id: RUN,
+    repo_name: REPO,
+    task_id: TASK,
+    state: "active", // live → this render would start following
+    started_ts: "2026-07-20T08:00:00Z",
+  });
+  var releaseRun = defer("GET", "/api/runs/" + RUN);
+  await navigate("#/runs/" + RUN + "/logs"); // parks awaiting the run record
+  await navigate("#/tasks");
+
+  await releaseRun();
+  eq(
+    "stale route: a stale log view paints nothing over the newer view",
+    pageHeading().textContent.trim(),
+    "Tasks"
+  );
+  check(
+    "stale route: a stale log view opens no stream",
+    lastCall("GET", "/api/runs/" + RUN + "/logs/stream") === null,
+    "an SSE stream was opened for a view the user had already left"
+  );
 }
 
 /* --------------------------------------------------------------- run them */

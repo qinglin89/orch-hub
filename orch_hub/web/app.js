@@ -35,7 +35,7 @@
   let activeStream = null; // AbortController for the in-flight SSE log stream, if any
   let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
   let activeOverviewRefresh = null; // { cancelled, timer } for the Overview auto-refresh, if any
-  let routeGeneration = 0; // bumped by every router() entry; see router()
+  let routeGeneration = 0; // bumped by every router() entry; see routeGuard()
   // Known task-file statuses in protocol order; the sentinels are data
   // problems (file missing / status unparseable), not runnable states.
   const KNOWN_STATUSES = [
@@ -315,6 +315,22 @@
     focusPageStart();
   }
 
+  // Staleness guard for a view that paints after an await. Every route handler
+  // fetches before it paints, so a slow route can resolve long after the user
+  // navigated on — and writing `#view` then puts the old route's content under
+  // the new route's URL, tab bar and document.title. A handler captures the
+  // route generation at entry (before its first await) and calls the returned
+  // predicate before painting; router() bumps the generation on every entry, so
+  // a superseded handler drops its paint.
+  //
+  // Re-entering a handler WITHOUT a navigation (the log view's Reload, the
+  // intake control re-renders, the intake poll's settle) captures the live
+  // generation and is therefore never superseded — those repaints still land.
+  function routeGuard() {
+    const generation = routeGeneration;
+    return () => generation !== routeGeneration;
+  }
+
   function renderError(err) {
     const msg =
       err instanceof ApiError ? err.message : "Something went wrong.";
@@ -496,6 +512,7 @@
   }
 
   async function renderRepos() {
+    const superseded = routeGuard();
     view().innerHTML = loadingView("Repos", "Loading repos…");
     const reposData = await api("/api/repos");
     const repos = reposData.repos || [];
@@ -517,6 +534,7 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
+    if (superseded()) return; // a newer route owns the view
     if (!repos.length) {
       view().innerHTML =
         pageTitle("Repos") + centerHtml("No managed repos discovered.");
@@ -701,6 +719,7 @@
   }
 
   async function renderTasks() {
+    const superseded = routeGuard();
     view().innerHTML = loadingView("Tasks", "Loading tasks…");
     const data = await api("/api/tasks");
     const repos = data.repos || [];
@@ -713,6 +732,9 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
+    // Before the filter reconciliation below, so a superseded route neither
+    // paints nor edits the shared filter state the live route is showing.
+    if (superseded()) return;
     const repoNames = repos.map((r) => r.name);
     const statuses = orderedStatuses(repos);
     if (taskFilters.repo && !repoNames.includes(taskFilters.repo))
@@ -801,10 +823,12 @@
   }
 
   async function renderRepoDetail(repoName) {
+    const superseded = routeGuard();
     view().innerHTML = loadingView(repoName, "Loading " + repoName + "…");
     // Required: this repo's task inventory (single-repo envelope). An unknown
     // repo is a 404 the router surfaces as an error view.
     const data = await api("/api/repos/" + encodeURIComponent(repoName) + "/tasks");
+    if (superseded()) return; // guards the not-found paint just below
     const entry = (data.repos || [])[0];
     if (!entry) {
       view().innerHTML =
@@ -860,6 +884,9 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
+    // The best-effort overlays above added more awaits, so re-check before the
+    // paint (and before the shared status filter is reconciled).
+    if (superseded()) return;
 
     const tasks = entry.tasks || [];
     const statuses = orderedStatusesFromTasks(tasks);
@@ -1216,12 +1243,23 @@
   // 401 already shows the login gate). Used by the intake control re-renders and
   // by the intake poll's settle. The repaint destroys the control that was
   // pressed, so it lands on the new view the same way a navigation does.
+  //
+  // A navigation during the re-render's fetch makes it stale like any route
+  // completion: the handler then skips its own paint, so landing on (or erroring
+  // over) the newer view would be the same theft the route guard exists to stop.
   function rerender(promise) {
-    promise.then(landOnView).catch((err) => {
-      if (err instanceof ApiError && err.status === 401) return; // login shown
-      renderError(err);
-      landOnView();
-    });
+    const superseded = routeGuard();
+    promise
+      .then(() => {
+        if (superseded()) return; // a navigation owns the view now
+        landOnView();
+      })
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 401) return; // login shown
+        if (superseded()) return;
+        renderError(err);
+        landOnView();
+      });
   }
 
   // Toggle a control button's busy state and clear its status line when busy.
@@ -1528,6 +1566,7 @@
   }
 
   async function renderTaskDetail(repoName, taskId) {
+    const superseded = routeGuard();
     view().innerHTML = loadingView(taskId, "Loading task…");
     // Required: the task's inventory fields + raw file body. Unknown repo/task
     // is a 404 the router surfaces as an error view.
@@ -1588,6 +1627,7 @@
         if (err instanceof ApiError && err.status === 401) throw err;
       }
     }
+    if (superseded()) return; // a newer route owns the view
 
     const blockers =
       detail.blockers && detail.blockers.length
@@ -1943,8 +1983,10 @@
   // run tapping through to its log tail. Empty payload and no-match are distinct
   // states; a clear-filters button restores the full newest-first set.
   async function renderRuns() {
+    const superseded = routeGuard();
     view().innerHTML = loadingView("Run history", "Loading runs…");
     const data = await api("/api/history/runs");
+    if (superseded()) return; // a newer route owns the view
     const runs = data.runs || [];
     if (!runs.length) {
       view().innerHTML =
@@ -2022,8 +2064,10 @@
   // surfaces — e.g. the log view's task back-link — and shows the file body with
   // an active/archived source badge; an absent file renders a muted note.
   async function renderRunTask(runId) {
+    const superseded = routeGuard();
     view().innerHTML = loadingView("Task file", "Loading task…");
     const data = await api("/api/runs/" + encodeURIComponent(runId) + "/task"); // unknown run → 404
+    if (superseded()) return; // a newer route owns the view
     const taskId = data.task_id || runId;
     const sourceBadge = data.source ? badge(data.source) : "";
     const body = data.present
@@ -2321,6 +2365,7 @@
   }
 
   async function renderIntakeReview(intakeId) {
+    const superseded = routeGuard();
     // A fresh render supersedes any in-flight poll (this may BE the poll's settle
     // re-render); it restarts below if the new status is still transient.
     stopIntakePoll();
@@ -2330,6 +2375,9 @@
     const data = await api(
       "/api/intakes/" + encodeURIComponent(intakeId) + "/history"
     );
+    // A newer route owns the view: drop the paint, and with it the poll this
+    // render would otherwise restart for a view that is gone.
+    if (superseded()) return;
     const repoName = data.repo_name || "";
     const back = repoName
       ? `<a class="back-link" href="${repoHash(repoName)}">← ${escapeHtml(
@@ -2649,6 +2697,7 @@
   }
 
   async function renderRunLogs(runId) {
+    const superseded = routeGuard();
     // Leaving or reloading this view aborts any prior in-flight stream first.
     if (activeStream) {
       activeStream.abort();
@@ -2656,6 +2705,10 @@
     }
     view().innerHTML = loadingView("Run log", "Loading run…");
     const run = await api("/api/runs/" + encodeURIComponent(runId)); // unknown → 404
+    // A newer route owns the view. Returning here also matters beyond the paint:
+    // router() already aborted the stream on its way out, so continuing would
+    // open a fresh SSE stream nothing tears down, feeding a detached <pre>.
+    if (superseded()) return;
     const live = LIVE_STATES.has(run.state);
     // The task link goes through the run-scoped task view (resolved from the run
     // record), not taskHash's index-gated task detail, so it still opens the
@@ -2696,8 +2749,12 @@
     const pre = document.getElementById("log-output");
     const statusEl = document.getElementById("log-status");
     document.getElementById("log-reload").addEventListener("click", () => {
+      // Captured per press, not per render: a reload that fails after the user
+      // navigated away must not paint its error over the newer route either.
+      const reloadSuperseded = routeGuard();
       renderRunLogs(runId).catch((err) => {
         if (err instanceof ApiError && err.status === 401) return; // login shown
+        if (reloadSuperseded()) return;
         renderError(err);
       });
     });
@@ -3236,7 +3293,9 @@
     // router() entry (hashchange, login submit, Retry) bumps it and thereby
     // marks this invocation stale. Route handlers await network payloads, so a
     // slow route can still resolve long after the user moved on — and its
-    // post-await work would then act on a view it no longer owns.
+    // post-await work would then act on a view it no longer owns. Each handler
+    // guards its own paint against the same counter through routeGuard(); this
+    // one guards the landing/error work the router itself owns.
     const generation = ++routeGeneration;
     // Leaving any view aborts an in-flight log stream and stops the intake poll
     // and the Overview refresh so none keep reading/painting after navigation.
