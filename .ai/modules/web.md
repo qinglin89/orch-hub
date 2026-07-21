@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 5fa62f65c02e064aebc258b613fd08f26dc1be1a
+verified-against: 4fafdfbceec13a94fce2fdf3a7692d8e254bce09
 ---
 
 # Modules: Web and Operations
@@ -71,10 +71,15 @@ view-kind class: overview/list views fill the remaining workspace, detail/form/
 run-task/intake views use a bounded reading column, and logs/run history use a
 wider column; top-level card grids are scoped to direct `#view > .list`
 children so nested chronological feeds remain single-column newest-first.
-`styles.css` also owns the CSS-only industrial control-console theme: automatic
-light/dark graphite token sets, electric-cyan accents, semantic status colours,
+`styles.css` also owns the CSS-only industrial control-console theme:
+Dark/Light graphite token sets, electric-cyan accents, semantic status colours,
 system typography, monospace operational labels/ids/output, and subtle static
 grid/edge/glow effects without external fonts/assets or a frontend build step.
+Dark is the first-visit default and safe fallback; a static shell-header select
+persists Dark/Light/System in `localStorage`, an inline head script resolves the
+stored or default preference to `<html data-theme>` before stylesheet paint,
+System follows `prefers-color-scheme` changes while open, and document
+`color-scheme` plus browser `theme-color` track the resolved scheme.
 The shell assets are served uncached by the API so updates reach browsers on the
 next load. `app.js` owns token entry/localStorage,
 bearer `fetch` calls, hash routing,
