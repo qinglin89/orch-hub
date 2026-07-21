@@ -36,6 +36,7 @@
   let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
   let activeOverviewRefresh = null; // { cancelled, timer } for the Overview auto-refresh, if any
   let routeGeneration = 0; // bumped by every router() entry; see routeGuard()
+  let navByKeyboard = false; // last input was a key press → focusPageStart shows the heading ring
   // Known task-file statuses in protocol order; the sentinels are data
   // problems (file missing / status unparseable), not runnable states.
   const KNOWN_STATUSES = [
@@ -289,6 +290,29 @@
     });
   }
 
+  // The per-view width class the desktop shell reads off #view (styles.css):
+  // overview + the flat card lists fill the workspace, detail/form views keep a
+  // bounded reading column, logs and run history get the wider column. Derived
+  // from the same path segments matchRoute keys on (the fixed route keywords, not
+  // the encoded ids), so the whole view adopts its width in one place per
+  // navigation instead of each render function repeating it. Below the desktop
+  // breakpoint every kind renders at the single mobile/tablet column, so the
+  // class is inert there.
+  function viewKind(path) {
+    const seg = path.split("/").filter(Boolean);
+    if (seg[0] === "runs")
+      return seg.length >= 3 && seg[2] === "task" ? "read" : "wide";
+    if (seg[0] === "tasks") return seg.length >= 3 ? "read" : "list";
+    if (seg[0] === "repos") return seg.length >= 2 ? "read" : "list";
+    if (seg[0] === "intakes") return "read";
+    if (seg[0] === "overview") return "overview";
+    return "list"; // default repo list
+  }
+
+  function setViewKind(path) {
+    view().className = "view view--" + viewKind(path);
+  }
+
   // Mirror the rendered page heading into document.title, so the browser/AT
   // window title tracks the route without every view repeating itself.
   function syncDocumentTitle() {
@@ -300,9 +324,19 @@
   // Move focus to the routed view's page heading. The heading is
   // `tabindex="-1"`, so this is a plain focus move: Tab continues into the view
   // and Shift+Tab back out to the chrome — nothing is trapped.
+  //
+  // Show the landing focus ring only for a keyboard-driven navigation. A
+  // touch/mouse navigation still moves focus here (Tab order + assistive tech
+  // need a real landing point), but iOS Safari would otherwise paint a
+  // :focus-visible ring on this programmatic focus even after a tap — a stray
+  // blue box on the title. `.nav-focus-ring` gates the ring in styles.css; the
+  // class is re-evaluated on every landing (navByKeyboard is set from the last
+  // real input, below), so a heading focused after a tap stays ring-free.
   function focusPageStart() {
     const target = document.querySelector("#view .page-title") || view();
-    if (target && typeof target.focus === "function") target.focus();
+    if (!target || typeof target.focus !== "function") return;
+    if (target.classList) target.classList.toggle("nav-focus-ring", navByKeyboard);
+    target.focus();
   }
 
   // Land on a freshly rendered view: name it in document.title and put focus at
@@ -359,6 +393,9 @@
   // `role="alert"` so it is announced when it replaces the form in place.
   function renderLogin(message) {
     showChrome(false);
+    // Clear any prior route's width class: the login card centres itself and the
+    // desktop rail is hidden, so the workspace should be the plain full-width view.
+    view().className = "view";
     view().innerHTML = `
       <section class="card login">
         ${pageTitle("Connect to orch-hub")}
@@ -3339,6 +3376,7 @@
     showChrome(true);
     const path = currentPath();
     setActiveTab(path);
+    setViewKind(path);
     const handler = matchRoute(path);
     let failure = null;
     try {
@@ -3375,6 +3413,21 @@
     ev.preventDefault();
     focusPageStart();
   });
+  // Track the input modality that drives navigation, so focusPageStart shows the
+  // routed-heading ring for a keyboard user but not after a touch/mouse tap (see
+  // focusPageStart and the .page-title focus rules in styles.css). Capture phase
+  // and window scope so the flag is set before the navigation the input triggers
+  // (keydown Enter / a tap) reaches the router. pointerdown covers mouse, touch
+  // and pen on current browsers; touchstart is the fallback for an engine without
+  // Pointer Events.
+  window.addEventListener("keydown", () => {
+    navByKeyboard = true;
+  }, true);
+  const markPointerNav = () => {
+    navByKeyboard = false;
+  };
+  window.addEventListener("pointerdown", markPointerNav, true);
+  window.addEventListener("touchstart", markPointerNav, true);
   window.addEventListener("hashchange", router);
   router();
 })();

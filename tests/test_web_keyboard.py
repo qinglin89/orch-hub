@@ -84,6 +84,7 @@ def test_keyboard_smoke_actually_ran(harness_output: str):
         "intake:",
         "outline (",
         "log:",
+        "layout:",
         "stale route:",
     ],
 )

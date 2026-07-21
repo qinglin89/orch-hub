@@ -1218,3 +1218,103 @@ def test_interactive_controls_meet_a_minimum_target_size():
     assert "min-height: 32px" in css  # inline back/text links
     # The only animated affordance honours a reduced-motion preference.
     assert "prefers-reduced-motion: reduce" in css
+
+
+# ---- adaptive dashboard layout (2026-07-21-adaptive-dashboard-layout) ---------
+#
+# The desktop shell anchors the nav rail to the left viewport edge and lets each
+# view own its content width via a view-kind class app.js tags on #view: overview
+# and the flat card lists fill the workspace (their grids add balanced columns),
+# detail/form views keep a bounded reading column, logs and run history get a
+# wider column — all left-anchored after the rail, so there is no centred outer
+# gutter. Touch/programmatic navigation no longer paints a focus ring on the page
+# title, while keyboard navigation still shows one. Asserted at the served-asset
+# boundary (no JS runtime in this suite); the per-route view-kind tagging and the
+# focus-move behaviour are driven for real under the jsc harness
+# (tests/test_web_keyboard.py). Each check maps to a scope/acceptance line.
+
+
+def test_desktop_rail_is_flush_left_and_workspace_fills_remaining():
+    css = styles_css()
+    assert "min-width: 1024px" in css
+    desktop = css[css.index("min-width: 1024px") :]
+    # The rail is anchored to the left viewport edge (left: 0), sidebar-wide, with
+    # a right border — not the old centred-block offset.
+    assert "left: 0;" in desktop
+    assert "width: var(--sidebar-w)" in desktop
+    assert "border-right: 1px solid var(--border)" in desktop
+    # The centred-block machinery that produced the artificial outer gutter is gone.
+    assert "--app-max" not in css
+    assert "margin-left: max(" not in css
+    # The workspace clears the rail and fills the remaining width by default
+    # (max-width: none), left-anchored (margin-right: 0), so a capped view leaves
+    # trailing space rather than a centred gutter.
+    assert "margin-left: var(--sidebar-w)" in desktop
+    assert "margin-right: 0;" in desktop
+
+
+def test_desktop_views_have_page_appropriate_width_caps():
+    css = styles_css()
+    body = app_js()
+    # Per-view caps: a bounded reading column for detail/form, a wider column for
+    # logs/history, and an overview cap that keeps its fixed tile/panel set
+    # balanced instead of stretching ultra-wide. Flat list/overview grids fill.
+    for cap in ("--read-max", "--overview-max", "--wide-max"):
+        assert cap in css
+    for rule in (".view--read", ".view--overview", ".view--wide"):
+        assert rule in css
+    # app.js tags #view with the view kind per route (derived from the path) in
+    # one place, wired into the router before the handler paints.
+    assert "function viewKind" in body
+    assert "function setViewKind" in body
+    assert "setViewKind(path);" in body
+    assert 'view().className = "view view--"' in body
+    for kind in ('"read"', '"wide"', '"overview"', '"list"'):
+        assert kind in body
+
+
+def test_chronological_feeds_stay_single_column():
+    css = styles_css()
+    # The multi-column card grid is scoped to the *direct* children of #view (the
+    # flat collections: repos, all-tasks, repo-detail tasks) via the child
+    # combinator. Chronological feeds (recent commits, session strips, overview
+    # activity/outcomes, run-history run cards) are nested deeper, so they keep the
+    # base single-column flex flow and newest-to-oldest stays unambiguous.
+    assert "#view > .list {" in css
+    assert "repeat(auto-fill, minmax(320px, 1fr))" in css
+    assert "flex-direction: column" in css  # the base list flow + commits feed
+
+
+def test_page_title_focus_ring_is_gated_by_input_modality():
+    css = styles_css()
+    body = app_js()
+    # The heuristic :focus-visible ring is suppressed on the two programmatic
+    # focus targets (the routed heading and the main region), then re-enabled on
+    # the heading only when app.js marks a keyboard-driven navigation.
+    assert ".page-title:focus-visible" in css
+    assert "outline: none" in css
+    assert ".page-title.nav-focus-ring:focus" in css
+    # app.js tracks the last input modality and toggles that class on the heading
+    # it focuses, so a touch/mouse navigation lands without a ring.
+    assert "navByKeyboard" in body
+    assert 'classList.toggle("nav-focus-ring", navByKeyboard)' in body
+    assert '"keydown"' in body
+    assert '"pointerdown"' in body
+    # The general focus-visible rule (real controls + tabindex=0 scroll regions)
+    # is untouched, so keyboard focus stays visible everywhere else.
+    assert (
+        ":where(a, button, input, select, textarea, summary, [tabindex]):focus-visible"
+        in css
+    )
+
+
+def test_mobile_and_tablet_shell_is_preserved():
+    css = styles_css()
+    # The phone base (bottom tab bar + safe-area insets, usable at 320px) and the
+    # tablet tier (bottom bar kept, flat lists two-up) are untouched by the desktop
+    # refinement.
+    assert "env(safe-area-inset-bottom)" in css
+    assert "env(safe-area-inset-top)" in css
+    assert "min-width: 720px" in css
+    tablet = css[css.index("min-width: 720px") : css.index("min-width: 1024px")]
+    assert "#view > .list" in tablet  # tablet keeps the same direct-child card grid

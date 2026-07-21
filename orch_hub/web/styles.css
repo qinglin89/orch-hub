@@ -33,9 +33,9 @@
   --header-h: 52px;
   --tabbar-h: 56px;
   /* Responsive shell (media blocks at the bottom of the file). --sidebar-w is
-     the desktop nav-rail width; --content-max is the reading-column cap and
-     widens at the desktop breakpoint. The mobile/tablet value is the original
-     single-column width, so nothing below the breakpoint changes. */
+     the desktop nav-rail width; --content-max caps the single mobile/tablet
+     column. The desktop tier drops that single cap for a flush-left rail plus
+     per-view width caps (--read-max/--overview-max/--wide-max, defined there). */
   --sidebar-w: 220px;
   --content-max: 720px;
 }
@@ -89,9 +89,9 @@ code {
 /* One focus indicator for everything interactive. `:where()` keeps the selector
    at zero specificity, so a component can still override it, and the 2px offset
    draws the ring OUTSIDE filled buttons (an accent ring on an accent fill would
-   be invisible). Programmatic focus targets (the page heading, the main region)
-   are included via [tabindex]: browsers only match :focus-visible for them when
-   the user is actually driving by keyboard, so a tap-navigation shows no ring. */
+   be invisible). This covers real controls and the keyboard-reachable scroll
+   regions (the task-file / log <pre>, tabindex="0"); the programmatic-only focus
+   targets below opt out of the heuristic and manage their own ring. */
 :where(a, button, input, select, textarea, summary, [tabindex]):focus-visible {
   outline: 2px solid var(--focus);
   outline-offset: 2px;
@@ -101,6 +101,27 @@ code {
    would collide with the neighbouring card; draw this one inside instead. */
 .card-link:focus-visible {
   outline-offset: -2px;
+}
+
+/* The routed page heading and the main region are programmatic focus targets:
+   app.js calls .focus() on them after a route change so a keyboard/AT user lands
+   on the new page. iOS Safari paints its :focus-visible ring on such a
+   programmatic focus even when the navigation came from a touch tap, leaving a
+   stray blue box around the page title on ordinary mobile navigation. Suppress
+   the heuristic ring on both (higher specificity than the zero-specificity rule
+   above), then let app.js re-enable it on the heading — and only the heading —
+   for a keyboard-driven navigation, which adds .nav-focus-ring. Keyboard users
+   keep a visible landing indicator; touch users get none. */
+.view:focus,
+.view:focus-visible,
+.page-title:focus,
+.page-title:focus-visible {
+  outline: none;
+}
+
+.page-title.nav-focus-ring:focus {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
 }
 
 /* Available to screen readers and to the accessible name, never painted. Used
@@ -1373,9 +1394,13 @@ code {
      < 720px   phone   — base rules: bottom tab bar, one column.
      ≥ 720px   tablet  — bottom tab bar kept; flat card lists flow two-up; roomier
                          gutters. Sits above the Overview's own 520/640 breakpoints.
-     ≥ 1024px  desktop — the bottom tab bar becomes a left nav rail and the content
-                         column widens (--content-max), so navigation and content
-                         use the space far better than a centered 720px column.
+     ≥ 1024px  desktop — the bottom tab bar becomes a left nav rail flush with the
+                         viewport edge, and the workspace fills the width to its
+                         right. Each view then caps its own content: overview and
+                         flat card lists fill (their grids add balanced columns),
+                         detail/form keep a bounded reading column, logs and run
+                         history get a wider column — all left-anchored after the
+                         rail, so there is no centred outer gutter.
    ========================================================================== */
 
 /* ---- tablet: multi-column card lists + wider gutters ---- */
@@ -1405,26 +1430,29 @@ code {
   }
 }
 
-/* ---- desktop: left nav rail + wider content column ---- */
+/* ---- desktop: left nav rail flush to the viewport edge + per-view widths ---- */
 
 @media (min-width: 1024px) {
   :root {
-    --content-max: 1040px;
-    /* --sidebar-w (220) + --content-max (1040): the width at which the rail +
-       content block is fully grown. Past it the whole block centres (symmetric
-       gutters); below it the block is flush-left so the rail aligns exactly with
-       the content's left edge. Kept literal so it can be used inside max()/calc. */
-    --app-max: 1260px;
+    /* Per-view content caps (applied via the view-kind class app.js sets on
+       #view). Read = bounded reading column for detail/form; overview caps so its
+       fixed set of metric tiles / panels stays balanced instead of stretching
+       ultra-wide; wide = the roomiest column, for logs and run history. The flat
+       list/overview grids otherwise fill the workspace. All fill at 1440px
+       (workspace ≈ 1220px < every cap), so a large gutter appears only well past
+       it, and only ever as right-side trailing space — never a centred gutter. */
+    --read-max: 820px;
+    --overview-max: 1440px;
+    --wide-max: 1560px;
   }
 
-  /* The fixed bottom tab bar becomes a fixed left rail under the header. Its left
-     edge tracks the centred app block on ultra-wide screens (max() clamps to 0 on
-     narrower ones, keeping it flush-left). Vertical stack of labels, not a
-     stretched 4-up row. */
+  /* The fixed bottom tab bar becomes a fixed left rail flush with the left
+     viewport edge, under the header. Vertical stack of labels, not a stretched
+     4-up row; the workspace takes all the width to its right. */
   .tabbar {
     top: calc(var(--header-h) + env(safe-area-inset-top));
     bottom: 0;
-    left: max(0px, calc((100% - var(--app-max)) / 2));
+    left: 0;
     right: auto;
     width: var(--sidebar-w);
     height: auto;
@@ -1450,34 +1478,43 @@ code {
     background: var(--surface-2);
   }
 
-  /* Content clears the rail and centres within the space beside it. margin-left =
-     block offset + rail width; margin-right:auto yields a symmetric right gutter
-     once the block is centred. Bottom padding drops the tab-bar reservation (the
-     bar is on the left now) and keeps only the safe-area inset. */
+  /* The workspace clears the rail and fills the remaining width by default (the
+     overview and flat card lists want every column they can get). It is
+     left-anchored after the rail — margin-right:0 — so a capped view (below)
+     leaves its spare room as trailing space, never a centred outer gutter. Bottom
+     padding drops the tab-bar reservation (the bar is on the left now) and keeps
+     only the safe-area inset. */
   .view {
-    max-width: var(--content-max);
-    margin-left: max(
-      var(--sidebar-w),
-      calc((100% - var(--app-max)) / 2 + var(--sidebar-w))
-    );
-    margin-right: auto;
+    max-width: none;
+    margin-left: var(--sidebar-w);
+    margin-right: 0;
     padding: calc(var(--header-h) + env(safe-area-inset-top) + 20px) 32px
       calc(env(safe-area-inset-bottom) + 28px);
   }
 
-  /* Align the header's brand/sign-out with the centred app block instead of the
-     raw viewport edges, so the brand sits above the rail and sign-out above the
-     content's right edge. */
-  .app-header {
-    padding-left: max(16px, calc((100% - var(--app-max)) / 2 + 16px));
-    padding-right: max(16px, calc((100% - var(--app-max)) / 2 + 16px));
+  /* Per-view caps. box-sizing is border-box, so max-width is the whole column
+     (content ≈ cap − 64px padding), positioned after the rail's margin-left. */
+  .view--read {
+    max-width: var(--read-max);
+  }
+  .view--overview {
+    max-width: var(--overview-max);
+  }
+  .view--wide {
+    max-width: var(--wide-max);
   }
 
-  /* Pre-auth the rail is hidden (login gate): don't reserve or offset for it, so
-     the login card centres normally. :has() is progressive — an unsupported
-     browser simply keeps the rail-reserved offset, which is a harmless indent. */
+  /* Brand sits above the rail; sign-out above the workspace's right edge. */
+  .app-header {
+    padding-left: 20px;
+    padding-right: 32px;
+  }
+
+  /* Pre-auth the rail is hidden (login gate): drop the rail offset so the login
+     card centres in the viewport. :has() is progressive — an unsupported browser
+     keeps the offset, a harmless indent. */
   body:has(#nav[hidden]) .view {
-    margin-left: auto;
+    margin-left: 0;
   }
   body:has(#nav[hidden]) .app-header {
     padding-left: 16px;

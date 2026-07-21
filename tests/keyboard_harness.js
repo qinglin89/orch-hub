@@ -904,6 +904,9 @@ async function scenarioLogin() {
   eq("login: document.title tracks the page", doc.title, "Connect to orch-hub · orch-hub");
   activeIs("login: focus lands on the heading", heading);
   eq("login: heading is programmatic-only focus", heading.getAttribute("tabindex"), "-1");
+  // The gate drops any per-view width class: the login card centres itself and
+  // the desktop rail is hidden, so the workspace is the plain full-width view.
+  eq("login: the gate uses the plain full-width view", doc.getElementById("view").className, "view");
 
   var input = doc.getElementById("token-input");
   var label = doc.querySelector('label[for="token-input"]');
@@ -1125,6 +1128,45 @@ async function scenarioHeadingOutline() {
   eq("log: the scroll region is keyboard-reachable", out.getAttribute("tabindex"), "0");
   check("log: the log body carries no live-region role", !out.getAttribute("role"), out.getAttribute("role"));
   check("log: log lines are written as text", out.textContent.indexOf("dev session started") !== -1, out.textContent);
+}
+
+// The desktop shell reads a per-view width class off #view (styles.css): the
+// overview + flat card lists fill the workspace, detail/form views keep a
+// bounded reading column, logs + run history get the wider column. The widths
+// are CSS (nothing to measure without a layout engine), but the class app.js
+// tags per route is the contract the stylesheet rests on, so pin it per
+// representative route. The router sets it on entry, before the handler paints,
+// so it holds even for a route whose payload errors.
+async function scenarioViewLayout() {
+  installRoutes({ waiting: true });
+  route("GET", "/api/runs/" + RUN + "/task", {
+    run_id: RUN,
+    task_id: TASK,
+    source: "active",
+    present: true,
+    content: "# Demo task\n",
+  });
+  var cases = [
+    ["#/overview", "overview"],
+    ["#/repos", "list"],
+    ["#/tasks", "list"],
+    ["#/repos/" + REPO, "read"],
+    ["#/tasks/" + REPO + "/" + TASK, "read"],
+    ["#/intakes/i1", "read"],
+    ["#/runs", "wide"],
+    ["#/runs/" + RUN + "/logs", "wide"],
+    ["#/runs/" + RUN + "/task", "read"],
+  ];
+  for (var i = 0; i < cases.length; i++) {
+    await navigate(cases[i][0]);
+    var v = doc.getElementById("view");
+    check(
+      "layout: " + cases[i][0] + " tags view--" + cases[i][1],
+      v.classList.contains("view") &&
+        v.classList.contains("view--" + cases[i][1]),
+      v.className
+    );
+  }
 }
 
 // Every route handler awaits a payload, so a slow route can resolve long after
@@ -1359,6 +1401,7 @@ async function scenarioStaleRoute() {
     await scenarioRunOptions();
     await scenarioIntakeReview();
     await scenarioHeadingOutline();
+    await scenarioViewLayout();
     await scenarioStaleRoute();
   } catch (err) {
     FAILED++;
