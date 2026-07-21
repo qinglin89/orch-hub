@@ -134,44 +134,94 @@
 
 /* ---- palette presets ---------------------------------------------------------
    Appearance has two INDEPENDENT axes. The Dark/Light *mode* above (data-theme)
-   owns surface/text lightness and color-scheme; the *palette* selected here
-   (data-palette) owns the accent hue and the decorative/atmosphere tokens layered
-   over the mode's neutrals. Neon Cyan is the default and needs NO block — it IS the
-   bare :root (dark) and :root[data-theme="light"] (light) sets above, so the
-   default appearance stays byte-for-byte unchanged. Wasteland Orange overrides only
-   the hue-carrying tokens, once per mode, below.
+   owns the lightness TIER (dark vs light) and color-scheme; the *palette* selected
+   here (data-palette) owns the whole HUE/temperature — accent, the neutral
+   surfaces/text/border (warmed at the mode's own lightness), the decorative
+   industrial tokens, and the coloured atmosphere. So a mode change flips light↔dark
+   and a palette change swaps cool↔warm, independently.
+
+   What the palette does NOT touch, on purpose: color-scheme (mode-owned); the
+   semantic status tokens (--ok/--bad/--warn/--run) and the destructive --danger
+   pair, kept mode-owned so run/waiting/error/success/destructive stay the one
+   trusted vocabulary in BOTH palettes and never blur into decorative orange/rust;
+   and the hueless near-black atmosphere (--scanline/--vignette/--shadow), which is
+   lightness- not hue-bearing. All four appearance combos are WCAG-verified
+   (text/muted/link/badge >= 4.5, focus ring >= 3).
+
+   Neon Cyan is the default and needs NO block — it IS the bare :root (dark) and
+   :root[data-theme="light"] (light) sets above, so the default appearance stays
+   byte-for-byte unchanged. Wasteland Orange overrides the hue-carrying tokens once
+   per mode, below; the two blocks set an IDENTICAL token-name set (see specificity).
 
    Specificity: dark Wasteland Orange (:root[data-palette=...], 0,1,1) layers over
    the bare :root fine. Light Wasteland Orange needs its OWN combined block
    (:root[data-theme="light"][data-palette=...], 0,2,1) to beat BOTH the light-mode
    block and the dark-orange palette block, which are equal-specificity (0,1,1) and
-   would otherwise resolve by source order.
+   would otherwise resolve by source order — so for a light+orange user the LATER
+   dark-orange block would win any token the light block failed to set. Hence the
+   two Wasteland blocks must override the same token names; the light block is the
+   complete light override, not a delta. */
 
-   SESSION-1 NOTE: these Wasteland Orange presets are PROVISIONAL — an accent +
-   atmosphere recolor that proves the palette seam and the live control end to end
-   (selecting the palette already repaints the console). The COMPLETE token set —
-   warm surfaces, semantic-state separation from decorative orange/rust, focus, and
-   the full atmosphere — plus contrast and cross-viewport verification lands in
-   session-2. Neon Cyan remains the untouched default throughout. */
-
-/* Wasteland Orange — dark: an ember accent + warm atmosphere over dark graphite. */
+/* Wasteland Orange — dark: an ember accent over warm oxidized-graphite surfaces and
+   dust-toned text — the console re-skinned as rusted industrial metal, at dark
+   mode's lightness. Neutrals are warmed (not lightened): every text/muted/link/badge
+   pair verifies >= 4.5 and the focus ring >= 3, same as the cyan default. */
 :root[data-palette="wasteland-orange"] {
+  /* Warm oxidized graphite — the blue-black console shifted to a rusted brown-black
+     at matched lightness, so contrast holds while the temperature flips. */
+  --bg: #0c0906;
+  --surface: #17110b;
+  --surface-2: #241a11;
+  --text: #ece0d0; /* warm dust-white; ~15:1 on --bg */
+  --muted: #a68f76; /* warm taupe; >= 4.5 on --bg/--surface/--surface-2 */
+  --border: #3b2e20;
+  /* Ember accent (unchanged from the seam that proves the palette live). */
   --accent: #ff8a3d;
-  --accent-text: #17110b; /* near-black on ember ~9:1; white on ember ~2.3:1 (unusable) */
+  --accent-text: #17110b; /* near-black on ember ~8:1; white on ember ~2.3:1 (unusable) */
   --focus: #ffb066;
+  /* Decorative industrial palette, reframed warm — still DISTINCT from the
+     mode-owned semantic hues and never a state signal: an irradiated acid-green as
+     the one chemical counterpoint (log phosphor edge, terminal caret), a hazard
+     amber and an oxidized rust for the access-terminal hazard stripe. */
+  --toxic: #9ad14a;
+  --rad-amber: #ff9a2e;
+  --rust: #bd5f34;
+  /* Atmosphere recoloured to an ember glow / warm grid / amber bloom (the black
+     scanline + vignette stay mode-owned above). */
   --glow: rgba(255, 138, 61, 0.42);
-  --glow-strong: rgba(255, 138, 61, 0.6);
+  --glow-strong: rgba(255, 138, 61, 0.62);
   --bloom: rgba(255, 138, 61, 0.05);
   --grid-line: rgba(230, 150, 95, 0.06);
-  --edge-hi: rgba(230, 180, 140, 0.08);
+  --edge-hi: rgba(230, 180, 140, 0.09);
 }
 
-/* Wasteland Orange — light: a deep burnt-orange dark enough to carry white text and
-   read as a link on the pale mode surface. */
+/* Wasteland Orange — light: sun-bleached dust and warm concrete under a deep
+   burnt-orange accent — the daylight counterpart, at light mode's lightness. This
+   block is the COMPLETE light override (mirrors every token name the dark-orange
+   block sets); its 0,2,1 specificity is required to beat both the light-mode block
+   and the later dark-orange block. */
 :root[data-theme="light"][data-palette="wasteland-orange"] {
+  /* Warm sand/concrete neutrals — the cool light greys shifted warm at matched
+     lightness. --surface-2 stays a hair lighter (still darker than --surface) so
+     the warn metric value / muted badge text on it keep >= 4.5. */
+  --bg: #ece2d3;
+  --surface: #faf6ef;
+  --surface-2: #e9e0d0;
+  --text: #241a12; /* warm near-black; ~13:1 on --bg */
+  --muted: #665640; /* warm taupe; >= 4.5 on --bg/--surface/--surface-2 */
+  --border: #cdbda3;
+  /* Deep burnt-orange, dark enough to carry white text and read as a link on the
+     pale mode surface. */
   --accent: #9a4a17;
   --accent-text: #ffffff; /* white on burnt-orange ~6:1 */
   --focus: #b5590a;
+  /* Decorative industrial palette — the daylight counterpart, muted for a pale
+     canvas, still distinct from the semantic success/warning hues. */
+  --toxic: #5a7016;
+  --rad-amber: #a1560a;
+  --rust: #8a4526;
+  /* Light atmosphere: a soft burnt-orange glow, a warm console grid, a white top
+     bevel (no dark bevel on a pale surface); scanline/vignette stay mode-owned. */
   --glow: rgba(154, 74, 23, 0.28);
   --glow-strong: rgba(154, 74, 23, 0.34);
   --bloom: rgba(154, 74, 23, 0.03);
