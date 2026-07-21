@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 06a46e4937ebe0df6f1e399a068f82741a7de29e
+verified-against: 5fa62f65c02e064aebc258b613fd08f26dc1be1a
 ---
 
 # Features: Dashboard Ops
@@ -25,6 +25,11 @@ Implemented behavior:
   shell. It stores the bearer token in `localStorage`, attaches
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
+- `styles.css` owns a CSS-only industrial control-console theme: system sans
+  for prose, restrained monospace for identifiers/labels/output, graphite and
+  blue-black light/dark token sets, electric-cyan accents, accessible semantic
+  status colours, and subtle static grid/edge/glow treatments with no external
+  fonts, build step, or decorative network assets.
 - The shell is mobile-first responsive: phones keep the fixed bottom tab bar and
   original single column; tablet widths keep bottom navigation while only
   top-level `#view > .list` card lists become grids. Desktop widths move

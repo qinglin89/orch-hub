@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 06a46e4937ebe0df6f1e399a068f82741a7de29e
+verified-against: 5fa62f65c02e064aebc258b613fd08f26dc1be1a
 ---
 
 # Modules: Web and Operations
@@ -70,8 +70,12 @@ flush with the viewport edge. At desktop widths, `app.js` tags `#view` with a
 view-kind class: overview/list views fill the remaining workspace, detail/form/
 run-task/intake views use a bounded reading column, and logs/run history use a
 wider column; top-level card grids are scoped to direct `#view > .list`
-children so nested chronological feeds remain single-column newest-first. The
-shell assets are served uncached by the API so updates reach browsers on the
+children so nested chronological feeds remain single-column newest-first.
+`styles.css` also owns the CSS-only industrial control-console theme: automatic
+light/dark graphite token sets, electric-cyan accents, semantic status colours,
+system typography, monospace operational labels/ids/output, and subtle static
+grid/edge/glow effects without external fonts/assets or a frontend build step.
+The shell assets are served uncached by the API so updates reach browsers on the
 next load. `app.js` owns token entry/localStorage,
 bearer `fetch` calls, hash routing,
 route-level headings/focus/announcements, an Operations Overview default landing

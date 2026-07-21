@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-21
+verified-against: 5fa62f65c02e064aebc258b613fd08f26dc1be1a
 ---
 
 # Design: Patterns
@@ -58,6 +58,9 @@ verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
   logs from HTTP payloads rather than reading repo files or recomputing checks.
 - Serve dashboard shell assets through an enumerated allowlist rather than a
   broad static mount; every non-shell data route stays bearer-protected.
+- Keep dashboard presentation CSS-only: theme tokens, system fonts, semantic
+  state colours, and static atmosphere live in `styles.css`; do not add a build
+  step, external font, or decorative network asset for the control surface.
 - For raw task content, gate on task-index membership and resolve the task file
   target under the resolved `.ai-tasks` directory so symlinked files cannot
   disclose content outside the task dir.
