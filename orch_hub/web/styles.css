@@ -688,11 +688,20 @@ code {
   flex-wrap: wrap;
 }
 
+/* A field label speaks the console-key voice — the same monospace, upper-case,
+   tracked treatment as the spec-sheet keys (.kv dt) and metric labels — so the
+   filter bars, launch dialog, and intake/login forms all name their controls in
+   one voice. The nested control below opts back out (font-family + text-transform
+   reset on the control rules) so only the label text is affected, never the value
+   the user types or the option text. */
 .filters label {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted);
   flex: 1;
   min-width: 130px;
@@ -706,7 +715,11 @@ code {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 9px 10px;
+  /* Reset the console-key voice inherited from the label: the control shows its
+     value/placeholder in the normal reading font, not upper-case monospace. */
+  font-family: var(--sans);
   font-size: 14px;
+  text-transform: none;
   min-width: 0; /* let the search input shrink inside its flex label */
 }
 
@@ -760,7 +773,12 @@ code {
 }
 
 .login label {
-  font-size: 12px;
+  /* Console-key voice (see .filters label); the token input is a sibling, not a
+     child, so there is no control cascade to reset here. */
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -1122,7 +1140,10 @@ code {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-family: inherit;
+  /* Freeform prose input: the reading font, and explicitly not the console-key
+     voice of a wrapping field label (the intake revise textarea sits inside one). */
+  font-family: var(--sans);
+  text-transform: none;
   resize: vertical;
 }
 
@@ -1276,6 +1297,17 @@ code {
   color: var(--muted);
 }
 
+/* The launch-parameter field labels read as a spec-config panel in the console-key
+   voice (see .filters label). Scoped away from the two checkbox rows — the
+   plan-gate and blocked-task explanations are full prose sentences and must stay
+   sans (they render as flex rows via .run-controls .opt-toggle/.ack). */
+.run-options label:not(.opt-toggle):not(.ack) {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
 .run-options input,
 .run-options select {
   font-size: 16px; /* >=16px keeps iOS Safari from zooming on focus */
@@ -1284,7 +1316,9 @@ code {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-family: inherit;
+  /* Reset the label's console-key voice: the value/option text reads normally. */
+  font-family: var(--sans);
+  text-transform: none;
 }
 
 .run-options .control-actions {
@@ -1348,7 +1382,12 @@ code {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 13px;
+  /* Console-key voice (see .filters label); its textarea is .answer-input, which
+     resets back to the reading font. */
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -1370,10 +1409,23 @@ code {
   word-break: break-word;
 }
 
+/* A draft sub-heading ("Task file <path>", "Index entry <path>"): the same
+   console-label voice as the run-detail sub-heads (.sessions h3), so every h3
+   under a section reads alike. Kept at 12px (not 11) so the inline path code
+   stays legible. */
 .intake-sub {
   margin: 14px 0 6px;
-  font-size: 13px;
+  font-family: var(--mono);
+  font-size: 12px;
   font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The inline filename keeps its real case — only the label word is upper-cased. */
+.intake-sub code {
+  text-transform: none;
 }
 
 .intake-events {
@@ -1394,7 +1446,11 @@ code {
   align-items: baseline;
 }
 
+/* The audit event kind (created / revised / awaiting_review / …) is an
+   operational identifier, so it reads in monospace like the run/task/session ids
+   — its own case preserved, next to the muted timestamp. */
 .intake-event-kind {
+  font-family: var(--mono);
   font-weight: 650;
   font-size: 13px;
 }
