@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 4fafdfbceec13a94fce2fdf3a7692d8e254bce09
+verified-against: 4bb671a20e20a1924119c7622dc27e36724346a2
 ---
 
 # Features: Dashboard Ops
@@ -25,16 +25,18 @@ Implemented behavior:
   shell. It stores the bearer token in `localStorage`, attaches
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
-- `styles.css` owns a CSS-only industrial control-console theme: system sans
-  for prose, restrained monospace for identifiers/labels/output, graphite and
-  blue-black Dark/Light token sets, electric-cyan accents, accessible semantic
-  status colours, and subtle static grid/edge/glow treatments with no external
-  fonts, build step, or decorative network assets. Dark is the first-visit
-  default and safe fallback; a shell-header select persists Dark/Light/System in
-  `localStorage`, an inline head script resolves `<html data-theme>` before the
-  stylesheet paints, System follows `prefers-color-scheme` while open, and
-  document `color-scheme` plus browser `theme-color` stay aligned with the
-  resolved scheme.
+- `styles.css` owns a CSS-only neon-wasteland industrial control-console theme:
+  system sans for prose, restrained monospace for identifiers/labels/output,
+  graphite Dark/Light token sets, an intensified electric-cyan accent,
+  decorative toxic-green/radiation-amber/rust tokens used only for atmosphere,
+  accessible semantic status colours kept distinct from decoration, and
+  code-native grid/scanline/bloom/edge/glow treatments with no external fonts,
+  build step, or decorative network assets. Dark is the first-visit default and
+  safe fallback; Light stays a restrained industrial counterpart; a shell-header
+  select persists Dark/Light/System in `localStorage`, an inline head script
+  resolves `<html data-theme>` before the stylesheet paints, System follows
+  `prefers-color-scheme` while open, and document `color-scheme` plus browser
+  `theme-color` stay aligned with the resolved scheme.
 - The shell is mobile-first responsive: phones keep the fixed bottom tab bar and
   original single column; tablet widths keep bottom navigation while only
   top-level `#view > .list` card lists become grids. Desktop widths move
