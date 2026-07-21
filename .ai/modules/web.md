@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 0843c8f2bb3502cd9453fe7f88d230ce3d8fb12d
+verified-against: 06a46e4937ebe0df6f1e399a068f82741a7de29e
 ---
 
 # Modules: Web and Operations
@@ -65,9 +65,14 @@ Location: `orch_hub/web/`
 
 Responsibility: provide the build-stepless mobile-first dashboard shell.
 `index.html` defines the static app container and navigation; CSS keeps the
-bottom tab bar on phone/tablet widths and turns it into a desktop left rail with
-a wider content column. The shell assets are served uncached by the API so
-updates reach browsers on the next load. `app.js` owns token entry/localStorage,
+bottom tab bar on phone/tablet widths and turns it into a desktop left rail
+flush with the viewport edge. At desktop widths, `app.js` tags `#view` with a
+view-kind class: overview/list views fill the remaining workspace, detail/form/
+run-task/intake views use a bounded reading column, and logs/run history use a
+wider column; top-level card grids are scoped to direct `#view > .list`
+children so nested chronological feeds remain single-column newest-first. The
+shell assets are served uncached by the API so updates reach browsers on the
+next load. `app.js` owns token entry/localStorage,
 bearer `fetch` calls, hash routing,
 route-level headings/focus/announcements, an Operations Overview default landing
 route, repo/task/detail/run views, repo/task run-state signals,
@@ -83,7 +88,10 @@ log/task data as escaped HTML or text nodes.
 
 Every routed view renders one visible `h1.page-title`; router/full-view
 repaints sync it into `document.title` and move focus there, while background
-Overview refreshes, intake ticks, and log appends do not move focus. The main
+Overview refreshes, intake ticks, and log appends do not move focus. The page
+heading remains a programmatic landing target, but its visible focus ring is
+gated by last input modality: keyboard navigation adds the ring, while
+touch/pointer navigation keeps focus without a stray title outline. The main
 `#view` is not an ARIA live region; scoped status/alert/count regions carry the
 announcements. A monotonic route generation guards stale route completions:
 router-owned landing/error work, each handler's own post-await paint, `rerender`

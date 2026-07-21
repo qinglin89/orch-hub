@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 0843c8f2bb3502cd9453fe7f88d230ce3d8fb12d
+verified-against: 06a46e4937ebe0df6f1e399a068f82741a7de29e
 ---
 
 # Features: Dashboard Ops
@@ -26,15 +26,23 @@ Implemented behavior:
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
 - The shell is mobile-first responsive: phones keep the fixed bottom tab bar and
-  original single column; tablet widths keep bottom navigation while top-level
-  card lists become grids; desktop widths move navigation to a fixed left rail,
-  widen the content column, align header chrome to the rail/content block, and
-  keep the login gate centered with the nav hidden.
+  original single column; tablet widths keep bottom navigation while only
+  top-level `#view > .list` card lists become grids. Desktop widths move
+  navigation to a fixed left rail flush with the viewport edge; `app.js` tags
+  `#view` with a view-kind class so overview/list views fill the workspace,
+  detail/form/run-task/intake views keep a bounded reading column, and logs/run
+  history use a wider column, all left-anchored after the rail. Nested
+  chronological feeds such as recent commits, session strips, overview
+  activity/outcomes, and run cards stay single-column newest-first because they
+  are not direct `#view > .list` children.
 - Accessibility is route-level infrastructure: every routed view starts with one
   visible `h1.page-title`; router/full-view repaints mirror it into
   `document.title` and move focus there; `#view` is not a live region, with
-  announcements scoped to status, alert, and filter-count regions; shared focus
-  styling and minimum target sizes cover dashboard controls.
+  announcements scoped to status, alert, and filter-count regions. Heading
+  focus remains the routed landing point, but the visible heading ring is gated
+  by input modality so keyboard-driven navigation shows it while touch/pointer
+  navigation does not leave a stray page-title outline. Shared focus styling and
+  minimum target sizes cover dashboard controls and keyboard-scrollable blocks.
 - The Operations Overview is the default authenticated landing route
   (`#/overview`). It remains client-side over existing protected APIs,
   parallel-fetching repos, tasks, live runs, escalations, and run history into
