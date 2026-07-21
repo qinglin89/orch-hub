@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 4bb671a20e20a1924119c7622dc27e36724346a2
+verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
 ---
 
 # Features: Dashboard Ops
@@ -27,16 +27,19 @@ Implemented behavior:
   and uses no cookie or query-token credential path.
 - `styles.css` owns a CSS-only neon-wasteland industrial control-console theme:
   system sans for prose, restrained monospace for identifiers/labels/output,
-  graphite Dark/Light token sets, an intensified electric-cyan accent,
-  decorative toxic-green/radiation-amber/rust tokens used only for atmosphere,
-  accessible semantic status colours kept distinct from decoration, and
-  code-native grid/scanline/bloom/edge/glow treatments with no external fonts,
-  build step, or decorative network assets. Dark is the first-visit default and
-  safe fallback; Light stays a restrained industrial counterpart; a shell-header
-  select persists Dark/Light/System in `localStorage`, an inline head script
-  resolves `<html data-theme>` before the stylesheet paints, System follows
-  `prefers-color-scheme` while open, and document `color-scheme` plus browser
-  `theme-color` stay aligned with the resolved scheme.
+  independent Appearance axes for Mode (`Dark`/`Light`/`System` via
+  `data-theme`, first-visit safe fallback Dark) and Palette (`Neon Cyan`/
+  `Wasteland Orange` via `data-palette`, first-visit safe fallback Neon Cyan),
+  token presets for Neon Cyan graphite/cyan and Wasteland Orange warm
+  oxidized-metal/dust/ember dark+light variants, decorative toxic-green/
+  radiation-amber/rust tokens used only for atmosphere, accessible semantic
+  status colours kept distinct from decoration, and code-native grid/scanline/
+  bloom/edge/glow treatments with no external fonts, build step, or decorative
+  network assets. The shell-header Appearance popover persists the mode and
+  palette under separate `localStorage` keys, an inline head script resolves both
+  attributes before the stylesheet paints, System follows `prefers-color-scheme`
+  while open without changing palette, and document `color-scheme` plus browser
+  `theme-color` stay aligned with the resolved mode and palette surface.
 - The shell is mobile-first responsive: phones keep the fixed bottom tab bar and
   original single column; tablet widths keep bottom navigation while only
   top-level `#view > .list` card lists become grids. Desktop widths move

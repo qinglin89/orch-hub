@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-21
-verified-against: 4bb671a20e20a1924119c7622dc27e36724346a2
+verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
 ---
 
 # Modules: Web and Operations
@@ -72,17 +72,18 @@ run-task/intake views use a bounded reading column, and logs/run history use a
 wider column; top-level card grids are scoped to direct `#view > .list`
 children so nested chronological feeds remain single-column newest-first.
 `styles.css` also owns the CSS-only neon-wasteland industrial control-console
-theme: Dark/Light graphite token sets, intensified electric-cyan accents,
-semantic status colours kept separate from decorative toxic-green,
-radiation-amber, and rust tokens, system typography, monospace operational
-labels/ids/output, and static grid/scanline/bloom/edge/glow effects without
-external fonts/assets or a frontend build step. Dark is the first-visit default
-and safe fallback; Light stays a restrained industrial counterpart; a static
-shell-header select persists Dark/Light/System in `localStorage`, an inline
-head script resolves the stored or default preference to `<html data-theme>`
-before stylesheet paint, System follows `prefers-color-scheme` changes while
-open, and document `color-scheme` plus browser `theme-color` track the resolved
-scheme.
+theme: independent Appearance axes for Mode (`Dark`/`Light`/`System` on
+`data-theme`) and Palette (`Neon Cyan`/`Wasteland Orange` on `data-palette`),
+token presets for graphite/electric-cyan and warm oxidized-metal/dust/ember
+dark+light variants, semantic status colours kept separate from decorative
+toxic-green, radiation-amber, and rust tokens, system typography, monospace
+operational labels/ids/output, and static grid/scanline/bloom/edge/glow effects
+without external fonts/assets or a frontend build step. Dark + Neon Cyan is the
+first-visit safe fallback; a static shell-header Appearance popover persists
+mode and palette under separate `localStorage` keys, an inline head script
+resolves both `<html>` attributes before stylesheet paint, System follows
+`prefers-color-scheme` changes while open without changing palette, and document
+`color-scheme` plus browser `theme-color` track the resolved mode/palette.
 The shell assets are served uncached by the API so updates reach browsers on the
 next load. `app.js` owns token entry/localStorage,
 bearer `fetch` calls, hash routing,
