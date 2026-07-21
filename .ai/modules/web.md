@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-20
-verified-against: 1ab6f87d248bdb0d7c350186aee3cf9659b848b5
+last-updated: 2026-07-21
+verified-against: 0843c8f2bb3502cd9453fe7f88d230ce3d8fb12d
 ---
 
 # Modules: Web and Operations
@@ -63,18 +63,20 @@ audits the mode without copying answer text into history.
 
 Location: `orch_hub/web/`
 
-Responsibility: provide the build-stepless mobile dashboard shell. `index.html`
-defines the static app container and bottom navigation; the shell assets are
-served uncached by the API so updates reach browsers on the next load. `app.js`
-owns token entry/localStorage, bearer `fetch` calls, hash routing,
+Responsibility: provide the build-stepless mobile-first dashboard shell.
+`index.html` defines the static app container and navigation; CSS keeps the
+bottom tab bar on phone/tablet widths and turns it into a desktop left rail with
+a wider content column. The shell assets are served uncached by the API so
+updates reach browsers on the next load. `app.js` owns token entry/localStorage,
+bearer `fetch` calls, hash routing,
 route-level headings/focus/announcements, an Operations Overview default landing
 route, repo/task/detail/run views, repo/task run-state signals,
 searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
 run controls, live per-session context strips, waiting-question answer forms,
 filterable/counted/collapsible grouped run history with est-vs-actual rollups, a
 run-scoped task-file view, remote intake start/review views, and recent/live log
-views; `styles.css` holds the mobile layout. The dashboard reads only HTTP
-payloads, uses `fetch` +
+views; `styles.css` holds the mobile-first responsive layout. The dashboard
+reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
 log/task data as escaped HTML or text nodes.

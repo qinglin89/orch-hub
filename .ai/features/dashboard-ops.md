@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-20
-verified-against: 1ab6f87d248bdb0d7c350186aee3cf9659b848b5
+last-updated: 2026-07-21
+verified-against: 0843c8f2bb3502cd9453fe7f88d230ce3d8fb12d
 ---
 
 # Features: Dashboard Ops
@@ -25,6 +25,11 @@ Implemented behavior:
   shell. It stores the bearer token in `localStorage`, attaches
   `Authorization: Bearer ...` to every data `fetch`, clears the token on 401,
   and uses no cookie or query-token credential path.
+- The shell is mobile-first responsive: phones keep the fixed bottom tab bar and
+  original single column; tablet widths keep bottom navigation while top-level
+  card lists become grids; desktop widths move navigation to a fixed left rail,
+  widen the content column, align header chrome to the rail/content block, and
+  keep the login gate centered with the nav hidden.
 - Accessibility is route-level infrastructure: every routed view starts with one
   visible `h1.page-title`; router/full-view repaints mirror it into
   `document.title` and move focus there; `#view` is not a live region, with

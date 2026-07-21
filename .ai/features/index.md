@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-20
-verified-against: a5fc57d3bb19492f19777dfae70b73e8b92e879b
+last-updated: 2026-07-21
+verified-against: 0843c8f2bb3502cd9453fe7f88d230ce3d8fb12d
 ---
 
 # Features
@@ -14,7 +14,7 @@ verified-against: a5fc57d3bb19492f19777dfae70b73e8b92e879b
 | Run lifecycle | implemented | runs, sessions, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/sessions`, `POST /api/runs/{id}/stop` |
 | Human question relay | implemented | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
-| Mobile dashboard | implemented | api, web | public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including Operations Overview, searchable/counted all-tasks inventory, run start/stop controls, session context strips, filterable/collapsible grouped run history, and run-scoped task-file view |
+| Mobile dashboard | implemented | api, web | responsive public shell routes plus protected repo/task/run/escalation/log/history/commit APIs, including Operations Overview, searchable/counted all-tasks inventory, run start/stop controls, session context strips, filterable/collapsible grouped run history, and run-scoped task-file view |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | implemented | notifications, config, runs, intake, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |
