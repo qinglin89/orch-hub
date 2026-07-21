@@ -961,41 +961,87 @@ async function scenarioNavigation() {
   activeIs("nav: the skip link moves focus into the view", pageHeading());
 }
 
-async function scenarioTheme() {
-  // The theme control lives in the shell header (outside #view), so it is present
-  // on every view including the login gate and survives route repaints.
-  var select = doc.getElementById("theme-select");
-  check("theme: the header exposes a theme control", !!select, "no #theme-select");
-  eq("theme: it is a native select for full keyboard/touch support", select.tagName, "SELECT");
-  check("theme: it carries an accessible name", !!select.getAttribute("aria-label"), "no aria-label");
-  check("theme: it is keyboard reachable", isTabbable(select), "the theme select is not tabbable");
-  var values = doc.querySelectorAll("#theme-select option").map(function (o) {
+async function scenarioAppearance() {
+  // The Appearance popover lives in the shell header (outside #view), so it is
+  // present on every view including the login gate and survives route repaints. A
+  // compact toggle discloses a panel holding the two INDEPENDENT preference selects
+  // (mode + palette), so both axes fit a 320px header without overflow.
+  var toggle = doc.getElementById("appearance-toggle");
+  check("theme: the header exposes an appearance toggle", !!toggle, "no #appearance-toggle");
+  eq("theme: the toggle is a real button for full keyboard/touch support", toggle.tagName, "BUTTON");
+  check("theme: the toggle carries an accessible name", !!toggle.getAttribute("aria-label"), "no aria-label");
+  check("theme: the toggle is keyboard reachable", isTabbable(toggle), "the appearance toggle is not tabbable");
+
+  // The panel starts collapsed; the toggle reports it, and disclosing it opens the
+  // panel (so the selects inside become reachable).
+  var panel = doc.getElementById("appearance-panel");
+  check("theme: the panel starts collapsed", panel.hidden === true, "panel not hidden initially");
+  eq("theme: the toggle reports collapsed", toggle.getAttribute("aria-expanded"), "false");
+  dispatch(toggle, new Event("click"));
+  check("theme: activating the toggle opens the panel", panel.hidden === false, "panel still hidden after activation");
+  eq("theme: the toggle reports expanded", toggle.getAttribute("aria-expanded"), "true");
+
+  // ---- mode axis (Dark / Light / System) ----
+  var mode = doc.getElementById("theme-select");
+  check("theme: the panel exposes a mode control", !!mode, "no #theme-select");
+  eq("theme: mode is a native select for full keyboard/touch support", mode.tagName, "SELECT");
+  check("theme: mode carries an accessible name", !!mode.getAttribute("aria-label"), "no aria-label");
+  check("theme: mode is keyboard reachable when disclosed", isTabbable(mode), "the mode select is not tabbable");
+  var modeValues = doc.querySelectorAll("#theme-select option").map(function (o) {
     return o.getAttribute("value");
   });
-  eq("theme: it offers Dark, Light and System", values.join(","), "dark,light,system");
+  eq("theme: it offers Dark, Light and System", modeValues.join(","), "dark,light,system");
   // First run has no stored preference, so the control reflects the Dark default.
-  eq("theme: it reflects the Dark default with nothing stored", select.value, "dark");
+  eq("theme: it reflects the Dark default with nothing stored", mode.value, "dark");
 
-  // Choosing a scheme from the control persists the explicit preference; System is
-  // itself a persistable choice (its live OS-follow is browser-only, not stubbed).
-  select.value = "light";
-  dispatch(select, new Event("change"));
+  // ---- palette axis (Neon Cyan / Wasteland Orange) ----
+  var palette = doc.getElementById("palette-select");
+  check("palette: the panel exposes a palette control", !!palette, "no #palette-select");
+  eq("palette: it is a native select for full keyboard/touch support", palette.tagName, "SELECT");
+  check("palette: it carries an accessible name", !!palette.getAttribute("aria-label"), "no aria-label");
+  check("palette: it is keyboard reachable when disclosed", isTabbable(palette), "the palette select is not tabbable");
+  var paletteValues = doc.querySelectorAll("#palette-select option").map(function (o) {
+    return o.getAttribute("value");
+  });
+  eq("palette: it offers Neon Cyan and Wasteland Orange", paletteValues.join(","), "neon-cyan,wasteland-orange");
+  // First run has no stored preference, so the control reflects the Neon Cyan default.
+  eq("palette: it reflects the Neon Cyan default with nothing stored", palette.value, "neon-cyan");
+
+  // The two axes persist INDEPENDENTLY: changing one never rewrites the other's key.
+  mode.value = "light";
+  dispatch(mode, new Event("change"));
   eq("theme: choosing Light persists it", localStorage.getItem("orch-hub-theme"), "light");
-  select.value = "system";
-  dispatch(select, new Event("change"));
+  eq("palette: a mode change leaves the palette key untouched", localStorage.getItem("orch-hub-palette"), null);
+  palette.value = "wasteland-orange";
+  dispatch(palette, new Event("change"));
+  eq("palette: choosing Wasteland Orange persists it", localStorage.getItem("orch-hub-palette"), "wasteland-orange");
+  eq("palette: a palette change leaves the mode key untouched", localStorage.getItem("orch-hub-theme"), "light");
+  // System is itself a persistable mode choice (its live OS-follow is browser-only).
+  mode.value = "system";
+  dispatch(mode, new Event("change"));
   eq("theme: choosing System persists it", localStorage.getItem("orch-hub-theme"), "system");
 
+  // Escape closes the panel and returns focus to the toggle.
+  dispatch(panel, new Event("keydown", { key: "Escape" }));
+  check("theme: Escape closes the panel", panel.hidden === true, "panel still open after Escape");
+  activeIs("theme: Escape returns focus to the toggle", toggle);
+
   // The control is not part of the repainted #view, so a navigation leaves it in
-  // place (a keyboard user's theme choice is never torn out by routing).
+  // place (a keyboard user's appearance choice is never torn out by routing).
   await navigate("#/repos");
   check(
     "theme: the control survives a navigation",
-    doc.getElementById("theme-select") === select,
-    "the theme select was replaced by a route repaint"
+    doc.getElementById("appearance-toggle") === toggle &&
+      doc.getElementById("theme-select") === mode &&
+      doc.getElementById("palette-select") === palette,
+    "the appearance control was replaced by a route repaint"
   );
-  // Restore the default so later scenarios start from a known theme state.
-  select.value = "dark";
-  dispatch(select, new Event("change"));
+
+  // Restore defaults so later scenarios start from a known appearance state.
+  mode.value = "dark";
+  dispatch(mode, new Event("change"));
+  palette.value = "neon-cyan";
+  dispatch(palette, new Event("change"));
 }
 
 async function scenarioTaskDetail() {
@@ -1434,7 +1480,7 @@ async function scenarioStaleRoute() {
   try {
     await scenarioLogin();
     await scenarioNavigation();
-    await scenarioTheme();
+    await scenarioAppearance();
     await scenarioTaskDetail();
     await scenarioRunOptions();
     await scenarioIntakeReview();

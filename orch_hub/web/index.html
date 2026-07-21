@@ -18,12 +18,15 @@
     <!-- Inline empty icon: avoids a /favicon.ico request that the default-deny
          auth middleware would answer with 401. -->
     <link rel="icon" href="data:," />
-    <!-- Pre-paint theme resolution. Reads the saved Dark/Light/System preference
-         (default Dark) and sets the resolved scheme on <html> before the stylesheet
-         paints a frame, so there is no light-to-dark startup flash. Kept inline and
-         tiny because app.js only loads after the first paint; app.js re-applies the
-         same logic and owns the live control plus system-change following. Fails
-         safe to Dark if storage is unavailable or the stored value is invalid. -->
+    <!-- Pre-paint appearance resolution. Two INDEPENDENT axes are resolved and
+         written to <html> before the stylesheet paints a frame, so neither flashes
+         on startup: the Dark/Light/System *mode* → data-theme, and the Neon Cyan /
+         Wasteland Orange *palette* → data-palette. Kept inline and tiny because
+         app.js only loads after the first paint; app.js re-applies the same logic
+         and owns the live controls plus system-change following. Each axis fails
+         safe on its own (Dark / Neon Cyan) when storage is unavailable or the
+         stored value is invalid, and reads its own key — a returning Dark/Light/
+         System user keeps their mode and simply gains the Neon Cyan default. -->
     <script>
       (function () {
         try {
@@ -40,6 +43,13 @@
         } catch (e) {
           document.documentElement.setAttribute("data-theme", "dark");
         }
+        try {
+          var palette = localStorage.getItem("orch-hub-palette");
+          if (palette !== "wasteland-orange") palette = "neon-cyan";
+          document.documentElement.setAttribute("data-palette", palette);
+        } catch (e) {
+          document.documentElement.setAttribute("data-palette", "neon-cyan");
+        }
       })();
     </script>
     <link rel="stylesheet" href="/styles.css" />
@@ -52,17 +62,57 @@
 
     <header class="app-header">
       <span class="app-title">orch-hub</span>
-      <!-- Header actions sit at the right edge. The theme control is always
+      <!-- Header actions sit at the right edge. The Appearance control is always
            present (including the login gate); Sign out is auth-gated by app.js. -->
       <div class="header-actions">
-        <!-- Compact native <select> for full touch + keyboard support in the
-             smallest space; app.js reflects the saved preference and persists a
-             change. `color-scheme` (set per theme) styles the popup to match. -->
-        <select id="theme-select" class="theme-select" aria-label="Theme">
-          <option value="dark">Dark</option>
-          <option value="light">Light</option>
-          <option value="system">System</option>
-        </select>
+        <!-- Appearance: one compact popover holding the two INDEPENDENT preference
+             axes (mode + palette). Collapsing them behind a single icon-sized
+             toggle keeps the mobile header from overflowing at 320px, even
+             post-auth with Sign out visible. The toggle is a real
+             <button aria-expanded> for full touch + keyboard support; app.js
+             opens/closes the panel (Escape + outside-click), and the native
+             <select>s inside keep each axis operable. The swatch dot reflects the
+             active palette accent so the closed control still signals it. -->
+        <div class="appearance">
+          <button
+            id="appearance-toggle"
+            class="appearance-toggle"
+            type="button"
+            aria-haspopup="true"
+            aria-expanded="false"
+            aria-controls="appearance-panel"
+            aria-label="Appearance"
+          >
+            <span class="appearance-dot" aria-hidden="true"></span>
+          </button>
+          <div
+            id="appearance-panel"
+            class="appearance-panel"
+            role="group"
+            aria-label="Appearance"
+            hidden
+          >
+            <label class="appearance-row">
+              <span class="appearance-label">Mode</span>
+              <select id="theme-select" class="theme-select" aria-label="Mode">
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
+            </label>
+            <label class="appearance-row">
+              <span class="appearance-label">Palette</span>
+              <select
+                id="palette-select"
+                class="palette-select"
+                aria-label="Palette"
+              >
+                <option value="neon-cyan">Neon Cyan</option>
+                <option value="wasteland-orange">Wasteland Orange</option>
+              </select>
+            </label>
+          </div>
+        </div>
         <button
           id="signout-btn"
           class="icon-btn"

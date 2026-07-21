@@ -1320,32 +1320,52 @@ def test_mobile_and_tablet_shell_is_preserved():
     assert "#view > .list" in tablet  # tablet keeps the same direct-child card grid
 
 
-# ---- persistent theme control (2026-07-21-dashboard-theme-control) ------------
+# ---- appearance: mode + palette (2026-07-21-dashboard-color-palettes) ---------
 #
-# A header theme control offers Dark / Light / System, with Dark the first-visit
-# default. The choice persists in localStorage and is resolved to a concrete
-# `data-theme` on <html> before the first paint (an inline script in index.html),
-# so there is no light-to-dark startup flash; app.js owns the live control,
-# system-change following, and the browser-chrome meta. styles.css keys its token
-# sets off `data-theme` (dark the bare-:root default, light an override) rather
-# than the OS media query. Asserted at the served-asset boundary (no JS runtime in
-# this suite); the control's keyboard behaviour is driven for real under the jsc
-# harness (tests/test_web_keyboard.py, `theme:` scenario). Each check maps to a
-# scope/acceptance line.
+# Appearance is two INDEPENDENT axes behind one compact header popover: a
+# Dark / Light / System *mode* (data-theme) and a Neon Cyan / Wasteland Orange
+# *palette* (data-palette). Dark + Neon Cyan is the first-visit default. Both
+# persist under their own localStorage keys and resolve to <html> attributes
+# before the first paint (an inline script in index.html), so neither flashes;
+# app.js owns the live controls, mode's system-change following, and the
+# browser-chrome meta. styles.css keys mode off `data-theme` (dark the bare-:root
+# default, light an override) and layers the palette off `data-palette` as a token
+# preset (Neon Cyan = the untouched default sets, Wasteland Orange = overrides).
+# The two selects live in a disclosure popover so both fit a 320px header without
+# overflow, even post-auth with sign-out visible. Asserted at the served-asset
+# boundary (no JS runtime in this suite); the control's keyboard behaviour is
+# driven for real under the jsc harness (tests/test_web_keyboard.py, `theme:` and
+# `palette:` scenarios). Each check maps to a scope/acceptance line.
 
 
-def test_theme_control_is_in_the_header_with_three_choices():
+def test_appearance_control_is_a_header_popover_with_both_axes():
     html = index_html()
-    # A compact, accessible theme control in the shell header — present on every
-    # view including the login gate, because the header sits outside the auth-gated
-    # #view. Dark / Light / System, named for assistive tech.
-    assert '<select id="theme-select" class="theme-select" aria-label="Theme">' in html
+    # A compact, accessible Appearance control in the shell header — present on
+    # every view including the login gate, because the header sits outside the
+    # auth-gated #view. One toggle button discloses a panel holding both selects, so
+    # two axes never overflow the mobile header.
+    assert 'class="header-actions"' in html
+    assert 'class="appearance"' in html
+    assert 'id="appearance-toggle"' in html
+    assert 'aria-expanded="false"' in html
+    assert 'aria-controls="appearance-panel"' in html
+    assert 'aria-label="Appearance"' in html
+    assert 'id="appearance-panel"' in html
+    # The mode axis: Dark / Light / System, named for assistive tech.
+    assert '<select id="theme-select" class="theme-select" aria-label="Mode">' in html
     for value, label in (("dark", "Dark"), ("light", "Light"), ("system", "System")):
         assert f'<option value="{value}">{label}</option>' in html
-    # Grouped with sign-out at the header's right edge; the control precedes #view,
-    # so it renders before authentication too.
-    assert 'class="header-actions"' in html
-    assert html.index('id="theme-select"') < html.index('id="view"')
+    # The palette axis: Neon Cyan / Wasteland Orange.
+    assert 'id="palette-select"' in html
+    assert 'class="palette-select"' in html
+    assert 'aria-label="Palette"' in html
+    for value, label in (
+        ("neon-cyan", "Neon Cyan"),
+        ("wasteland-orange", "Wasteland Orange"),
+    ):
+        assert f'<option value="{value}">{label}</option>' in html
+    # The control precedes #view, so it renders before authentication too.
+    assert html.index('id="appearance-toggle"') < html.index('id="view"')
 
 
 def test_theme_is_applied_before_first_paint_defaulting_to_dark():
@@ -1374,13 +1394,13 @@ def test_theme_defaults_to_dark_and_persists_the_choice():
     # safe to Dark rather than throwing.
     assert 'return THEME_CHOICES.has(stored) ? stored : "dark";' in body
     assert 'return "dark"; // storage unavailable' in body
-    # The header control persists the chosen preference and re-applies the theme.
+    # The mode control persists the chosen preference and re-applies the theme.
     assert "function setThemePreference" in body
-    assert 'select.addEventListener("change"' in body
+    assert 'themeSelect.addEventListener("change"' in body
     # applyTheme drives <html data-theme> from the resolved preference, and the
-    # bootstrap wires it once at startup.
+    # bootstrap wires the Appearance control once at startup.
     assert 'root.setAttribute("data-theme", resolveTheme(getThemePreference()))' in body
-    assert "initTheme();" in body
+    assert "initAppearance();" in body
 
 
 def test_theme_system_choice_follows_the_os_and_updates_live():
@@ -1424,11 +1444,86 @@ def test_theme_keeps_color_scheme_and_browser_chrome_consistent():
     assert '<meta name="color-scheme" content="dark light"' in html
 
 
-def test_theme_control_is_touch_sized_and_grouped():
+def test_appearance_control_is_touch_sized_and_grouped():
     css = styles_css()
-    # The compact control still meets the touch-target floor and groups with
-    # sign-out at the header edge.
-    assert ".theme-select" in css
+    # The compact controls meet the touch-target floor and group with sign-out at
+    # the header edge. The icon-sized toggle keeps the header narrow; the disclosed
+    # mode + palette selects share the same floor.
     assert ".header-actions" in css
-    theme = css[css.index(".theme-select") :]
-    assert "min-height: 36px" in theme[:200]
+    assert ".appearance-toggle" in css
+    assert ".theme-select" in css
+    assert ".palette-select" in css
+    toggle = css[css.index(".appearance-toggle") :]
+    assert "min-height: 36px" in toggle[:220]
+    selects = css[css.index(".theme-select,") :]
+    assert "min-height: 36px" in selects[:240]
+    # The panel is a floating disclosure so the two axes never widen the header.
+    assert ".appearance-panel" in css
+    assert "position: absolute" in css[css.index(".appearance-panel") :][:220]
+
+
+def test_palette_is_applied_before_first_paint_defaulting_to_neon_cyan():
+    html = index_html()
+    # The same pre-paint script resolves the palette axis too, so a Wasteland Orange
+    # visit never flashes the default palette. It reads its own key and must precede
+    # the stylesheet link so the first computed style already sees the palette.
+    assert 'localStorage.getItem("orch-hub-palette")' in html
+    assert '"data-palette"' in html
+    assert html.index('localStorage.getItem("orch-hub-palette")') < html.index(
+        'href="/styles.css"'
+    )
+    # An unknown / missing stored value normalises to Neon Cyan, and a storage error
+    # fails safe to Neon Cyan rather than throwing.
+    assert 'if (palette !== "wasteland-orange") palette = "neon-cyan";' in html
+    assert (
+        'document.documentElement.setAttribute("data-palette", "neon-cyan");' in html
+    )
+
+
+def test_palette_defaults_to_neon_cyan_and_persists_independently():
+    body = app_js()
+    # A second axis with its OWN key, so it never collides with the mode key — that
+    # separation is what lets an existing Dark/Light/System user migrate untouched.
+    assert 'const THEME_KEY = "orch-hub-theme";' in body
+    assert 'const PALETTE_KEY = "orch-hub-palette";' in body
+    assert 'new Set(["neon-cyan", "wasteland-orange"])' in body
+    # A missing / invalid stored value resolves to Neon Cyan; a storage error also
+    # fails safe rather than throwing.
+    assert 'return PALETTE_CHOICES.has(stored) ? stored : "neon-cyan";' in body
+    assert 'return "neon-cyan"; // storage unavailable' in body
+    # The palette control persists the chosen preference and applies it to
+    # <html data-palette>; the bootstrap wires it once at startup.
+    assert "function setPalettePreference" in body
+    assert 'paletteSelect.addEventListener("change"' in body
+    assert 'root.setAttribute("data-palette", getPalettePreference())' in body
+    assert "applyPalette();" in body
+
+
+def test_palette_is_a_token_preset_layered_over_mode():
+    css = styles_css()
+    # Neon Cyan is the DEFAULT and needs no block: it is the bare :root (dark) and
+    # the light override, untouched — so there is deliberately no data-palette
+    # selector for it, which keeps the default appearance byte-for-byte unchanged.
+    assert 'data-palette="neon-cyan"' not in css
+    assert "--accent: #26e4fb" in css  # the untouched Neon Cyan dark accent
+    # Wasteland Orange is a token preset per mode, overriding the hue-carrying
+    # tokens. Its light variant needs its own combined selector to win over both the
+    # light-mode block and the dark-orange palette block (equal specificity).
+    assert ':root[data-palette="wasteland-orange"]' in css
+    assert ':root[data-theme="light"][data-palette="wasteland-orange"]' in css
+    assert "--accent: #ff8a3d" in css  # dark ember
+    assert "--accent: #9a4a17" in css  # light burnt-orange
+
+
+def test_appearance_popover_is_toggled_and_dismissible():
+    body = app_js()
+    # The disclosure is built by hand so the toggle is a real focusable button:
+    # aria-expanded tracks state and the panel's hidden flag mirrors it.
+    assert "function initAppearancePopover" in body
+    assert 'toggle.setAttribute("aria-expanded", open ? "true" : "false")' in body
+    assert "panel.hidden = !open;" in body
+    assert 'toggle.addEventListener("click", () => setOpen(!isOpen()))' in body
+    # It dismisses on Escape (focus returns to the toggle) and on an outside click.
+    assert 'if (ev.key === "Escape" && isOpen())' in body
+    assert "toggle.focus()" in body
+    assert "!root.contains(ev.target)" in body

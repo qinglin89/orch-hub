@@ -83,15 +83,17 @@
     else localStorage.removeItem(TOKEN_KEY);
   }
 
-  // ---- theme ----
-  // Dark is the first-visit default and the safe fallback; an explicit choice
-  // (Dark/Light/System) persists in localStorage and is resolved to a concrete
-  // scheme on `<html data-theme>` — matching styles.css and the pre-paint script in
-  // index.html that applies it before the first frame (no light-to-dark flash).
-  // This code re-applies the same logic, owns the header control, and follows OS
-  // scheme changes while System is active. Every browser reach is guarded so the
-  // jsc keyboard harness — which stubs no matchMedia, documentElement, or
-  // getComputedStyle — can drive this file unchanged.
+  // ---- appearance: mode (theme) + palette ----
+  // Appearance has two INDEPENDENT axes. Mode (Dark/Light/System) is below; palette
+  // (Neon Cyan / Wasteland Orange) is further down. Each persists under its own key
+  // and resolves to a concrete `<html>` attribute (data-theme / data-palette) —
+  // matching styles.css and the pre-paint script in index.html that applies both
+  // before the first frame (no startup flash). This code re-applies the same logic,
+  // owns the header Appearance popover, and follows OS scheme changes while Mode is
+  // System. Every browser reach is guarded so the jsc keyboard harness — which stubs
+  // no matchMedia, documentElement, or getComputedStyle — can drive this unchanged.
+  //
+  // Mode: Dark is the first-visit default and the safe fallback.
   const THEME_KEY = "orch-hub-theme";
   const THEME_CHOICES = new Set(["dark", "light", "system"]);
 
@@ -159,18 +161,65 @@
     applyThemeColorMeta();
   }
 
-  // Wire the header theme control and follow OS scheme changes while System is the
-  // active preference. The <select> lives in the static shell (outside #view), so
-  // it is wired once at startup and survives every route repaint.
-  function initTheme() {
-    const select = document.getElementById("theme-select");
-    if (select) {
-      select.value = getThemePreference();
-      select.addEventListener("change", () => {
-        setThemePreference(select.value);
+  // Palette: a SECOND, independent appearance axis. Neon Cyan is the first-visit
+  // default and safe fallback; an explicit choice (Neon Cyan / Wasteland Orange)
+  // persists under its own key and resolves to `<html data-palette>`, which
+  // styles.css layers over the mode as a token preset. Mode owns light/dark; palette
+  // owns the accent hue and atmosphere — a change to one never touches the other.
+  // Migration is implicit: an existing Dark/Light/System user has no palette key, so
+  // they get Neon Cyan while their mode stays exactly as saved.
+  const PALETTE_KEY = "orch-hub-palette";
+  const PALETTE_CHOICES = new Set(["neon-cyan", "wasteland-orange"]);
+
+  function getPalettePreference() {
+    let stored = null;
+    try {
+      stored = localStorage.getItem(PALETTE_KEY);
+    } catch (_) {
+      return "neon-cyan"; // storage unavailable → safe default
+    }
+    return PALETTE_CHOICES.has(stored) ? stored : "neon-cyan";
+  }
+
+  function setPalettePreference(pref) {
+    try {
+      if (PALETTE_CHOICES.has(pref)) localStorage.setItem(PALETTE_KEY, pref);
+    } catch (_) {
+      /* storage unavailable: the in-memory applyPalette below still takes effect */
+    }
+  }
+
+  // Apply the current palette to `<html data-palette>` (which selects the token
+  // preset). The palette can shift --surface (warm vs graphite), so keep the
+  // browser-chrome meta in step too.
+  function applyPalette() {
+    const root = document.documentElement;
+    if (root && typeof root.setAttribute === "function")
+      root.setAttribute("data-palette", getPalettePreference());
+    applyThemeColorMeta();
+  }
+
+  // Wire the header Appearance popover (mode + palette selects) and follow OS scheme
+  // changes while Mode is System. The controls live in the static shell (outside
+  // #view), so they are wired once at startup and survive every route repaint.
+  function initAppearance() {
+    const themeSelect = document.getElementById("theme-select");
+    if (themeSelect) {
+      themeSelect.value = getThemePreference();
+      themeSelect.addEventListener("change", () => {
+        setThemePreference(themeSelect.value);
         applyTheme();
       });
     }
+    const paletteSelect = document.getElementById("palette-select");
+    if (paletteSelect) {
+      paletteSelect.value = getPalettePreference();
+      paletteSelect.addEventListener("change", () => {
+        setPalettePreference(paletteSelect.value);
+        applyPalette();
+      });
+    }
+    initAppearancePopover();
     try {
       if (typeof window.matchMedia === "function") {
         const mq = window.matchMedia("(prefers-color-scheme: dark)");
@@ -185,6 +234,42 @@
       /* no matchMedia: System just won't live-update while the page is open */
     }
     applyTheme();
+    applyPalette();
+  }
+
+  // Disclosure behaviour for the Appearance popover: an icon-sized toggle reveals a
+  // panel holding the two preference selects, so both axes fit a 320px header. Built
+  // by hand (a real <button aria-expanded> + a hidden panel) rather than <details>
+  // so the toggle is an ordinary focusable button; it closes on Escape (focus
+  // returns to the toggle) and on an outside click. Every browser reach is guarded
+  // so the jsc harness can drive it.
+  function initAppearancePopover() {
+    const toggle = document.getElementById("appearance-toggle");
+    const panel = document.getElementById("appearance-panel");
+    const root = document.querySelector(".appearance");
+    if (!toggle || !panel) return;
+    const isOpen = () => toggle.getAttribute("aria-expanded") === "true";
+    const setOpen = (open) => {
+      toggle.setAttribute("aria-expanded", open ? "true" : "false");
+      panel.hidden = !open;
+    };
+    toggle.addEventListener("click", () => setOpen(!isOpen()));
+    if (root && typeof root.addEventListener === "function") {
+      root.addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape" && isOpen()) {
+          setOpen(false);
+          if (typeof toggle.focus === "function") toggle.focus();
+        }
+      });
+    }
+    if (typeof document.addEventListener === "function") {
+      // An outside click closes it. The toggle's own click runs first (target
+      // phase) and opens the panel; this bubble-phase handler then sees the target
+      // inside .appearance and leaves it open.
+      document.addEventListener("click", (ev) => {
+        if (isOpen() && root && !root.contains(ev.target)) setOpen(false);
+      });
+    }
   }
 
   // ---- API client ----
@@ -3533,8 +3618,9 @@
   window.addEventListener("pointerdown", markPointerNav, true);
   window.addEventListener("touchstart", markPointerNav, true);
   window.addEventListener("hashchange", router);
-  // Reflect the saved theme in the header control, re-apply it (the pre-paint
-  // script in index.html already set data-theme), and start following OS changes.
-  initTheme();
+  // Reflect the saved mode + palette in the header Appearance popover, re-apply them
+  // (the pre-paint script in index.html already set data-theme/data-palette), and
+  // start following OS changes while Mode is System.
+  initAppearance();
   router();
 })();
