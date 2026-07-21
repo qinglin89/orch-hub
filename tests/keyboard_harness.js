@@ -961,6 +961,43 @@ async function scenarioNavigation() {
   activeIs("nav: the skip link moves focus into the view", pageHeading());
 }
 
+async function scenarioTheme() {
+  // The theme control lives in the shell header (outside #view), so it is present
+  // on every view including the login gate and survives route repaints.
+  var select = doc.getElementById("theme-select");
+  check("theme: the header exposes a theme control", !!select, "no #theme-select");
+  eq("theme: it is a native select for full keyboard/touch support", select.tagName, "SELECT");
+  check("theme: it carries an accessible name", !!select.getAttribute("aria-label"), "no aria-label");
+  check("theme: it is keyboard reachable", isTabbable(select), "the theme select is not tabbable");
+  var values = doc.querySelectorAll("#theme-select option").map(function (o) {
+    return o.getAttribute("value");
+  });
+  eq("theme: it offers Dark, Light and System", values.join(","), "dark,light,system");
+  // First run has no stored preference, so the control reflects the Dark default.
+  eq("theme: it reflects the Dark default with nothing stored", select.value, "dark");
+
+  // Choosing a scheme from the control persists the explicit preference; System is
+  // itself a persistable choice (its live OS-follow is browser-only, not stubbed).
+  select.value = "light";
+  dispatch(select, new Event("change"));
+  eq("theme: choosing Light persists it", localStorage.getItem("orch-hub-theme"), "light");
+  select.value = "system";
+  dispatch(select, new Event("change"));
+  eq("theme: choosing System persists it", localStorage.getItem("orch-hub-theme"), "system");
+
+  // The control is not part of the repainted #view, so a navigation leaves it in
+  // place (a keyboard user's theme choice is never torn out by routing).
+  await navigate("#/repos");
+  check(
+    "theme: the control survives a navigation",
+    doc.getElementById("theme-select") === select,
+    "the theme select was replaced by a route repaint"
+  );
+  // Restore the default so later scenarios start from a known theme state.
+  select.value = "dark";
+  dispatch(select, new Event("change"));
+}
+
 async function scenarioTaskDetail() {
   await navigate("#/tasks/" + REPO + "/" + TASK);
   var heading = pageHeading();
@@ -1397,6 +1434,7 @@ async function scenarioStaleRoute() {
   try {
     await scenarioLogin();
     await scenarioNavigation();
+    await scenarioTheme();
     await scenarioTaskDetail();
     await scenarioRunOptions();
     await scenarioIntakeReview();

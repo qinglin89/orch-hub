@@ -1318,3 +1318,117 @@ def test_mobile_and_tablet_shell_is_preserved():
     assert "min-width: 720px" in css
     tablet = css[css.index("min-width: 720px") : css.index("min-width: 1024px")]
     assert "#view > .list" in tablet  # tablet keeps the same direct-child card grid
+
+
+# ---- persistent theme control (2026-07-21-dashboard-theme-control) ------------
+#
+# A header theme control offers Dark / Light / System, with Dark the first-visit
+# default. The choice persists in localStorage and is resolved to a concrete
+# `data-theme` on <html> before the first paint (an inline script in index.html),
+# so there is no light-to-dark startup flash; app.js owns the live control,
+# system-change following, and the browser-chrome meta. styles.css keys its token
+# sets off `data-theme` (dark the bare-:root default, light an override) rather
+# than the OS media query. Asserted at the served-asset boundary (no JS runtime in
+# this suite); the control's keyboard behaviour is driven for real under the jsc
+# harness (tests/test_web_keyboard.py, `theme:` scenario). Each check maps to a
+# scope/acceptance line.
+
+
+def test_theme_control_is_in_the_header_with_three_choices():
+    html = index_html()
+    # A compact, accessible theme control in the shell header — present on every
+    # view including the login gate, because the header sits outside the auth-gated
+    # #view. Dark / Light / System, named for assistive tech.
+    assert '<select id="theme-select" class="theme-select" aria-label="Theme">' in html
+    for value, label in (("dark", "Dark"), ("light", "Light"), ("system", "System")):
+        assert f'<option value="{value}">{label}</option>' in html
+    # Grouped with sign-out at the header's right edge; the control precedes #view,
+    # so it renders before authentication too.
+    assert 'class="header-actions"' in html
+    assert html.index('id="theme-select"') < html.index('id="view"')
+
+
+def test_theme_is_applied_before_first_paint_defaulting_to_dark():
+    html = index_html()
+    # An inline head script resolves the saved preference and sets data-theme on
+    # <html> BEFORE the stylesheet paints a frame, so a dark-default visit never
+    # flashes light. It reads the same key app.js uses and must precede the
+    # stylesheet link so the first computed style already sees the resolved theme.
+    assert 'localStorage.getItem("orch-hub-theme")' in html
+    assert "document.documentElement.setAttribute(" in html
+    assert '"data-theme"' in html
+    assert html.index('localStorage.getItem("orch-hub-theme")') < html.index(
+        'href="/styles.css"'
+    )
+    # It fails safe to dark when storage is blocked or the stored value is invalid.
+    catch = html[html.index("catch (e)") :]
+    assert '"dark"' in catch[:140]
+
+
+def test_theme_defaults_to_dark_and_persists_the_choice():
+    body = app_js()
+    # One storage key, three choices; the saved preference persists and restores.
+    assert 'const THEME_KEY = "orch-hub-theme";' in body
+    assert 'new Set(["dark", "light", "system"])' in body
+    # A missing / invalid stored value resolves to Dark; a storage error also fails
+    # safe to Dark rather than throwing.
+    assert 'return THEME_CHOICES.has(stored) ? stored : "dark";' in body
+    assert 'return "dark"; // storage unavailable' in body
+    # The header control persists the chosen preference and re-applies the theme.
+    assert "function setThemePreference" in body
+    assert 'select.addEventListener("change"' in body
+    # applyTheme drives <html data-theme> from the resolved preference, and the
+    # bootstrap wires it once at startup.
+    assert 'root.setAttribute("data-theme", resolveTheme(getThemePreference()))' in body
+    assert "initTheme();" in body
+
+
+def test_theme_system_choice_follows_the_os_and_updates_live():
+    body = app_js()
+    # System resolves from the current OS scheme...
+    assert 'if (pref === "system") return systemPrefersDark() ? "dark" : "light";' in body
+    assert 'window.matchMedia("(prefers-color-scheme: dark)")' in body
+    # ...and a live OS-scheme change re-applies only while System is the active
+    # preference (an explicit Dark/Light choice is left untouched).
+    assert 'if (getThemePreference() === "system") applyTheme();' in body
+    assert 'mq.addEventListener("change", follow)' in body
+
+
+def test_theme_tokens_key_off_data_theme_with_a_dark_default():
+    css = styles_css()
+    # Dark is the bare-:root default (and safe fallback); Light is the higher-
+    # specificity override applied when data-theme="light" is resolved. The
+    # OS-driven media scheme block is gone — JS owns resolution now.
+    assert ':root[data-theme="light"]' in css
+    assert "prefers-color-scheme" not in css
+    # Both full token sets survive the move: dark now in :root, light in the
+    # attribute block (spot-check the background token of each).
+    assert "--bg: #090c11" in css  # dark default
+    assert "--bg: #e6eaf0" in css  # light override
+
+
+def test_theme_keeps_color_scheme_and_browser_chrome_consistent():
+    html = index_html()
+    body = app_js()
+    css = styles_css()
+    # The document color-scheme is set per resolved theme, so native controls and
+    # scrollbars follow: dark by default, light under the light attribute.
+    assert "color-scheme: dark;" in css
+    assert "color-scheme: light;" in css
+    # A theme-color meta tints the mobile browser chrome; app.js keeps it in step
+    # with the resolved theme's surface colour, read from the live CSS token.
+    assert '<meta name="theme-color"' in html
+    assert 'meta[name="theme-color"]' in body
+    assert '.getPropertyValue("--surface")' in body
+    # The pre-CSS canvas is biased to the dark default.
+    assert '<meta name="color-scheme" content="dark light"' in html
+
+
+def test_theme_control_is_touch_sized_and_grouped():
+    css = styles_css()
+    # The compact control still meets the touch-target floor and groups with
+    # sign-out at the header edge.
+    assert ".theme-select" in css
+    assert ".header-actions" in css
+    theme = css[css.index(".theme-select") :]
+    assert "min-height: 36px" in theme[:200]

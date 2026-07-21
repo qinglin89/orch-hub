@@ -83,6 +83,110 @@
     else localStorage.removeItem(TOKEN_KEY);
   }
 
+  // ---- theme ----
+  // Dark is the first-visit default and the safe fallback; an explicit choice
+  // (Dark/Light/System) persists in localStorage and is resolved to a concrete
+  // scheme on `<html data-theme>` — matching styles.css and the pre-paint script in
+  // index.html that applies it before the first frame (no light-to-dark flash).
+  // This code re-applies the same logic, owns the header control, and follows OS
+  // scheme changes while System is active. Every browser reach is guarded so the
+  // jsc keyboard harness — which stubs no matchMedia, documentElement, or
+  // getComputedStyle — can drive this file unchanged.
+  const THEME_KEY = "orch-hub-theme";
+  const THEME_CHOICES = new Set(["dark", "light", "system"]);
+
+  // The saved preference, defaulting to Dark when unset, invalid, or unreadable.
+  function getThemePreference() {
+    let stored = null;
+    try {
+      stored = localStorage.getItem(THEME_KEY);
+    } catch (_) {
+      return "dark"; // storage unavailable → safe default
+    }
+    return THEME_CHOICES.has(stored) ? stored : "dark";
+  }
+
+  function setThemePreference(pref) {
+    try {
+      if (THEME_CHOICES.has(pref)) localStorage.setItem(THEME_KEY, pref);
+    } catch (_) {
+      /* storage unavailable: the in-memory applyTheme below still takes effect */
+    }
+  }
+
+  function systemPrefersDark() {
+    try {
+      return (
+        typeof window.matchMedia === "function" &&
+        window.matchMedia("(prefers-color-scheme: dark)").matches
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // Resolve a preference to the scheme actually painted: System follows the OS,
+  // Light/Dark are themselves, and anything unexpected falls back to Dark.
+  function resolveTheme(pref) {
+    if (pref === "light") return "light";
+    if (pref === "system") return systemPrefersDark() ? "dark" : "light";
+    return "dark";
+  }
+
+  // Point the mobile browser-chrome tint at the resolved theme's surface colour,
+  // read from the live CSS token so it never drifts from the stylesheet.
+  function applyThemeColorMeta() {
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (!meta || typeof window.getComputedStyle !== "function") return;
+    let color = "";
+    try {
+      color = window
+        .getComputedStyle(document.documentElement)
+        .getPropertyValue("--surface")
+        .trim();
+    } catch (_) {
+      return;
+    }
+    if (color) meta.setAttribute("content", color);
+  }
+
+  // Apply the current preference to `<html data-theme>` (which drives the CSS token
+  // set and color-scheme) and keep the browser-chrome meta in step.
+  function applyTheme() {
+    const root = document.documentElement;
+    if (root && typeof root.setAttribute === "function")
+      root.setAttribute("data-theme", resolveTheme(getThemePreference()));
+    applyThemeColorMeta();
+  }
+
+  // Wire the header theme control and follow OS scheme changes while System is the
+  // active preference. The <select> lives in the static shell (outside #view), so
+  // it is wired once at startup and survives every route repaint.
+  function initTheme() {
+    const select = document.getElementById("theme-select");
+    if (select) {
+      select.value = getThemePreference();
+      select.addEventListener("change", () => {
+        setThemePreference(select.value);
+        applyTheme();
+      });
+    }
+    try {
+      if (typeof window.matchMedia === "function") {
+        const mq = window.matchMedia("(prefers-color-scheme: dark)");
+        const follow = () => {
+          if (getThemePreference() === "system") applyTheme();
+        };
+        if (typeof mq.addEventListener === "function")
+          mq.addEventListener("change", follow);
+        else if (typeof mq.addListener === "function") mq.addListener(follow); // older Safari
+      }
+    } catch (_) {
+      /* no matchMedia: System just won't live-update while the page is open */
+    }
+    applyTheme();
+  }
+
   // ---- API client ----
   class ApiError extends Error {
     constructor(message, status, body) {
@@ -3429,5 +3533,8 @@
   window.addEventListener("pointerdown", markPointerNav, true);
   window.addEventListener("touchstart", markPointerNav, true);
   window.addEventListener("hashchange", router);
+  // Reflect the saved theme in the header control, re-apply it (the pre-paint
+  // script in index.html already set data-theme), and start following OS changes.
+  initTheme();
   router();
 })();

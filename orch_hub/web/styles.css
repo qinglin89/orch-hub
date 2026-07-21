@@ -1,54 +1,58 @@
 /* orch-hub dashboard — mobile-first, no build step, no framework.
-   Light/dark follow the OS via prefers-color-scheme. Fixed header + bottom
-   tabbar with iOS safe-area insets so the content never hides behind them. */
+   Dark is the default theme; the header theme control persists a Dark/Light/System
+   choice as `data-theme` on <html>, resolved before the first paint by an inline
+   script in index.html (app.js owns the live control and system-change following).
+   The token sets below key off that attribute — a bare :root (no/invalid stored
+   preference, or storage unavailable) is the Dark default and safe fallback. Fixed
+   header + bottom tabbar with iOS safe-area insets so content never hides behind
+   them. */
 
 :root {
-  /* Auto light/dark; also steers form controls and scrollbars to the theme. */
-  color-scheme: light dark;
-
   /* Type systems: a readable system sans for prose, a restrained monospace for
      the "console voice" — identifiers, metadata, labels, and operational output. */
   --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 
-  /* Light mode — the daylight counterpart to the dark console: cool graphite
-     greys and a deep teal-cyan accent from the same family as the dark cyan.
-     Every pair below verified ≥4.5:1 (text/muted/links/badges), ring ≥3:1. */
-  --bg: #e6eaf0;
-  --surface: #f8fafc;
-  --surface-2: #dbe1e9;
-  --text: #141b24;
-  /* Cool graphite muted; ~5:1 on --bg, ~4.6:1 on the --surface-2 badge fill. */
-  --muted: #5c6370;
-  --border: #c2cad4;
-  /* Deep teal-cyan: white text ~6.9:1, and dark enough to read as a link on the
-     light --bg (~5.7:1) and inside the desktop active-tab --surface-2 pill. */
-  --accent: #0a6373;
-  /* Text drawn ON an --accent fill. Light's accent is dark enough for white;
-     dark's electric cyan is not (white ~2:1), so the dark block flips to near-black. */
-  --accent-text: #ffffff;
+  /* Dark is the default theme and the safe fallback (first visit, or a missing/
+     invalid stored preference / unavailable storage): the stronger industrial
+     identity — blue-black graphite surfaces under an electric-cyan accent. All
+     pairs verified ≥4.5:1 (text/muted/links/badges) and the focus ring ≥3:1.
+     color-scheme steers native controls and scrollbars to match. An explicit Dark
+     choice sets data-theme="dark", which resolves to this bare :root; Light below
+     overrides it. */
+  color-scheme: dark;
+  --bg: #090c11;
+  --surface: #11161d;
+  --surface-2: #1a212b;
+  --text: #dbe4ee;
+  --muted: #8592a1;
+  --border: #2a333f;
+  --accent: #2fd4e6;
+  --accent-text: #0f1115; /* near-black on bright cyan ~10.5:1; white ~2:1 */
   /* Destructive fills (Stop run, Cancel intake) need one colour that carries
-     white text in BOTH themes; --bad-fg is a light pink in dark mode. */
+     white text in BOTH themes, so --danger/--danger-text are theme-independent
+     and live here regardless of scheme; --bad-fg is a light pink in dark mode. */
   --danger: #dc2626;
   --danger-text: #ffffff;
-  --focus: #0b6fa8;
-  --ok-bg: #d6f0e0;
-  --ok-fg: #12683f;
-  --bad-bg: #fbe0e0;
-  --bad-fg: #a11d1d;
-  --warn-bg: #f7ecc9;
-  --warn-fg: #8a5a09;
-  --run-bg: #d6e6fb;
-  --run-fg: #175bbf;
+  --focus: #4fe3f2;
+  --ok-bg: #0d2a1b;
+  --ok-fg: #57d98a;
+  --bad-bg: #331519;
+  --bad-fg: #fb8a8a;
+  --warn-bg: #33280c;
+  --warn-fg: #f2c14e;
+  --run-bg: #132844;
+  --run-fg: #6db4ff;
 
   /* Atmosphere — code-native texture kept faint so content never competes with
      it: a fine console grid on the backdrop, a hairline highlight for panel
-     edges, an accent glow for live/active markers, and elevation shadows. */
-  --grid-line: rgba(20, 40, 60, 0.05);
-  --edge-hi: rgba(255, 255, 255, 0.65);
-  --glow: rgba(10, 99, 115, 0.35);
-  --shadow: 0 1px 2px rgba(15, 20, 30, 0.09), 0 6px 20px rgba(15, 20, 30, 0.06);
-  --shadow-pop: 0 14px 44px rgba(15, 20, 30, 0.22);
+     edges, an accent glow for live/active markers, and elevation shadows.
+     Cyan-tinted grid, a cool top edge, a cyan glow, deeper elevation. */
+  --grid-line: rgba(90, 200, 220, 0.045);
+  --edge-hi: rgba(150, 205, 225, 0.06);
+  --glow: rgba(47, 212, 230, 0.3);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.45);
+  --shadow-pop: 0 18px 50px rgba(0, 0, 0, 0.62);
 
   --header-h: 52px;
   --tabbar-h: 56px;
@@ -60,36 +64,43 @@
   --content-max: 720px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    /* Dark carries the stronger industrial identity: blue-black graphite
-       surfaces under an electric-cyan accent. All pairs verified ≥4.5:1
-       (text/muted/links/badges) and the focus ring ≥3:1. */
-    --bg: #090c11;
-    --surface: #11161d;
-    --surface-2: #1a212b;
-    --text: #dbe4ee;
-    --muted: #8592a1;
-    --border: #2a333f;
-    --accent: #2fd4e6;
-    --accent-text: #0f1115; /* near-black on bright cyan ~10.5:1; white ~2:1 */
-    --focus: #4fe3f2;
-    --ok-bg: #0d2a1b;
-    --ok-fg: #57d98a;
-    --bad-bg: #331519;
-    --bad-fg: #fb8a8a;
-    --warn-bg: #33280c;
-    --warn-fg: #f2c14e;
-    --run-bg: #132844;
-    --run-fg: #6db4ff;
+/* Light theme — applied when the resolved preference is Light (data-theme="light",
+   set by the pre-paint script / header control). Higher specificity than the bare
+   :root, so it overrides the Dark default. The daylight counterpart to the dark
+   console: cool graphite greys and a deep teal-cyan accent from the same family as
+   the dark cyan. Every pair below verified ≥4.5:1 (text/muted/links/badges),
+   ring ≥3:1. color-scheme flips native controls/scrollbars to light. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #e6eaf0;
+  --surface: #f8fafc;
+  --surface-2: #dbe1e9;
+  --text: #141b24;
+  /* Cool graphite muted; ~5:1 on --bg, ~4.6:1 on the --surface-2 badge fill. */
+  --muted: #5c6370;
+  --border: #c2cad4;
+  /* Deep teal-cyan: white text ~6.9:1, and dark enough to read as a link on the
+     light --bg (~5.7:1) and inside the desktop active-tab --surface-2 pill. */
+  --accent: #0a6373;
+  /* Light's accent is dark enough to carry white text on an --accent fill. */
+  --accent-text: #ffffff;
+  --focus: #0b6fa8;
+  --ok-bg: #d6f0e0;
+  --ok-fg: #12683f;
+  --bad-bg: #fbe0e0;
+  --bad-fg: #a11d1d;
+  --warn-bg: #f7ecc9;
+  --warn-fg: #8a5a09;
+  --run-bg: #d6e6fb;
+  --run-fg: #175bbf;
 
-    /* Cyan-tinted grid, a cool top edge, a cyan glow, deeper elevation. */
-    --grid-line: rgba(90, 200, 220, 0.045);
-    --edge-hi: rgba(150, 205, 225, 0.06);
-    --glow: rgba(47, 212, 230, 0.3);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.45);
-    --shadow-pop: 0 18px 50px rgba(0, 0, 0, 0.62);
-  }
+  /* Light atmosphere: a cool console grid, a bright top bevel, a teal glow, and
+     softer elevation shadows. */
+  --grid-line: rgba(20, 40, 60, 0.05);
+  --edge-hi: rgba(255, 255, 255, 0.65);
+  --glow: rgba(10, 99, 115, 0.35);
+  --shadow: 0 1px 2px rgba(15, 20, 30, 0.09), 0 6px 20px rgba(15, 20, 30, 0.06);
+  --shadow-pop: 0 14px 44px rgba(15, 20, 30, 0.22);
 }
 
 * {
@@ -264,6 +275,35 @@ code {
 }
 
 .icon-btn:hover {
+  border-color: var(--accent);
+}
+
+/* Header actions cluster: the theme control plus the (auth-gated) sign-out, kept
+   together at the header's right edge. Fits within a 320px header without
+   overflow — the theme control is content-sized and sign-out is hidden pre-auth. */
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Compact theme switcher, present on every view including the login gate. A native
+   <select> keeps it fully touch- and keyboard-operable in the least space; the
+   native popup follows the resolved scheme via color-scheme. Left at the platform
+   appearance so it keeps a visible dropdown affordance. */
+.theme-select {
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text);
+  border-radius: 8px;
+  min-height: 36px;
+  padding: 4px 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.theme-select:hover {
   border-color: var(--accent);
 }
 

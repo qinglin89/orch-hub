@@ -6,11 +6,42 @@
       name="viewport"
       content="width=device-width, initial-scale=1, viewport-fit=cover"
     />
-    <meta name="color-scheme" content="light dark" />
+    <!-- Dark is the default scheme. The saved Dark/Light/System choice is resolved
+         to a concrete `data-theme` before the first frame by the pre-paint script
+         below; styles.css sets the matching `color-scheme` per theme. `dark light`
+         biases the pre-CSS canvas toward the default. -->
+    <meta name="color-scheme" content="dark light" />
+    <!-- Mobile browser-chrome tint (address bar). app.js keeps it in step with the
+         resolved theme's surface colour; this initial value is the dark default. -->
+    <meta name="theme-color" content="#11161d" />
     <title>orch-hub</title>
     <!-- Inline empty icon: avoids a /favicon.ico request that the default-deny
          auth middleware would answer with 401. -->
     <link rel="icon" href="data:," />
+    <!-- Pre-paint theme resolution. Reads the saved Dark/Light/System preference
+         (default Dark) and sets the resolved scheme on <html> before the stylesheet
+         paints a frame, so there is no light-to-dark startup flash. Kept inline and
+         tiny because app.js only loads after the first paint; app.js re-applies the
+         same logic and owns the live control plus system-change following. Fails
+         safe to Dark if storage is unavailable or the stored value is invalid. -->
+    <script>
+      (function () {
+        try {
+          var pref = localStorage.getItem("orch-hub-theme");
+          if (pref !== "light" && pref !== "system") pref = "dark";
+          var dark =
+            pref === "dark" ||
+            (pref === "system" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.setAttribute(
+            "data-theme",
+            dark ? "dark" : "light"
+          );
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
@@ -21,15 +52,27 @@
 
     <header class="app-header">
       <span class="app-title">orch-hub</span>
-      <button
-        id="signout-btn"
-        class="icon-btn"
-        type="button"
-        aria-label="Sign out"
-        hidden
-      >
-        Sign&nbsp;out
-      </button>
+      <!-- Header actions sit at the right edge. The theme control is always
+           present (including the login gate); Sign out is auth-gated by app.js. -->
+      <div class="header-actions">
+        <!-- Compact native <select> for full touch + keyboard support in the
+             smallest space; app.js reflects the saved preference and persists a
+             change. `color-scheme` (set per theme) styles the popup to match. -->
+        <select id="theme-select" class="theme-select" aria-label="Theme">
+          <option value="dark">Dark</option>
+          <option value="light">Light</option>
+          <option value="system">System</option>
+        </select>
+        <button
+          id="signout-btn"
+          class="icon-btn"
+          type="button"
+          aria-label="Sign out"
+          hidden
+        >
+          Sign&nbsp;out
+        </button>
+      </div>
     </header>
 
     <!-- app.js renders the login gate or the routed view into #view, each
