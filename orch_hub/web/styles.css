@@ -22,19 +22,23 @@
      overrides it. */
   color-scheme: dark;
   --bg: #090c11;
-  --surface: #11161d;
-  --surface-2: #1a212b;
+  /* Deepened graphite panels — the reading surfaces stay calm and matte, a touch
+     darker/bluer than the base console so the intensified neon reads off them. */
+  --surface: #0f151d;
+  --surface-2: #18212c;
   --text: #dbe4ee;
   --muted: #8592a1;
   --border: #2a333f;
-  --accent: #2fd4e6;
-  --accent-text: #0f1115; /* near-black on bright cyan ~10.5:1; white ~2:1 */
+  /* Intensified electric cyan — the primary neon. Near-black --accent-text on it
+     stays ~11:1; as a link on --bg it is ~12:1. */
+  --accent: #26e4fb;
+  --accent-text: #0f1115; /* near-black on bright cyan ~11:1; white ~2:1 */
   /* Destructive fills (Stop run, Cancel intake) need one colour that carries
      white text in BOTH themes, so --danger/--danger-text are theme-independent
      and live here regardless of scheme; --bad-fg is a light pink in dark mode. */
   --danger: #dc2626;
   --danger-text: #ffffff;
-  --focus: #4fe3f2;
+  --focus: #5cebff;
   --ok-bg: #0d2a1b;
   --ok-fg: #57d98a;
   --bad-bg: #331519;
@@ -44,13 +48,26 @@
   --run-bg: #132844;
   --run-fg: #6db4ff;
 
-  /* Atmosphere — code-native texture kept faint so content never competes with
-     it: a fine console grid on the backdrop, a hairline highlight for panel
-     edges, an accent glow for live/active markers, and elevation shadows.
-     Cyan-tinted grid, a cool top edge, a cyan glow, deeper elevation. */
-  --grid-line: rgba(90, 200, 220, 0.045);
-  --edge-hi: rgba(150, 205, 225, 0.06);
-  --glow: rgba(47, 212, 230, 0.3);
+  /* Decorative industrial palette — post-apocalyptic character, deliberately
+     DISTINCT from the semantic status hues above and never used to signal state:
+     acid toxic-green (vs the softer success --ok-fg), hot radiation-amber (vs the
+     gold warning --warn-fg), and oxidized rust for hazard/edge detailing. */
+  --toxic: #96f24a;
+  --rad-amber: #ff8f2e;
+  --rust: #b9633a;
+
+  /* Atmosphere — code-native texture kept faint so content on the solid card
+     surfaces never competes with it: a cyan console grid + a CRT scanline on the
+     backdrop, a hairline highlight for panel edges, a cyan accent glow for
+     live/active markers and neon emphasis (a stronger variant for concentrated
+     points), a top cyan bloom, an edge vignette for depth, and elevation shadows. */
+  --grid-line: rgba(95, 210, 230, 0.06);
+  --edge-hi: rgba(150, 210, 230, 0.08);
+  --glow: rgba(38, 228, 251, 0.42);
+  --glow-strong: rgba(38, 228, 251, 0.62);
+  --scanline: rgba(0, 0, 0, 0.22);
+  --bloom: rgba(38, 228, 251, 0.05);
+  --vignette: rgba(0, 0, 0, 0.5);
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.45);
   --shadow-pop: 0 18px 50px rgba(0, 0, 0, 0.62);
 
@@ -94,11 +111,23 @@
   --run-bg: #d6e6fb;
   --run-fg: #175bbf;
 
-  /* Light atmosphere: a cool console grid, a bright top bevel, a teal glow, and
+  /* Decorative industrial palette — the daylight counterpart, muted so the light
+     theme reads as a restrained industrial console rather than neon-on-pale. Still
+     distinct from the semantic success/warning hues. */
+  --toxic: #4f7a12;
+  --rad-amber: #b5590a;
+  --rust: #8a4a2a;
+
+  /* Light atmosphere: a cool console grid, a bright top bevel, a soft teal glow
+     (no neon bloom on a pale canvas), near-invisible scanline/vignette, and
      softer elevation shadows. */
   --grid-line: rgba(20, 40, 60, 0.05);
   --edge-hi: rgba(255, 255, 255, 0.65);
-  --glow: rgba(10, 99, 115, 0.35);
+  --glow: rgba(10, 99, 115, 0.28);
+  --glow-strong: rgba(10, 99, 115, 0.34);
+  --scanline: rgba(20, 40, 60, 0.028);
+  --bloom: rgba(10, 99, 115, 0.03);
+  --vignette: rgba(15, 20, 30, 0.06);
   --shadow: 0 1px 2px rgba(15, 20, 30, 0.09), 0 6px 20px rgba(15, 20, 30, 0.06);
   --shadow-pop: 0 14px 44px rgba(15, 20, 30, 0.22);
 }
@@ -115,14 +144,30 @@ body {
 
 body {
   background-color: var(--bg);
-  /* Fine console grid: two 1px gradients on a 44px cell, kept near-invisible so
-     text on the solid card surfaces never competes with it. Fixed to the
-     viewport so it reads as a backdrop the content scrolls over (and still
-     covers a short page like the login gate); degrades to scroll if ignored. */
+  /* Backdrop atmosphere, all fixed to the viewport so it reads as a console the
+     content scrolls over (and still covers a short page like the login gate), and
+     all BEHIND the opaque card surfaces so text never competes with it: a faint
+     CRT scanline, the fine cyan console grid (two 1px gradients on a 44px cell), a
+     top cyan bloom, and an edge vignette for depth. Degrades to scroll if
+     background-attachment is ignored. */
   background-image:
+    repeating-linear-gradient(
+      0deg,
+      var(--scanline) 0,
+      var(--scanline) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
     linear-gradient(var(--grid-line) 1px, transparent 1px),
-    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
-  background-size: 44px 44px;
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px),
+    radial-gradient(120% 70% at 50% -8%, var(--bloom), transparent 60%),
+    radial-gradient(140% 120% at 50% 45%, transparent 52%, var(--vignette));
+  background-size:
+    100% 3px,
+    44px 44px,
+    44px 44px,
+    100% 100%,
+    100% 100%;
   background-attachment: fixed;
   color: var(--text);
   font: 15px/1.45 var(--sans);
@@ -246,21 +291,40 @@ code {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: var(--surface);
+  /* Brushed-metal panel: a shallow top-lit gradient under a cyan-charged bottom
+     edge, with a soft cyan bloom beneath it that lifts the console chrome off the
+     grid. The border-color override keeps the codebase's progressive idiom — an
+     engine without color-mix keeps the neutral --border hairline. */
+  background: linear-gradient(180deg, var(--surface-2), var(--surface) 78%);
   border-bottom: 1px solid var(--border);
-  /* Beveled top edge + a soft drop that lifts the console chrome off the grid. */
-  box-shadow: inset 0 1px 0 var(--edge-hi), var(--shadow);
+  border-bottom-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+  box-shadow: inset 0 1px 0 var(--edge-hi), 0 1px 0 var(--glow), var(--shadow);
   z-index: 10;
 }
 
-/* The wordmark reads as a console header: monospace, wide-tracked, upper-case. */
+/* The wordmark reads as a console header: monospace, wide-tracked, upper-case,
+   with a soft cyan neon bloom and a leading power-LED bar. */
 .app-title {
   margin: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
   font-family: var(--mono);
   font-size: 15px;
   font-weight: 650;
   letter-spacing: 0.12em;
   text-transform: uppercase;
+  text-shadow: 0 0 10px var(--glow);
+}
+
+/* Leading power-LED: a short glowing cyan bar — an industrial "console live" mark. */
+.app-title::before {
+  content: "";
+  width: 4px;
+  height: 15px;
+  border-radius: 1px;
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--glow-strong);
 }
 
 .icon-btn {
@@ -344,6 +408,7 @@ code {
 
 .tabbar a.active {
   color: var(--accent);
+  text-shadow: 0 0 8px var(--glow);
 }
 
 /* Active-channel marker: a short glowing accent bar on the current tab — a top
@@ -358,7 +423,7 @@ code {
   height: 2px;
   transform: translateX(-50%);
   background: var(--accent);
-  box-shadow: 0 0 8px var(--glow);
+  box-shadow: 0 0 10px var(--glow-strong);
 }
 
 /* `showChrome(false)` sets the nav's `hidden` attribute on the login gate, but
@@ -521,16 +586,31 @@ code {
    glance; idle stays a flat muted grey (an explicit "no live run" state). */
 .run-dot.waiting {
   background: var(--warn-fg);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--warn-fg) 55%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--warn-fg) 65%, transparent);
+  animation: run-pulse 2.4s ease-in-out infinite;
 }
 .run-dot.active {
   background: var(--ok-fg);
-  box-shadow: 0 0 6px color-mix(in srgb, var(--ok-fg) 55%, transparent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--ok-fg) 65%, transparent);
+  animation: run-pulse 2.4s ease-in-out infinite;
 }
 /* Idle used --border, which is barely distinguishable from the card it sits on
    (~1.4:1). The muted grey keeps "no live run" legible as an explicit state. */
 .run-dot.idle {
   background: var(--muted);
+}
+
+/* Restrained "living signal" breath on the live LEDs only. The reduced-motion
+   block near the top collapses animation-duration to ~0, so a reduced-motion
+   viewer sees a steady dot at full opacity — never a pulse. */
+@keyframes run-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
 }
 
 /* Ready-repo metadata line (latest commit + active task count). */
@@ -592,9 +672,15 @@ code {
   flex-direction: column;
   gap: 2px;
   padding: 12px 14px;
-  background: var(--surface);
+  /* A machined gauge readout: a panel gradient, a cyan-charged top edge, and a
+     chamfered top-right corner. Safe to clip — a metric tile is a non-focusable
+     <div>, so no focus ring can be cut by the clip-path. A semantic .metric.warn
+     re-sets border-color, keeping its full warn frame. */
+  background: linear-gradient(180deg, var(--surface-2), var(--surface) 70%);
   border: 1px solid var(--border);
+  border-top-color: color-mix(in srgb, var(--accent) 34%, var(--border));
   border-radius: 12px;
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
   box-shadow: inset 0 1px 0 var(--edge-hi);
 }
 
@@ -627,6 +713,7 @@ code {
 }
 .metric.run .metric-value {
   color: var(--run-fg);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--run-fg) 55%, transparent);
 }
 
 /* "Needs attention" rows reuse the task-card run-accent idiom: a colour-coded
@@ -798,6 +885,36 @@ code {
 .login {
   max-width: 420px;
   margin: 24px auto 0;
+  position: relative;
+  /* Access terminal: a beveled top (both corners chamfered) over a hazard stripe.
+     The chamfers sit above the heading text only — the focusable form controls are
+     inset well clear of them, so no focus ring is clipped. */
+  clip-path: polygon(
+    10px 0,
+    calc(100% - 10px) 0,
+    100% 10px,
+    100% 100%,
+    0 100%,
+    0 10px
+  );
+}
+
+/* Radiation-hazard stripe across the terminal's top edge — amber/rust diagonal
+   bands, a purely decorative "restricted access" mark, never a status signal. */
+.login::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--rad-amber) 0,
+    var(--rad-amber) 7px,
+    var(--rust) 7px,
+    var(--rust) 14px
+  );
 }
 
 .login .page-title {
@@ -820,6 +937,14 @@ code {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--muted);
+}
+
+/* Terminal prompt caret — a toxic-green decorative flourish on the access
+   terminal's one field label. Non-semantic: it never conveys state. */
+.login label::before {
+  content: "\203A  ";
+  color: var(--toxic);
+  font-weight: 700;
 }
 
 .login input,
@@ -846,6 +971,8 @@ code {
   border: none;
   font-weight: 650;
   cursor: pointer;
+  /* Selective neon: a soft cyan halo marks a primary action. */
+  box-shadow: 0 0 18px -5px var(--glow-strong);
 }
 
 .retry-btn {
@@ -937,6 +1064,7 @@ code {
   height: 12px;
   border-radius: 1px;
   background: var(--accent);
+  box-shadow: 0 0 6px var(--glow);
 }
 
 .kv {
@@ -1204,14 +1332,17 @@ code {
   font-size: 14px;
   font-weight: 650;
   cursor: pointer;
+  box-shadow: 0 0 18px -5px var(--glow-strong);
 }
 
 /* The discuss/feedback button is the secondary intent — outlined, not filled —
-   so the binding Answer/Confirm reads as the primary action beside it. */
+   so the binding Answer/Confirm reads as the primary action beside it. Explicitly
+   flat so it does not inherit the primary button's neon halo. */
 .answer-actions .answer-discuss {
   background: transparent;
   color: var(--accent);
   border: 1px solid var(--accent);
+  box-shadow: none;
 }
 
 .answer-actions button:disabled {
@@ -1246,6 +1377,7 @@ code {
   font-size: 14px;
   font-weight: 650;
   cursor: pointer;
+  box-shadow: 0 0 18px -5px var(--glow-strong);
 }
 
 .run-controls button:disabled {
@@ -1253,9 +1385,11 @@ code {
   cursor: default;
 }
 
+/* The destructive Stop trades the cyan halo for a red hazard glow. */
 .run-controls .btn-danger {
   background: var(--danger);
   color: var(--danger-text);
+  box-shadow: 0 0 18px -5px color-mix(in srgb, var(--danger) 70%, transparent);
 }
 
 .run-controls .ack,
@@ -1288,7 +1422,7 @@ code {
 }
 
 /* Cancel stays secondary inside .run-controls, whose broad button rule would
-   otherwise paint it with the primary accent. */
+   otherwise paint it with the primary accent and its neon halo. */
 .run-controls .btn-secondary {
   background: var(--surface-2);
   color: var(--text);
@@ -1297,6 +1431,7 @@ code {
   min-height: 40px;
   padding: 8px 14px;
   font-weight: 600;
+  box-shadow: none;
 }
 
 /* ---- cc-codex launch options dialog ---- */
@@ -1306,6 +1441,8 @@ code {
   max-height: 86vh;
   overflow: auto;
   border: 1px solid var(--border);
+  /* Console panel: a cyan-charged top edge over the pop shadow. */
+  border-top-color: color-mix(in srgb, var(--accent) 40%, var(--border));
   border-radius: 14px;
   background: var(--surface);
   color: var(--text);
@@ -1386,6 +1523,7 @@ code {
   font-size: 14px;
   font-weight: 650;
   cursor: pointer;
+  box-shadow: 0 0 18px -5px var(--glow-strong);
 }
 
 .intake button:disabled {
@@ -1394,10 +1532,11 @@ code {
 }
 
 /* More specific than `.intake button`, so the danger/secondary variants keep
-   their own fill instead of the accent. */
+   their own fill (and their own halo) instead of the accent. */
 .intake .btn-danger {
   background: var(--danger);
   color: var(--danger-text);
+  box-shadow: 0 0 18px -5px color-mix(in srgb, var(--danger) 70%, transparent);
 }
 
 .intake .btn-secondary {
@@ -1408,6 +1547,7 @@ code {
   min-height: 40px;
   padding: 8px 14px;
   font-weight: 600;
+  box-shadow: none;
 }
 
 .intake-form,
@@ -1574,7 +1714,19 @@ code {
   background: var(--surface);
   color: var(--text);
   border: 1px solid var(--border);
+  /* CRT terminal: a toxic-green phosphor edge + a faint scanline behind the
+     opaque monospace lines. The text stays --text for full legibility, and the
+     .diagnostic variant below re-sets background/border, so a startup-failure
+     tail keeps its distinct amber warn treatment. */
+  border-left: 3px solid color-mix(in srgb, var(--toxic) 55%, var(--border));
   border-radius: 10px;
+  background-image: repeating-linear-gradient(
+    0deg,
+    color-mix(in srgb, var(--toxic) 5%, transparent) 0,
+    color-mix(in srgb, var(--toxic) 5%, transparent) 1px,
+    transparent 1px,
+    transparent 3px
+  );
   font-family: var(--mono);
   font-size: 12px;
   line-height: 1.5;
