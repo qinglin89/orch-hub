@@ -3,33 +3,53 @@
    tabbar with iOS safe-area insets so the content never hides behind them. */
 
 :root {
-  --bg: #f4f5f7;
-  --surface: #ffffff;
-  --surface-2: #eceef1;
-  --text: #1c1f24;
-  /* Darkened from #6b7280, which fell just under 4.5:1 on --bg at the 12-13px
-     sizes muted text is used at. Now ~5.5:1 on --bg and ~6:1 on --surface. */
+  /* Auto light/dark; also steers form controls and scrollbars to the theme. */
+  color-scheme: light dark;
+
+  /* Type systems: a readable system sans for prose, a restrained monospace for
+     the "console voice" — identifiers, metadata, labels, and operational output. */
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* Light mode — the daylight counterpart to the dark console: cool graphite
+     greys and a deep teal-cyan accent from the same family as the dark cyan.
+     Every pair below verified ≥4.5:1 (text/muted/links/badges), ring ≥3:1. */
+  --bg: #e6eaf0;
+  --surface: #f8fafc;
+  --surface-2: #dbe1e9;
+  --text: #141b24;
+  /* Cool graphite muted; ~5:1 on --bg, ~4.6:1 on the --surface-2 badge fill. */
   --muted: #5c6370;
-  --border: #d8dbe0;
-  --accent: #2563eb;
-  /* Text drawn ON an --accent fill. Light mode's accent is dark enough for
-     white; dark mode's #60a5fa is not (white on it is ~2.5:1), so the dark
-     theme flips to near-black — see the dark block below. */
+  --border: #c2cad4;
+  /* Deep teal-cyan: white text ~6.9:1, and dark enough to read as a link on the
+     light --bg (~5.7:1) and inside the desktop active-tab --surface-2 pill. */
+  --accent: #0a6373;
+  /* Text drawn ON an --accent fill. Light's accent is dark enough for white;
+     dark's electric cyan is not (white ~2:1), so the dark block flips to near-black. */
   --accent-text: #ffffff;
   /* Destructive fills (Stop run, Cancel intake) need one colour that carries
-     white text in BOTH themes: --bad-fg is a light pink in dark mode, so using
-     it as a button background there left white-on-pink at ~1.5:1. */
+     white text in BOTH themes; --bad-fg is a light pink in dark mode. */
   --danger: #dc2626;
   --danger-text: #ffffff;
-  --focus: #1d4ed8;
-  --ok-bg: #dcfce7;
-  --ok-fg: #166534;
-  --bad-bg: #fee2e2;
-  --bad-fg: #991b1b;
-  --warn-bg: #fef3c7;
-  --warn-fg: #92400e;
-  --run-bg: #dbeafe;
-  --run-fg: #1e40af;
+  --focus: #0b6fa8;
+  --ok-bg: #d6f0e0;
+  --ok-fg: #12683f;
+  --bad-bg: #fbe0e0;
+  --bad-fg: #a11d1d;
+  --warn-bg: #f7ecc9;
+  --warn-fg: #8a5a09;
+  --run-bg: #d6e6fb;
+  --run-fg: #175bbf;
+
+  /* Atmosphere — code-native texture kept faint so content never competes with
+     it: a fine console grid on the backdrop, a hairline highlight for panel
+     edges, an accent glow for live/active markers, and elevation shadows. */
+  --grid-line: rgba(20, 40, 60, 0.05);
+  --edge-hi: rgba(255, 255, 255, 0.65);
+  --glow: rgba(10, 99, 115, 0.35);
+  --shadow: 0 1px 2px rgba(15, 20, 30, 0.09), 0 6px 20px rgba(15, 20, 30, 0.06);
+  --shadow-pop: 0 14px 44px rgba(15, 20, 30, 0.22);
+
   --header-h: 52px;
   --tabbar-h: 56px;
   /* Responsive shell (media blocks at the bottom of the file). --sidebar-w is
@@ -42,23 +62,33 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0f1115;
-    --surface: #191c22;
-    --surface-2: #22262e;
-    --text: #e6e8eb;
-    --muted: #9aa2ad;
-    --border: #2b2f37;
-    --accent: #60a5fa;
-    --accent-text: #0f1115; /* white on #60a5fa is ~2.5:1; near-black is ~7.4:1 */
-    --focus: #93c5fd;
-    --ok-bg: #10331f;
-    --ok-fg: #86efac;
-    --bad-bg: #3a1717;
-    --bad-fg: #fca5a5;
-    --warn-bg: #3a2f10;
-    --warn-fg: #fcd34d;
-    --run-bg: #16233f;
-    --run-fg: #93c5fd;
+    /* Dark carries the stronger industrial identity: blue-black graphite
+       surfaces under an electric-cyan accent. All pairs verified ≥4.5:1
+       (text/muted/links/badges) and the focus ring ≥3:1. */
+    --bg: #090c11;
+    --surface: #11161d;
+    --surface-2: #1a212b;
+    --text: #dbe4ee;
+    --muted: #8592a1;
+    --border: #2a333f;
+    --accent: #2fd4e6;
+    --accent-text: #0f1115; /* near-black on bright cyan ~10.5:1; white ~2:1 */
+    --focus: #4fe3f2;
+    --ok-bg: #0d2a1b;
+    --ok-fg: #57d98a;
+    --bad-bg: #331519;
+    --bad-fg: #fb8a8a;
+    --warn-bg: #33280c;
+    --warn-fg: #f2c14e;
+    --run-bg: #132844;
+    --run-fg: #6db4ff;
+
+    /* Cyan-tinted grid, a cool top edge, a cyan glow, deeper elevation. */
+    --grid-line: rgba(90, 200, 220, 0.045);
+    --edge-hi: rgba(150, 205, 225, 0.06);
+    --glow: rgba(47, 212, 230, 0.3);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.5), 0 8px 28px rgba(0, 0, 0, 0.45);
+    --shadow-pop: 0 18px 50px rgba(0, 0, 0, 0.62);
   }
 }
 
@@ -73,14 +103,23 @@ body {
 }
 
 body {
-  background: var(--bg);
+  background-color: var(--bg);
+  /* Fine console grid: two 1px gradients on a 44px cell, kept near-invisible so
+     text on the solid card surfaces never competes with it. Fixed to the
+     viewport so it reads as a backdrop the content scrolls over (and still
+     covers a short page like the login gate); degrades to scroll if ignored. */
+  background-image:
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+  background-size: 44px 44px;
+  background-attachment: fixed;
   color: var(--text);
-  font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font: 15px/1.45 var(--sans);
   -webkit-text-size-adjust: 100%;
 }
 
 code {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 0.85em;
 }
 
@@ -198,14 +237,19 @@ code {
   justify-content: space-between;
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  /* Beveled top edge + a soft drop that lifts the console chrome off the grid. */
+  box-shadow: inset 0 1px 0 var(--edge-hi), var(--shadow);
   z-index: 10;
 }
 
+/* The wordmark reads as a console header: monospace, wide-tracked, upper-case. */
 .app-title {
   margin: 0;
-  font-size: 17px;
+  font-family: var(--mono);
+  font-size: 15px;
   font-weight: 650;
-  letter-spacing: 0.01em;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
 }
 
 .icon-btn {
@@ -217,6 +261,10 @@ code {
   padding: 6px 12px;
   font-size: 13px;
   cursor: pointer;
+}
+
+.icon-btn:hover {
+  border-color: var(--accent);
 }
 
 .view {
@@ -241,17 +289,36 @@ code {
 
 .tabbar a {
   flex: 1;
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: center;
   color: var(--muted);
   text-decoration: none;
-  font-size: 13px;
+  font-family: var(--mono);
+  font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
 }
 
 .tabbar a.active {
   color: var(--accent);
+}
+
+/* Active-channel marker: a short glowing accent bar on the current tab — a top
+   edge on the phone bottom bar, re-anchored to the left edge on the desktop
+   rail (see the 1024px block). Reads as a live indicator without a word. */
+.tabbar a.active::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: 30px;
+  height: 2px;
+  transform: translateX(-50%);
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--glow);
 }
 
 /* `showChrome(false)` sets the nav's `hidden` attribute on the login gate, but
@@ -278,6 +345,8 @@ code {
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 12px 14px;
+  /* Hairline top bevel — a brushed-panel edge, strongest in dark mode. */
+  box-shadow: inset 0 1px 0 var(--edge-hi);
 }
 
 .card.problem {
@@ -299,7 +368,7 @@ code {
 
 .card-head .task-id,
 .card-head .run-id {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 13px;
 }
 
@@ -352,14 +421,20 @@ code {
   justify-content: flex-end;
 }
 
+/* Status chips read as squared console tags — monospace, boxed, with a hairline
+   in their own hue — rather than soft pills. The color-mix borders are
+   progressive: an engine without it drops the tint and falls back to the neutral
+   --border, still a valid chip. */
 .badge {
   display: inline-block;
-  padding: 2px 9px;
-  border-radius: 999px;
+  padding: 2px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-family: var(--mono);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 650;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
+  letter-spacing: 0.05em;
   background: var(--surface-2);
   color: var(--muted);
   white-space: nowrap;
@@ -368,18 +443,22 @@ code {
 .badge.ok {
   background: var(--ok-bg);
   color: var(--ok-fg);
+  border-color: color-mix(in srgb, var(--ok-fg) 32%, transparent);
 }
 .badge.bad {
   background: var(--bad-bg);
   color: var(--bad-fg);
+  border-color: color-mix(in srgb, var(--bad-fg) 32%, transparent);
 }
 .badge.warn {
   background: var(--warn-bg);
   color: var(--warn-fg);
+  border-color: color-mix(in srgb, var(--warn-fg) 32%, transparent);
 }
 .badge.run {
   background: var(--run-bg);
   color: var(--run-fg);
+  border-color: color-mix(in srgb, var(--run-fg) 32%, transparent);
 }
 
 /* ---- run dot (repo run-state) ---- */
@@ -398,11 +477,15 @@ code {
   background: var(--muted);
 }
 
+/* Live run-state LED: waiting/active glow so the signal reads as live at a
+   glance; idle stays a flat muted grey (an explicit "no live run" state). */
 .run-dot.waiting {
   background: var(--warn-fg);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--warn-fg) 55%, transparent);
 }
 .run-dot.active {
   background: var(--ok-fg);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--ok-fg) 55%, transparent);
 }
 /* Idle used --border, which is barely distinguishable from the card it sits on
    (~1.4:1). The muted grey keeps "no live run" legible as an explicit state. */
@@ -472,9 +555,12 @@ code {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 12px;
+  box-shadow: inset 0 1px 0 var(--edge-hi);
 }
 
+/* Telemetry readout: tabular monospace figures read as a gauge value. */
 .metric-value {
+  font-family: var(--mono);
   font-size: 22px;
   font-weight: 700;
   font-variant-numeric: tabular-nums;
@@ -482,7 +568,10 @@ code {
 }
 
 .metric-label {
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
@@ -754,12 +843,12 @@ code {
 }
 
 .detail-head .task-id.big {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 15px;
 }
 
 .detail-head .run-id.big {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 13px;
   word-break: break-all;
 }
@@ -768,13 +857,28 @@ code {
   margin-top: 18px;
 }
 
+/* Section headers are console labels: monospace, tracked, upper-case, led by a
+   small accent tick (an industrial marker). Kept at --text weight for hierarchy;
+   semantic sections (e.g. .section.waiting) still override the colour. */
 .section h2 {
-  font-size: 14px;
+  font-family: var(--mono);
+  font-size: 12px;
   font-weight: 650;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
   margin: 0 0 8px;
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.section h2::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 3px;
+  height: 12px;
+  border-radius: 1px;
+  background: var(--accent);
 }
 
 .kv {
@@ -785,14 +889,20 @@ code {
   font-size: 13px;
 }
 
+/* Spec-sheet keys: monospace, upper-case, muted — the dd values are already
+   monospace, so a key/value row reads like a telemetry field. */
 .kv dt {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
   color: var(--muted);
 }
 
 .kv dd {
   margin: 0;
   word-break: break-all;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
 }
 
 .task-content {
@@ -801,7 +911,7 @@ code {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 10px;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -813,8 +923,11 @@ code {
 /* ---- per-session context strips (run detail + run history) ---- */
 
 .sessions h3 {
-  font-size: 12px;
+  font-family: var(--mono);
+  font-size: 11px;
   font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
   color: var(--muted);
   margin: 10px 0 6px;
 }
@@ -844,7 +957,7 @@ code {
 }
 
 .ss-line {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
   word-break: break-word;
@@ -935,7 +1048,7 @@ code {
 }
 
 .tg-task {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 13px;
   font-weight: 650;
   word-break: break-word;
@@ -957,7 +1070,7 @@ code {
 }
 
 .roll-line {
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
   word-break: break-word;
@@ -1136,7 +1249,7 @@ code {
   background: var(--surface);
   color: var(--text);
   padding: 18px;
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-pop);
 }
 
 .run-options::backdrop {
@@ -1351,6 +1464,10 @@ code {
   cursor: pointer;
 }
 
+.btn-secondary:hover {
+  border-color: var(--accent);
+}
+
 .btn-secondary[hidden] {
   display: none;
 }
@@ -1362,7 +1479,7 @@ code {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: 10px;
-  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-family: var(--mono);
   font-size: 12px;
   line-height: 1.5;
   white-space: pre-wrap;
@@ -1476,6 +1593,17 @@ code {
   /* The active item is a filled pill (keeps the base rule's accent text colour). */
   .tabbar a.active {
     background: var(--surface-2);
+  }
+
+  /* Re-anchor the active-channel marker from the bottom-bar top edge to a left
+     status bar running down the rail item. */
+  .tabbar a.active::before {
+    top: 8px;
+    bottom: 8px;
+    left: 0;
+    width: 3px;
+    height: auto;
+    transform: none;
   }
 
   /* The workspace clears the rail and fills the remaining width by default (the
