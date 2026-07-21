@@ -32,6 +32,12 @@
   --run-fg: #1e40af;
   --header-h: 52px;
   --tabbar-h: 56px;
+  /* Responsive shell (media blocks at the bottom of the file). --sidebar-w is
+     the desktop nav-rail width; --content-max is the reading-column cap and
+     widens at the desktop breakpoint. The mobile/tablet value is the original
+     single-column width, so nothing below the breakpoint changes. */
+  --sidebar-w: 220px;
+  --content-max: 720px;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -195,7 +201,7 @@ code {
 .view {
   padding: calc(var(--header-h) + env(safe-area-inset-top) + 12px) 12px
     calc(var(--tabbar-h) + env(safe-area-inset-bottom) + 12px);
-  max-width: 720px;
+  max-width: var(--content-max);
   margin: 0 auto;
 }
 
@@ -225,6 +231,14 @@ code {
 
 .tabbar a.active {
   color: var(--accent);
+}
+
+/* `showChrome(false)` sets the nav's `hidden` attribute on the login gate, but
+   the UA `[hidden] { display: none }` is overridden by `.tabbar { display: flex }`
+   above (author beats UA). This higher-specificity guard restores it, so neither
+   the mobile bottom bar nor the desktop rail shows before authentication. */
+.tabbar[hidden] {
+  display: none;
 }
 
 /* ---- cards + lists ---- */
@@ -495,11 +509,13 @@ code {
   word-break: break-word;
 }
 
-/* The lower Overview panels stack on a phone; on a wider screen (still inside the
-   shell's 720px cap — the global adaptive shell is a separate task) they lay out
-   two-up, with the priority "needs attention" panel spanning the full width and
-   current-activity + recent-outcomes sharing the row below. The wrapper is a
-   plain block on a phone, so the mobile stack is unchanged. */
+/* The lower Overview panels stack on a phone; from 640px up they lay out two-up,
+   with the priority "needs attention" panel spanning the full width and
+   current-activity + recent-outcomes sharing the row below. This is the Overview's
+   own internal breakpoint and composes with the global responsive shell (media
+   blocks at the bottom of the file): at desktop the content column widens past
+   720px and these panels simply get more room. The wrapper is a plain block on a
+   phone, so the mobile stack is unchanged. */
 @media (min-width: 640px) {
   .overview-panels {
     display: grid;
@@ -1341,4 +1357,130 @@ code {
   border-color: var(--warn-fg);
   border-left-width: 3px;
   background: var(--warn-bg);
+}
+
+/* ============================================================================
+   Responsive shell
+
+   Mobile-first is the base above: a fixed bottom tab bar and a single ≤720px
+   reading column. These blocks progressively enhance for wider viewports and
+   never touch the phone layout (the base rules stand below every breakpoint).
+   They are CSS-only: index.html and app.js are unchanged, so the skip link stays
+   the first tab stop, every view keeps its single h1.page-title, and the tab
+   order / DOM the keyboard harness drives is identical.
+
+   Tiers:
+     < 720px   phone   — base rules: bottom tab bar, one column.
+     ≥ 720px   tablet  — bottom tab bar kept; flat card lists flow two-up; roomier
+                         gutters. Sits above the Overview's own 520/640 breakpoints.
+     ≥ 1024px  desktop — the bottom tab bar becomes a left nav rail and the content
+                         column widens (--content-max), so navigation and content
+                         use the space far better than a centered 720px column.
+   ========================================================================== */
+
+/* ---- tablet: multi-column card lists + wider gutters ---- */
+
+@media (min-width: 720px) {
+  /* Only the flat, top-level card lists (repos, all-tasks, repo-detail tasks,
+     missing-index) are direct children of #view. The Overview panels, run-history
+     groups and intake events are nested deeper, so this leaves them to their own
+     layouts. auto-fill keeps a comfortable card width and adds columns as the
+     column widens (2-up on a tablet, 3-up on a wide desktop). */
+  #view > .list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+    align-items: start;
+  }
+
+  /* An empty / no-match message is a lone .center <li>; span it so it reads as a
+     full-width note instead of a stray first-column cell. */
+  #view > .list > .center {
+    grid-column: 1 / -1;
+  }
+
+  .view {
+    padding-left: 20px;
+    padding-right: 20px;
+  }
+}
+
+/* ---- desktop: left nav rail + wider content column ---- */
+
+@media (min-width: 1024px) {
+  :root {
+    --content-max: 1040px;
+    /* --sidebar-w (220) + --content-max (1040): the width at which the rail +
+       content block is fully grown. Past it the whole block centres (symmetric
+       gutters); below it the block is flush-left so the rail aligns exactly with
+       the content's left edge. Kept literal so it can be used inside max()/calc. */
+    --app-max: 1260px;
+  }
+
+  /* The fixed bottom tab bar becomes a fixed left rail under the header. Its left
+     edge tracks the centred app block on ultra-wide screens (max() clamps to 0 on
+     narrower ones, keeping it flush-left). Vertical stack of labels, not a
+     stretched 4-up row. */
+  .tabbar {
+    top: calc(var(--header-h) + env(safe-area-inset-top));
+    bottom: 0;
+    left: max(0px, calc((100% - var(--app-max)) / 2));
+    right: auto;
+    width: var(--sidebar-w);
+    height: auto;
+    flex-direction: column;
+    gap: 4px;
+    padding: 14px 12px calc(env(safe-area-inset-bottom) + 14px);
+    border-top: none;
+    border-right: 1px solid var(--border);
+  }
+
+  .tabbar a {
+    flex: 0 0 auto;
+    justify-content: flex-start;
+    gap: 10px;
+    min-height: 44px;
+    padding: 0 12px;
+    border-radius: 8px;
+    font-size: 14px;
+  }
+
+  /* The active item is a filled pill (keeps the base rule's accent text colour). */
+  .tabbar a.active {
+    background: var(--surface-2);
+  }
+
+  /* Content clears the rail and centres within the space beside it. margin-left =
+     block offset + rail width; margin-right:auto yields a symmetric right gutter
+     once the block is centred. Bottom padding drops the tab-bar reservation (the
+     bar is on the left now) and keeps only the safe-area inset. */
+  .view {
+    max-width: var(--content-max);
+    margin-left: max(
+      var(--sidebar-w),
+      calc((100% - var(--app-max)) / 2 + var(--sidebar-w))
+    );
+    margin-right: auto;
+    padding: calc(var(--header-h) + env(safe-area-inset-top) + 20px) 32px
+      calc(env(safe-area-inset-bottom) + 28px);
+  }
+
+  /* Align the header's brand/sign-out with the centred app block instead of the
+     raw viewport edges, so the brand sits above the rail and sign-out above the
+     content's right edge. */
+  .app-header {
+    padding-left: max(16px, calc((100% - var(--app-max)) / 2 + 16px));
+    padding-right: max(16px, calc((100% - var(--app-max)) / 2 + 16px));
+  }
+
+  /* Pre-auth the rail is hidden (login gate): don't reserve or offset for it, so
+     the login card centres normally. :has() is progressive — an unsupported
+     browser simply keeps the rail-reserved offset, which is a harmless indent. */
+  body:has(#nav[hidden]) .view {
+    margin-left: auto;
+  }
+  body:has(#nav[hidden]) .app-header {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
