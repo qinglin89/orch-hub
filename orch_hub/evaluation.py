@@ -547,7 +547,9 @@ class EvaluationService:
         """Best-effort git commit metadata for the task's run-lifecycle window.
 
         The window spans the earliest run ``started_ts`` to the latest run
-        ``ended_ts`` (open-ended when the last run has not been observed ended).
+        ``ended_ts``, and stays open-ended (``until=None``) whenever any run is
+        still live (no parseable ``ended_ts``) — a live run's activity runs to now,
+        so the window must not close at an earlier run's end.
         With no parseable run start there is no window, so git evidence is
         ``available=False`` with that reason. The query is bounded by
         :data:`EVIDENCE_COMMIT_LIMIT` and fails closed to unavailable on any git
@@ -560,9 +562,16 @@ class EvaluationService:
                 available=False,
                 detail="no run start timestamps to form a git window",
             )
-        ends = [ts for ts in (_parse_ts(r.record.ended_ts) for r in related) if ts]
+        run_ends = [_parse_ts(r.record.ended_ts) for r in related]
+        any_live = any(end is None for end in run_ends)
         since = min(starts).isoformat()
-        until = max(ends).isoformat() if ends else None
+        # The window's upper bound is the union of every run's activity: an ended
+        # run reaches its ``ended_ts``, a still-live run (no parseable ``ended_ts``)
+        # runs to now. So any live run leaves the lifecycle open and the window
+        # unbounded (``until=None``) — bounding it at an earlier run's end would drop
+        # commits made during that live run. Only an all-ended set closes, at the
+        # latest end.
+        until = None if any_live else max(run_ends).isoformat()
         log = read_commits_between(
             repo,
             since=since,

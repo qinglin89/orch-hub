@@ -584,6 +584,29 @@ def test_git_window_open_when_no_run_ended(tmp_path):
     assert not any(a.startswith("--until=") for a in calls[0])
 
 
+def test_git_window_open_when_later_run_is_live(tmp_path):
+    # Mixed ended+live runs: an earlier run ended, a later run is still live. The
+    # live run's activity runs to now, so the window must stay open (until=None)
+    # instead of closing at the earlier run's end and dropping commits made during
+    # the live run.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00", ended_ts="2026-07-22T09:30:00+00:00")
+    write_run(config, "20260722T100000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T10:00:00+00:00")  # later run: still live
+    calls: list = []
+
+    pack = make_service(config, git_runner=fake_git(rc=0, calls=calls)).build_evidence(
+        repo, TASK, evaluation_id="e1"
+    )
+
+    assert pack.git.since == "2026-07-22T09:00:00+00:00"  # earliest start
+    assert pack.git.until is None  # later run still live => window stays open
+    assert not any(a.startswith("--until=") for a in calls[0])
+
+
 def test_git_window_unavailable_without_run_timestamps(tmp_path):
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)
