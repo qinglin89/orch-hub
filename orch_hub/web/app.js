@@ -2784,7 +2784,7 @@
         `<div class="detail-head">${pageTitle(taskId, "task-id big")}</div>` +
         `<section class="section"><h2>Task evaluation</h2>` +
         `<p class="muted">Task evaluation is disabled on this hub ` +
-        `(ORCH_HUB_EVAL_ENABLED is not set). No evidence or metrics can be ` +
+        `(ORCH_HUB_EVAL_ENABLED is set to a disabled value). No evidence or metrics can be ` +
         `generated or viewed here.</p></section>`;
       return;
     }

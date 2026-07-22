@@ -1569,7 +1569,7 @@ def test_evaluation_disabled_mode_is_explained_not_probed():
     # Disabled → a concise explanation, not a probe of an action route that 404s.
     assert "if (!avail || !avail.enabled)" in body
     assert "Task evaluation is disabled on this hub" in body
-    assert "ORCH_HUB_EVAL_ENABLED is not set" in body
+    assert "ORCH_HUB_EVAL_ENABLED is set to a disabled value" in body
 
 
 def test_evaluation_view_renders_layer1_metrics():
