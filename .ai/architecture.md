@@ -1,14 +1,14 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Architecture
 
 orch-hub is a local control plane for remotely inspecting managed repos,
 starting deployed orchestrator runs, answering human-input prompts, reading run
-state, drafting new tasks through a confirmed intake loop, and building
-read-only task-evaluation evidence packs. It coordinates existing systems
+state, drafting new tasks through a confirmed intake loop, and building plus
+viewing read-only task-evaluation evidence/static-metrics artifacts. It coordinates existing systems
 rather than replacing them:
 ai-native-development remains the managed-repo registry, target repos own their
 task files and deployed orchestrator payloads, and orch-hub owns only its
@@ -145,8 +145,10 @@ adds bounded per-run history/session/log/spawn diagnostics plus a best-effort
 git commit window, and persists `evidence.json` under the hub data dir. The
 static metrics layer computes deterministic, non-semantic run/session,
 taskfile/session-log, score, confidence, and warning rollups from that evidence
-and persists `static_metrics.json` beside `evidence.json`. Semantic model calls
-and dashboard/API presentation remain separate sidecar layers.
+and persists `static_metrics.json` beside `evidence.json`. Protected HTTP
+routes expose availability, evidence/static generation, evaluation history, and
+artifact readback; the dashboard renders the Layer 1 sidecar with copy/download
+JSON affordances and never invokes a semantic model.
 
 ## Component Boundaries
 
@@ -162,6 +164,9 @@ and dashboard/API presentation remain separate sidecar layers.
 - Static metrics owns deterministic scoring over evidence packs and persists
   `static_metrics.json` beside the pack; it does not perform semantic model
   calls or mutate target tasks/run state.
+- Evaluation API/dashboard presentation owns sidecar routing, active/archive
+  target display, deterministic report rendering, and local-inspection
+  affordances; it does not gate run control or expose raw logs inline.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
 - Control-dir handling owns only the file-channel mechanics for questions,

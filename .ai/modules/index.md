@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Modules
@@ -17,7 +17,7 @@ verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 | Housekeeping | `orch_hub/housekeeping.py` | Implemented display-only `.ai/.housekeeping-pending` marker detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, typed `session-est`, and contained active/archive task reads |
-| Evaluation | `orch_hub/evaluation.py` | Implemented optional read-only task evidence target resolution, related-run aggregation, bounded evidence-pack assembly, and contained artifact persistence |
+| Evaluation | `orch_hub/evaluation.py` | Implemented optional read-only task evidence target resolution, related-run aggregation, bounded evidence-pack assembly, contained artifact persistence, and persisted evaluation listing/artifact reads |
 | Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
@@ -27,9 +27,9 @@ verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | Sessions | `orch_hub/sessions.py` | Implemented tolerant parsing and persistence of per-protocol-session context usage from orchestrator logs |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake/evaluation routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/intake/probe notification formatters |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile-first dashboard SPA assets, including responsive phone/tablet/desktop shell, CSS-only neon-wasteland industrial control-console theme with independent persisted Mode (Dark/Light/System) and Palette (Neon Cyan/Wasteland Orange) selection, Operations Overview aggregation/refresh, route-level accessibility/focus infrastructure, status layout, searchable/counted all-tasks inventory, recent commits, task-detail run controls/session strips, filterable/counted grouped run-history rollups, run-scoped task-file view, and polled remote intake review loop |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile-first dashboard SPA assets, including responsive phone/tablet/desktop shell, CSS-only neon-wasteland industrial control-console theme with independent persisted Mode (Dark/Light/System) and Palette (Neon Cyan/Wasteland Orange) selection, Operations Overview aggregation/refresh, route-level accessibility/focus infrastructure, status layout, searchable/counted all-tasks inventory, recent commits, task-detail run controls/session strips, filterable/counted grouped run-history rollups, run-scoped task-file view, task-evaluation Layer 1 sidecar view, and polled remote intake review loop |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Deployment docs | `docs/launchd.md` | Implemented install/start/stop/log guidance and Tailscale assumptions |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |

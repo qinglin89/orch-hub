@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-21
-verified-against: 5fa62f65c02e064aebc258b613fd08f26dc1be1a
+last-updated: 2026-07-22
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Design: Patterns
@@ -54,8 +54,9 @@ verified-against: 5fa62f65c02e064aebc258b613fd08f26dc1be1a
 - Stream only complete newline-terminated log lines; keep partial trailing bytes
   pending so split UTF-8 characters are not corrupted across reads.
 - Keep dashboard data access behind the API: the SPA renders readiness,
-  task-store sentinel states, task content, run state, answers, history, and
-  logs from HTTP payloads rather than reading repo files or recomputing checks.
+  task-store sentinel states, task content, run state, answers, history, logs,
+  and task-evaluation evidence/static-metrics summaries from HTTP payloads
+  rather than reading repo files or recomputing checks.
 - Serve dashboard shell assets through an enumerated allowlist rather than a
   broad static mount; every non-shell data route stays bearer-protected.
 - Keep dashboard presentation CSS-only: theme tokens, system fonts, semantic

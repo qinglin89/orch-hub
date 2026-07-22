@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Project Overview
@@ -26,11 +26,12 @@ waiting questions remotely, retrieve or stream run logs, persist run lifecycle
 plus answer-audit metadata, serve the dashboard, push Bark notifications for
 pending questions, terminal run states, and intake drafts/revisions ready for
 review, and run a confirmed remote intake loop that drafts a task before
-writing it to the target repo, and generate bounded read-only task evidence
-packs under the hub data dir for active or archived tasks, then compute
-deterministic protocol/reliability/handoff/estimate/knowledge-maintenance
-static reports as `static_metrics.json` beside the evidence pack. Later slices
-add semantic evaluation, dashboard exposure for evaluation, and IM bot control.
+writing it to the target repo, generate bounded read-only task evidence packs
+under the hub data dir for active or archived tasks, compute deterministic
+protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
+`static_metrics.json` beside the evidence pack, and expose that Layer 1
+evaluation through protected HTTP routes plus the dashboard task-evaluation
+view. Later slices add semantic evaluation and IM bot control.
 
 ## Users
 
@@ -59,6 +60,10 @@ add semantic evaluation, dashboard exposure for evaluation, and IM bot control.
   including run/session rollups, taskfile/session-log protocol metrics, five
   score axes, evidence-backed warnings, and `static_metrics.json` persistence
   in the hub-owned evaluation artifact directory.
+- Expose task evaluation as a sidecar HTTP/dashboard workflow: availability,
+  evidence generation/readback, static metrics generation/readback, active or
+  archived task targeting, history selection, and copy/download JSON affordances
+  without semantic model calls or target-repo mutation.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.

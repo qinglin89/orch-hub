@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Features: Core
@@ -85,7 +85,9 @@ Modules: evaluation, config, task_store, runs, history, sessions, logs,
 git_meta, models.
 
 APIs: internal `EvaluationService.resolve_target`, `related_runs`,
-`build_evidence`, `generate_evidence`, and `artifact_dir`.
+`build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`,
+and `artifact_dir`; protected `GET /api/evaluation` and
+`/api/repos/{repo_id}/evaluations/{task_id}` evidence routes.
 
 Implemented behavior:
 
@@ -107,9 +109,16 @@ Implemented behavior:
   `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`, cleaning an empty
   reserved dir on failure. It never mutates target repos, task files, run
   records, `.ai/`, or `.ai-tasks/`.
-- No static scores, semantic model calls, HTTP routes, or dashboard affordances
-  are part of this foundation; static scoring is the separate Layer 1 static
-  metrics layer.
+- `list_evaluations` enumerates persisted evaluation dirs newest-first by
+  `(timestamp, numeric collision suffix)` and reports only which artifact files
+  exist; `read_artifact` returns parsed `evidence.json` or `static_metrics.json`
+  for a contained evaluation dir and lets corrupt JSON surface loudly.
+- HTTP routes expose availability, persisted evaluation listing, evaluation
+  detail readback, and evidence generation while preserving the same disabled
+  fail-closed gate: only `GET /api/evaluation` returns 200 while disabled; the
+  action/read routes 404.
+- Static scores are still computed by the separate Layer 1 static metrics layer;
+  no semantic model calls are part of this foundation.
 
 ## Task Static Metrics
 
@@ -121,7 +130,9 @@ from one evidence pack and persist the report beside the pack.
 Modules: static_metrics, evaluation, config, models.
 
 APIs: internal `StaticEvaluator.run_metrics`, `build_report`,
-`generate_metrics`, and `STATIC_METRICS_NAME`.
+`generate_metrics`, and `STATIC_METRICS_NAME`; protected
+`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` plus evaluation detail
+readback.
 
 Implemented behavior:
 
@@ -150,8 +161,14 @@ Implemented behavior:
   atomically in the same evaluation artifact directory as `evidence.json`, and
   cleans the reserved directory on report-write failure so no half-pair
   remains.
-- Static metrics have no HTTP route, dashboard UI, or semantic model call yet;
-  those are downstream tasks.
+- `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` runs a fresh
+  deterministic evidence+static refresh and returns the new report; the detail
+  route can later read the paired `evidence` and `static_metrics` artifacts.
+- The dashboard renders the deterministic Layer 1 report, keeps semantic
+  evaluation explicitly future/unavailable, and offers raw JSON only through
+  copy/download affordances rather than inline log/evidence display.
+- Static metrics have no semantic model call; semantic evaluation remains a
+  downstream task.
 - Tests cover run/session rollups, protocol parsing, score axes, partial
   evidence behavior, persistence, disabled mode, and prior protocol
   false-negative regressions.
@@ -167,7 +184,7 @@ auth on every non-health path.
 Modules: api, config, registry, readiness, task_store, models.
 
 APIs: `GET /`, `GET /app.js`, `GET /styles.css`, `GET /api/health`,
-repo/task/run/escalation/log/history data routes; `python -m orch_hub.api`;
+repo/task/run/escalation/log/history/intake/evaluation data routes; `python -m orch_hub.api`;
 `orch-hub-api`; `uvicorn orch_hub.api:app`.
 
 Implemented behavior:

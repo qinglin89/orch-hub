@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # APIs: Internal Interfaces
@@ -60,6 +60,10 @@ best-effort git-window commits; per-run artifact failures become warnings, while
 target task IO errors fail the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
+Persisted evaluation listing and artifact reads are structural and contained:
+`list_evaluations` reports newest-first ids plus artifact filenames, while
+`read_artifact` parses `evidence.json`/`static_metrics.json` for a known
+evaluation dir and lets corrupt JSON fail loudly.
 
 ## Static Metrics Evaluator
 
@@ -81,8 +85,9 @@ status-transition path, and completion hygiene, then returns five transparent
 score components with evidence-backed warnings and confidence. `generate_metrics`
 delegates to `EvaluationService.generate_evidence`, writes `static_metrics.json`
 atomically into the same evaluation artifact directory, and removes the
-reserved dir on report-write failure. It does not expose HTTP routes or
-dashboard UI yet, and it never mutates target repos or run records.
+reserved dir on report-write failure. HTTP/dashboard presentation wraps it
+outside the module through the evaluation API routes and Layer 1 dashboard view;
+the evaluator itself never mutates target repos or run records.
 
 ## Intake Manager
 

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Design Principles and Decisions
@@ -64,5 +64,5 @@ verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
   evaluation artifacts under `ORCH_HUB_DATA_DIR`, including per-run
   `events.jsonl` history, stuck `confirming` intake records after a mid-write
   process crash, and generated evidence/static/semantic report history.
-- Exact route schema beyond the implemented repo/task/run/escalation/log/history
-  and dashboard-shell API surface.
+- Exact route schema beyond the implemented repo/task/run/escalation/log/history/
+  intake/evaluation and dashboard-shell API surface.

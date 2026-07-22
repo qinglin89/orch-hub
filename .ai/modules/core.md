@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Modules: Core
@@ -165,14 +165,18 @@ from task content, related run records, metadata-only events, persisted session
 snapshots, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
 and best-effort git-window commits; `generate_evidence` mints an evaluation id
 and atomically writes `evidence.json` under
-`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`.
+`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. `list_evaluations`
+enumerates persisted dirs newest-first by `(timestamp, numeric suffix)` and
+reports present artifact filenames; `read_artifact` parses contained artifact
+JSON for the API/dashboard read layer.
 
 Per-run artifact reads are isolated into warnings so corrupt/missing run
 evidence yields a partial pack; target task file IO errors fail loudly because
 the task file is the primary subject. The git window spans earliest parseable
 run start to latest parseable run end, but remains open-ended when any related
-run has no parseable end. The foundation does not compute scores, invoke
-semantic models, or expose HTTP/dashboard routes.
+run has no parseable end. The foundation does not compute scores or invoke
+semantic models; HTTP/dashboard presentation lives in `api.py`/`web/` as a
+sidecar over these read/generate methods.
 
 ## Static Metrics
 
@@ -192,7 +196,9 @@ taskfile/session-log protocol facts, five transparent score axes
 values, and evidence-backed warnings. `generate_metrics(repo, task_id,
 evaluation_id=None)` delegates to `EvaluationService.generate_evidence`, writes
 `static_metrics.json` atomically in the same evaluation dir, and cleans the
-reserved dir if the report write fails.
+reserved dir if the report write fails. `api.py` exposes this as the protected
+`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` deterministic refresh
+route; dashboard rendering stays in `web/`.
 
 The evaluator is read-only over packs: it never reaches back into target repos
 or run dirs during scoring. Knowledge-maintenance checks are limited to facts

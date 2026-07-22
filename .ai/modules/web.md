@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-21
-verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
+last-updated: 2026-07-22
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Modules: Web and Operations
@@ -11,7 +11,8 @@ Location: `orch_hub/api.py`
 
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
-run_manager=None, intake_manager=None)` builds an app with a default-deny bearer-token middleware,
+run_manager=None, intake_manager=None, evaluation_service=None,
+static_evaluator=None)` builds an app with a default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
 escalation, log, and history routes over one `RunManager` instance plus a
@@ -37,6 +38,14 @@ intake routes are `POST /api/intakes`, `GET /api/intakes`,
 `POST /api/intakes/{intake_id}/confirm`, and
 `POST /api/intakes/{intake_id}/cancel`; manager errors map to 404/409/400 and
 agent-turn failures are returned as auditable intake records rather than 5xx.
+The evaluation routes are `GET /api/evaluation`,
+`GET /api/repos/{repo_id}/evaluations/{task_id}`,
+`GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`,
+`POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`, and
+`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; they resolve exact
+active-or-archived task ids outside the active task index, write/read only
+hub-owned evaluation artifacts, and map disabled mode to 404 except for the
+availability route.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.
@@ -92,8 +101,9 @@ route, repo/task/detail/run views, repo/task run-state signals,
 searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
 run controls, live per-session context strips, waiting-question answer forms,
 filterable/counted/collapsible grouped run history with est-vs-actual rollups, a
-run-scoped task-file view, remote intake start/review views, and recent/live log
-views; `styles.css` holds the mobile-first responsive layout. The dashboard
+run-scoped task-file view, task-evaluation Layer 1 sidecar view and entry
+points, remote intake start/review views, and recent/live log views;
+`styles.css` holds the mobile-first responsive layout. The dashboard
 reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted
@@ -163,6 +173,15 @@ shows filtered group/run counts plus distinct empty/no-match states, preserves
 log links on visible run cards, and lets each task group collapse without
 hiding its rollup. Rollups show observed dev-session count vs estimate, peak
 context, and summed wall-clock from run-record ISO timestamps.
+
+Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
+Tasks tab active. It probes availability first, distinguishes disabled,
+never-generated, evidence-only, and full static-metrics states, renders target
+active/archive state plus scores/run/protocol/evidence-warning rollups, and
+offers raw evidence/static artifacts only as Copy/Download JSON. Task detail and
+run-history groups show evaluation entry links only when availability reports
+enabled; Generate posts `/metrics` and re-renders to the latest deterministic
+Layer 1 report without mutating target task or run state.
 
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete

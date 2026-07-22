@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-21
-verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
+last-updated: 2026-07-22
+verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 ---
 
 # Features: Dashboard Ops
@@ -15,8 +15,8 @@ run observation, answering waiting questions, run history, and logs.
 Modules: api, web.
 
 APIs: public `GET /`, `GET /app.js`, `GET /styles.css`; protected
-repo/task/run/escalation/log/history/intake HTTP APIs, including the run-scoped
-task file route. Log streaming uses the bearer-authenticated SSE endpoint
+repo/task/run/escalation/log/history/intake/evaluation HTTP APIs, including the
+run-scoped task file route. Log streaming uses the bearer-authenticated SSE endpoint
 through `fetch`/ReadableStream, not browser `EventSource`.
 
 Implemented behavior:
@@ -134,6 +134,20 @@ Implemented behavior:
   `GET /api/runs/{run_id}/task`, shows the active/archived source, and is used
   by the log view's task back-link so run task links still open after close-out
   archives the task. The Tasks page remains active-task-only.
+- A task-evaluation sidecar view at
+  `#/evaluations/{repo}/{task}[/{evaluation_id}]` probes `GET /api/evaluation`
+  first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts
+  for exact active-or-archived task ids. Task detail shows a gated "Task
+  evaluation" entry link for active tasks; run-history task groups show gated
+  "Evaluation" links for archived/completed tasks. Disabled hubs hide entry
+  links and the evaluation route shows a concise disabled explanation.
+- The evaluation view renders deterministic Layer 1 static metrics only:
+  target active/archive state, five score axes, run/session/failure-diagnostic
+  rollups, taskfile/session-log protocol facts, evidence warnings, artifact
+  timestamps, and evaluation history selection. Generate posts `/metrics` to
+  create a fresh hub-owned evidence+static pair; semantic evaluation is labeled
+  unavailable, and raw evidence/static JSON is offered only through Copy/Download
+  affordances, never inline raw logs.
 - The remote-intake review view polls `GET /api/intakes/{id}` while an intake
   status is `drafting`, `revising`, or `confirming`; it shows live status,
   elapsed time, and a safe-to-navigate-away note, stops polling on resting
