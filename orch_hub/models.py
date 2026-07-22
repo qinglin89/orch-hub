@@ -735,3 +735,136 @@ class RelatedRun:
 
     def to_dict(self) -> dict:
         return self.record.to_dict()
+
+
+@dataclass(frozen=True)
+class RunRollup:
+    """One related run's deterministic, evidence-derived static metrics.
+
+    Output of the static evaluator (:mod:`orch_hub.static_metrics`), computed
+    read-only from the run's evidence — record, metadata-only history events, and
+    per-session context snapshot — with no model call. ``outcome`` is one of the
+    ``RUN_OUTCOME_*`` values (an *evidence-only* classification from raw
+    ``ended_ts``/``exit_code``/``error`` + the ``stop_requested`` event, kept
+    deliberately distinct from the run manager's live verdict, which needs
+    control-dir/task-store reads the pack does not carry). ``ended`` is the raw
+    presence of ``ended_ts`` (matches :attr:`RunEvidence.ended`), *not* the
+    outcome — a ``broken`` run has ``ended=False`` yet is not ``live``.
+    ``duration_seconds`` is ``ended_ts - started_ts`` when both parse (``None``
+    when either is absent/malformed or the difference is negative). Session counts
+    come from the snapshot: ``dev``/``review`` count ``kind == "session"``
+    brackets by role, ``plan_gate`` counts the dev planning pre-session.
+    ``peak_context_tokens`` is the max ``context≈`` across the run's sessions
+    (``None`` when none reported one). ``has_diagnostic`` is whether any
+    failure-explaining text survived — a non-empty orchestrator log tail or
+    ``spawn.out`` startup capture.
+    """
+
+    run_id: str
+    task_status_at_launch: str | None
+    outcome: str
+    ended: bool
+    exit_code: int | None
+    stop_requested: bool
+    duration_seconds: float | None
+    answer_count: int
+    dev_session_count: int
+    review_session_count: int
+    plan_gate_count: int
+    total_turns: int
+    peak_context_tokens: int | None
+    has_diagnostic: bool
+    warning_count: int
+
+    def to_dict(self) -> dict:
+        return {
+            "run_id": self.run_id,
+            "task_status_at_launch": self.task_status_at_launch,
+            "outcome": self.outcome,
+            "ended": self.ended,
+            "exit_code": self.exit_code,
+            "stop_requested": self.stop_requested,
+            "duration_seconds": self.duration_seconds,
+            "answer_count": self.answer_count,
+            "dev_session_count": self.dev_session_count,
+            "review_session_count": self.review_session_count,
+            "plan_gate_count": self.plan_gate_count,
+            "total_turns": self.total_turns,
+            "peak_context_tokens": self.peak_context_tokens,
+            "has_diagnostic": self.has_diagnostic,
+            "warning_count": self.warning_count,
+        }
+
+
+@dataclass(frozen=True)
+class RunMetrics:
+    """Task-level run/session/event rollup derived from one evidence pack.
+
+    The static evaluator's (:mod:`orch_hub.static_metrics`) aggregate of every
+    related run's :class:`RunRollup`, plus the pack-level facts a static score
+    needs: the ``evaluation_id`` it derives from (so a persisted report ties to a
+    specific pack), whether the target task file was found and where
+    (``target_source``: ``"active"``/``"archived"``/``None`` — the
+    close-out/archive-state signal), and the total evidence-degradation
+    ``warning_count`` (pack-level plus every run's). The outcome counts partition
+    the runs (``run_count == live + clean + failed + stopped + ended_unknown +
+    broken``). ``failed_without_diagnostic_count`` is the reliability red flag — a
+    failed/broken run with no log or ``spawn.out`` to explain it.
+    ``total_duration_seconds`` and ``peak_context_tokens`` are ``None`` when no
+    run reported a measurable value, kept distinct from ``0``.
+
+    Session-2 composes this into the full static-metrics report with protocol
+    metrics parsed from the task file, score components, and warnings.
+    """
+
+    evaluation_id: str
+    target_present: bool
+    target_source: str | None
+    run_count: int
+    live_count: int
+    clean_count: int
+    failed_count: int
+    stopped_count: int
+    ended_unknown_count: int
+    broken_count: int
+    failed_without_diagnostic_count: int
+    human_input_count: int
+    dev_session_count: int
+    review_session_count: int
+    plan_gate_count: int
+    total_turns: int
+    peak_context_tokens: int | None
+    total_duration_seconds: float | None
+    warning_count: int
+    runs: tuple[RunRollup, ...] = ()
+
+    @property
+    def failure_count(self) -> int:
+        """Runs that failed: non-zero exit (``failed``) plus unreadable records
+        (``broken``). The scope's "run failure count"."""
+        return self.failed_count + self.broken_count
+
+    def to_dict(self) -> dict:
+        return {
+            "evaluation_id": self.evaluation_id,
+            "target_present": self.target_present,
+            "target_source": self.target_source,
+            "run_count": self.run_count,
+            "live_count": self.live_count,
+            "clean_count": self.clean_count,
+            "failed_count": self.failed_count,
+            "stopped_count": self.stopped_count,
+            "ended_unknown_count": self.ended_unknown_count,
+            "broken_count": self.broken_count,
+            "failure_count": self.failure_count,
+            "failed_without_diagnostic_count": self.failed_without_diagnostic_count,
+            "human_input_count": self.human_input_count,
+            "dev_session_count": self.dev_session_count,
+            "review_session_count": self.review_session_count,
+            "plan_gate_count": self.plan_gate_count,
+            "total_turns": self.total_turns,
+            "peak_context_tokens": self.peak_context_tokens,
+            "total_duration_seconds": self.total_duration_seconds,
+            "warning_count": self.warning_count,
+            "runs": [run.to_dict() for run in self.runs],
+        }
