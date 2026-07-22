@@ -1446,6 +1446,189 @@ code {
   font-weight: 650;
 }
 
+/* ---- task evaluation (deterministic Layer 1 sidecar) ---- */
+
+/* The per-task Evaluation link on run-history groups, and the entry line on task
+   detail: a plain secondary link, spaced clear of the surrounding controls. */
+.tg-actions {
+  margin: 0 0 8px 18px;
+}
+
+.eval-entry {
+  margin: 14px 0 0;
+}
+
+/* The static-vs-semantic disclaimer under the title: this is deterministic
+   Layer 1, and semantic evaluation is a separate, future layer. */
+.eval-kind {
+  margin: 6px 0 0;
+  font-size: 13px;
+}
+
+.eval-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* The Generate button is a primary action, matching the run-control button. */
+.eval-gen-btn {
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: 10px;
+  min-height: 40px;
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 650;
+  cursor: pointer;
+  box-shadow: 0 0 18px -5px var(--glow-strong);
+}
+
+.eval-gen-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* Score axes: one row per axis, a colour-banded percentage and a meter beneath,
+   with any evidence-pointing warnings listed under it. */
+.score-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.eval-score {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.eval-score-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.es-name {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+  font-weight: 650;
+}
+
+/* The score value carries the band colour so it reads at a glance; confidence is
+   secondary. A non-assessable (n/a) axis stays muted, not alarmed. */
+.es-score {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 650;
+}
+.es-score.good {
+  color: var(--ok-fg);
+}
+.es-score.mid {
+  color: var(--warn-fg);
+}
+.es-score.low {
+  color: var(--bad-fg);
+}
+.es-score.na {
+  color: var(--muted);
+}
+
+.es-conf {
+  font-size: 12px;
+  margin-left: auto;
+}
+
+/* The meter mirrors the context meter (clamped fill on a track), banded by the
+   same good/mid/low thresholds as the value. */
+.score-meter {
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.score-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--muted);
+}
+.score-meter.good .score-fill {
+  background: var(--ok-fg);
+}
+.score-meter.mid .score-fill {
+  background: var(--warn-fg);
+}
+/* --danger is the theme-stable red sanctioned for fills (--bad-fg is a light
+   pink in dark mode); the meter is aria-hidden and text-free, but reuse the
+   blessed fill token so the contrast guard stays honest. */
+.score-meter.low .score-fill {
+  background: var(--danger);
+}
+
+/* Per-score warnings and the structural protocol flags: compact bulleted lists
+   in the warning colour so a degraded axis is legible without a badge. */
+.eval-warnings,
+.eval-flags {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--warn-fg);
+}
+
+.eval-warnings li,
+.eval-flags li {
+  word-break: break-word;
+}
+
+/* Local-inspection rows: a label, a Copy button, and a Download link per raw
+   JSON artifact. Copy is an outlined secondary control; Download is a text link. */
+.eval-artifact {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 8px 0 0;
+}
+
+.ea-label {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  min-width: 8em;
+}
+
+.eval-copy {
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  min-height: 36px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.eval-count {
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+
 /* ---- waiting-question answer box ---- */
 
 .section.waiting {

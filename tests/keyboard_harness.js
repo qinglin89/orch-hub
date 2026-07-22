@@ -795,6 +795,101 @@ var TASKS = {
   ],
 };
 
+// A deterministic Layer 1 static-metrics report (StaticMetricsReport.to_dict
+// shape), rich enough to exercise the scores, run/session rollup, protocol
+// facts, an n/a (non-assessable) axis, a per-score warning, and a pack-level
+// evidence warning — plus a partial-evidence signal (a run that failed with no
+// diagnostic). The eval view renders this; the raw evidence pack below is only
+// offered as a copy/download artifact.
+var EVAL_ID = "20260722T090000Z";
+var EVAL_REPORT = {
+  evaluation_id: EVAL_ID,
+  generated_ts: "2026-07-22T09:00:00Z",
+  repo_name: REPO,
+  task_id: TASK,
+  target_present: true,
+  target_source: "active",
+  scores: [
+    { name: "protocol", score: 0.9, confidence: 1.0, warnings: [] },
+    {
+      name: "reliability",
+      score: 0.5,
+      confidence: 0.8,
+      warnings: ["1 run failed without a diagnostic"],
+    },
+    { name: "handoff", score: null, confidence: 0.0, warnings: [] },
+    { name: "estimate", score: 1.0, confidence: 1.0, warnings: [] },
+    { name: "knowledge", score: 0.75, confidence: 0.6, warnings: [] },
+  ],
+  warnings: ["run run-1 sessions.json missing"],
+  runs: {
+    evaluation_id: EVAL_ID,
+    target_present: true,
+    target_source: "active",
+    run_count: 2,
+    live_count: 0,
+    clean_count: 1,
+    failed_count: 1,
+    stopped_count: 0,
+    ended_unknown_count: 0,
+    broken_count: 0,
+    failure_count: 1,
+    failed_without_diagnostic_count: 1,
+    human_input_count: 1,
+    dev_session_count: 2,
+    review_session_count: 1,
+    plan_gate_count: 1,
+    total_turns: 12,
+    peak_context_tokens: 120000,
+    total_duration_seconds: 1800,
+    warning_count: 1,
+    runs: [],
+  },
+  protocol: {
+    task_content_present: true,
+    frontmatter_present: true,
+    frontmatter_status: "in_progress",
+    status_legal: true,
+    id_present: true,
+    id_matches: true,
+    session_est: { current: 2, total: 3 },
+    session_est_present: true,
+    session_est_wellformed: true,
+    blocker_rule_ok: true,
+    fix_set_present: false,
+    prefetch_present: true,
+    prefetch_wellformed: true,
+    missing_sections: [],
+    has_session_plan: true,
+    session_log_present: true,
+    entry_count: 3,
+    work_entry_count: 2,
+    review_entry_count: 1,
+    malformed_entry_count: 0,
+    uncovered_work_entries: [],
+    pass_verdict_count: 1,
+    changes_requested_count: 0,
+    remediation_count: 0,
+    blocked_entry_count: 0,
+    dispute_unresolved_count: 0,
+    incomplete_entries: [],
+    illegal_transitions: [],
+    transition_continuity_ok: true,
+    final_status_matches: true,
+    completed: false,
+    final_open_none: false,
+  },
+};
+var EVAL_EVIDENCE = {
+  evaluation_id: EVAL_ID,
+  generated_ts: "2026-07-22T09:00:00Z",
+  target: { repo_name: REPO, task_id: TASK, source: "active", present: true, content: "# Demo task\n" },
+  runs: [],
+  git: { available: false },
+  warnings: ["run run-1 sessions.json missing"],
+  summary: { run_count: 0, runs_ended: 0, has_task_content: true, git_available: false, warning_count: 1 },
+};
+
 function installRoutes(opts) {
   ROUTES = {};
   var waiting = opts && opts.waiting;
@@ -878,6 +973,29 @@ function installRoutes(opts) {
     request: "Add a thing",
     updated_ts: "2026-07-20T08:00:00Z",
     events: [],
+  });
+  // Task evaluation: availability (enabled by default; a scenario flips it to
+  // exercise the disabled branch and the entry-link gating), the (repo, task)
+  // list, one evaluation's detail, and the deterministic generate POST.
+  route("GET", "/api/evaluation", { enabled: true });
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
+    repo: REPO,
+    task_id: TASK,
+    enabled: true,
+    target: { present: true, source: "active" },
+    latest_evaluation_id: EVAL_ID,
+    evaluations: [
+      { evaluation_id: EVAL_ID, has_evidence: true, has_static_metrics: true },
+    ],
+  });
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
+    evaluation_id: EVAL_ID,
+    evidence: EVAL_EVIDENCE,
+    static_metrics: EVAL_REPORT,
+  });
+  route("POST", "/api/repos/" + REPO + "/evaluations/" + TASK + "/metrics", {
+    evaluation_id: EVAL_ID,
+    static_metrics: EVAL_REPORT,
   });
 }
 
@@ -1202,6 +1320,9 @@ async function scenarioHeadingOutline() {
   await navigate("#/intakes/i1");
   checkOutline("intake review");
 
+  await navigate("#/evaluations/" + REPO + "/" + TASK);
+  checkOutline("task evaluation");
+
   await navigate("#/runs/" + RUN + "/logs");
   checkOutline("run log");
   var status = doc.getElementById("log-status");
@@ -1239,6 +1360,7 @@ async function scenarioViewLayout() {
     ["#/runs", "wide"],
     ["#/runs/" + RUN + "/logs", "wide"],
     ["#/runs/" + RUN + "/task", "read"],
+    ["#/evaluations/" + REPO + "/" + TASK, "read"],
   ];
   for (var i = 0; i < cases.length; i++) {
     await navigate(cases[i][0]);
@@ -1250,6 +1372,116 @@ async function scenarioViewLayout() {
       v.className
     );
   }
+}
+
+// Task evaluation: the deterministic Layer 1 sidecar view. The keyboard smoke
+// covers what served-asset greps can't — that the route renders itself, names
+// itself, and lands focus like every other view; that the metrics actually paint
+// from the report; that Generate posts the deterministic refresh; that the entry
+// link is present when the subsystem is enabled; and that the disabled branch
+// replaces the controls with a concise explanation.
+async function scenarioTaskEval() {
+  installRoutes({ waiting: false });
+  var evalPath = "#/evaluations/" + REPO + "/" + TASK;
+  var metricsPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/metrics";
+
+  await navigate(evalPath);
+  var heading = pageHeading();
+  eq("eval: the view names the task", heading && heading.textContent.trim(), TASK);
+  activeIs("eval: focus lands on the heading", heading);
+  eq("eval: document.title tracks the route", doc.title, TASK + " · orch-hub");
+  // Task-scoped, so it keeps the Tasks tab current (like task detail).
+  var current = doc.querySelectorAll(".tabbar a").filter(function (a) {
+    return a.getAttribute("aria-current") === "page";
+  });
+  eq(
+    "eval: the Tasks tab stays current",
+    current.length && current[0].getAttribute("data-tab"),
+    "/tasks"
+  );
+
+  // Enabled → the generate control shows and the disabled note is absent.
+  check("eval: the Generate control is present", !!doc.querySelector(".eval-gen-btn"), "no .eval-gen-btn");
+  check(
+    "eval: it labels itself deterministic vs semantic",
+    (doc.querySelector(".eval-kind") || {}).textContent &&
+      doc.querySelector(".eval-kind").textContent.indexOf("Semantic") !== -1,
+    "no static-vs-semantic note"
+  );
+
+  // The report paints: five score axes (one non-assessable → n/a), the run
+  // rollup, the protocol facts, and the pack-level evidence warning.
+  eq("eval: all five score axes render", doc.querySelectorAll(".eval-score").length, 5);
+  check(
+    "eval: a non-assessable axis reads n/a",
+    doc.querySelector(".score-list").textContent.indexOf("n/a") !== -1,
+    "no n/a score rendered"
+  );
+  check(
+    "eval: the run rollup renders related runs",
+    doc.querySelector(".eval-runs").textContent.indexOf("related runs") !== -1,
+    "no run rollup"
+  );
+  check(
+    "eval: the failure-diagnostics flag renders",
+    doc.querySelector(".eval-runs").textContent.indexOf("failed without diagnostic") !== -1,
+    "no failure-diagnostics rollup"
+  );
+  check("eval: the protocol facts render", !!doc.querySelector(".eval-protocol"), "no .eval-protocol");
+  check(
+    "eval: pack evidence warnings render",
+    !!doc.querySelector(".eval-evidence-warnings"),
+    "no evidence warnings section"
+  );
+
+  // Local-inspection affordances: a Copy button and a declarative download link.
+  check("eval: a copy affordance is present", !!doc.querySelector(".eval-copy"), "no .eval-copy");
+  var dl = doc.querySelector(".eval-dl");
+  check("eval: a download link is present", !!dl, "no .eval-dl");
+  check(
+    "eval: download is a declarative data: URI",
+    dl && dl.getAttribute("href").indexOf("data:application/json") === 0,
+    dl && dl.getAttribute("href")
+  );
+  check("eval: the evaluation-history picker is present", !!doc.getElementById("eval-pick"), "no #eval-pick");
+
+  // Generate posts the deterministic refresh (writes hub-owned artifacts only).
+  pressEnter(doc.querySelector(".eval-gen-btn"));
+  await flush();
+  check("eval: Generate posts the metrics refresh", !!lastCall("POST", metricsPath), "no metrics POST");
+
+  // The entry point from task detail appears when the subsystem is enabled.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var entry = doc.querySelector(".eval-entry a");
+  check("eval: task detail links to the evaluation view", !!entry, "no task-detail eval link");
+  eq(
+    "eval: the entry link targets the eval route",
+    entry && entry.getAttribute("href"),
+    evalPath
+  );
+
+  // Disabled branch: availability 200 {enabled:false} → the controls are
+  // replaced by a concise explanation, and no generate control is offered.
+  route("GET", "/api/evaluation", { enabled: false });
+  await navigate(evalPath);
+  check(
+    "eval: disabled mode drops the Generate control",
+    doc.querySelector(".eval-gen-btn") === null,
+    "the Generate control survived disabled mode"
+  );
+  check(
+    "eval: disabled mode explains itself",
+    doc.getElementById("view").textContent.indexOf("disabled") !== -1,
+    "no disabled explanation"
+  );
+  // Disabled task detail hides the entry link entirely.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check(
+    "eval: task detail hides the link when disabled",
+    doc.querySelector(".eval-entry") === null,
+    "the eval entry link showed on a disabled hub"
+  );
+  route("GET", "/api/evaluation", { enabled: true }); // restore for later scenarios
 }
 
 // Every route handler awaits a payload, so a slow route can resolve long after
@@ -1486,6 +1718,7 @@ async function scenarioStaleRoute() {
     await scenarioIntakeReview();
     await scenarioHeadingOutline();
     await scenarioViewLayout();
+    await scenarioTaskEval();
     await scenarioStaleRoute();
   } catch (err) {
     FAILED++;

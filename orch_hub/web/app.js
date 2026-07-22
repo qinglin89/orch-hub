@@ -457,6 +457,12 @@
   const runTaskHash = (runId) => "#/runs/" + encodeURIComponent(runId) + "/task";
   // A remote intake's draft-review view, addressed by intake id.
   const intakeHash = (intakeId) => "#/intakes/" + encodeURIComponent(intakeId);
+  // A task's evaluation view, keyed by (repo, task). Not index-gated: the backend
+  // resolves the task active-then-archive, so a completed/archived task stays
+  // evaluable. An optional trailing evaluation id selects a specific past
+  // evaluation; omitting it shows the latest.
+  const evalHash = (repo, taskId) =>
+    "#/evaluations/" + encodeURIComponent(repo) + "/" + encodeURIComponent(taskId);
 
   function showChrome(authed) {
     document.getElementById("signout-btn").hidden = !authed;
@@ -470,6 +476,9 @@
     let tab = "/repos";
     if (path.startsWith("/overview")) tab = "/overview";
     else if (path.startsWith("/tasks")) tab = "/tasks";
+    // Task evaluation is task-scoped and primarily reached from task detail, so
+    // it keeps the Tasks tab current (like task detail itself).
+    else if (path.startsWith("/evaluations")) tab = "/tasks";
     else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
       const active = a.dataset.tab === tab;
@@ -494,6 +503,7 @@
     if (seg[0] === "tasks") return seg.length >= 3 ? "read" : "list";
     if (seg[0] === "repos") return seg.length >= 2 ? "read" : "list";
     if (seg[0] === "intakes") return "read";
+    if (seg[0] === "evaluations") return "read";
     if (seg[0] === "overview") return "overview";
     return "list"; // default repo list
   }
@@ -1859,6 +1869,18 @@
         if (err instanceof ApiError && err.status === 401) throw err;
       }
     }
+
+    // Best-effort: surface the task-evaluation entry only when the optional
+    // evaluation subsystem is enabled, so a disabled hub shows no dead control.
+    // A probe failure degrades to hiding the link — it must never block the task
+    // view (the sidecar is never load-bearing for run control).
+    let evalEnabled = false;
+    try {
+      const avail = await api("/api/evaluation");
+      evalEnabled = !!(avail && avail.enabled);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
     if (superseded()) return; // a newer route owns the view
 
     const blockers =
@@ -1893,6 +1915,14 @@
       ${runStatusSection(run, sessions)}
       ${runControlsSection(repoName, detail, run, busyRun, readiness)}
       ${answerSection(run ? run.run_id : "", questions)}
+      ${
+        evalEnabled
+          ? `<p class="eval-entry"><a class="text-link" href="${evalHash(
+              repoName,
+              detail.task_id
+            )}">Task evaluation →</a></p>`
+          : ""
+      }
       ${contentSection}`;
 
     wireAnswerForms();
@@ -2100,6 +2130,18 @@
     const key = groupKey(group.runs[0]); // group is non-empty; all runs share it
     const collapsed = collapsedGroups.has(key);
     const cards = group.runs.map(historyRunCard).join("");
+    // A per-task Evaluation link (eval-enabled hubs only). It sits OUTSIDE the
+    // collapse-toggle <button> — nesting an <a> in a <button> is invalid and its
+    // click would fight the toggle — and stays visible when the group collapses,
+    // giving archived/completed tasks a reachable evaluation entry point. The
+    // delegated group-header click ignores it (it only matches .task-group-head).
+    const evalLink =
+      historyEvalEnabled && group.repo_name && group.task_id
+        ? `<div class="tg-actions"><a class="text-link tg-eval" href="${evalHash(
+            group.repo_name,
+            group.task_id
+          )}">Evaluation →</a></div>`
+        : "";
     return (
       `<section class="task-group${collapsed ? " collapsed" : ""}" ` +
       `data-group-key="${escapeHtml(key)}">` +
@@ -2114,6 +2156,7 @@
         group.repo_name || ""
       )} · ${runCount} run${runCount === 1 ? "" : "s"}</span>` +
       `</button>` +
+      evalLink +
       taskRollup(group) +
       `<ul class="list">${cards}</ul>` +
       `</section>`
@@ -2134,6 +2177,11 @@
   // Collapsed groups persist across filter re-renders (and view re-entry), keyed
   // by the stable group key; a stale key for a group no longer present is inert.
   const collapsedGroups = new Set();
+  // Whether the optional evaluation subsystem is enabled, probed once per run
+  // history load and read by taskGroupCard so the per-task Evaluation link only
+  // appears on an eval-enabled hub. It survives the filter re-renders (which do
+  // not refetch), like runFilters.
+  let historyEvalEnabled = false;
 
   // Canonical run-state order for the state dropdown (live states first, then end
   // classifications); any unknown state (forward compat) sorts after, mirroring
@@ -2218,7 +2266,18 @@
     const superseded = routeGuard();
     view().innerHTML = loadingView("Run history", "Loading runs…");
     const data = await api("/api/history/runs");
+    // Best-effort: gate the per-task Evaluation link on the subsystem being
+    // enabled. A probe failure just hides the link — run history must render
+    // regardless (the evaluation sidecar is never load-bearing here).
+    let evalEnabled = false;
+    try {
+      const avail = await api("/api/evaluation");
+      evalEnabled = !!(avail && avail.enabled);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
     if (superseded()) return; // a newer route owns the view
+    historyEvalEnabled = evalEnabled;
     const runs = data.runs || [];
     if (!runs.length) {
       view().innerHTML =
@@ -2314,6 +2373,457 @@
       </div>
       <p><a class="text-link" href="${logsHash(runId)}">View logs →</a></p>
       <section class="section"><h2>Task file</h2>${body}</section>`;
+  }
+
+  // ---- task evaluation (deterministic Layer 1 metrics) ----
+  //
+  // A read-only sidecar over the optional evaluation subsystem. The view resolves
+  // a task active-then-archive (so a completed/archived task stays evaluable),
+  // shows the run/session, protocol, and score rollups a `static_metrics` report
+  // carries, and lets the operator (re)generate a fresh deterministic evaluation.
+  // It never runs a semantic model and never touches task/run state — generation
+  // writes only hub-owned artifacts. Raw run logs are never rendered inline; the
+  // full evidence pack is reachable only as a copy/download JSON artifact.
+
+  const evalListPath = (repo, taskId) =>
+    "/api/repos/" +
+    encodeURIComponent(repo) +
+    "/evaluations/" +
+    encodeURIComponent(taskId);
+  const evalDetailPath = (repo, taskId, id) =>
+    evalListPath(repo, taskId) + "/" + encodeURIComponent(id);
+  const evalMetricsPath = (repo, taskId) =>
+    evalListPath(repo, taskId) + "/metrics";
+
+  // Human labels for the five deterministic score axes (machine keys from the
+  // report); an unknown key passes through so a new axis still renders.
+  const SCORE_LABELS = {
+    protocol: "Protocol",
+    reliability: "Reliability",
+    handoff: "Handoff",
+    estimate: "Estimate",
+    knowledge: "Knowledge",
+  };
+  const scoreLabel = (name) => SCORE_LABELS[name] || name;
+
+  // A score is 0..1 (1 = clean) or null when the axis is not assessable from the
+  // evidence; the level drives the meter/percentage colour, kept distinct from a
+  // real 0.0.
+  function scoreLevel(score) {
+    if (score === null || score === undefined) return "na";
+    if (score >= 0.8) return "good";
+    if (score >= 0.5) return "mid";
+    return "low";
+  }
+
+  // A clamped 0..100% score meter, coloured by band. Empty for a non-assessable
+  // (null) score — the row shows "n/a" text instead of a misleading empty bar.
+  function scoreMeter(score) {
+    if (score === null || score === undefined) return "";
+    const pct = Math.max(0, Math.min(100, score * 100));
+    return (
+      `<span class="score-meter ${scoreLevel(score)}" aria-hidden="true">` +
+      `<span class="score-fill" style="width: ${pct.toFixed(0)}%"></span></span>`
+    );
+  }
+
+  function scoreRow(s) {
+    const na = s.score === null || s.score === undefined;
+    const scoreTxt = na ? "n/a" : Math.round(s.score * 100) + "%";
+    const conf = Math.round((s.confidence || 0) * 100) + "%";
+    const warnings =
+      s.warnings && s.warnings.length
+        ? `<ul class="eval-warnings">${s.warnings
+            .map((w) => `<li>${escapeHtml(w)}</li>`)
+            .join("")}</ul>`
+        : "";
+    return (
+      `<li class="eval-score">` +
+      `<div class="eval-score-head">` +
+      `<span class="es-name">${escapeHtml(scoreLabel(s.name))}</span>` +
+      `<span class="es-score ${scoreLevel(s.score)}">${scoreTxt}</span>` +
+      `<span class="es-conf muted">confidence ${conf}</span>` +
+      `</div>` +
+      scoreMeter(s.score) +
+      warnings +
+      `</li>`
+    );
+  }
+
+  // A small key/value block that drops rows whose value is genuinely absent
+  // (null/undefined/"") but keeps a real 0 or "no".
+  function evalKv(rows) {
+    return rows
+      .filter(([, v]) => v !== null && v !== undefined && v !== "")
+      .map(
+        ([k, v]) =>
+          `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`
+      )
+      .join("");
+  }
+
+  // The resolved-target signal: active/archived source badge, or a warning pill
+  // when the task file is genuinely absent (still evaluable for run history).
+  function evalTargetBadge(target) {
+    if (!target) return "";
+    if (target.source) return badge(target.source);
+    if (target.present === false) return badge("no task file", "warn");
+    return ""; // present:null → a target IO error; no misleading badge
+  }
+
+  function evalScoresSection(report) {
+    const scores = report.scores || [];
+    if (!scores.length)
+      return `<section class="section"><h2>Scores</h2>
+        <p class="muted">No score axes were computed.</p></section>`;
+    return `<section class="section eval-scores"><h2>Scores</h2>
+      <ul class="score-list">${scores.map(scoreRow).join("")}</ul></section>`;
+  }
+
+  // The run/session rollup plus the scope-named facts: task status/archive state,
+  // related-run outcome partition, the failure-diagnostics red flag, session and
+  // plan-gate counts, review/remediation counts, and the context/session-est
+  // rollup. `—` marks a value no run reported (kept distinct from 0).
+  function evalRunsSection(report) {
+    const r = report.runs || {};
+    const p = report.protocol || {};
+    const est = p.session_est;
+    const sourceTxt =
+      report.target_source || (report.target_present ? "present" : "no task file");
+    const rows = [
+      ["task status", p.frontmatter_status],
+      ["archive state", sourceTxt],
+      ["related runs", r.run_count],
+      ["clean / failed", r.clean_count + " / " + r.failure_count],
+      [
+        "stopped / other",
+        r.stopped_count + " / " + (r.ended_unknown_count + r.broken_count),
+      ],
+      ["live runs", r.live_count],
+      ["failed without diagnostic", r.failed_without_diagnostic_count],
+      ["human inputs", r.human_input_count],
+      ["dev / review sessions", r.dev_session_count + " / " + r.review_session_count],
+      ["plan gates", r.plan_gate_count],
+      [
+        "dev sessions vs est",
+        est
+          ? r.dev_session_count + " / " + est.total
+          : r.dev_session_count + " / est unknown",
+      ],
+      ["peak context", fmtTokensK(r.peak_context_tokens) || "—"],
+      [
+        "total wall-clock",
+        r.total_duration_seconds != null
+          ? fmtDuration(r.total_duration_seconds)
+          : "—",
+      ],
+      ["total turns", r.total_turns],
+    ];
+    return `<section class="section eval-runs"><h2>Runs &amp; sessions</h2>
+      <dl class="kv">${evalKv(rows)}</dl></section>`;
+  }
+
+  // The deterministic taskfile/session-log protocol facts. Absent task file →
+  // a note (every downstream fact would just be its empty default). Structural
+  // problems (missing sections, unreviewed work, illegal transitions, incomplete
+  // entries) are surfaced as a flags list, not buried in the key/value grid.
+  function evalProtocolSection(p) {
+    if (!p) return "";
+    if (!p.task_content_present)
+      return `<section class="section eval-protocol"><h2>Protocol</h2>
+        <p class="muted">No task file was found, so protocol metrics are not
+           applicable.</p></section>`;
+    const yn = (b) => (b ? "yes" : "no");
+    const rows = [
+      ["frontmatter status", p.frontmatter_status],
+      ["status legal", yn(p.status_legal)],
+      ["id matches", yn(p.id_matches)],
+      ["session plan", yn(p.has_session_plan)],
+      ["log entries", p.entry_count],
+      [
+        "work / review / malformed",
+        p.work_entry_count + " / " + p.review_entry_count + " / " + p.malformed_entry_count,
+      ],
+      ["pass / changes-requested", p.pass_verdict_count + " / " + p.changes_requested_count],
+      ["remediations", p.remediation_count],
+      ["blocked entries", p.blocked_entry_count],
+      ["dispute-unresolved", p.dispute_unresolved_count],
+      ["transition continuity", yn(p.transition_continuity_ok)],
+      ["final status matches", yn(p.final_status_matches)],
+      ["completed", yn(p.completed)],
+      ["final Open none", yn(p.final_open_none)],
+      ["blocker rule ok", yn(p.blocker_rule_ok)],
+      ["fix-set open", yn(p.fix_set_present)],
+    ];
+    const flags = [];
+    if (p.missing_sections && p.missing_sections.length)
+      flags.push("missing sections: " + p.missing_sections.join(", "));
+    if (p.uncovered_work_entries && p.uncovered_work_entries.length)
+      flags.push("unreviewed work entries: " + p.uncovered_work_entries.join(", "));
+    if (p.illegal_transitions && p.illegal_transitions.length)
+      flags.push("illegal transitions: " + p.illegal_transitions.join(", "));
+    if (p.incomplete_entries && p.incomplete_entries.length)
+      flags.push("incomplete entries: " + p.incomplete_entries.join(", "));
+    const flagsHtml = flags.length
+      ? `<ul class="eval-flags">${flags
+          .map((f) => `<li>${escapeHtml(f)}</li>`)
+          .join("")}</ul>`
+      : "";
+    return `<section class="section eval-protocol"><h2>Protocol</h2>
+      <dl class="kv">${evalKv(rows)}</dl>${flagsHtml}</section>`;
+  }
+
+  // Pack-level evidence-degradation warnings (missing/corrupt run artifacts),
+  // kept separate from the per-score quality warnings shown inline above.
+  function evalEvidenceWarnings(warnings) {
+    if (!warnings || !warnings.length) return "";
+    return `<section class="section eval-evidence-warnings">
+      <h2>Evidence warnings</h2>
+      <ul class="eval-warnings">${warnings
+        .map((w) => `<li>${escapeHtml(w)}</li>`)
+        .join("")}</ul></section>`;
+  }
+
+  function evalMetaSection(id, generatedTs) {
+    const rows = [
+      ["evaluation id", id],
+      ["generated", generatedTs || "—"],
+    ];
+    return `<section class="section eval-meta"><h2>Artifact</h2>
+      <dl class="kv">${evalKv(rows)}</dl></section>`;
+  }
+
+  // One copy/download row for a raw JSON artifact. Download is a declarative
+  // data: URI anchor (no runtime Blob/clipboard needed); Copy is wired to the
+  // closed-over JSON string in wireEvalControls. This is the only place the raw
+  // evidence is offered — it is never rendered inline, so unbounded log tails
+  // stay out of the UI.
+  function evalArtifactRow(label, artifactKey, json, taskId, fileStem) {
+    const filename = fileStem + "-" + taskId + ".json";
+    const href =
+      "data:application/json;charset=utf-8," + encodeURIComponent(json);
+    return (
+      `<div class="eval-artifact">` +
+      `<span class="ea-label">${escapeHtml(label)}</span>` +
+      `<button type="button" class="eval-copy" data-artifact="${escapeHtml(
+        artifactKey
+      )}">Copy</button>` +
+      `<a class="eval-dl text-link" download="${escapeHtml(
+        filename
+      )}" href="${escapeHtml(href)}">Download</a>` +
+      `</div>`
+    );
+  }
+
+  function evalArtifactsSection(taskId, reportJson, evidenceJson) {
+    const items = [];
+    if (reportJson)
+      items.push(
+        evalArtifactRow("Static metrics", "report", reportJson, taskId, "static_metrics")
+      );
+    if (evidenceJson)
+      items.push(
+        evalArtifactRow("Evidence pack", "evidence", evidenceJson, taskId, "evidence")
+      );
+    if (!items.length) return "";
+    return `<section class="section eval-artifacts"><h2>Local inspection</h2>
+      <p class="muted">Copy or download the raw JSON for local inspection. Raw
+         run logs are not shown in the dashboard.</p>
+      ${items.join("")}
+      <span class="control-status eval-copy-status" role="status"></span>
+    </section>`;
+  }
+
+  // The metrics body for the selected evaluation. Three distinct states, kept
+  // deliberately separate: no evaluation yet, an evidence-only evaluation with no
+  // computed metrics, and a full Layer 1 report.
+  function evalDetailHtml(taskId, detail, reportJson, evidenceJson) {
+    if (!detail)
+      return `<section class="section"><h2>Metrics</h2>
+        <p class="muted">No evaluation has been generated for this task yet. Use
+           Generate metrics above to compute the first one.</p></section>`;
+    const report = detail.static_metrics;
+    const artifacts = evalArtifactsSection(taskId, reportJson, evidenceJson);
+    if (!report)
+      return (
+        `<section class="section"><h2>Metrics</h2>
+          <p class="muted">This evaluation has an evidence pack but no computed
+             Layer 1 metrics. Generate metrics to compute them, or download the
+             evidence below.</p></section>` + artifacts
+      );
+    return (
+      evalScoresSection(report) +
+      evalRunsSection(report) +
+      evalProtocolSection(report.protocol) +
+      evalEvidenceWarnings(report.warnings) +
+      evalMetaSection(detail.evaluation_id, report.generated_ts) +
+      artifacts
+    );
+  }
+
+  function evalGenerateSection() {
+    return `<section class="section eval-generate"><h2>Generate</h2>
+      <p class="muted">Recompute deterministic evidence and Layer 1 metrics from
+         the task file and its run history. This writes only hub-owned artifacts;
+         the task and run records are never modified, and no semantic model is
+         invoked.</p>
+      <div class="eval-actions">
+        <button type="button" class="eval-gen-btn">Generate metrics</button>
+        <span class="control-status eval-status" role="status"></span>
+      </div></section>`;
+  }
+
+  // The evaluation-history picker: a select of past evaluations (newest first).
+  // Changing it navigates to the id-scoped route so the full view re-renders
+  // under the route guard — no in-place repaint bookkeeping.
+  function evalPickerSection(repo, taskId, evals, selectedId) {
+    if (!evals.length) return "";
+    const opts = evals
+      .map((e) => {
+        const mark = e.has_static_metrics
+          ? "metrics"
+          : e.has_evidence
+          ? "evidence only"
+          : "empty";
+        const sel = e.evaluation_id === selectedId ? " selected" : "";
+        return `<option value="${escapeHtml(e.evaluation_id)}"${sel}>${escapeHtml(
+          e.evaluation_id + " · " + mark
+        )}</option>`;
+      })
+      .join("");
+    return `<section class="section eval-history"><h2>Evaluations</h2>
+      <label for="eval-pick">Evaluation
+        <select id="eval-pick">${opts}</select>
+      </label>
+      <p class="muted eval-count">${evals.length} evaluation${
+      evals.length === 1 ? "" : "s"
+    } · newest first</p></section>`;
+  }
+
+  // Copy an artifact's JSON to the clipboard, degrading with a status hint when
+  // the Clipboard API is unavailable (the Download link still works).
+  function evalCopy(text) {
+    const statusEl = document.querySelector(".eval-copy-status");
+    if (statusEl) statusEl.classList.remove("error-text");
+    if (!text) {
+      if (statusEl) statusEl.textContent = "Nothing to copy.";
+      return;
+    }
+    const nav = globalThis.navigator;
+    if (nav && nav.clipboard && typeof nav.clipboard.writeText === "function") {
+      nav.clipboard.writeText(text).then(
+        () => {
+          if (statusEl) statusEl.textContent = "Copied to clipboard.";
+        },
+        () => {
+          if (statusEl) {
+            statusEl.classList.add("error-text");
+            statusEl.textContent = "Copy failed — use Download.";
+          }
+        }
+      );
+    } else if (statusEl) {
+      statusEl.classList.add("error-text");
+      statusEl.textContent = "Clipboard unavailable — use Download.";
+    }
+  }
+
+  // Generate a fresh deterministic evaluation: POST /metrics writes hub-owned
+  // artifacts only, then re-render to the new latest. Mirrors the intake control
+  // guard — captured before the POST so a navigation during the (slow) generation
+  // drops the follow-up instead of painting over the newer view.
+  async function onEvalGenerate(repo, taskId, button) {
+    const statusEl = document.querySelector(".eval-status");
+    const superseded = routeGuard();
+    setControlBusy(button, statusEl, true);
+    try {
+      await api(evalMetricsPath(repo, taskId), { method: "POST" });
+      if (superseded()) return;
+      rerender(renderTaskEval(repo, taskId, null)); // land on the fresh latest
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the button and its status line are gone
+      setControlBusy(button, statusEl, false);
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = controlErrorText(err, "Failed to generate metrics.");
+      }
+    }
+  }
+
+  function wireEvalControls(repo, taskId, reportJson, evidenceJson) {
+    const genBtn = document.querySelector(".eval-gen-btn");
+    if (genBtn)
+      genBtn.addEventListener("click", () => onEvalGenerate(repo, taskId, genBtn));
+    const pick = document.getElementById("eval-pick");
+    if (pick)
+      pick.addEventListener("change", (ev) => {
+        location.hash =
+          evalHash(repo, taskId) + "/" + encodeURIComponent(ev.target.value);
+      });
+    const strings = { report: reportJson, evidence: evidenceJson };
+    document.querySelectorAll(".eval-copy").forEach((btn) => {
+      btn.addEventListener("click", () => evalCopy(strings[btn.dataset.artifact]));
+    });
+  }
+
+  async function renderTaskEval(repoName, taskId, evaluationId) {
+    const superseded = routeGuard();
+    view().innerHTML = loadingView(taskId, "Loading evaluation…");
+
+    // Availability first: it is the one evaluation route that answers while the
+    // subsystem is disabled (200 {enabled:false}), so the view renders a concise
+    // disabled explanation instead of probing an action route that would 404.
+    const avail = await api("/api/evaluation"); // 401 re-gates; 5xx → error view
+    if (superseded()) return;
+    if (!avail || !avail.enabled) {
+      view().innerHTML =
+        `<a class="back-link" href="${repoHash(repoName)}">← ${escapeHtml(
+          repoName
+        )}</a>` +
+        `<div class="detail-head">${pageTitle(taskId, "task-id big")}</div>` +
+        `<section class="section"><h2>Task evaluation</h2>` +
+        `<p class="muted">Task evaluation is disabled on this hub ` +
+        `(ORCH_HUB_EVAL_ENABLED is not set). No evidence or metrics can be ` +
+        `generated or viewed here.</p></section>`;
+      return;
+    }
+
+    // The task's evaluation history + resolved target (active/archived/absent).
+    const list = await api(evalListPath(repoName, taskId));
+    if (superseded()) return;
+    const evals = list.evaluations || [];
+    const selectedId = evaluationId || list.latest_evaluation_id || null;
+
+    // The selected (or latest) evaluation's artifacts, when one exists.
+    let detail = null;
+    if (selectedId) {
+      detail = await api(evalDetailPath(repoName, taskId, selectedId));
+      if (superseded()) return;
+    }
+
+    // Pretty JSON for the copy/download affordances, computed once and closed
+    // over by the copy handlers. No raw evidence is rendered inline.
+    const report = detail ? detail.static_metrics : null;
+    const evidence = detail ? detail.evidence : null;
+    const reportJson = report ? JSON.stringify(report, null, 2) : "";
+    const evidenceJson = evidence ? JSON.stringify(evidence, null, 2) : "";
+
+    view().innerHTML = `
+      <a class="back-link" href="${repoHash(repoName)}">← ${escapeHtml(
+      repoName
+    )}</a>
+      <div class="detail-head">
+        ${pageTitle(taskId, "task-id big")}
+        ${evalTargetBadge(list.target)}
+      </div>
+      <p class="eval-kind muted">Deterministic static metrics (Layer 1). Semantic
+         evaluation is not yet available.</p>
+      ${evalGenerateSection()}
+      ${evalPickerSection(repoName, taskId, evals, selectedId)}
+      ${evalDetailHtml(taskId, detail, reportJson, evidenceJson)}`;
+
+    wireEvalControls(repoName, taskId, reportJson, evidenceJson);
   }
 
   // ---- remote intake (draft → review → confirm / cancel) ----
@@ -3535,6 +4045,11 @@
         : renderTasks;
     if (seg[0] === "intakes" && seg.length >= 2)
       return () => renderIntakeReview(seg[1]);
+    // /evaluations/{repo}/{task}[/{evaluation_id}] — the task-evaluation view.
+    // A 3-segment path shows the latest evaluation; a 4th segment selects a
+    // specific past one (the history picker navigates there).
+    if (seg[0] === "evaluations" && seg.length >= 3)
+      return () => renderTaskEval(seg[1], seg[2], seg[3]);
     if (seg[0] === "repos" && seg.length >= 2)
       return () => renderRepoDetail(seg[1]);
     if (seg[0] === "overview") return renderOverview;

@@ -1527,3 +1527,149 @@ def test_appearance_popover_is_toggled_and_dismissible():
     assert 'if (ev.key === "Escape" && isOpen())' in body
     assert "toggle.focus()" in body
     assert "!root.contains(ev.target)" in body
+
+
+# ---- task evaluation (deterministic Layer 1 sidecar view) -------------------
+#
+# The evaluation view has a JS runtime behaviour test in the keyboard harness
+# (tests/test_web_keyboard.py, scenario `eval:`) that drives the real render
+# against stubbed endpoints — that is where "the metrics actually paint" and "the
+# disabled branch replaces the controls" are proven. These served-asset checks
+# pin the wiring at the shell boundary: each maps to a scope/acceptance line of
+# the dashboard-evaluation task, so a regression that drops a route, a metric, an
+# entry point, or the disabled handling is caught here even without a JS engine.
+
+
+def test_evaluation_route_and_hash_are_wired():
+    body = app_js()
+    # A dedicated /evaluations/{repo}/{task}[/{id}] route → renderTaskEval, an
+    # encoded hash builder, its own bounded-width view kind, and the Tasks tab.
+    assert 'seg[0] === "evaluations" && seg.length >= 3' in body
+    assert "renderTaskEval(seg[1], seg[2], seg[3])" in body
+    assert "const evalHash = (repo, taskId) =>" in body
+    assert '"#/evaluations/" + encodeURIComponent(repo)' in body
+    assert 'if (seg[0] === "evaluations") return "read";' in body
+    assert 'else if (path.startsWith("/evaluations")) tab = "/tasks";' in body
+
+
+def test_evaluation_view_reads_availability_then_list_then_detail():
+    body = app_js()
+    assert "async function renderTaskEval(repoName, taskId, evaluationId)" in body
+    # Availability first (the one route that answers while disabled), then the
+    # (repo, task) list, then the selected/latest evaluation's artifacts.
+    assert 'const avail = await api("/api/evaluation");' in body
+    assert "const evalListPath = (repo, taskId) =>" in body
+    assert "const evalDetailPath = (repo, taskId, id) =>" in body
+    assert "list.latest_evaluation_id" in body
+    assert "await api(evalDetailPath(repoName, taskId, selectedId))" in body
+
+
+def test_evaluation_disabled_mode_is_explained_not_probed():
+    body = app_js()
+    # Disabled → a concise explanation, not a probe of an action route that 404s.
+    assert "if (!avail || !avail.enabled)" in body
+    assert "Task evaluation is disabled on this hub" in body
+    assert "ORCH_HUB_EVAL_ENABLED is not set" in body
+
+
+def test_evaluation_view_renders_layer1_metrics():
+    body = app_js()
+    # The five score axes with a banded meter, the run/session + protocol rollups
+    # the scope names, and the pack-level evidence warnings.
+    assert "const SCORE_LABELS = {" in body
+    assert "function scoreMeter(score)" in body
+    assert 'class="eval-score"' in body
+    for label in ("related runs", "failed without diagnostic", "plan gates",
+                  "dev / review sessions", "peak context"):
+        assert label in body
+    assert "function evalProtocolSection(p)" in body
+    for label in ("pass / changes-requested", "remediations", "log entries"):
+        assert label in body
+    assert "unreviewed work entries: " in body
+    assert "illegal transitions: " in body
+    assert "Evidence warnings" in body
+
+
+def test_evaluation_view_distinguishes_static_missing_and_semantic():
+    body = app_js()
+    # Static-deterministic vs future-semantic, and the three distinct empty
+    # states (none yet / evidence-only / disabled) kept apart.
+    assert "Deterministic static metrics (Layer 1)." in body
+    assert "Semantic" in body and "is not yet available" in body
+    assert "No evaluation has been generated for this task yet." in body
+    assert "This evaluation has an evidence pack but no computed" in body
+
+
+def test_evaluation_generate_posts_deterministic_refresh():
+    body = app_js()
+    # Generate → POST /metrics (writes hub-owned artifacts only), then re-render
+    # to the fresh latest under the route guard captured before the POST.
+    assert "const evalMetricsPath = (repo, taskId) =>" in body
+    assert 'evalListPath(repo, taskId) + "/metrics"' in body
+    assert "async function onEvalGenerate(repo, taskId, button)" in body
+    assert "await api(evalMetricsPath(repo, taskId), { method: \"POST\" });" in body
+    assert "rerender(renderTaskEval(repo, taskId, null))" in body
+
+
+def test_evaluation_offers_copy_download_and_never_inlines_raw_logs():
+    body = app_js()
+    # Local-inspection affordances: a Copy button (Clipboard API) and a
+    # declarative data: URI download — the only place the raw evidence is offered.
+    assert 'class="eval-copy"' in body
+    assert 'class="eval-dl text-link"' in body
+    assert '"data:application/json;charset=utf-8," + encodeURIComponent(json)' in body
+    assert "nav.clipboard.writeText(text)" in body
+    # The evidence pack is offered as an artifact, not rendered inline, so bounded
+    # log tails stay out of the UI.
+    assert "run logs are not shown in the dashboard" in body
+
+
+def test_evaluation_history_picker_navigates_to_the_id_route():
+    body = app_js()
+    assert "function evalPickerSection(repo, taskId, evals, selectedId)" in body
+    assert 'const pick = document.getElementById("eval-pick");' in body
+    assert 'evalHash(repo, taskId) + "/" + encodeURIComponent(ev.target.value)' in body
+
+
+def test_task_detail_links_to_evaluation_only_when_enabled():
+    body = app_js()
+    # The entry point is gated on a best-effort availability probe, so a disabled
+    # hub shows no dead control; the probe never blocks the task view.
+    assert "let evalEnabled = false;" in body
+    assert 'const avail = await api("/api/evaluation");' in body
+    assert 'class="eval-entry"' in body
+    assert "Task evaluation " in body
+
+
+def test_run_history_links_to_evaluation_only_when_enabled():
+    body = app_js()
+    # Run-history task groups (where archived/completed tasks appear) get a
+    # per-task Evaluation link, gated on the same availability probe, sitting
+    # outside the collapse <button> so it is a real navigable link.
+    assert "let historyEvalEnabled = false;" in body
+    assert "historyEvalEnabled && group.repo_name && group.task_id" in body
+    assert 'class="text-link tg-eval"' in body
+    assert "Evaluation " in body
+
+
+def test_evaluation_styles_are_present():
+    css = styles_css()
+    # Score meters/rows, the banded value colours, the primary Generate button,
+    # the outlined Copy control, warning lists, and the two entry-link anchors.
+    for selector in (
+        ".score-meter",
+        ".score-fill",
+        ".eval-score",
+        ".es-score.good",
+        ".es-score.mid",
+        ".es-score.low",
+        ".es-score.na",
+        ".score-meter.low .score-fill",
+        ".eval-gen-btn",
+        ".eval-copy",
+        ".eval-warnings",
+        ".eval-flags",
+        ".eval-entry",
+        ".tg-actions",
+    ):
+        assert selector in css, selector
