@@ -811,6 +811,109 @@ a
     assert any("blocker rule" in w for w in score(report, SCORE_PROTOCOL).warnings)
 
 
+# -- protocol score: verdict-aware final-gate transitions ---------------------
+
+# A task at final_review after a final-gate review requested changes: the review
+# entry legally leaves status at final_review (findings never downgrade a status;
+# review contract §6), so the transition is verdict-consistent, not illegal.
+FINAL_REVIEW_CHANGES = """---
+id: 2026-07-22-task-static-quality-metrics
+status: final_review
+session-est: 1/1
+blockers: []
+---
+## Goal
+g
+## Scope
+s
+## Acceptance
+a
+## Session log
+
+### 2026-07-22 / d1 / (pending → in_progress)
+- Done: first slice
+- Next: finish scope
+- Open: none
+
+### 2026-07-22 / d2 / (in_progress → final_review)
+- Done: finished scope
+- Next: none
+- Open: none
+
+### 2026-07-22 / r1 / review of d2 / (final_review → final_review)
+- Verdict: changes-requested
+- Group: d2
+- Findings: fix it
+- Next: address the finding
+- Open: none
+"""
+
+
+def test_protocol_changes_requested_final_review_holds_status_is_legal():
+    # Verdict-aware positive: a changes-requested final gate that correctly leaves
+    # status at final_review is consistent, not an illegal transition.
+    report = report_of(FINAL_REVIEW_CHANGES)
+    pm = report.protocol
+    assert pm.changes_requested_count == 1 and pm.final_status_matches
+    assert pm.illegal_transitions == ()
+    assert not any(
+        "illegal status transition" in w
+        for w in score(report, SCORE_PROTOCOL).warnings
+    )
+
+
+def test_protocol_flags_changes_requested_review_reaching_completed():
+    # The false-negative: the taskfile table ties the final-gate forward edge to
+    # the verdict, so a review with Verdict: changes-requested recorded as
+    # (final_review -> completed) is illegal even though the raw status pair is
+    # structurally legal. A pair-only check passed this with a perfect score.
+    bad = FINAL_REVIEW_CHANGES.replace(
+        "status: final_review", "status: completed"
+    ).replace(
+        "review of d2 / (final_review → final_review)",
+        "review of d2 / (final_review → completed)",
+    )
+    report = report_of(bad, source=SOURCE_ARCHIVED)
+    assert "final_review -> completed" in report.protocol.illegal_transitions
+    sp = score(report, SCORE_PROTOCOL)
+    assert sp.score < 1.0
+    assert any("illegal status transition" in w for w in sp.warnings)
+
+
+def test_protocol_flags_pass_final_review_that_does_not_complete():
+    # Corollary of the same rule: a final-gate `pass` must complete; recording it
+    # as (final_review -> final_review) is verdict-inconsistent and illegal.
+    held = FINAL_REVIEW_CHANGES.replace(
+        "- Verdict: changes-requested", "- Verdict: pass"
+    )
+    pm = report_of(held).protocol
+    assert "final_review -> final_review" in pm.illegal_transitions
+
+
+def test_protocol_pass_final_review_reaching_completed_stays_legal():
+    # Guard against over-correction: the normal pass path (final_review ->
+    # completed with Verdict: pass) must remain legal.
+    assert report_of(COMPLETED, source=SOURCE_ARCHIVED).protocol.illegal_transitions == ()
+
+
+def test_protocol_final_open_none_reads_the_final_entry():
+    # `final_open_none` reflects the FINAL session-log entry only. A completed task
+    # whose final (review) entry omits Open must NOT be rescued by an earlier work
+    # entry's `Open: none`.
+    no_final_open = COMPLETED.replace(
+        "- Verdict: pass\n- Group: sid-b\n- Findings: none\n- Open: none\n",
+        "- Verdict: pass\n- Group: sid-b\n- Findings: none\n",
+    )
+    # The earlier work entry sid-b still carries `Open: none`; only the final
+    # review entry's Open was dropped (the old walk-to-last-Open would be rescued).
+    assert "- Open: none" in no_final_open
+    report = report_of(no_final_open, source=SOURCE_ARCHIVED)
+    assert report.protocol.final_open_none is False
+    sp = score(report, SCORE_PROTOCOL)
+    assert sp.score < 1.0
+    assert any("final Open" in w for w in sp.warnings)
+
+
 # -- reliability score --------------------------------------------------------
 
 

@@ -682,25 +682,22 @@ def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFact
         (e.sid or "?") for e in wellformed if not _entry_fields_ok(e)
     )
 
-    transitions = [(e.before, e.after) for e in wellformed if e.before and e.after]
+    edged = [e for e in wellformed if e.before and e.after]
     illegal = tuple(
-        f"{before} -> {after}"
-        for before, after in transitions
-        if not _transition_legal(before, after)
+        f"{e.before} -> {e.after}" for e in edged if not _transition_legal(e)
     )
     continuity_ok = all(
-        transitions[i][1] == transitions[i + 1][0]
-        for i in range(len(transitions) - 1)
+        edged[i].after == edged[i + 1].before for i in range(len(edged) - 1)
     )
     final_status_matches = (
-        bool(transitions) and status is not None and transitions[-1][1] == status
+        bool(edged) and status is not None and edged[-1].after == status
     )
 
-    # Final forward-looking Open across the whole log (last entry that has one).
-    final_open_none = False
-    for entry in entries:
-        if entry.open_value is not None:
-            final_open_none = entry.open_value == "none"
+    # The FINAL session-log entry's forward-looking Open (taskfile §5: a completed
+    # task's final entry resolves every forward-looking item, i.e. `Open: none`).
+    # Read strictly from the last entry — an earlier entry's `Open: none` must not
+    # stand in for a final entry that omits it, and a missing Open is not `none`.
+    final_open_none = bool(entries) and entries[-1].open_value == "none"
 
     return _LogFacts(
         entry_count=len(entries),
@@ -793,13 +790,30 @@ def _entry_fields_ok(entry: _LogEntry) -> bool:
     return required <= entry.field_names
 
 
-def _transition_legal(before: str, after: str) -> bool:
-    """True when ``(before, after)`` is a legal status edge (taskfile §3). Any
-    legal status may transition to ``blocked``; other edges use the explicit
-    table."""
+def _transition_legal(entry: _LogEntry) -> bool:
+    """True when ``entry``'s ``(before, after)`` status edge is legal (taskfile
+    §3). Any legal status may transition to ``blocked``.
+
+    Review **final-gate** entries (``before == final_review``) are verdict-aware:
+    the taskfile table and the review contract (§6, "findings never downgrade a
+    status") tie the forward edge to the verdict — a ``pass`` completes, a
+    ``changes-requested`` leaves status at ``final_review`` — which the raw status
+    pair cannot express. So a changes-requested review recorded as
+    ``final_review -> completed`` is caught here, where a pair-only check passed it
+    (the pair is structurally in :data:`_LEGAL_TRANSITIONS`)."""
+    before, after = entry.before, entry.after
     if after == "blocked":
         return before in LEGAL_STATUSES
-    return (before, after) in _LEGAL_TRANSITIONS
+    if (before, after) not in _LEGAL_TRANSITIONS:
+        return False
+    if entry.is_review and before == "final_review":
+        if after == "completed":
+            return entry.verdict == _VERDICT_PASS  # only a pass completes
+        if after == "final_review":
+            return entry.verdict != _VERDICT_PASS  # a pass must complete, not hold
+        # after == "in_progress": the documented "final_review set in error"
+        # correction (review contract §6), independent of the verdict.
+    return True
 
 
 def _session_log_section(content: str) -> str | None:
