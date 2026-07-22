@@ -812,6 +812,28 @@ def test_list_evaluations_returns_newest_first_with_artifacts(tmp_path):
     assert isinstance(stored[0], StoredEvaluation)
 
 
+def test_list_evaluations_orders_double_digit_suffix_numerically(tmp_path):
+    # Regression: same-second collisions past -9 must still list newest-first.
+    # The collision suffix is unpadded (base, -2 .. -11), so a plain reverse
+    # *lexical* sort ranks "-9" above "-11"/"-10" and would report a stale
+    # latest evaluation; the numeric ``(stamp, suffix)`` key keeps -11 newest.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)  # fixed clock => one base stamp, bumping suffix
+
+    ids = [service.generate_evidence(repo, TASK).evaluation_id for _ in range(11)]
+    assert ids[0] == "20260722T090000Z"
+    assert ids[-2:] == ["20260722T090000Z-10", "20260722T090000Z-11"]
+
+    stored = service.list_evaluations(repo, TASK)
+    # Newest-first is the exact reverse of the mint (chronological) order: the
+    # last-minted -11 leads and the suffix-free base id trails.
+    assert [s.evaluation_id for s in stored] == list(reversed(ids))
+    assert stored[0].evaluation_id == "20260722T090000Z-11"  # true latest
+    assert stored[-1].evaluation_id == "20260722T090000Z"
+
+
 def test_generate_then_list_and_read_round_trips(tmp_path):
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)

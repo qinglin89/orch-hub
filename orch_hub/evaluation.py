@@ -344,6 +344,22 @@ def _write_evidence(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _evaluation_order_key(evaluation_id: str) -> tuple[str, int]:
+    """Chronological sort key for an evaluation id: ``(stamp, suffix)``.
+
+    An id is a fixed-width UTC stamp (:data:`_EVAL_ID_TS`, hyphen-free, so it
+    sorts chronologically as a string) with an optional ``-N`` same-second
+    collision suffix (``N`` >= 2; :meth:`EvaluationService._reserve_evaluation_dir`
+    mints the first id in a second with no suffix). The suffix is *unpadded*, so
+    it must sort numerically — a plain lexical sort ranks ``-10`` before ``-9``,
+    which would surface a stale newest evaluation. The base (no suffix) is the
+    first generation in its second, so it keys as suffix 1 (one below the first
+    real ``-2``), ordering ahead of every suffix at the same stamp.
+    """
+    stamp, sep, suffix = evaluation_id.partition("-")
+    return (stamp, int(suffix) if sep and suffix.isdigit() else 1)
+
+
 class EvaluationService:
     """Read-only task-evaluation foundation, gated by ``evaluation_enabled``.
 
@@ -457,10 +473,12 @@ class EvaluationService:
         and, for each, the artifact filenames it holds (``evidence.json`` /
         ``static_metrics.json``), so the caller learns which evaluations exist and
         what each carries without reading any artifact body. Newest-first by id
-        (the id is a UTC stamp, so a reverse lexical sort is chronological,
-        matching the run manager's run ordering). An absent tree (no evaluation
-        ever generated) is an empty list, not an error; only the gate fails
-        closed. Read-only — it creates nothing.
+        via :func:`_evaluation_order_key`: the id is a UTC stamp with an optional
+        unpadded ``-N`` same-second collision suffix, so it is ordered by
+        ``(stamp, numeric suffix)`` (a plain reverse lexical sort would rank a
+        same-second ``-10`` before ``-9`` and report a stale latest). An absent
+        tree (no evaluation ever generated) is an empty list, not an error; only
+        the gate fails closed. Read-only — it creates nothing.
         """
         self._require_enabled()
         parent = task_evaluations_dir(
@@ -478,7 +496,7 @@ class EvaluationService:
             for child in parent.iterdir()
             if child.is_dir()
         ]
-        stored.sort(key=lambda e: e.evaluation_id, reverse=True)
+        stored.sort(key=lambda e: _evaluation_order_key(e.evaluation_id), reverse=True)
         return stored
 
     def read_artifact(
