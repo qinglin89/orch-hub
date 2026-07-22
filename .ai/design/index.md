@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Design Principles and Decisions
@@ -16,6 +16,8 @@ verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
 - Fail closed before launch: readiness checks should block unclear or unsafe runs.
 - Human-confirmed task creation: remote intake drafts stay hub-owned until the
   user explicitly confirms the complete task file and index row.
+- Read-only task evaluation: evidence packs are hub-owned sidecar artifacts and
+  must not mutate target tasks, run state, or protocol memory.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
 
@@ -49,14 +51,17 @@ verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
   task inventory.
 - Duplicating run start/stop behavior inside the intake flow after a task is
   created.
+- Letting evaluation generation write into target repos or affect run/task
+  lifecycle decisions.
 - Adding watchdog or log-silence detection.
 - Hardcoding target repo paths in product code.
 - Using broad shell commands where structured subprocess arguments are practical.
 
 ## Open Design Items
 
-- Retention/reconciliation policy for hub-owned run dirs and intake dirs under
-  `ORCH_HUB_DATA_DIR`, including per-run `events.jsonl` history and stuck
-  `confirming` intake records after a mid-write process crash.
+- Retention/reconciliation policy for hub-owned run dirs, intake dirs, and
+  evaluation artifacts under `ORCH_HUB_DATA_DIR`, including per-run
+  `events.jsonl` history, stuck `confirming` intake records after a mid-write
+  process crash, and generated evidence/static/semantic report history.
 - Exact route schema beyond the implemented repo/task/run/escalation/log/history
   and dashboard-shell API surface.

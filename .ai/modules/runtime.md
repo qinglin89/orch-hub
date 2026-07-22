@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Modules: Runtime
@@ -29,7 +29,9 @@ prepends common user agent-CLI locations (`~/.local/bin`, `~/.claude/local`,
 and baseline macOS paths. `run.json` is the source of truth,
 stores launch-time task frontmatter status plus the internal `spawn_out` path,
 and is rewritten atomically; in-memory `Popen` handles exist only to capture
-exit codes for runs that end while the hub process is alive.
+exit codes for runs that end while the hub process is alive. `load_records`
+returns `(run_dir, RunRecord)` pairs without refresh, pid probing, or writes for
+historical/evaluation consumers that must not mutate run state.
 
 Reattach scans run dirs, loads records, and probes pid liveness with
 `os.kill(pid, 0)`. If a run ended while the hub was down, `ended_ts` is

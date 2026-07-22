@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-20
-verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Conventions
@@ -21,7 +21,8 @@ verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
 
 - Package name: `orch_hub`.
 - Use explicit domain names: `ManagedRepo`, `ReadinessReport`, `TaskSummary`,
-  `RunRecord`, `RunStatus`, `Question`, `Answer`.
+  `RunRecord`, `RunStatus`, `Question`, `Answer`, `EvaluationTarget`,
+  `RelatedRun`, `EvidencePack`.
 - Use `repo_path`, `task_id`, `run_id`, and `control_dir` consistently.
 - Use `waiting` for an active run awaiting a human answer; reserve `blocked` for task frontmatter status.
 
@@ -40,6 +41,8 @@ verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
 - Invoke `aii-2` through the configured absolute path (`Config.aii2_bin`), not by relying on PATH.
 - Empty or whitespace-only environment config values count as unset; malformed
   explicit values such as an invalid `ORCH_HUB_PORT` should fail loudly.
+- Evaluation disabled mode should fail closed at service/API boundaries and
+  leave normal repo/task/run control available.
 
 ## Logging
 
@@ -58,6 +61,8 @@ verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
 - Do not place generated run dirs inside managed target repos unless deliberately matching an orchestrator contract.
 - Put hub-owned run dirs under `<ORCH_HUB_DATA_DIR>/runs/`, outside every
   managed target repo.
+- Put hub-owned evaluation artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`,
+  outside every managed target repo.
 
 ## Git Workflow
 
@@ -76,6 +81,8 @@ verified-against: 8b0f37c2cf33ae8d173089b3a4f094277539c293
   of starting real orchestrator subprocesses.
 - Prefer testing structured return values before testing text formatting.
 - Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
+- Inject fake record loaders, git runners, and clocks for task-evaluation tests
+  instead of reading real run history or invoking real git.
 - For non-trivial `orch_hub/web/app.js` behavior, extend the committed
   JavaScriptCore harness (`tests/keyboard_harness.js`, wrapped by
   `tests/test_web_keyboard.py`), which drives the real SPA against a stubbed

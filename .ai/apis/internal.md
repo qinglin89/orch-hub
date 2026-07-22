@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # APIs: Internal Interfaces
@@ -38,9 +38,28 @@ Input: repo path.
 Output: `RepoTaskInventory` values containing repo fields, `index_present`, ordered `TaskSummary` rows, and optional raw task content for one listed task.
 
 Behavior: parse `.ai-tasks/index.md` and task frontmatter locally. The index supplies active task ids and summaries; task frontmatter supplies authoritative status and blockers. The reusable `tasks_payload(inventories)` helper serializes as `{"repos": [...]}` for future CLI/API adapters.
-`read_task_content(repo, task_id)` is the only raw-body reader: it rejects
-non-bare filenames, requires the file target to resolve under the resolved
-`.ai-tasks` directory, and returns `None` for absent or unsafe content.
+`read_task_content(repo, task_id)` and `read_archived_task_content(repo,
+task_id)` are the raw-body readers: they reject non-bare filenames, require the
+file target to resolve under the resolved active/archive `.ai-tasks` directory,
+and return `None` for absent or unsafe content.
+
+## Task Evaluation Service
+
+Input: managed repo, exact task id, and optional evaluation id.
+
+Output: `EvaluationTarget`, `RelatedRun` values, or a bounded `EvidencePack`
+persisted as `evidence.json` under the hub data dir.
+
+Behavior: `EvaluationService` is gated by `Config.evaluation_enabled` and raises
+`EvaluationDisabledError` from every operation when disabled. Target resolution
+checks active task files before archive files. Related-run aggregation loads
+persisted run records read-only via `runs.load_records` and matches exact
+`(repo_path, task_id)`. Evidence building reads run events, session snapshots,
+bounded orchestrator logs, bounded `spawn.out`, terminal record fields, and
+best-effort git-window commits; per-run artifact failures become warnings, while
+target task IO errors fail the build. Persistence writes only
+`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
+mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
 
 ## Intake Manager
 
@@ -81,7 +100,8 @@ intakes.
 Input: repo id, task id, start flags.
 
 Output: `RunRecord` from `start_run`, `RunStatus` from list/get operations,
-and idempotent stop-request results.
+read-only `(run_dir, RunRecord)` records from `load_records`, and idempotent
+stop-request results.
 
 Behavior: implemented subprocess lifecycle, per-repo serialization, and history
 event ownership.

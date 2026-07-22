@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-13
-verified-against: 593b593183f551c0e4a4c068c9de6ec9b84d937c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Features: Core
@@ -72,6 +72,43 @@ Implemented behavior:
 - Exact-id run-history helpers can read archived task files after close-out and
   parse active-then-archive `session-est: current/total` into a typed
   `SessionEst`; malformed or missing estimates degrade to unknown.
+
+## Task Evaluation Foundation
+
+Status: implemented
+
+Description: Build optional read-only evidence packs for one active or archived
+task so later static metrics and semantic evaluators have bounded task/run/git
+input without changing normal run-control state.
+
+Modules: evaluation, config, task_store, runs, history, sessions, logs,
+git_meta, models.
+
+APIs: internal `EvaluationService.resolve_target`, `related_runs`,
+`build_evidence`, `generate_evidence`, and `artifact_dir`.
+
+Implemented behavior:
+
+- `ORCH_HUB_EVAL_ENABLED` defaults true for local use; falsy tokens disable the
+  service fail-closed, and malformed explicit values raise config errors.
+- Target resolution reads active `.ai-tasks/<task_id>.md` first, then
+  `.ai-tasks/archive/<task_id>.md`, by exact id and contained path checks.
+- Related-run aggregation includes every persisted run with exact
+  `(repo_path, task_id)` identity and excludes other repos/tasks and unreadable
+  unattributed run dirs.
+- Evidence packs include task content/archive state, related run records,
+  metadata-only events, persisted session snapshots, bounded orchestrator-log
+  and `spawn.out` excerpts with size/truncation metadata, terminal record fields,
+  explicit warnings, and best-effort git commit-window metadata.
+- Git evidence uses ambient commit-date history reachable from HEAD over the
+  run lifecycle window, capped at 50 commits; any related run with no parseable
+  end keeps `until` open-ended.
+- `generate_evidence` persists `evidence.json` atomically under
+  `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`, cleaning an empty
+  reserved dir on failure. It never mutates target repos, task files, run
+  records, `.ai/`, or `.ai-tasks/`.
+- No static scores, semantic model calls, HTTP routes, or dashboard affordances
+  are part of this foundation.
 
 ## HTTP API Foundation
 

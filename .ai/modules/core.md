@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Modules: Core
@@ -46,7 +46,7 @@ Location: `orch_hub/config.py`
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
-and derived
+`ORCH_HUB_EVAL_ENABLED`, and derived
 `aii-2`/registry file paths:
 
 ```text
@@ -57,9 +57,12 @@ All current environment variables strip surrounding whitespace. Empty or
 whitespace-only values count as unset; a malformed or out-of-range
 `ORCH_HUB_PORT` raises `ValueError` instead of silently binding the default.
 `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; the run manager writes
-`<data_dir>/runs/<run_id>/` directories there. `ORCH_HUB_BARK_URL` is the full
-Bark endpoint including device key; empty or whitespace-only values disable
-push notifications.
+`<data_dir>/runs/<run_id>/` directories there, and evaluation writes
+`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/` artifacts there.
+`ORCH_HUB_BARK_URL` is the full Bark endpoint including device key; empty or
+whitespace-only values disable push notifications. `ORCH_HUB_EVAL_ENABLED`
+defaults true and accepts normal truthy/falsy tokens; malformed explicit values
+raise `ValueError`, while falsy values disable evaluation services fail-closed.
 
 ## Models
 
@@ -67,7 +70,7 @@ Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
-questions, run state, run history, and intake state.
+questions, run state, run history, intake state, and evaluation target/run links.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
@@ -91,7 +94,10 @@ Public readiness payloads contain `ready` plus failed check reasons only.
 review. `IntakeRecord` persists hub-owned intake status, draft, created task id,
 repo attribution, and audit metadata while omitting internal agent handles from
 serialized payloads. `IntakeEvent` and `IntakeHistoryEntry` expose metadata-only
-intake history.
+intake history. `EvaluationTarget` and `RelatedRun` are the shared shapes for
+evaluation target resolution and run aggregation; evidence composites stay in
+`evaluation.py` because they reference `logs.LogSnapshot`, avoiding a
+models/logs import cycle.
 
 ## Registry
 
@@ -109,14 +115,15 @@ Responsibility: check repo filesystem, deployed manifest, orchestrator script, v
 
 Location: `orch_hub/git_meta.py`
 
-Responsibility: read display-only git commit metadata for managed repos without
+Responsibility: read best-effort git commit metadata for managed repos without
 participating in launch readiness. `latest_commit(repo)` returns the newest
-`CommitInfo` or `None`; `read_commits(repo, limit=...)` returns
-`CommitLog(available, commits)` newest-first with the limit clamped to `1..50`.
-It invokes `git log` in the repo, parses `%H`, `%h`, `%cI`, and `%s` using an
-ASCII unit-separator field delimiter, and degrades to unavailable on missing
-git, non-git dirs, missing paths, or non-zero exit. Commit lookup failure must
-not hide repo/task content.
+`CommitInfo` or `None`; `read_commits(repo, limit=...)` returns recent commits;
+`read_commits_between(repo, since, until, limit=...)` returns windowed commits
+for evaluation evidence. All return `CommitLog(available, commits)` newest-first
+with limits clamped to `1..50`, invoke `git log` in the repo, parse `%H`, `%h`,
+`%cI`, and `%s` using an ASCII unit-separator field delimiter, and degrade to
+unavailable on missing git, non-git dirs, missing paths, or non-zero exit.
+Commit lookup failure must not hide repo/task content or fail evidence packs.
 
 ## Housekeeping
 
@@ -140,6 +147,29 @@ and redirect output.
 Location: `orch_hub/task_store.py`
 
 Responsibility: parse active task files without importing protocol or orchestrator code. `list_repo_tasks(repo)` reads `.ai-tasks/index.md` for active task ids and summaries, normalizing bare Task cells or full-cell Markdown links like `[id](id.md)` to the safe bare id used for file lookup and API payloads. It also parses five-column `id | title | status | session-est | blockers` indexes, using `title` as the summary there while preserving the legacy positional third-column summary for other table layouts. It then reads each task file frontmatter for authoritative status and blockers. Missing indexes return `index_present=False`; missing task files use a `missing` sentinel status; task files without parseable status use `unknown`. `read_task_content(repo, task_id)` backs the dashboard detail view and stays active-task scoped under `.ai-tasks`; `read_archived_task_content(repo, task_id)` reads `.ai-tasks/archive/<task_id>.md` for run-scoped historical access; `read_session_est(repo, task_id)` reads active-then-archive frontmatter `session-est: current/total` into `SessionEst | None`, with only genuine active-file absence falling through to archive and malformed/missing values degrading to unknown. Raw content readers reject non-bare filenames, resolve the target, and only return content whose resolved path remains under the tight containing directory.
+
+## Evaluation
+
+Location: `orch_hub/evaluation.py`
+
+Responsibility: optional read-only task-evaluation foundation gated by
+`Config.evaluation_enabled`. `EvaluationService.resolve_target(repo, task_id)`
+reads active `.ai-tasks/<id>.md` first, then archived
+`.ai-tasks/archive/<id>.md`; `related_runs` aggregates exact
+`(repo_path, task_id)` run records through `runs.load_records` without refresh,
+pid probing, or writes; `build_evidence` assembles a bounded `EvidencePack`
+from task content, related run records, metadata-only events, persisted session
+snapshots, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
+and best-effort git-window commits; `generate_evidence` mints an evaluation id
+and atomically writes `evidence.json` under
+`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`.
+
+Per-run artifact reads are isolated into warnings so corrupt/missing run
+evidence yields a partial pack; target task file IO errors fail loudly because
+the task file is the primary subject. The git window spans earliest parseable
+run start to latest parseable run end, but remains open-ended when any related
+run has no parseable end. The foundation does not compute scores, invoke
+semantic models, or expose HTTP/dashboard routes.
 
 ## Intake Manager
 

@@ -1,14 +1,15 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Architecture
 
 orch-hub is a local control plane for remotely inspecting managed repos,
 starting deployed orchestrator runs, answering human-input prompts, reading run
-state, and drafting new tasks through a confirmed intake loop. It coordinates
-existing systems rather than replacing them:
+state, drafting new tasks through a confirmed intake loop, and building
+read-only task-evaluation evidence packs. It coordinates existing systems
+rather than replacing them:
 ai-native-development remains the managed-repo registry, target repos own their
 task files and deployed orchestrator payloads, and orch-hub owns only its
 service surface plus external run state.
@@ -89,10 +90,11 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Task ids, summaries, status, blockers | Target repo `.ai-tasks/index.md` plus task frontmatter | task inventory is read-only; runtime overlays do not replace task status |
 | Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
 | Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
+| Evaluation evidence artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated packs are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
 | Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
-| Commit metadata | Target repo git history | display-only; never gates readiness or launch |
+| Commit metadata | Target repo git history | display/evaluation evidence only; never gates readiness, launch, or evidence generation |
 | Housekeeping marker | Target repo `.ai/.housekeeping-pending` | display-only dashboard/API warning; never gates readiness or launch |
 | Notifications | Derived from run state, pending questions, and intake draft/revision state | delivery is best-effort and must not affect state writes |
 
@@ -137,6 +139,13 @@ were authorized to touch when the process is still alive. When a draft or
 revision settles to `awaiting_review`, the manager emits one metadata-only
 intake-ready notification off the state-critical path when Bark is configured.
 
+Task evaluation resolves an exact active or archived task id, aggregates every
+hub run matching `(repo_path, task_id)` through read-only run-record loading,
+adds bounded per-run history/session/log/spawn diagnostics plus a best-effort
+git commit window, and persists `evidence.json` under the hub data dir. The
+foundation performs no static scoring, semantic model call, or dashboard/API
+presentation; those are separate sidecar layers over the evidence artifact.
+
 ## Component Boundaries
 
 - Registry discovery does not perform readiness checks.
@@ -146,6 +155,8 @@ intake-ready notification off the state-critical path when Bark is configured.
 - Task inventory reads task files but does not decide orchestrator turn state.
 - Intake owns draft/revise/confirm/cancel lifecycle, intake audit state, and the
   read-only-until-confirm safety contract.
+- Evaluation owns task evidence assembly and persistence; it reads target
+  tasks/run artifacts and writes only its own hub-owned evaluation artifacts.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
 - Control-dir handling owns only the file-channel mechanics for questions,
@@ -161,7 +172,8 @@ intake-ready notification off the state-critical path when Bark is configured.
 
 - ai-native-development repository and its `aii-2` CLI.
 - Managed target repos with deployed `.cursor/orchestrator/` payloads.
-- Git CLI for target-repo state and display metadata.
+- Git CLI for target-repo state, display metadata, and best-effort evaluation
+  commit windows.
 - `/usr/bin/caffeinate` on macOS for long-running orchestrator subprocesses.
 - Python virtual environment inside each target repo's deployed orchestrator
   directory.
@@ -179,6 +191,8 @@ intake-ready notification off the state-critical path when Bark is configured.
 - Control-dir adapter code stays file-channel only.
 - The same target repo cannot have two active orchestrator runs.
 - Hub-owned run dirs stay outside target repo working trees.
+- Hub-owned evaluation artifacts stay outside target repo working trees and do
+  not mutate task/run/protocol state.
 - Hub-owned unconfirmed intake drafts are not tasks and cannot be launched.
 - A confirmed intake must land through task inventory as `pending` or `blocked`;
   every other confirm outcome is failed/unverified.

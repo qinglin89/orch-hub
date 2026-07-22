@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-21
-verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Modules
@@ -8,15 +8,16 @@ verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output, launchd operations dispatch, and notification delivery checks |
-| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token and Bark URL loading, data-dir setting, and derived `aii-2`/registry paths |
+| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token/Bark URL/evaluation gate loading, data-dir setting, and derived `aii-2`/registry paths |
 | Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing and lookup |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, and intake models plus payload helpers and run-record repo reconstruction |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, and evaluation target/run-link models plus payload helpers and run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
-| Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent commit reads for dashboard/API display |
+| Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent/windowed commit reads for dashboard/API display and evaluation evidence |
 | Housekeeping | `orch_hub/housekeeping.py` | Implemented display-only `.ai/.housekeeping-pending` marker detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, typed `session-est`, and contained active/archive task reads |
+| Evaluation | `orch_hub/evaluation.py` | Implemented optional read-only task evidence target resolution, related-run aggregation, bounded evidence-pack assembly, and contained artifact persistence |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session snapshot handling, and per-repo serialization |
@@ -36,7 +37,7 @@ verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
 
 | File | Contains |
 |---|---|
-| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, intake manager, intake agent |
+| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, intake manager, intake agent |
 | runtime.md | Run manager, monitor, history, control-dir, logs, notifications |
 | web.md | API, web UI, and launchd operations |
 
@@ -44,9 +45,12 @@ verified-against: ba505657be3bdb33d39216d89f71fa27dbd851cb
 
 - Registry code does not perform readiness checks.
 - Readiness code does not launch orchestrators.
-- Git metadata is display-only and never gates readiness or run launch.
+- Git metadata is best-effort display/evaluation evidence and never gates
+  readiness, run launch, or evidence generation.
 - Housekeeping marker state is display-only and never gates readiness or run launch.
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
+- Evaluation reads target tasks and run artifacts through existing stores and
+  writes only contained artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`.
 - Intake manager owns intake state, intake-ready notification trigger timing,
   and the confirmation postcondition; API/web layers do not treat drafts as
   active tasks or decide whether a confirm landed.

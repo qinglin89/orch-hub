@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-22
+verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 ---
 
 # Project Overview
@@ -13,8 +13,9 @@ The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
-the mobile dashboard, Bark notifications, and remote intake-task: read the
-ai-native-development local registry, list managed repos, report launch
+the mobile dashboard, Bark notifications, remote intake-task, and the
+task-evaluation foundation: read the ai-native-development local registry, list
+managed repos, report launch
 readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
 those payloads through HTTP, require `ORCH_HUB_TOKEN` on every non-health HTTP
 path, provide a launchd user-agent template for resident macOS operation,
@@ -24,7 +25,10 @@ waiting questions remotely, retrieve or stream run logs, persist run lifecycle
 plus answer-audit metadata, serve the dashboard, push Bark notifications for
 pending questions, terminal run states, and intake drafts/revisions ready for
 review, and run a confirmed remote intake loop that drafts a task before
-writing it to the target repo. Later slices add IM bot control.
+writing it to the target repo, and generate bounded read-only task evidence
+packs under the hub data dir for active or archived tasks. Later slices add
+static metrics, semantic evaluation, dashboard exposure for evaluation, and IM
+bot control.
 
 ## Users
 
@@ -46,6 +50,9 @@ writing it to the target repo. Later slices add IM bot control.
   is configured.
 - Draft, revise, confirm, or cancel new task proposals remotely while keeping
   target repo `.ai-tasks/` files unchanged until explicit confirmation.
+- Generate bounded, read-only evidence packs for active or archived tasks from
+  task files, related run records/events/sessions/log diagnostics, and
+  best-effort git commit windows.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.
@@ -85,6 +92,7 @@ orch_hub/
   api.py
   cli.py
   config.py
+  evaluation.py
   history.py
   intake.py
   intake_agent.py
