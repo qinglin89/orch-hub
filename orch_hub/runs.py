@@ -919,6 +919,30 @@ def _write_record(run_dir: Path, record: RunRecord) -> None:
     os.replace(tmp, path)
 
 
+def load_records(config: Config) -> list[tuple[Path, RunRecord]]:
+    """Read every persisted run record read-only, as ``(run_dir, record)`` pairs.
+
+    Oldest-first (run ids sort by start time). Unlike :meth:`RunManager.list_runs`,
+    this performs **no** refresh: it never probes pid liveness, observes a run's
+    end, rewrites ``run.json``, appends events, or fires notifications. It is the
+    read-only entry point for historical consumers — the task-evaluation evidence
+    builder aggregates related runs by ``(repo_path, task_id)`` through it and
+    must not mutate run state. An unreadable ``run.json`` still yields an
+    ``error`` stub (via :func:`_load_record`), so a broken dir surfaces rather
+    than silently vanishing from an evidence pack; a missing ``runs/`` dir is an
+    empty list. The ``run_dir`` is returned alongside each record because
+    per-run history (``events.jsonl``), the session snapshot (``sessions.json``),
+    and the startup capture (``spawn.out``) are all read from it.
+    """
+    runs_dir = config.data_dir / RUNS_SUBDIR
+    if not runs_dir.is_dir():
+        return []
+    return [
+        (run_dir, _load_record(run_dir))
+        for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir())
+    ]
+
+
 def _load_record(run_dir: Path) -> RunRecord:
     """Load ``run.json``; an unreadable one yields an ``error`` stub.
 

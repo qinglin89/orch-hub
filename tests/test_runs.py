@@ -33,6 +33,7 @@ from orch_hub.runs import (
     RunEndedError,
     RunManager,
     UnknownRunError,
+    load_records,
 )
 
 FIXED_NOW = dt.datetime(2026, 7, 8, 3, 0, 0, tzinfo=dt.timezone.utc)
@@ -1463,3 +1464,50 @@ def test_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
     assert status.state == "ended"
     assert read_record(manager, record.run_id)["ended_ts"] is not None
     assert not sessions_json(manager, record.run_id).exists()
+
+
+# -- load_records (read-only historical reader) -------------------------------
+
+
+def test_load_records_reads_persisted_runs_without_mutating(tmp_path):
+    # load_records is the read-only entry point for evidence aggregation: unlike
+    # list_runs it must not refresh, so a dead pid does NOT flip the run to ended
+    # or append a run_ended event.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)  # pid_probe returns False (dead)
+    record = manager.start_run(repo, TASK_ID)
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    run_dir = manager.runs_dir / record.run_id
+    run_json_before = (run_dir / "run.json").read_text(encoding="utf-8")
+    events_before = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+
+    pairs = load_records(config)
+
+    assert [p[0] for p in pairs] == [run_dir]
+    loaded = pairs[0][1]
+    assert loaded.run_id == record.run_id
+    assert loaded.repo_path == repo.path
+    assert loaded.task_id == TASK_ID
+    assert loaded.ended_ts is None  # never observed the end (no pid probe)
+    # No write of any kind happened.
+    assert (run_dir / "run.json").read_text(encoding="utf-8") == run_json_before
+    assert (run_dir / "events.jsonl").read_text(encoding="utf-8") == events_before
+
+
+def test_load_records_missing_runs_dir_is_empty(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "nowhere")
+    assert load_records(config) == []
+
+
+def test_load_records_surfaces_broken_dir_as_error_stub(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    broken = config.data_dir / "runs" / "20260708T030000Z-broken"
+    broken.mkdir(parents=True)  # no run.json
+
+    pairs = load_records(config)
+
+    assert len(pairs) == 1
+    run_dir, record = pairs[0]
+    assert run_dir == broken
+    assert record.error is not None
+    assert record.repo_path is None  # unattributable, so it never matches a repo

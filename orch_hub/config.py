@@ -43,6 +43,45 @@ The value is a full URL such as ``https://api.day.app/<device-key>``. It embeds
 a device key, so treat it as a secret and never log it. Unset (or blank)
 disables push notifications entirely."""
 
+EVAL_ENABLED_ENV = "ORCH_HUB_EVAL_ENABLED"
+"""Environment variable gating the optional task-evaluation subsystem.
+
+Task evaluation (read-only evidence packs, later static/semantic metrics) is a
+bolt-on kept separable from run orchestration so it can be omitted from customer
+deployments. It defaults to *enabled* for local use; setting this to a falsy
+token (``0``/``false``/``no``/``off``) disables it, so evaluation services fail
+closed and the future evaluation API/dashboard surfaces are removed/404. Unset
+or blank means the default; an unrecognized value fails loudly (like a malformed
+``ORCH_HUB_PORT``) rather than silently guessing on/off."""
+
+DEFAULT_EVAL_ENABLED = True
+"""Task evaluation is enabled by default (local use); disable it explicitly."""
+
+_TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
+_FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_bool(raw: str | None, *, default: bool, env_name: str) -> bool:
+    """Parse a boolean env var: unset/blank is ``default``, malformed fails loud.
+
+    Recognizes ``1``/``true``/``yes``/``on`` and ``0``/``false``/``no``/``off``
+    case-insensitively. An unrecognized explicit value raises ``ValueError``
+    instead of silently falling back, mirroring :func:`_parse_port`, so a typo in
+    the service environment surfaces at startup rather than quietly picking a
+    gate state.
+    """
+    value = (raw or "").strip().lower()
+    if not value:
+        return default
+    if value in _TRUE_TOKENS:
+        return True
+    if value in _FALSE_TOKENS:
+        return False
+    raise ValueError(
+        f"{env_name} must be a boolean"
+        f" (one of {', '.join(sorted(_TRUE_TOKENS | _FALSE_TOKENS))}), got {raw!r}"
+    )
+
 
 def _parse_port(raw: str | None) -> int:
     """Parse ``PORT_ENV``: unset/blank means the default; malformed is an
@@ -98,6 +137,17 @@ class Config:
     push notifications are disabled; there is no separate on/off flag.
     """
 
+    evaluation_enabled: bool = DEFAULT_EVAL_ENABLED
+    """Whether the optional task-evaluation subsystem is enabled.
+
+    Gates the read-only evidence-pack service (and its later static/semantic
+    metrics and API/dashboard surfaces). ``True`` by default for local use; a
+    deployment that omits evaluation sets ``ORCH_HUB_EVAL_ENABLED`` falsy so the
+    evaluation services fail closed and the routes are removed/404. It gates a
+    *feature*, unlike ``token``/``bark_url`` whose ``None`` encodes both absence
+    and disable — hence a real boolean, not a nullable value.
+    """
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
@@ -123,6 +173,11 @@ class Config:
             port=_parse_port(env.get(PORT_ENV)),
             data_dir=Path(raw_data_dir).expanduser() if raw_data_dir else DEFAULT_DATA_DIR,
             bark_url=bark_url or None,
+            evaluation_enabled=_parse_bool(
+                env.get(EVAL_ENABLED_ENV),
+                default=DEFAULT_EVAL_ENABLED,
+                env_name=EVAL_ENABLED_ENV,
+            ),
         )
 
     @property

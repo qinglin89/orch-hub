@@ -18,6 +18,7 @@ from orch_hub.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    EVAL_ENABLED_ENV,
     HOST_ENV,
     PORT_ENV,
     TOKEN_ENV,
@@ -144,3 +145,30 @@ def test_bark_url_from_env_strips_whitespace():
 def test_bark_url_empty_or_whitespace_counts_as_unset():
     assert Config.from_env({BARK_URL_ENV: ""}).bark_url is None
     assert Config.from_env({BARK_URL_ENV: "   "}).bark_url is None
+
+
+def test_evaluation_enabled_defaults_to_true():
+    # Enabled by default for local use; a deployment disables it explicitly.
+    assert Config.from_env({}).evaluation_enabled is True
+    assert Config(ai_native_path=Path("/root/ai-native")).evaluation_enabled is True
+
+
+def test_evaluation_enabled_falsy_tokens_disable():
+    for token in ("0", "false", "no", "off", "FALSE", " Off ", "No\n"):
+        assert Config.from_env({EVAL_ENABLED_ENV: token}).evaluation_enabled is False
+
+
+def test_evaluation_enabled_truthy_tokens_enable():
+    for token in ("1", "true", "yes", "on", "TRUE", " On ", "Yes\n"):
+        assert Config.from_env({EVAL_ENABLED_ENV: token}).evaluation_enabled is True
+
+
+def test_evaluation_enabled_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({EVAL_ENABLED_ENV: ""}).evaluation_enabled is True
+    assert Config.from_env({EVAL_ENABLED_ENV: "   "}).evaluation_enabled is True
+
+
+def test_evaluation_enabled_malformed_is_explicit_error():
+    # A typo'd gate must fail at startup, not silently guess on/off.
+    with pytest.raises(ValueError, match=EVAL_ENABLED_ENV):
+        Config.from_env({EVAL_ENABLED_ENV: "maybe"})

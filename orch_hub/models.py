@@ -685,3 +685,53 @@ class IntakeHistoryEntry:
             **self.record.to_dict(),
             "events": [event.to_dict() for event in self.events],
         }
+
+
+@dataclass(frozen=True)
+class EvaluationTarget:
+    """The task an evaluation is about, resolved to its file and where it lives.
+
+    Output of the read-only target resolver (:mod:`orch_hub.evaluation`).
+    ``source`` is ``"active"`` when the file is the live ``.ai-tasks/<id>.md``,
+    ``"archived"`` when close-out has moved it to ``.ai-tasks/archive/<id>.md``,
+    and ``None`` when neither exists (``present=False``, ``content=None``) — a
+    task id with no file, evaluable for its run history alone. ``content`` is the
+    full task-file markdown: task files are small and are the primary subject of
+    evaluation, so unlike run logs they are not bounded. ``repo_path`` is retained
+    for related-run aggregation and is serialized like :class:`RunRecord`'s.
+    """
+
+    repo_name: str
+    repo_path: Path | None
+    task_id: str
+    source: str | None
+    present: bool
+    content: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "repo_name": self.repo_name,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "task_id": self.task_id,
+            "source": self.source,
+            "present": self.present,
+            "content": self.content,
+        }
+
+
+@dataclass(frozen=True)
+class RelatedRun:
+    """One hub run that belongs to an evaluated task, plus its run dir.
+
+    ``run_dir`` is carried (not just ``record.run_id``) because the evidence
+    builder reads a run's history (``events.jsonl``), session snapshot
+    (``sessions.json``), and startup capture (``spawn.out``) from it; it is
+    internal filesystem detail and is excluded from :meth:`to_dict`, matching the
+    other run/question models. The serialized shape is just the run record.
+    """
+
+    record: RunRecord
+    run_dir: Path
+
+    def to_dict(self) -> dict:
+        return self.record.to_dict()
