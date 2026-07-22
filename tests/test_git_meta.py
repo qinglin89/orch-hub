@@ -15,6 +15,7 @@ from orch_hub.git_meta import (
     CommitLog,
     latest_commit,
     read_commits,
+    read_commits_between,
 )
 from orch_hub.models import CommitInfo, ManagedRepo
 from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
@@ -137,3 +138,63 @@ def test_subject_with_colons_and_spaces_is_preserved(tmp_path):
     line = commit_line("h" * 40, "h", "2026-07-09T00:00:00+00:00", subject)
     commit = latest_commit(make_repo(tmp_path), runner=make_runner(stdout=line))
     assert commit.subject == subject
+
+
+# -- read_commits_between (windowed, best-effort) -----------------------------
+
+
+def test_read_commits_between_passes_window_and_clamps_limit(tmp_path):
+    calls: list = []
+    read_commits_between(
+        make_repo(tmp_path),
+        since="2026-07-22T09:00:00+00:00",
+        until="2026-07-22T10:00:00+00:00",
+        limit=1000,
+        runner=make_runner(calls=calls),
+    )
+    argv = calls[0]["argv"]
+    assert argv[0] == "git" and argv[1] == "log"
+    assert "--since=2026-07-22T09:00:00+00:00" in argv
+    assert "--until=2026-07-22T10:00:00+00:00" in argv
+    # An oversized limit is clamped to the hard cap, like read_commits.
+    assert f"-{MAX_COMMIT_LIMIT}" in argv
+    assert str(calls[0]["cwd"]) == str(tmp_path)
+
+
+def test_read_commits_between_omits_absent_bounds(tmp_path):
+    calls: list = []
+    read_commits_between(
+        make_repo(tmp_path), since=None, until=None, runner=make_runner(calls=calls)
+    )
+    argv = calls[0]["argv"]
+    assert not any(a.startswith("--since=") for a in argv)
+    assert not any(a.startswith("--until=") for a in argv)
+
+
+def test_read_commits_between_parses_commits(tmp_path):
+    line = commit_line("h" * 40, "hhhhhhh", "2026-07-22T09:30:00+00:00", "windowed")
+    log = read_commits_between(
+        make_repo(tmp_path),
+        since="2026-07-22T09:00:00+00:00",
+        runner=make_runner(stdout=line),
+    )
+    assert log.available is True
+    assert [c.subject for c in log.commits] == ["windowed"]
+
+
+def test_read_commits_between_unavailable_on_failure(tmp_path):
+    log = read_commits_between(
+        make_repo(tmp_path), since="2026-07-22T09:00:00+00:00", runner=make_runner(rc=128)
+    )
+    assert log == CommitLog(available=False, commits=())
+
+
+def test_read_commits_between_unavailable_when_path_missing(tmp_path):
+    calls: list = []
+    log = read_commits_between(
+        make_repo(tmp_path / "gone"),
+        since="2026-07-22T09:00:00+00:00",
+        runner=make_runner(calls=calls),
+    )
+    assert log.available is False
+    assert calls == []  # runner never invoked when the path is not a dir

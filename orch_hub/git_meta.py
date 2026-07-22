@@ -59,12 +59,62 @@ def read_commits(
     (never raises) when the repo path is not a directory, git is missing, or the
     command fails, so callers can treat a git problem as a graceful empty state.
     """
-    count = max(1, min(limit, MAX_COMMIT_LIMIT))
+    return _git_log(repo, count=_clamp_limit(limit), extra=(), runner=runner)
+
+
+def read_commits_between(
+    repo: ManagedRepo,
+    *,
+    since: str | None,
+    until: str | None = None,
+    limit: int = MAX_COMMIT_LIMIT,
+    runner: Runner = run_command,
+) -> CommitLog:
+    """Return up to ``limit`` commits in a time window for ``repo``, newest first.
+
+    Same best-effort format and fail-closed degradation as :func:`read_commits`,
+    adding ``--since``/``--until`` bounds. The task-evaluation evidence builder
+    uses it to capture the commits made during a task's run lifecycle window
+    (:mod:`orch_hub.evaluation`). ``since``/``until`` are passed to git verbatim
+    (git parses ISO-8601 with offset); a ``None`` bound is omitted. Windowing is
+    by git's commit date over history reachable from HEAD, so the result is
+    ambient repo history in that window — deliberately *not* a task-scoped filter
+    (other work committed in the window is included). ``limit`` defaults to the
+    hard cap and is clamped to ``1..MAX_COMMIT_LIMIT`` so a wide window cannot ask
+    git for unbounded history.
+    """
+    extra: list[str] = []
+    if since:
+        extra.append(f"--since={since}")
+    if until:
+        extra.append(f"--until={until}")
+    return _git_log(repo, count=_clamp_limit(limit), extra=tuple(extra), runner=runner)
+
+
+def _clamp_limit(limit: int) -> int:
+    """Clamp a requested commit count to ``1..MAX_COMMIT_LIMIT``."""
+    return max(1, min(limit, MAX_COMMIT_LIMIT))
+
+
+def _git_log(
+    repo: ManagedRepo,
+    *,
+    count: int,
+    extra: tuple[str, ...],
+    runner: Runner,
+) -> CommitLog:
+    """Run ``git log -{count} <format> <extra>`` in ``repo``, best-effort.
+
+    Shared by :func:`read_commits` and :func:`read_commits_between`. Returns an
+    unavailable log (never raises) when the repo path is not a directory, git is
+    missing, or the command exits non-zero, so a git problem is a graceful empty
+    state rather than a caller-visible error.
+    """
     if not repo.path.is_dir():
         return CommitLog(available=False, commits=())
     try:
         result = runner(
-            ["git", "log", f"-{count}", f"--pretty=format:{_COMMIT_FORMAT}"],
+            ["git", "log", f"-{count}", f"--pretty=format:{_COMMIT_FORMAT}", *extra],
             cwd=repo.path,
         )
     except CommandNotFoundError:
