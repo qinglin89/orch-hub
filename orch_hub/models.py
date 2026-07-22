@@ -1065,3 +1065,28 @@ class StaticMetricsReport:
             "runs": self.runs.to_dict(),
             "protocol": self.protocol.to_dict(),
         }
+
+
+@dataclass(frozen=True)
+class StoredEvaluation:
+    """One persisted evaluation directory for a ``(repo, task_id)``, enumerated.
+
+    Output of :meth:`orch_hub.evaluation.EvaluationService.list_evaluations`: the
+    ``evaluation_id`` naming the dir plus ``artifacts``, the sorted filenames
+    actually present in it (e.g. ``evidence.json``, ``static_metrics.json`` — an
+    evidence-only generation has just the former). It is a structural directory
+    manifest, deliberately not the artifact *contents*: the evaluation-history
+    picker needs only which evaluations exist and what each carries, and reads a
+    specific artifact on demand. The API maps ``artifacts`` membership to explicit
+    ``has_evidence``/``has_static_metrics`` booleans so the concrete filenames
+    stay an internal detail of the evaluation subsystem.
+    """
+
+    evaluation_id: str
+    artifacts: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "evaluation_id": self.evaluation_id,
+            "artifacts": list(self.artifacts),
+        }

@@ -46,6 +46,11 @@ from .control_dir import (
     pending_questions,
     write_answer,
 )
+from .evaluation import (
+    EVIDENCE_NAME,
+    EvaluationDisabledError,
+    EvaluationService,
+)
 from .git_meta import DEFAULT_COMMIT_LIMIT, latest_commit, read_commits
 from .housekeeping import housekeeping_pending
 from .intake import (
@@ -57,7 +62,7 @@ from .intake import (
 )
 from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
-from .models import repos_payload, tasks_payload
+from .models import ManagedRepo, repos_payload, tasks_payload
 from .monitor import RunMonitor
 from .notifications import build_notifier
 from .readiness import check_readiness
@@ -70,6 +75,7 @@ from .runs import (
     RunManager,
     UnknownRunError,
 )
+from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from .task_store import (
     list_repo_tasks,
     list_tasks,
@@ -242,11 +248,29 @@ class ReviseIntakeRequest(BaseModel):
     feedback: str
 
 
+def _evaluation_summary(stored) -> dict:
+    """Map a :class:`~orch_hub.models.StoredEvaluation` to its API summary.
+
+    The evaluation-history picker needs the id and which artifacts exist, not the
+    concrete filenames: this translates the stored ``artifacts`` set into the
+    stable ``has_evidence``/``has_static_metrics`` booleans, keeping
+    ``evidence.json`` / ``static_metrics.json`` an internal detail of the
+    evaluation subsystem rather than part of the HTTP contract.
+    """
+    return {
+        "evaluation_id": stored.evaluation_id,
+        "has_evidence": EVIDENCE_NAME in stored.artifacts,
+        "has_static_metrics": STATIC_METRICS_NAME in stored.artifacts,
+    }
+
+
 def create_app(
     config: Config | None = None,
     *,
     run_manager: RunManager | None = None,
     intake_manager: IntakeManager | None = None,
+    evaluation_service: EvaluationService | None = None,
+    static_evaluator: StaticEvaluator | None = None,
 ) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
 
@@ -297,6 +321,22 @@ def create_app(
             agent=ClaudeIntakeAgent(),
             notifier=build_notifier(resolved),
         )
+    )
+    # Optional task-evaluation subsystem (gated by ``Config.evaluation_enabled``).
+    # The static evaluator wraps the same evaluation service the evidence/read
+    # routes use, so injecting a fake ``evaluation_service`` alone (a hermetic
+    # test with a fake git runner / record loader / clock) also drives the metrics
+    # route through those fakes; a test wanting a deterministic report clock
+    # injects ``static_evaluator`` too.
+    evaluation = (
+        evaluation_service
+        if evaluation_service is not None
+        else EvaluationService(resolved)
+    )
+    static_metrics = (
+        static_evaluator
+        if static_evaluator is not None
+        else StaticEvaluator(resolved, evaluation_service=evaluation)
     )
     monitor = RunMonitor(manager)
 
@@ -404,6 +444,17 @@ def create_app(
     @app.exception_handler(IntakeStateError)
     async def _intake_state(request: Request, exc: IntakeStateError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    # The optional evaluation subsystem is off (``ORCH_HUB_EVAL_ENABLED`` falsy):
+    # every evaluation action/read route is removed → 404 with the fail-closed
+    # reason, matching the config contract. ``GET /api/evaluation`` never raises
+    # this (it answers 200 ``{"enabled": false}``) so the dashboard can hide the
+    # evaluation controls with a concise explanation instead of probing a 404.
+    @app.exception_handler(EvaluationDisabledError)
+    async def _evaluation_disabled(
+        request: Request, exc: EvaluationDisabledError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
 
     # Default-deny bearer auth as pure ASGI middleware (see BearerAuthMiddleware
     # for why not BaseHTTPMiddleware): it wraps the whole app, so it protects
@@ -905,6 +956,188 @@ def create_app(
         succeeds for a cancellable intake.
         """
         return intake.cancel_intake(intake_id).to_dict()
+
+    # -- task evaluation -------------------------------------------------------
+    #
+    # Read-only sidecar over the optional evaluation subsystem (gated by
+    # ``Config.evaluation_enabled``). "Read-only" is w.r.t. the managed repos:
+    # generation writes only hub-owned artifacts under ``<data_dir>/evaluations``,
+    # never the target task file, run records, ``.ai/``, or ``.ai-tasks/`` — so
+    # these routes are a sidecar view that can never block normal run control.
+    # When the subsystem is disabled every route below except availability 404s
+    # via the EvaluationDisabledError handler; ``require_evaluation_enabled`` runs
+    # that gate before repo resolution so the disabled signal is uniform. The
+    # ``.enabled`` source of truth is the (possibly injected) evaluation service's
+    # config, so availability, the gate, and the service agree.
+    #
+    # ``task_id`` is deliberately NOT index-gated (unlike the ``/tasks/`` routes):
+    # an evaluation targets an exact active *or archived* task id — the archived
+    # case is how a completed task, dropped from the active index at close-out, is
+    # still evaluable — so resolution goes through the service's active-then-archive
+    # resolver, kept in a distinct ``/evaluations/`` subtree to make that explicit.
+
+    def require_evaluation_enabled() -> None:
+        if not evaluation.enabled:
+            raise EvaluationDisabledError(
+                "task evaluation is disabled (ORCH_HUB_EVAL_ENABLED)"
+            )
+
+    def resolve_repo(repo_id: str) -> ManagedRepo:
+        repo = next((r for r in discover_repos(resolved) if r.name == repo_id), None)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown repo: {repo_id}")
+        return repo
+
+    @app.get("/api/evaluation")
+    def evaluation_availability() -> dict:
+        """Report whether the optional task-evaluation subsystem is enabled.
+
+        The one evaluation route that answers even when disabled (200,
+        ``{"enabled": false}``), so the dashboard hides/disables the evaluation
+        controls with a concise explanation rather than probing an action route
+        and handling its 404. Protected like every non-health route.
+        """
+        return {"enabled": evaluation.enabled}
+
+    @app.get("/api/repos/{repo_id}/evaluations/{task_id}")
+    def list_task_evaluations(repo_id: str, task_id: str) -> dict:
+        """List a task's persisted evaluations plus its resolved target state.
+
+        ``repo_id`` is the managed-repo name (unknown → 404); ``task_id`` resolves
+        active-then-archive, not through the active index. ``target`` carries only
+        ``present``/``source`` (``active``/``archived``/``null`` — the task
+        status/archive-state signal; the full body stays on the existing task
+        routes), degrading to ``null``/``null`` if the task file is genuinely
+        unreadable so a target IO error never blanks the list. ``evaluations`` are
+        newest-first ``{evaluation_id, has_evidence, has_static_metrics}``
+        summaries and ``latest_evaluation_id`` names the newest — ``null`` with an
+        empty list when none exist yet, a normal 200 (a never-evaluated task is
+        not an error). An unsafe ``task_id`` path segment → 400.
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            stored = evaluation.list_evaluations(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        try:
+            target = evaluation.resolve_target(repo, task_id)
+            target_info = {"present": target.present, "source": target.source}
+        except OSError:
+            # A genuine target-file IO error (not mere absence) must not blank the
+            # evaluation list, which is this route's primary payload.
+            target_info = {"present": None, "source": None}
+        return {
+            "repo": repo_id,
+            "task_id": task_id,
+            "enabled": True,
+            "target": target_info,
+            "latest_evaluation_id": stored[0].evaluation_id if stored else None,
+            "evaluations": [_evaluation_summary(s) for s in stored],
+        }
+
+    @app.get("/api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}")
+    def get_task_evaluation(
+        repo_id: str, task_id: str, evaluation_id: str
+    ) -> dict:
+        """Return one persisted evaluation's full artifacts for ``(repo, task)``.
+
+        ``evidence`` is the bounded evidence pack and ``static_metrics`` the Layer
+        1 report; each is ``null`` when that artifact was not generated (an
+        evidence-only evaluation has no report). The pair backs both the metrics
+        view and the local-inspection download affordances. ``repo_id`` unknown →
+        404; an ``evaluation_id`` with no persisted dir → 404 (kept distinct from a
+        present dir missing one artifact, which is a ``null`` field). An unsafe
+        ``task_id`` → 400; a corrupt persisted artifact surfaces as a 500 rather
+        than being masked as "not generated".
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            stored = next(
+                (
+                    s
+                    for s in evaluation.list_evaluations(repo, task_id)
+                    if s.evaluation_id == evaluation_id
+                ),
+                None,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if stored is None:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"repo {repo_id!r} task {task_id!r} has no evaluation"
+                    f" {evaluation_id!r}"
+                ),
+            )
+        # Read only the artifacts the dir actually holds (task_id already validated
+        # by list_evaluations above); a corrupt file's decode error rides out to a
+        # 500 here, deliberately not caught as the 400 that path-safety uses.
+        evidence = (
+            evaluation.read_artifact(repo, task_id, evaluation_id, EVIDENCE_NAME)
+            if EVIDENCE_NAME in stored.artifacts
+            else None
+        )
+        static = (
+            evaluation.read_artifact(
+                repo, task_id, evaluation_id, STATIC_METRICS_NAME
+            )
+            if STATIC_METRICS_NAME in stored.artifacts
+            else None
+        )
+        return {
+            "evaluation_id": evaluation_id,
+            "evidence": evidence,
+            "static_metrics": static,
+        }
+
+    @app.post(
+        "/api/repos/{repo_id}/evaluations/{task_id}/evidence", status_code=201
+    )
+    def generate_task_evidence(repo_id: str, task_id: str) -> dict:
+        """Generate a fresh evidence pack for ``(repo, task)`` and return it.
+
+        Delegates to :meth:`EvaluationService.generate_evidence`: mints an
+        evaluation id, assembles the bounded read-only pack from the task file and
+        its related run records, and persists ``evidence.json`` under
+        ``<data_dir>/evaluations`` — writing only hub-owned artifacts, never the
+        target task or run state. ``repo_id`` unknown → 404; an unsafe id → 400;
+        disabled → 404. Returns the new ``evaluation_id`` and the pack (201).
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            pack = evaluation.generate_evidence(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"evaluation_id": pack.evaluation_id, "evidence": pack.to_dict()}
+
+    @app.post(
+        "/api/repos/{repo_id}/evaluations/{task_id}/metrics", status_code=201
+    )
+    def generate_task_metrics(repo_id: str, task_id: str) -> dict:
+        """Generate a fresh Layer 1 static-metrics report for ``(repo, task)``.
+
+        Delegates to :meth:`StaticEvaluator.generate_metrics`, which builds a fresh
+        evidence pack and persists both ``evidence.json`` and
+        ``static_metrics.json`` in one evaluation dir — the deterministic refresh
+        path, hub-owned artifacts only, target task/run state untouched, no
+        semantic model call. ``repo_id`` unknown → 404; an unsafe id → 400;
+        disabled → 404. Returns the new ``evaluation_id`` and the report (201); its
+        paired evidence is then readable through the detail route.
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            report = static_metrics.generate_metrics(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {
+            "evaluation_id": report.evaluation_id,
+            "static_metrics": report.to_dict(),
+        }
 
     return app
 

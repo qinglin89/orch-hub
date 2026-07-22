@@ -33,6 +33,7 @@ from orch_hub.intake import (
     STATUS_FAILED,
     STATUS_REVISING,
 )
+from orch_hub.evaluation import EvaluationService
 from orch_hub.models import (
     CommitInfo,
     IntakeDraft,
@@ -40,10 +41,13 @@ from orch_hub.models import (
     ReadinessCheck,
     ReadinessReport,
     RepoTaskInventory,
+    RunRecord,
     TaskSummary,
 )
 from orch_hub.registry import RegistryError
 from orch_hub.runs import RunManager
+from orch_hub.static_metrics import StaticEvaluator
+from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_store import STATUS_MISSING
 
 TOKEN = "test-token"
@@ -2143,3 +2147,313 @@ def test_intake_routes_require_auth(tmp_path, monkeypatch):
     ).status_code == 401
     assert unauthed.post("/api/intakes/anything/confirm").status_code == 401
     assert unauthed.post("/api/intakes/anything/cancel").status_code == 401
+
+
+# --- task evaluation routes ---------------------------------------------------
+#
+# These drive the app's real EvaluationService + StaticEvaluator over a fake repo
+# in ``tmp_path``, with an injected record loader, a fake git runner, and a fixed
+# clock, so no real run history, subprocess, or git is touched. Generation writes
+# only hub-owned artifacts under ``<data_dir>/evaluations``; the tests pin that
+# the target repo/task is never mutated and that disabled mode fails closed.
+
+EVAL_CLOCK = dt.datetime(2026, 7, 22, 9, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def eval_config(tmp_path: Path, *, enabled: bool = True) -> Config:
+    return Config(
+        ai_native_path=tmp_path / "ai-native",
+        token=TOKEN,
+        data_dir=tmp_path / "hub-data",
+        evaluation_enabled=enabled,
+    )
+
+
+def fake_eval_git(args, **kwargs) -> CommandResult:
+    """A git runner that always fails, so the evidence git window is unavailable
+    without a real subprocess (mirrors the evaluation-module tests)."""
+    return CommandResult(tuple(str(a) for a in args), 128, "", "")
+
+
+def make_eval_client(
+    tmp_path,
+    monkeypatch,
+    *,
+    repo: ManagedRepo | None = None,
+    enabled: bool = True,
+    records=None,
+) -> tuple[TestClient, EvaluationService, StaticEvaluator, ManagedRepo]:
+    repo = repo if repo is not None else make_run_repo(tmp_path)
+    config = eval_config(tmp_path, enabled=enabled)
+    loader = lambda cfg: list(records or [])
+    service = EvaluationService(
+        config, record_loader=loader, git_runner=fake_eval_git, clock=lambda: EVAL_CLOCK
+    )
+    static = StaticEvaluator(
+        config, evaluation_service=service, clock=lambda: EVAL_CLOCK
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    client = TestClient(
+        api.create_app(config, evaluation_service=service, static_evaluator=static)
+    )
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    return client, service, static, repo
+
+
+# -- availability --------------------------------------------------------------
+
+
+def test_evaluation_availability_reports_enabled(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    resp = client.get("/api/evaluation")
+    assert resp.status_code == 200
+    assert resp.json() == {"enabled": True}
+
+
+def test_evaluation_availability_reports_disabled(tmp_path, monkeypatch):
+    # Availability is the one evaluation route that answers while disabled, so the
+    # dashboard can hide controls rather than probe a 404.
+    client, *_ = make_eval_client(tmp_path, monkeypatch, enabled=False)
+    resp = client.get("/api/evaluation")
+    assert resp.status_code == 200
+    assert resp.json() == {"enabled": False}
+
+
+# -- generate / list / fetch ---------------------------------------------------
+
+
+def test_list_evaluations_empty_for_never_evaluated_active_task(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["evaluations"] == []
+    assert body["latest_evaluation_id"] is None
+    # The target resolves to the active task file even with no evaluations yet.
+    assert body["target"] == {"present": True, "source": "active"}
+    assert body["enabled"] is True
+
+
+def test_generate_metrics_then_list_and_fetch(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+
+    gen = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics")
+    assert gen.status_code == 201
+    eval_id = gen.json()["evaluation_id"]
+    report = gen.json()["static_metrics"]
+    assert report["evaluation_id"] == eval_id
+    assert report["task_id"] == RUN_TASK_ID
+    assert report["target_source"] == "active"
+    # The five deterministic score axes are present in the report.
+    assert {s["name"] for s in report["scores"]} == {
+        "protocol", "reliability", "handoff", "estimate", "knowledge"
+    }
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["latest_evaluation_id"] == eval_id
+    assert listing["evaluations"] == [
+        {"evaluation_id": eval_id, "has_evidence": True, "has_static_metrics": True}
+    ]
+
+    detail = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{eval_id}"
+    ).json()
+    assert detail["evaluation_id"] == eval_id
+    assert detail["static_metrics"] == report
+    # Evidence is generated alongside metrics and readable for local inspection.
+    assert detail["evidence"]["evaluation_id"] == eval_id
+    assert detail["evidence"]["summary"]["run_count"] == 0
+
+
+def test_generate_evidence_only_has_no_static_metrics(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+
+    gen = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/evidence")
+    assert gen.status_code == 201
+    eval_id = gen.json()["evaluation_id"]
+    assert gen.json()["evidence"]["evaluation_id"] == eval_id
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["evaluations"] == [
+        {"evaluation_id": eval_id, "has_evidence": True, "has_static_metrics": False}
+    ]
+
+    detail = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{eval_id}"
+    ).json()
+    assert detail["evidence"]["evaluation_id"] == eval_id
+    assert detail["static_metrics"] is None  # evidence-only: no report artifact
+
+
+def test_generate_metrics_refresh_creates_second_evaluation(tmp_path, monkeypatch):
+    # Re-running is a refresh: a same-second collision bumps a ``-N`` suffix, and
+    # the list is newest-first without ever mutating task/run state.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    first = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics"
+    ).json()["evaluation_id"]
+    second = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics"
+    ).json()["evaluation_id"]
+
+    assert first != second
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    ids = [e["evaluation_id"] for e in listing["evaluations"]]
+    assert ids == sorted(ids, reverse=True)  # newest-first
+    assert set(ids) == {first, second}
+    assert listing["latest_evaluation_id"] == ids[0]
+
+
+def test_evaluation_of_archived_task(tmp_path, monkeypatch):
+    # A completed task dropped from the active index at close-out is still
+    # evaluable through the active-then-archive target resolver.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    archived = f"---\nid: {RUN_TASK_ID}\nstatus: completed\n---\n\n# archived body\n"
+    archive_run_task(repo, RUN_TASK_ID, archived)
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["target"] == {"present": True, "source": "archived"}
+
+    gen = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics")
+    assert gen.status_code == 201
+    assert gen.json()["static_metrics"]["target_source"] == "archived"
+
+
+def test_unknown_task_evaluates_as_absent_target(tmp_path, monkeypatch):
+    # A task id with no active or archived file: not an error — it is evaluable
+    # for its run history alone, with an absent target.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    ghost = "2026-01-01-no-such-task"
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{ghost}").json()
+    assert listing["target"] == {"present": False, "source": None}
+    assert listing["evaluations"] == []
+
+    gen = client.post(f"/api/repos/{repo.name}/evaluations/{ghost}/metrics")
+    assert gen.status_code == 201
+    assert gen.json()["static_metrics"]["target_present"] is False
+
+
+# -- error shapes --------------------------------------------------------------
+
+
+def test_evaluation_list_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repos/ghost/evaluations/{RUN_TASK_ID}")
+    assert resp.status_code == 404
+    assert "ghost" in resp.json()["detail"]
+
+
+def test_evaluation_generate_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    resp = client.post(f"/api/repos/ghost/evaluations/{RUN_TASK_ID}/metrics")
+    assert resp.status_code == 404
+
+
+def test_fetch_unknown_evaluation_id_is_404(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    resp = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/20990101T000000Z"
+    )
+    assert resp.status_code == 404
+
+
+# -- partial evidence ----------------------------------------------------------
+
+
+def test_partial_evidence_surfaces_failed_run_without_diagnostic(tmp_path, monkeypatch):
+    # A related run that ended non-zero with no log or spawn.out is partial
+    # evidence: the pack still classifies it and the report flags the missing
+    # diagnostic, all end-to-end through the HTTP surface.
+    repo = make_run_repo(tmp_path)
+    run_dir = tmp_path / "hub-data" / "runs" / "r1"
+    run_dir.mkdir(parents=True)
+    record = RunRecord(
+        "r1",
+        repo.name,
+        repo.path,
+        RUN_TASK_ID,
+        log_dir=run_dir,  # a real but empty dir → no log located, degrades cleanly
+        started_ts="2026-07-22T09:00:00Z",
+        ended_ts="2026-07-22T09:10:00Z",
+        exit_code=1,
+    )
+    client, *_ = make_eval_client(
+        tmp_path, monkeypatch, repo=repo, records=[(run_dir, record)]
+    )
+
+    body = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics"
+    ).json()
+    runs = body["static_metrics"]["runs"]
+    assert runs["run_count"] == 1
+    assert runs["failed_count"] == 1
+    assert runs["failed_without_diagnostic_count"] == 1
+    reliability = next(
+        s for s in body["static_metrics"]["scores"] if s["name"] == "reliability"
+    )
+    assert reliability["score"] is not None and reliability["score"] < 1.0
+
+
+# -- disabled mode -------------------------------------------------------------
+
+
+def test_disabled_mode_action_routes_are_404(tmp_path, monkeypatch):
+    # Every evaluation route except availability is removed (404) with the
+    # fail-closed reason when ``ORCH_HUB_EVAL_ENABLED`` is off.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch, enabled=False)
+
+    for resp in (
+        client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}"),
+        client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/anything"),
+        client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/evidence"),
+        client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics"),
+    ):
+        assert resp.status_code == 404
+        assert "disabled" in resp.json()["detail"]
+
+
+def test_disabled_mode_writes_no_artifacts(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch, enabled=False)
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics")
+    # The fail-closed gate short-circuits before any generation: no evaluations
+    # tree is created under the hub data dir.
+    assert not (tmp_path / "hub-data" / "evaluations").exists()
+
+
+# -- read-only over the target -------------------------------------------------
+
+
+def test_generate_is_read_only_over_the_target_repo(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    task_file = repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md"
+    before = task_file.read_text(encoding="utf-8")
+    before_listing = sorted(p.name for p in (repo.path / ".ai-tasks").iterdir())
+
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics")
+
+    assert task_file.read_text(encoding="utf-8") == before  # task file untouched
+    assert sorted(p.name for p in (repo.path / ".ai-tasks").iterdir()) == before_listing
+    # Artifacts landed only in the hub-owned evaluations tree, outside the repo.
+    assert (tmp_path / "hub-data" / "evaluations" / repo.name / RUN_TASK_ID).is_dir()
+
+
+# -- auth ----------------------------------------------------------------------
+
+
+def test_evaluation_routes_require_auth(tmp_path, monkeypatch):
+    # The default-deny middleware covers every evaluation route, availability
+    # included: an unauthenticated caller is 401 on all of them.
+    config = eval_config(tmp_path)
+    unauthed = TestClient(api.create_app(config))
+    assert unauthed.get("/api/evaluation").status_code == 401
+    assert unauthed.get(f"/api/repos/r/evaluations/{RUN_TASK_ID}").status_code == 401
+    assert unauthed.get(
+        f"/api/repos/r/evaluations/{RUN_TASK_ID}/e1"
+    ).status_code == 401
+    assert unauthed.post(
+        f"/api/repos/r/evaluations/{RUN_TASK_ID}/evidence"
+    ).status_code == 401
+    assert unauthed.post(
+        f"/api/repos/r/evaluations/{RUN_TASK_ID}/metrics"
+    ).status_code == 401

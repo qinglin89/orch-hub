@@ -27,8 +27,9 @@ from orch_hub.evaluation import (
     EvaluationDisabledError,
     EvaluationService,
     evaluation_artifact_dir,
+    task_evaluations_dir,
 )
-from orch_hub.models import ManagedRepo, RunRecord
+from orch_hub.models import ManagedRepo, RunRecord, StoredEvaluation
 from orch_hub.subprocess_utils import CommandResult
 
 TASK = "2026-07-22-task-evaluation-foundation"
@@ -298,6 +299,10 @@ def test_disabled_service_refuses_every_operation(tmp_path):
         service.related_runs(repo, TASK)
     with pytest.raises(EvaluationDisabledError):
         service.artifact_dir(repo, TASK, "eval-1")
+    with pytest.raises(EvaluationDisabledError):
+        service.list_evaluations(repo, TASK)
+    with pytest.raises(EvaluationDisabledError):
+        service.read_artifact(repo, TASK, "eval-1", EVIDENCE_NAME)
 
 
 def test_disabled_service_does_not_touch_the_loader(tmp_path):
@@ -753,3 +758,89 @@ def test_disabled_service_refuses_build_and_generate(tmp_path):
         service.generate_evidence(repo, TASK)
     # Nothing was persisted while disabled.
     assert not (make_config(tmp_path).data_dir / EVALUATIONS_SUBDIR).exists()
+
+
+# -- persisted-evaluation read layer (list / read) ----------------------------
+#
+# The dashboard-facing reads over persisted artifacts: enumerate a task's
+# evaluations newest-first with their present artifact filenames, and read one
+# artifact's JSON back. Both are gated and contained like the write path.
+
+
+def test_task_evaluations_dir_is_scoped_and_contained(tmp_path):
+    base = tmp_path / EVALUATIONS_SUBDIR
+    path = task_evaluations_dir(tmp_path, repo_name="alpha", task_id=TASK)
+    assert path == base / "alpha" / TASK
+    assert path.resolve().is_relative_to(base.resolve())
+
+
+@pytest.mark.parametrize("bad", ["../evil", "a/b", "a\\b", "a\x00b", ".", "..", ""])
+def test_task_evaluations_dir_rejects_unsafe_task_id(tmp_path, bad):
+    with pytest.raises(ValueError):
+        task_evaluations_dir(tmp_path, repo_name="alpha", task_id=bad)
+
+
+def test_list_evaluations_empty_when_no_tree(tmp_path):
+    repo = make_repo(tmp_path)
+    service = make_service(make_config(tmp_path))
+    # Never generated: an empty list, not an error (the tree does not exist yet).
+    assert service.list_evaluations(repo, TASK) == []
+
+
+def test_list_evaluations_returns_newest_first_with_artifacts(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    # Two persisted evaluation dirs (hand-built ids so the ordering is explicit),
+    # plus a stray non-dir the enumerator must ignore.
+    base = task_evaluations_dir(config.data_dir, repo_name=repo.name, task_id=TASK)
+    (base / "20260722T090000Z").mkdir(parents=True)
+    (base / "20260722T090000Z" / EVIDENCE_NAME).write_text("{}", encoding="utf-8")
+    (base / "20260722T100000Z").mkdir()
+    (base / "20260722T100000Z" / EVIDENCE_NAME).write_text("{}", encoding="utf-8")
+    (base / "20260722T100000Z" / "static_metrics.json").write_text("{}", encoding="utf-8")
+    (base / "stray-file").write_text("ignored", encoding="utf-8")
+
+    stored = make_service(config).list_evaluations(repo, TASK)
+
+    assert [s.evaluation_id for s in stored] == [
+        "20260722T100000Z",
+        "20260722T090000Z",
+    ]  # newest-first
+    assert stored[0].artifacts == ("evidence.json", "static_metrics.json")
+    assert stored[1].artifacts == ("evidence.json",)
+    assert isinstance(stored[0], StoredEvaluation)
+
+
+def test_generate_then_list_and_read_round_trips(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    pack = service.generate_evidence(repo, TASK)
+
+    stored = service.list_evaluations(repo, TASK)
+    assert [s.evaluation_id for s in stored] == [pack.evaluation_id]
+    assert EVIDENCE_NAME in stored[0].artifacts
+
+    # read_artifact reads the persisted evidence.json back to the pack's own dict.
+    on_disk = service.read_artifact(repo, TASK, pack.evaluation_id, EVIDENCE_NAME)
+    assert on_disk == pack.to_dict()
+
+
+def test_read_artifact_absent_dir_or_file_is_none(tmp_path):
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(make_config(tmp_path))
+
+    # No evaluation generated at all: absent dir reads as None, not an error.
+    assert service.read_artifact(repo, TASK, "20990101T000000Z", EVIDENCE_NAME) is None
+
+    # A present dir missing the requested artifact also reads as None (distinct
+    # from a present-but-empty file).
+    pack = service.generate_evidence(repo, TASK)  # writes evidence.json only
+    assert (
+        service.read_artifact(repo, TASK, pack.evaluation_id, "static_metrics.json")
+        is None
+    )

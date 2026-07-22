@@ -61,6 +61,7 @@ from .models import (
     RunEvent,
     RunRecord,
     SessionsSnapshot,
+    StoredEvaluation,
 )
 from .runs import load_records
 from .sessions import read_snapshot
@@ -113,6 +114,28 @@ class EvaluationDisabledError(EvaluationError):
     """
 
 
+def task_evaluations_dir(data_dir: Path, *, repo_name: str, task_id: str) -> Path:
+    """Return the contained parent dir holding every evaluation for one task.
+
+    Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/``, the directory
+    :func:`evaluation_artifact_dir` places each ``<evaluation-id>/`` under and
+    :meth:`EvaluationService.list_evaluations` enumerates. The repo component is
+    slugged (:data:`_SLUG`); the task component must be a single safe path
+    segment (empty, a separator/null byte, or a ``.``/``..`` dot reference raises
+    ``ValueError``, failing closed). As a final defense the resolved target is
+    asserted to stay under the resolved evaluations base, so neither a crafted
+    task id nor repo name can steer a read/write outside ``<data_dir>/evaluations``.
+    Pure path math: it creates nothing.
+    """
+    base = data_dir / EVALUATIONS_SUBDIR
+    repo_seg = _safe_segment(_slug(repo_name), label="repo")
+    task_seg = _safe_segment(task_id, label="task id")
+    target = base / repo_seg / task_seg
+    if not target.resolve().is_relative_to(base.resolve()):
+        raise ValueError(f"evaluations path escapes {base}: {target}")
+    return target
+
+
 def evaluation_artifact_dir(
     data_dir: Path,
     *,
@@ -122,21 +145,21 @@ def evaluation_artifact_dir(
 ) -> Path:
     """Return the contained directory for one evaluation's artifacts.
 
-    Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/``.
-    The repo component is slugged (:data:`_SLUG`); the task and evaluation
-    components must each be a single safe path segment. A segment that is empty,
-    contains a separator or null byte, or is a ``.``/``..`` dot reference raises
-    ``ValueError`` — fail closed rather than build a path that could escape the
-    evaluations tree. As a final defense the resolved target is asserted to stay
-    under the resolved evaluations base (catching, e.g., an all-dots repo slug),
-    so neither a crafted task id, evaluation id, nor repo name can steer a write
-    outside ``<data_dir>/evaluations``. Pure path math: it creates nothing.
+    Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/`` —
+    the per-task parent (:func:`task_evaluations_dir`, which slugs the repo and
+    validates the task segment) plus a validated ``<evaluation-id>`` segment. A
+    segment that is empty, contains a separator or null byte, or is a ``.``/``..``
+    dot reference raises ``ValueError`` — fail closed rather than build a path
+    that could escape the evaluations tree. As a final defense the resolved target
+    is asserted to stay under the resolved evaluations base (catching, e.g., an
+    all-dots repo slug), so neither a crafted task id, evaluation id, nor repo
+    name can steer a write outside ``<data_dir>/evaluations``. Pure path math: it
+    creates nothing.
     """
     base = data_dir / EVALUATIONS_SUBDIR
-    repo_seg = _safe_segment(_slug(repo_name), label="repo")
-    task_seg = _safe_segment(task_id, label="task id")
+    parent = task_evaluations_dir(data_dir, repo_name=repo_name, task_id=task_id)
     eval_seg = _safe_segment(evaluation_id, label="evaluation id")
-    target = base / repo_seg / task_seg / eval_seg
+    target = parent / eval_seg
     if not target.resolve().is_relative_to(base.resolve()):
         raise ValueError(f"evaluation artifact path escapes {base}: {target}")
     return target
@@ -423,6 +446,63 @@ class EvaluationService:
             task_id=task_id,
             evaluation_id=evaluation_id,
         )
+
+    def list_evaluations(
+        self, repo: ManagedRepo, task_id: str
+    ) -> list[StoredEvaluation]:
+        """List every persisted evaluation for ``(repo, task_id)``, newest-first.
+
+        A structural directory read, gated and contained: it lists the
+        ``<evaluation-id>/`` dirs under the per-task :func:`task_evaluations_dir`
+        and, for each, the artifact filenames it holds (``evidence.json`` /
+        ``static_metrics.json``), so the caller learns which evaluations exist and
+        what each carries without reading any artifact body. Newest-first by id
+        (the id is a UTC stamp, so a reverse lexical sort is chronological,
+        matching the run manager's run ordering). An absent tree (no evaluation
+        ever generated) is an empty list, not an error; only the gate fails
+        closed. Read-only — it creates nothing.
+        """
+        self._require_enabled()
+        parent = task_evaluations_dir(
+            self._config.data_dir, repo_name=repo.name, task_id=task_id
+        )
+        if not parent.is_dir():
+            return []
+        stored = [
+            StoredEvaluation(
+                evaluation_id=child.name,
+                artifacts=tuple(
+                    sorted(p.name for p in child.iterdir() if p.is_file())
+                ),
+            )
+            for child in parent.iterdir()
+            if child.is_dir()
+        ]
+        stored.sort(key=lambda e: e.evaluation_id, reverse=True)
+        return stored
+
+    def read_artifact(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str
+    ) -> dict | None:
+        """Read and parse one persisted artifact JSON, or ``None`` when absent.
+
+        ``name`` is an artifact filename (:data:`EVIDENCE_NAME` or the static
+        layer's ``STATIC_METRICS_NAME`` — a fixed constant supplied by the caller,
+        so the subsystem's own filenames stay in their home modules rather than
+        being duplicated here) and is re-validated as a single safe segment.
+        Resolution goes through :meth:`artifact_dir`, so a crafted
+        repo/task/evaluation id is rejected before any read. A missing evaluation
+        dir or a missing artifact file both read as ``None`` (a not-yet-generated
+        or evidence-only evaluation), kept distinct from a present-but-empty
+        artifact. Gated and read-only; a corrupt artifact surfaces its ``json``
+        decode error rather than being silently masked.
+        """
+        self._require_enabled()
+        eval_dir = self.artifact_dir(repo, task_id, evaluation_id)
+        path = eval_dir / _safe_segment(name, label="artifact name")
+        if not path.is_file():
+            return None
+        return json.loads(path.read_text(encoding="utf-8"))
 
     def build_evidence(
         self, repo: ManagedRepo, task_id: str, *, evaluation_id: str
