@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Project Map
@@ -12,6 +12,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only; commit and housekeeping metadata are best-effort/display-only data |
 | Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries after normalizing bare-id or full-cell Markdown-link Task cells to safe bare ids; also supports five-column `id|title|status|session-est|blockers` indexes with `title` as summary; otherwise summaries use the legacy positional third column; task frontmatter supplies authoritative status/blockers; normal single-task content reads are index-gated and contained under `.ai-tasks`; exact-id archived content and typed `session-est` reads are available for run-scoped history access |
 | Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models | implemented; optional `ORCH_HUB_EVAL_ENABLED` gate; resolves exact active/archive task ids, aggregates exact `(repo_path, task_id)` runs via read-only record loading, includes bounded events/sessions/log/spawn diagnostics plus best-effort git commit-window metadata, and persists `evidence.json` under `<data_dir>/evaluations/` without scoring or UI/API presentation |
+| Task static metrics | static_metrics, evaluation, config, models | implemented; optional evaluation-gated deterministic Layer 1 report over `EvidencePack`; computes run/session rollups, taskfile/session-log protocol facts, five transparent score axes, confidence, and warnings; persists `static_metrics.json` beside `evidence.json` with no HTTP/dashboard/semantic surface yet |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, mirrors answer-mode parser rules for explicit mode normalization, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, sessions, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, live-only `stop_requested` overlay, stop/end classification, per-session context snapshots parsed from logs, protected HTTP start/list/get/sessions/stop routes |
@@ -31,6 +32,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | Repo discovery and readiness | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
 | Task inventory | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
 | Task evaluation foundation | internal `EvaluationService.resolve_target`, `related_runs`, `build_evidence`, `generate_evidence`, `artifact_dir`; no HTTP/dashboard surface yet |
+| Task static metrics | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`, and `STATIC_METRICS_NAME`; no HTTP/dashboard surface yet |
 | HTTP API foundation | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs, `orch-hub-api` |
 | Control-dir file channel | internal `list_questions`, `pending_questions`, `write_answer`, `request_stop` |
 | Run lifecycle | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/sessions`, `POST /api/runs/{run_id}/stop` |
@@ -48,7 +50,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | Module | Responsibilities |
 |---|---|
 | config | Environment overrides, default ai-native-development path, bearer token and Bark URL loading, host/port/data-dir/evaluation service settings, derived `aii-2` and registry-file paths |
-| models | Stable repo/readiness/task inventory/question/run/session/history/evaluation-target data structures shared by CLI/API/tests; `RunRecord` can reconstruct its `ManagedRepo` for run-scoped repo reads |
+| models | Stable repo/readiness/task inventory/question/run/session/history/evaluation-target/static-metrics data structures shared by CLI/API/tests; `RunRecord` can reconstruct its `ManagedRepo` for run-scoped repo reads |
 | registry | Discover managed repos from `aii-2` or registry file |
 | readiness | Validate target repo launch readiness with seven fail-closed checks |
 | git_meta | Read latest/recent/windowed git commit metadata for display and evaluation evidence, degrading to unavailable instead of gating repo/task content |
@@ -61,6 +63,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | intake_agent | Drive a Claude CLI `/intake-task` session with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, expose read-only run-record loading, enforce per-repo serialization, classify live/end status, append run history events, snapshot/serve session context, and trigger isolated notifications |
 | evaluation | Resolve task evaluation targets, aggregate related run evidence, build bounded evidence packs, and persist hub-owned evaluation artifacts behind the optional evaluation gate |
+| static_metrics | Compute deterministic Layer 1 run/session/protocol score reports from evidence packs and persist `static_metrics.json` beside `evidence.json` behind the optional evaluation gate |
 | history | Append/read per-run JSONL audit/history events without storing answer text; round-trip answer mode metadata |
 | control_dir | Implement question/answer/stop file-channel handling and pure answer-mode normalization |
 | logs | Locate, read, and stream orchestrator logs from run records |

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Modules
@@ -10,7 +10,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output, launchd operations dispatch, and notification delivery checks |
 | Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token/Bark URL/evaluation gate loading, data-dir setting, and derived `aii-2`/registry paths |
 | Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing and lookup |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, and evaluation target/run-link models plus payload helpers and run-record repo reconstruction |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, evaluation target/run-link, and static-metrics report models plus payload helpers and run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent/windowed commit reads for dashboard/API display and evaluation evidence |
@@ -18,6 +18,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
 | Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, typed `session-est`, and contained active/archive task reads |
 | Evaluation | `orch_hub/evaluation.py` | Implemented optional read-only task evidence target resolution, related-run aggregation, bounded evidence-pack assembly, and contained artifact persistence |
+| Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session snapshot handling, and per-repo serialization |
@@ -51,6 +52,9 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 - Task inventory reads task files but does not decide orchestrator state-machine turns.
 - Evaluation reads target tasks and run artifacts through existing stores and
   writes only contained artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`.
+- Static metrics read evidence packs and write only contained
+  `static_metrics.json` artifacts under the same evaluation dir; they do not
+  mutate target repos, run records, or protocol state.
 - Intake manager owns intake state, intake-ready notification trigger timing,
   and the confirmation postcondition; API/web layers do not treat drafts as
   active tasks or decide whether a confirm landed.

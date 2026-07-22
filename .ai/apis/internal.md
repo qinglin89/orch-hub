@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # APIs: Internal Interfaces
@@ -60,6 +60,29 @@ best-effort git-window commits; per-run artifact failures become warnings, while
 target task IO errors fail the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
+
+## Static Metrics Evaluator
+
+Input: config, an `EvidencePack`, or a managed repo plus exact task id and
+optional evaluation id.
+
+Output: `RunMetrics`, `StaticMetricsReport`, and a persisted
+`static_metrics.json` beside the pack's `evidence.json`.
+
+Behavior: `StaticEvaluator` is gated by `Config.evaluation_enabled` and raises
+`EvaluationDisabledError` from run/report/generate operations when disabled.
+`run_metrics(pack)` is pure over bounded pack evidence and computes run counts,
+evidence-only outcome partition, failure/diagnostic availability, human-input
+count, dev/review/plan-gate session counts, context/turn/duration aggregates,
+warning count, and target active/archive source. `build_report(pack)` parses
+the task file content from the pack for frontmatter legality, required
+sections, session-log structure, review coverage, verdict/remediation counts,
+status-transition path, and completion hygiene, then returns five transparent
+score components with evidence-backed warnings and confidence. `generate_metrics`
+delegates to `EvaluationService.generate_evidence`, writes `static_metrics.json`
+atomically into the same evaluation artifact directory, and removes the
+reserved dir on report-write failure. It does not expose HTTP routes or
+dashboard UI yet, and it never mutates target repos or run records.
 
 ## Intake Manager
 

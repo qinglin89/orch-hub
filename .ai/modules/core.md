@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Modules: Core
@@ -70,7 +70,8 @@ Location: `orch_hub/models.py`
 
 Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
-questions, run state, run history, intake state, and evaluation target/run links.
+questions, run state, run history, intake state, evaluation target/run links,
+and static-metrics reports.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
@@ -95,7 +96,9 @@ review. `IntakeRecord` persists hub-owned intake status, draft, created task id,
 repo attribution, and audit metadata while omitting internal agent handles from
 serialized payloads. `IntakeEvent` and `IntakeHistoryEntry` expose metadata-only
 intake history. `EvaluationTarget` and `RelatedRun` are the shared shapes for
-evaluation target resolution and run aggregation; evidence composites stay in
+evaluation target resolution and run aggregation; `RunRollup`, `RunMetrics`,
+`ProtocolMetrics`, `ScoreComponent`, and `StaticMetricsReport` are the
+deterministic static-metrics output shapes. Evidence composites stay in
 `evaluation.py` because they reference `logs.LogSnapshot`, avoiding a
 models/logs import cycle.
 
@@ -170,6 +173,32 @@ the task file is the primary subject. The git window spans earliest parseable
 run start to latest parseable run end, but remains open-ended when any related
 run has no parseable end. The foundation does not compute scores, invoke
 semantic models, or expose HTTP/dashboard routes.
+
+## Static Metrics
+
+Location: `orch_hub/static_metrics.py`
+
+Responsibility: compute deterministic, non-semantic task-quality metrics from
+one `EvidencePack` and optionally persist `static_metrics.json` beside the
+pack's `evidence.json` under the hub-owned evaluation artifact directory.
+`StaticEvaluator` shares the evaluation gate and raises
+`EvaluationDisabledError` when disabled. `run_metrics(pack)` derives
+run/session/event/diagnostic rollups from bounded pack evidence, including
+evidence-only run outcome partitioning, failure/diagnostic counts,
+human-input count, dev/review/plan-gate session counts, context/duration
+aggregates, target source, and warning count. `build_report(pack)` adds
+taskfile/session-log protocol facts, five transparent score axes
+(`protocol`, `reliability`, `handoff`, `estimate`, `knowledge`), confidence
+values, and evidence-backed warnings. `generate_metrics(repo, task_id,
+evaluation_id=None)` delegates to `EvaluationService.generate_evidence`, writes
+`static_metrics.json` atomically in the same evaluation dir, and cleans the
+reserved dir if the report write fails.
+
+The evaluator is read-only over packs: it never reaches back into target repos
+or run dirs during scoring. Knowledge-maintenance checks are limited to facts
+the pack actually carries; per-commit touched files and cross-task archived
+blocker references are intentionally omitted until the evidence layer grows
+those inputs.
 
 ## Intake Manager
 

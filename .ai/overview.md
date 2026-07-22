@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Project Overview
@@ -13,8 +13,9 @@ The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
-the mobile dashboard, Bark notifications, remote intake-task, and the
-task-evaluation foundation: read the ai-native-development local registry, list
+the mobile dashboard, Bark notifications, remote intake-task, the
+task-evaluation foundation, and deterministic static task metrics: read the
+ai-native-development local registry, list
 managed repos, report launch
 readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
 those payloads through HTTP, require `ORCH_HUB_TOKEN` on every non-health HTTP
@@ -26,9 +27,10 @@ plus answer-audit metadata, serve the dashboard, push Bark notifications for
 pending questions, terminal run states, and intake drafts/revisions ready for
 review, and run a confirmed remote intake loop that drafts a task before
 writing it to the target repo, and generate bounded read-only task evidence
-packs under the hub data dir for active or archived tasks. Later slices add
-static metrics, semantic evaluation, dashboard exposure for evaluation, and IM
-bot control.
+packs under the hub data dir for active or archived tasks, then compute
+deterministic protocol/reliability/handoff/estimate/knowledge-maintenance
+static reports as `static_metrics.json` beside the evidence pack. Later slices
+add semantic evaluation, dashboard exposure for evaluation, and IM bot control.
 
 ## Users
 
@@ -53,6 +55,10 @@ bot control.
 - Generate bounded, read-only evidence packs for active or archived tasks from
   task files, related run records/events/sessions/log diagnostics, and
   best-effort git commit windows.
+- Compute deterministic static task-quality reports from evidence packs,
+  including run/session rollups, taskfile/session-log protocol metrics, five
+  score axes, evidence-backed warnings, and `static_metrics.json` persistence
+  in the hub-owned evaluation artifact directory.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.
@@ -100,6 +106,7 @@ orch_hub/
   registry.py
   readiness.py
   runs.py
+  static_metrics.py
   logs.py
   notifications.py
   subprocess_utils.py

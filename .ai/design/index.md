@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Design Principles and Decisions
@@ -16,8 +16,9 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 - Fail closed before launch: readiness checks should block unclear or unsafe runs.
 - Human-confirmed task creation: remote intake drafts stay hub-owned until the
   user explicitly confirms the complete task file and index row.
-- Read-only task evaluation: evidence packs are hub-owned sidecar artifacts and
-  must not mutate target tasks, run state, or protocol memory.
+- Read-only task evaluation: evidence packs and deterministic static reports are
+  hub-owned sidecar artifacts and must not mutate target tasks, run state, or
+  protocol memory.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
 

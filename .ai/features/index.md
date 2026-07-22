@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Features
@@ -10,6 +10,7 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 | Repo discovery and readiness | implemented | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
 | Task evaluation foundation | implemented | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models | internal `EvaluationService` evidence build/generate; no HTTP/dashboard route yet |
+| Task static metrics | implemented | static_metrics, evaluation, config, models | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`; persists `static_metrics.json` beside `evidence.json`; no HTTP/dashboard route yet |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, sessions, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/sessions`, `POST /api/runs/{id}/stop` |
@@ -27,6 +28,6 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 
 | File | Contains |
 |---|---|
-| core.md | Repo discovery/readiness, task inventory, task evaluation foundation, HTTP foundation, auth/private access |
+| core.md | Repo discovery/readiness, task inventory, task evaluation foundation, task static metrics, HTTP foundation, auth/private access |
 | run-control.md | Run lifecycle, control-dir channel, question relay, log viewing, run history/audit |
 | dashboard-ops.md | Mobile dashboard, notifications, launchd service, future remote intake and IM bot surfaces |

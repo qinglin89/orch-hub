@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Architecture
@@ -90,7 +90,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Task ids, summaries, status, blockers | Target repo `.ai-tasks/index.md` plus task frontmatter | task inventory is read-only; runtime overlays do not replace task status |
 | Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
 | Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
-| Evaluation evidence artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated packs are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
+| Evaluation artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated evidence packs and static/semantic reports are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
 | Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
@@ -143,8 +143,10 @@ Task evaluation resolves an exact active or archived task id, aggregates every
 hub run matching `(repo_path, task_id)` through read-only run-record loading,
 adds bounded per-run history/session/log/spawn diagnostics plus a best-effort
 git commit window, and persists `evidence.json` under the hub data dir. The
-foundation performs no static scoring, semantic model call, or dashboard/API
-presentation; those are separate sidecar layers over the evidence artifact.
+static metrics layer computes deterministic, non-semantic run/session,
+taskfile/session-log, score, confidence, and warning rollups from that evidence
+and persists `static_metrics.json` beside `evidence.json`. Semantic model calls
+and dashboard/API presentation remain separate sidecar layers.
 
 ## Component Boundaries
 
@@ -156,7 +158,10 @@ presentation; those are separate sidecar layers over the evidence artifact.
 - Intake owns draft/revise/confirm/cancel lifecycle, intake audit state, and the
   read-only-until-confirm safety contract.
 - Evaluation owns task evidence assembly and persistence; it reads target
-  tasks/run artifacts and writes only its own hub-owned evaluation artifacts.
+  tasks/run artifacts and writes only hub-owned evaluation artifacts.
+- Static metrics owns deterministic scoring over evidence packs and persists
+  `static_metrics.json` beside the pack; it does not perform semantic model
+  calls or mutate target tasks/run state.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
 - Control-dir handling owns only the file-channel mechanics for questions,

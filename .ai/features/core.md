@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+verified-against: a86f19eef9261b232e1c598fd02bba28b29702ff
 ---
 
 # Features: Core
@@ -108,7 +108,53 @@ Implemented behavior:
   reserved dir on failure. It never mutates target repos, task files, run
   records, `.ai/`, or `.ai-tasks/`.
 - No static scores, semantic model calls, HTTP routes, or dashboard affordances
-  are part of this foundation.
+  are part of this foundation; static scoring is the separate Layer 1 static
+  metrics layer.
+
+## Task Static Metrics
+
+Status: implemented
+
+Description: Compute deterministic, non-semantic Layer 1 task-quality metrics
+from one evidence pack and persist the report beside the pack.
+
+Modules: static_metrics, evaluation, config, models.
+
+APIs: internal `StaticEvaluator.run_metrics`, `build_report`,
+`generate_metrics`, and `STATIC_METRICS_NAME`.
+
+Implemented behavior:
+
+- `StaticEvaluator` shares the evaluation subsystem's
+  `ORCH_HUB_EVAL_ENABLED` fail-closed gate and raises
+  `EvaluationDisabledError` when disabled.
+- `run_metrics(pack)` derives run/session/event rollups from pack evidence:
+  related run count, evidence-only terminal outcome partition, failure count,
+  failed-without-diagnostic count, human-input count, dev/review/plan-gate
+  session counts, turn/context aggregates, duration windows, warning count,
+  and active/archive target source.
+- `build_report(pack)` parses the task file for frontmatter legality,
+  required sections, session-log entry counts, review coverage, verdict and
+  remediation counts, blocker/fix-set/prefetch facts, status-transition
+  continuity, final-status match, and completed-task final `Open: none`.
+- Static reports carry five transparent score axes: protocol,
+  reliability/diagnostics, handoff structure, estimate fit, and
+  knowledge-maintenance signals. Penalties append evidence-naming warnings;
+  missing or partial evidence lowers confidence or makes an axis not
+  assessable instead of crashing.
+- Two knowledge signals are intentionally omitted because the evidence pack
+  cannot derive them: per-commit touched file paths and archived-task blocker
+  references across other tasks.
+- `generate_metrics(repo, task_id, evaluation_id=None)` delegates to
+  `EvaluationService.generate_evidence`, writes `static_metrics.json`
+  atomically in the same evaluation artifact directory as `evidence.json`, and
+  cleans the reserved directory on report-write failure so no half-pair
+  remains.
+- Static metrics have no HTTP route, dashboard UI, or semantic model call yet;
+  those are downstream tasks.
+- Tests cover run/session rollups, protocol parsing, score axes, partial
+  evidence behavior, persistence, disabled mode, and prior protocol
+  false-negative regressions.
 
 ## HTTP API Foundation
 
