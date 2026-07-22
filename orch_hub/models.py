@@ -868,3 +868,200 @@ class RunMetrics:
             "warning_count": self.warning_count,
             "runs": [run.to_dict() for run in self.runs],
         }
+
+
+@dataclass(frozen=True)
+class ProtocolMetrics:
+    """Deterministic protocol-structure facts parsed from the evaluated task file.
+
+    Output of the static evaluator (:mod:`orch_hub.static_metrics`), computed
+    read-only from the evidence pack's task content (the full ``.ai-tasks/<id>.md``
+    markdown) with no model call. These are *facts only* — the interpretation
+    (scores, warnings) lives in :class:`ScoreComponent`, so this shape stays a
+    stable, greppable record of what the task file structurally contains.
+
+    Presence: ``task_content_present`` is False for a task with no file (an id
+    evaluable only for run history); every downstream fact then degrades to its
+    empty/zero default rather than crashing. ``frontmatter_present`` is whether
+    the file opened with a ``---`` fence.
+
+    Frontmatter legality (taskfile schema §2): ``frontmatter_status`` is the raw
+    ``status`` value; ``status_legal`` whether it is one of the five lifecycle
+    statuses; ``id_matches`` whether frontmatter ``id`` equals the evaluated task
+    id; ``session_est`` the parsed ``current/total`` (``None`` when absent or
+    malformed, with ``session_est_present``/``session_est_wellformed`` splitting
+    those two cases); ``blocker_rule_ok`` whether the blocked⇔≥1-blocker rule
+    holds; ``fix_set_present`` whether a ``fix-set`` line is set (it must be
+    cleared before completion); ``prefetch_present``/``prefetch_wellformed``
+    describe the optional ``prefetch`` list.
+
+    Body (taskfile §5): ``missing_sections`` are required ``##`` headings absent
+    from the file; ``has_session_plan`` whether the optional plan section exists.
+
+    Session log (taskfile §5): ``entry_count`` counts ``###`` entries;
+    ``work_entry_count``/``review_entry_count``/``malformed_entry_count``
+    partition them (a heading that does not parse is malformed).
+    ``uncovered_work_entries`` are work session ids with no ``review of <id>``
+    entry; ``pass_verdict_count``/``changes_requested_count`` tally review
+    verdicts; ``remediation_count`` is work entries whose most recent preceding
+    review requested changes (the taskfile remediation predicate);
+    ``blocked_entry_count`` is entries transitioning to ``blocked``;
+    ``dispute_unresolved_count`` counts ``Dispute-unresolved`` markers;
+    ``incomplete_entries`` are entry ids missing a required field.
+
+    Transition path (taskfile §3): ``illegal_transitions`` are ``"a -> b"``
+    strings for entry status transitions not in the legal table;
+    ``transition_continuity_ok`` whether each entry's start status equals the
+    previous entry's end status; ``final_status_matches`` whether the last
+    entry's end status equals the frontmatter status.
+
+    Completion: ``completed`` mirrors ``frontmatter_status == "completed"``;
+    ``final_open_none`` is whether the last ``Open:`` field in the log is
+    ``none`` (required only when completed — every forward-looking item resolved).
+    """
+
+    task_content_present: bool
+    frontmatter_present: bool
+    frontmatter_status: str | None
+    status_legal: bool
+    id_present: bool
+    id_matches: bool
+    session_est: SessionEst | None
+    session_est_present: bool
+    session_est_wellformed: bool
+    blocker_rule_ok: bool
+    fix_set_present: bool
+    prefetch_present: bool
+    prefetch_wellformed: bool
+    missing_sections: tuple[str, ...]
+    has_session_plan: bool
+    session_log_present: bool
+    entry_count: int
+    work_entry_count: int
+    review_entry_count: int
+    malformed_entry_count: int
+    uncovered_work_entries: tuple[str, ...]
+    pass_verdict_count: int
+    changes_requested_count: int
+    remediation_count: int
+    blocked_entry_count: int
+    dispute_unresolved_count: int
+    incomplete_entries: tuple[str, ...]
+    illegal_transitions: tuple[str, ...]
+    transition_continuity_ok: bool
+    final_status_matches: bool
+    completed: bool
+    final_open_none: bool
+
+    def to_dict(self) -> dict:
+        return {
+            "task_content_present": self.task_content_present,
+            "frontmatter_present": self.frontmatter_present,
+            "frontmatter_status": self.frontmatter_status,
+            "status_legal": self.status_legal,
+            "id_present": self.id_present,
+            "id_matches": self.id_matches,
+            "session_est": (
+                self.session_est.to_dict() if self.session_est is not None else None
+            ),
+            "session_est_present": self.session_est_present,
+            "session_est_wellformed": self.session_est_wellformed,
+            "blocker_rule_ok": self.blocker_rule_ok,
+            "fix_set_present": self.fix_set_present,
+            "prefetch_present": self.prefetch_present,
+            "prefetch_wellformed": self.prefetch_wellformed,
+            "missing_sections": list(self.missing_sections),
+            "has_session_plan": self.has_session_plan,
+            "session_log_present": self.session_log_present,
+            "entry_count": self.entry_count,
+            "work_entry_count": self.work_entry_count,
+            "review_entry_count": self.review_entry_count,
+            "malformed_entry_count": self.malformed_entry_count,
+            "uncovered_work_entries": list(self.uncovered_work_entries),
+            "pass_verdict_count": self.pass_verdict_count,
+            "changes_requested_count": self.changes_requested_count,
+            "remediation_count": self.remediation_count,
+            "blocked_entry_count": self.blocked_entry_count,
+            "dispute_unresolved_count": self.dispute_unresolved_count,
+            "incomplete_entries": list(self.incomplete_entries),
+            "illegal_transitions": list(self.illegal_transitions),
+            "transition_continuity_ok": self.transition_continuity_ok,
+            "final_status_matches": self.final_status_matches,
+            "completed": self.completed,
+            "final_open_none": self.final_open_none,
+        }
+
+
+@dataclass(frozen=True)
+class ScoreComponent:
+    """One evidence-backed static score axis, computed deterministically.
+
+    The static evaluator (:mod:`orch_hub.static_metrics`) reports a small set of
+    these rather than one opaque number, so a degraded score is always explained
+    by its ``warnings`` (each names the evidence that lowered it). ``name`` is a
+    stable machine key (``protocol``/``reliability``/``handoff``/``estimate``/
+    ``knowledge``). ``score`` is ``0.0``–``1.0`` (1.0 = clean), or ``None`` when
+    the axis is *not assessable* from the evidence (no task file, no runs, no
+    estimate) — kept distinct from a real ``0.0``. ``confidence`` is ``0.0``–
+    ``1.0`` and drops as backing evidence goes missing/corrupt, so a partial pack
+    lowers confidence instead of asserting a false score. ``warnings`` are the
+    human-readable, evidence-pointing reasons the score fell short (empty when
+    clean).
+    """
+
+    name: str
+    score: float | None
+    confidence: float
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "score": self.score,
+            "confidence": self.confidence,
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
+class StaticMetricsReport:
+    """The full deterministic static-metrics report for one evaluated task.
+
+    Top-level output of the static evaluator (:mod:`orch_hub.static_metrics`),
+    persisted as ``static_metrics.json`` beside the ``evidence.json`` it derives
+    from (one dir per evaluation), so a report always ties to a specific pack via
+    ``evaluation_id``. It composes the run/session rollup (:class:`RunMetrics`),
+    the parsed task-file protocol facts (:class:`ProtocolMetrics`), and the
+    evidence-backed :class:`ScoreComponent` axes. ``warnings`` is the pack's
+    *evidence-degradation* list (missing/corrupt run artifacts) surfaced at the
+    top level, kept separate from the per-score quality warnings. ``generated_ts``
+    stamps when the report was computed. Task identity (``repo_name``/``task_id``/
+    ``target_present``/``target_source``) is carried so the artifact is
+    self-describing without re-reading the pack. No semantic judgment, no model
+    call — every field is a pure function of the evidence pack.
+    """
+
+    evaluation_id: str
+    generated_ts: str | None
+    repo_name: str
+    task_id: str
+    target_present: bool
+    target_source: str | None
+    runs: RunMetrics
+    protocol: ProtocolMetrics
+    scores: tuple[ScoreComponent, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "evaluation_id": self.evaluation_id,
+            "generated_ts": self.generated_ts,
+            "repo_name": self.repo_name,
+            "task_id": self.task_id,
+            "target_present": self.target_present,
+            "target_source": self.target_source,
+            "scores": [score.to_dict() for score in self.scores],
+            "warnings": list(self.warnings),
+            "runs": self.runs.to_dict(),
+            "protocol": self.protocol.to_dict(),
+        }

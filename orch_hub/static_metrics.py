@@ -27,25 +27,66 @@ signals a pack carries — ``ended_ts``/``exit_code``/``error`` plus the
 (which needs live control-dir/task-store reads the pack does not contain). The
 outcome is coarser than the run manager's live verdict and is labelled so:
 ``clean`` (exit 0) does not distinguish task-completed from a graceful boundary
-stop — that protocol-completion signal comes from the task file, parsed in
-session-2.
+stop — that protocol-completion signal comes from the task file, read by the
+protocol parser (:func:`_parse_protocol`) via the frontmatter status.
 
-**Session split.** Session-1 (this file) delivers the schema plus the
-run/session/event/diagnostic rollups. Session-2 adds task-file/session-log
-protocol metrics, score components, evidence-backed warnings, and persistence of
-a ``static_metrics.json`` report tied to the pack's ``evaluation_id``.
+**Layers.** :meth:`StaticEvaluator.run_metrics` is the run/session/event
+rollup (:class:`~orch_hub.models.RunMetrics`); :meth:`build_report` adds the
+task-file protocol facts (:class:`~orch_hub.models.ProtocolMetrics`, parsed from
+the pack's task content) and the evidence-backed score axes
+(:class:`~orch_hub.models.ScoreComponent`), composing a
+:class:`~orch_hub.models.StaticMetricsReport`; :meth:`generate_metrics` builds a
+fresh evidence pack (delegating to :class:`~orch_hub.evaluation.EvaluationService`)
+and persists ``static_metrics.json`` beside its ``evidence.json``.
+
+**Scoring is deliberately transparent, not opaque.** Each axis starts at ``1.0``
+and subtracts documented per-issue penalties (the ``_P_*`` constants), flooring
+at ``0.0``; every penalty appends a warning naming the evidence, and an axis with
+no backing evidence reports ``score=None`` with ``confidence=0.0`` rather than a
+misleading ``0.0``. Two knowledge-maintenance signals the scope names are
+**not derivable from the evidence pack** and are intentionally omitted (not
+guessed): which files a windowed commit touched (the pack carries commit
+subjects only — diffs/file-lists are deliberately excluded), and whether a
+blocker references an *archived* task (the pack carries only this task's file,
+not the archive set or other tasks). The pack-determinable knowledge signals —
+close-out/archive reconciliation, malformed prefetch, and repeated evidence
+degradation — are scored; the blocked⇔blocker self-consistency rule is scored
+under ``protocol``.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
+import json
+import os
+import re
+import shutil
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
 
 from .config import Config
-from .evaluation import EvaluationDisabledError, EvidencePack, RunEvidence
+from .evaluation import (
+    SOURCE_ARCHIVED,
+    EvaluationDisabledError,
+    EvaluationService,
+    EvidencePack,
+    RunEvidence,
+)
 from .history import KIND_ANSWER_RECORDED, KIND_STOP_REQUESTED
 from .logs import LogSnapshot
-from .models import RunEvent, RunMetrics, RunRollup, SessionSummary
+from .models import (
+    EvaluationTarget,
+    ManagedRepo,
+    ProtocolMetrics,
+    RunEvent,
+    RunMetrics,
+    RunRollup,
+    ScoreComponent,
+    SessionEst,
+    SessionSummary,
+    StaticMetricsReport,
+)
 
 # -- session vocabulary -------------------------------------------------------
 # The orchestrator log (parsed by :mod:`orch_hub.sessions`) brackets each
@@ -91,6 +132,88 @@ _FAILURE_OUTCOMES = (RUN_OUTCOME_FAILED, RUN_OUTCOME_BROKEN)
 """Outcomes that count as a run failure for the reliability/diagnostics signal:
 an orchestrator non-zero exit or an unreadable record."""
 
+# -- persisted report ---------------------------------------------------------
+STATIC_METRICS_NAME = "static_metrics.json"
+"""The persisted static-metrics report, written beside ``evidence.json`` in the
+evaluation's artifact dir (one dir per evaluation)."""
+
+# -- score axes ---------------------------------------------------------------
+SCORE_PROTOCOL = "protocol"
+SCORE_RELIABILITY = "reliability"
+SCORE_HANDOFF = "handoff"
+SCORE_ESTIMATE = "estimate"
+SCORE_KNOWLEDGE = "knowledge"
+
+# -- taskfile protocol vocabulary (mirrors .ai-protocol/meta/taskfile.md) ------
+# Local literals, not imported: the protocol contract lives outside the codebase
+# (it is documentation), so these encode the parts a static check needs.
+LEGAL_STATUSES = ("pending", "in_progress", "final_review", "completed", "blocked")
+"""The five task lifecycle statuses (taskfile schema §2)."""
+
+STATUS_COMPLETED = "completed"
+
+REQUIRED_SECTIONS = ("## Goal", "## Scope", "## Acceptance", "## Session log")
+"""Body headings every task file must carry (taskfile §5). ``## Session plan``
+is optional and tracked separately."""
+
+SESSION_PLAN_SECTION = "## Session plan"
+SESSION_LOG_SECTION = "## Session log"
+
+_LEGAL_TRANSITIONS = frozenset(
+    {
+        ("pending", "in_progress"),  # first claim
+        ("in_progress", "in_progress"),  # dev advancement / interim review
+        ("in_progress", "final_review"),  # dev advancement completes scope
+        ("final_review", "final_review"),  # final gate requests changes
+        ("final_review", "completed"),  # final gate passes
+        ("final_review", "in_progress"),  # final_review set in error, reopened
+        ("blocked", "pending"),  # unblocked, restored
+        ("blocked", "in_progress"),
+        ("blocked", "final_review"),
+    }
+)
+"""Legal ``(before, after)`` status edges from the taskfile transition table
+(§3), excluding the universal ``any -> blocked`` (handled in
+:func:`_transition_legal` since every legal status may be blocked)."""
+
+# -- score penalties (transparent: score = 1 - sum(penalties), floored at 0) ---
+# protocol axis
+_P_STATUS_ILLEGAL = 0.30
+_P_ID = 0.10
+_P_SESSION_EST = 0.10
+_P_BLOCKER_RULE = 0.20
+_P_FIX_SET = 0.20
+_P_MISSING_SECTION = 0.15
+_P_ILLEGAL_TRANSITION = 0.20
+_P_CONTINUITY = 0.10
+_P_FINAL_STATUS = 0.10
+_P_FINAL_OPEN = 0.15
+# reliability axis
+_P_NO_DIAGNOSTIC = 0.20
+# handoff axis
+_P_MALFORMED_ENTRY = 0.10
+_P_INCOMPLETE_ENTRY = 0.10
+_P_UNCOVERED_REVIEW = 0.10
+_P_DISPUTE = 0.20
+_HANDOFF_GROUP_CAP = 0.30
+"""Per-group cap so a run of same-kind handoff issues cannot alone zero the axis."""
+# estimate axis: overrun uses a ratio (planned/actual), not a flat penalty.
+# knowledge axis
+_P_CLOSEOUT = 0.40
+_P_PREFETCH = 0.10
+_P_REPEATED_WARN = 0.20
+_WARN_THRESHOLD = 3
+"""Evidence-degradation warning count at/above which the knowledge axis flags
+'repeated missing evidence'."""
+
+_CONFIDENCE_NO_SESSION_LOG = 0.6
+"""Protocol-axis confidence when the task file has no session log (frontmatter
+still checkable, but the transition/handoff evidence is absent)."""
+
+
+def _utc_now() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
 
 class StaticEvaluator:
     """Deterministic, non-semantic task-metric computation over an evidence pack.
@@ -99,14 +222,32 @@ class StaticEvaluator:
     operation fails closed with
     :class:`~orch_hub.evaluation.EvaluationDisabledError` when
     ``Config.evaluation_enabled`` is off, giving the whole subsystem a single
-    backend boundary (the later API gate maps this to a removed/404 surface). It
-    needs no injectable collaborators in session-1 — metric computation is a pure
-    function of the pack, requiring no clock, subprocess, or filesystem; the
-    config is held for the gate now and for persistence (session-2).
+    backend boundary (the later API gate maps this to a removed/404 surface).
+
+    Metric computation is a pure function of the pack (no clock/subprocess/
+    filesystem), so :meth:`run_metrics` and :meth:`build_report` need nothing
+    injected but the ``clock`` that stamps a report's ``generated_ts`` (injectable
+    so tests are deterministic). :meth:`generate_metrics` is the one path that
+    *builds and persists*: it delegates evidence assembly to an
+    :class:`~orch_hub.evaluation.EvaluationService` (default constructed from the
+    same config; injectable for tests) and writes ``static_metrics.json`` beside
+    that evaluation's ``evidence.json``.
     """
 
-    def __init__(self, config: Config):
+    def __init__(
+        self,
+        config: Config,
+        *,
+        evaluation_service: EvaluationService | None = None,
+        clock: Callable[[], dt.datetime] = _utc_now,
+    ):
         self._config = config
+        self._service = (
+            evaluation_service
+            if evaluation_service is not None
+            else EvaluationService(config)
+        )
+        self._clock = clock
 
     @property
     def enabled(self) -> bool:
@@ -129,6 +270,48 @@ class StaticEvaluator:
         """
         self._require_enabled()
         return _compute_run_metrics(pack)
+
+    def build_report(self, pack: EvidencePack) -> StaticMetricsReport:
+        """Compute the full static-metrics report for ``pack`` (pure, no writes).
+
+        Composes the run rollup (:meth:`run_metrics`), the task-file protocol
+        facts parsed from ``pack.target.content``, and the five evidence-backed
+        score axes into a :class:`~orch_hub.models.StaticMetricsReport`. Total
+        over any pack: an absent/partial task file yields ``None`` (not-assessable)
+        scores plus warnings rather than a crash, and the report ties to
+        ``pack.evaluation_id``. ``generated_ts`` comes from the injected clock, so
+        the result is deterministic for a fixed clock. This is the on-demand path
+        (e.g. a later dashboard scoring an already-persisted pack); persistence is
+        :meth:`generate_metrics`.
+        """
+        self._require_enabled()
+        return _build_report(pack, self._clock().isoformat())
+
+    def generate_metrics(
+        self, repo: ManagedRepo, task_id: str
+    ) -> StaticMetricsReport:
+        """Build a fresh evidence pack and persist its static-metrics report.
+
+        The stable pairing the acceptance asks for: it delegates to
+        :meth:`EvaluationService.generate_evidence` (which mints the evaluation
+        id, reserves the contained dir, and writes ``evidence.json``), scores the
+        returned pack, and writes ``static_metrics.json`` beside it — one dir per
+        evaluation, both artifacts tied to the same id. The report write is
+        atomic (same-dir tmp + rename); if it fails, the whole evaluation dir is
+        removed so no half-pair (evidence without metrics) is left behind,
+        mirroring ``generate_evidence``'s own failure cleanup. Read-only over
+        target repo/run state — the only writes are the two hub-owned artifacts.
+        """
+        self._require_enabled()
+        pack = self._service.generate_evidence(repo, task_id)
+        report = _build_report(pack, self._clock().isoformat())
+        assert pack.evaluation_dir is not None  # generate_evidence always sets it
+        try:
+            _write_json(pack.evaluation_dir / STATIC_METRICS_NAME, report.to_dict())
+        except Exception:
+            shutil.rmtree(pack.evaluation_dir, ignore_errors=True)
+            raise
+        return report
 
 
 def _compute_run_metrics(pack: EvidencePack) -> RunMetrics:
@@ -260,3 +443,659 @@ def _parse_ts(value: str | None) -> dt.datetime | None:
 
 def _count(rollups: Sequence[RunRollup], outcome: str) -> int:
     return sum(1 for r in rollups if r.outcome == outcome)
+
+
+# -- report assembly ----------------------------------------------------------
+
+
+def _build_report(pack: EvidencePack, generated_ts: str | None) -> StaticMetricsReport:
+    """Compose the full report from a pack (pure): run rollup + protocol facts +
+    scored axes + the pack's evidence-degradation warnings, tied to
+    ``pack.evaluation_id``."""
+    runs = _compute_run_metrics(pack)
+    protocol = _parse_protocol(pack.target)
+    scores = (
+        _score_protocol(protocol),
+        _score_reliability(runs),
+        _score_handoff(protocol),
+        _score_estimate(protocol),
+        _score_knowledge(protocol, runs),
+    )
+    # Top-level warnings are the *evidence-degradation* signals (missing/corrupt
+    # run artifacts), kept distinct from each axis's quality warnings.
+    evidence_warnings = tuple(pack.warnings) + tuple(
+        w for run in pack.runs for w in run.warnings
+    )
+    return StaticMetricsReport(
+        evaluation_id=pack.evaluation_id,
+        generated_ts=generated_ts,
+        repo_name=pack.target.repo_name,
+        task_id=pack.target.task_id,
+        target_present=pack.target.present,
+        target_source=pack.target.source,
+        runs=runs,
+        protocol=protocol,
+        scores=scores,
+        warnings=evidence_warnings,
+    )
+
+
+def _write_json(path: Path, data: dict) -> None:
+    """Persist ``static_metrics.json`` atomically (same-dir tmp + rename), matching
+    ``evaluation._write_evidence``."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# -- protocol parsing ---------------------------------------------------------
+# The evaluated task file (``EvidencePack.target.content``) is parsed for the
+# protocol-structure facts a static check can verify. Ownership note: the
+# inventory reader (:mod:`orch_hub.task_store`) owns *status/summary/blockers*
+# for the active task set; this parser owns *protocol-structure* facts (session
+# log entries, transitions, review coverage) — an evaluation concern — and keeps
+# local frontmatter/list helpers (mirroring task_store's private ones) so the
+# evaluation subsystem stays independent of inventory internals.
+
+_ENTRY_HEADING = re.compile(
+    r"^###\s+\S+\s*/\s*(?P<sid>.+?)\s*/\s*"
+    r"(?:review of\s+(?P<wsid>.+?)\s*/\s*)?"
+    r"\(\s*(?P<before>[^)]*?)\s*(?:→|-+>)\s*(?P<after>[^)]*?)\s*\)\s*$"
+)
+"""A ``### <date> / <sid> [/ review of <wsid>] / (<before> -> <after>)`` heading.
+Accepts the protocol's ``→`` arrow or an ASCII ``->`` fallback."""
+
+_FIELD_LINE = re.compile(r"^-\s+(?P<name>[A-Za-z][A-Za-z0-9-]*)\s*:\s*(?P<value>.*)$")
+"""An entry field/marker line ``- Name: value`` (taskfile: machine-parsed exact
+``- X: ...`` lines). The name is captured; a prose ``-`` bullet is ignored."""
+
+_WORK_REQUIRED = frozenset({"done", "next", "open"})
+_REVIEW_REQUIRED = frozenset({"verdict", "group", "findings"})
+_VERDICT_CHANGES = "changes-requested"
+_VERDICT_PASS = "pass"
+
+
+@dataclass(frozen=True)
+class _LogEntry:
+    """One parsed ``## Session log`` entry (internal to the parser)."""
+
+    sid: str | None
+    reviews: str | None  # work session id a review entry covers; None for work
+    before: str | None
+    after: str | None
+    verdict: str | None  # lowercased review verdict
+    field_names: frozenset[str]  # lowercased field names present
+    open_value: str | None  # last `Open:` value in this entry, lowercased
+    dispute_count: int
+    malformed: bool  # heading did not parse
+
+    @property
+    def is_review(self) -> bool:
+        return self.reviews is not None
+
+
+@dataclass(frozen=True)
+class _LogFacts:
+    """Aggregated session-log facts (internal to the parser)."""
+
+    entry_count: int
+    work_entry_count: int
+    review_entry_count: int
+    malformed_entry_count: int
+    uncovered_work_entries: tuple[str, ...]
+    pass_verdict_count: int
+    changes_requested_count: int
+    remediation_count: int
+    blocked_entry_count: int
+    dispute_unresolved_count: int
+    incomplete_entries: tuple[str, ...]
+    illegal_transitions: tuple[str, ...]
+    transition_continuity_ok: bool
+    final_status_matches: bool
+    final_open_none: bool
+
+
+def _parse_protocol(target: EvaluationTarget) -> ProtocolMetrics:
+    """Parse the target task file into deterministic protocol facts.
+
+    Total over any content: an absent/empty file yields the all-empty
+    :func:`_empty_protocol`; a present file is parsed for frontmatter legality,
+    required sections, and the ``## Session log`` entry structure. No scoring
+    here — just facts.
+    """
+    content = target.content
+    if not content:
+        return _empty_protocol()
+
+    fm = _frontmatter(content)
+    status = fm.get("status") or None
+    id_value = fm.get("id")
+    est_present = "session-est" in fm
+    session_est = _session_est_from_raw(fm.get("session-est"))
+    blockers = _inline_list(fm.get("blockers"))
+    prefetch_present = "prefetch" in fm
+
+    section = _session_log_section(content)
+    entries = _parse_entries(section) if section is not None else []
+    facts = _aggregate_entries(entries, status)
+
+    return ProtocolMetrics(
+        task_content_present=True,
+        frontmatter_present=bool(fm),
+        frontmatter_status=status,
+        status_legal=status in LEGAL_STATUSES,
+        id_present=bool(id_value),
+        id_matches=bool(id_value) and id_value == target.task_id,
+        session_est=session_est,
+        session_est_present=est_present,
+        session_est_wellformed=session_est is not None,
+        blocker_rule_ok=_blocker_rule_ok(status, blockers),
+        fix_set_present="fix-set" in fm,
+        prefetch_present=prefetch_present,
+        prefetch_wellformed=(
+            _prefetch_wellformed(fm.get("prefetch")) if prefetch_present else True
+        ),
+        missing_sections=tuple(
+            s for s in REQUIRED_SECTIONS if not _has_section(content, s)
+        ),
+        has_session_plan=_has_section(content, SESSION_PLAN_SECTION),
+        session_log_present=section is not None,
+        entry_count=facts.entry_count,
+        work_entry_count=facts.work_entry_count,
+        review_entry_count=facts.review_entry_count,
+        malformed_entry_count=facts.malformed_entry_count,
+        uncovered_work_entries=facts.uncovered_work_entries,
+        pass_verdict_count=facts.pass_verdict_count,
+        changes_requested_count=facts.changes_requested_count,
+        remediation_count=facts.remediation_count,
+        blocked_entry_count=facts.blocked_entry_count,
+        dispute_unresolved_count=facts.dispute_unresolved_count,
+        incomplete_entries=facts.incomplete_entries,
+        illegal_transitions=facts.illegal_transitions,
+        transition_continuity_ok=facts.transition_continuity_ok,
+        final_status_matches=facts.final_status_matches,
+        completed=status == STATUS_COMPLETED,
+        final_open_none=facts.final_open_none,
+    )
+
+
+def _empty_protocol() -> ProtocolMetrics:
+    """All-empty facts for a task with no file content (an id evaluable only for
+    run history). Every count zero, every bool safe-default."""
+    return ProtocolMetrics(
+        task_content_present=False,
+        frontmatter_present=False,
+        frontmatter_status=None,
+        status_legal=False,
+        id_present=False,
+        id_matches=False,
+        session_est=None,
+        session_est_present=False,
+        session_est_wellformed=False,
+        blocker_rule_ok=True,
+        fix_set_present=False,
+        prefetch_present=False,
+        prefetch_wellformed=True,
+        missing_sections=REQUIRED_SECTIONS,
+        has_session_plan=False,
+        session_log_present=False,
+        entry_count=0,
+        work_entry_count=0,
+        review_entry_count=0,
+        malformed_entry_count=0,
+        uncovered_work_entries=(),
+        pass_verdict_count=0,
+        changes_requested_count=0,
+        remediation_count=0,
+        blocked_entry_count=0,
+        dispute_unresolved_count=0,
+        incomplete_entries=(),
+        illegal_transitions=(),
+        transition_continuity_ok=True,
+        final_status_matches=False,
+        completed=False,
+        final_open_none=False,
+    )
+
+
+def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFacts:
+    """Fold parsed entries into the session-log facts (chronological order)."""
+    wellformed = [e for e in entries if not e.malformed]
+    work = [e for e in wellformed if not e.is_review]
+    review = [e for e in wellformed if e.is_review]
+    reviewed = {e.reviews for e in review if e.reviews}
+    uncovered = tuple(e.sid for e in work if e.sid and e.sid not in reviewed)
+
+    # Remediation: a work session whose most recent *preceding* review requested
+    # changes (the taskfile remediation predicate). Walk in log order.
+    remediation = 0
+    last_verdict: str | None = None
+    for entry in entries:
+        if entry.malformed:
+            continue
+        if entry.is_review:
+            last_verdict = entry.verdict
+        elif last_verdict == _VERDICT_CHANGES:
+            remediation += 1
+
+    incomplete = tuple(
+        (e.sid or "?") for e in wellformed if not _entry_fields_ok(e)
+    )
+
+    transitions = [(e.before, e.after) for e in wellformed if e.before and e.after]
+    illegal = tuple(
+        f"{before} -> {after}"
+        for before, after in transitions
+        if not _transition_legal(before, after)
+    )
+    continuity_ok = all(
+        transitions[i][1] == transitions[i + 1][0]
+        for i in range(len(transitions) - 1)
+    )
+    final_status_matches = (
+        bool(transitions) and status is not None and transitions[-1][1] == status
+    )
+
+    # Final forward-looking Open across the whole log (last entry that has one).
+    final_open_none = False
+    for entry in entries:
+        if entry.open_value is not None:
+            final_open_none = entry.open_value == "none"
+
+    return _LogFacts(
+        entry_count=len(entries),
+        work_entry_count=len(work),
+        review_entry_count=len(review),
+        malformed_entry_count=sum(1 for e in entries if e.malformed),
+        uncovered_work_entries=uncovered,
+        pass_verdict_count=sum(1 for e in review if e.verdict == _VERDICT_PASS),
+        changes_requested_count=sum(
+            1 for e in review if e.verdict == _VERDICT_CHANGES
+        ),
+        remediation_count=remediation,
+        blocked_entry_count=sum(1 for e in wellformed if e.after == "blocked"),
+        dispute_unresolved_count=sum(e.dispute_count for e in entries),
+        incomplete_entries=incomplete,
+        illegal_transitions=illegal,
+        transition_continuity_ok=continuity_ok,
+        final_status_matches=final_status_matches,
+        final_open_none=final_open_none,
+    )
+
+
+def _parse_entries(section: str) -> list[_LogEntry]:
+    """Split a session-log section into per-``###``-entry blocks and parse each."""
+    entries: list[_LogEntry] = []
+    block: list[str] | None = None
+    for line in section.splitlines():
+        if line.startswith("### "):
+            if block is not None:
+                entries.append(_parse_one_entry(block))
+            block = [line]
+        elif block is not None:
+            block.append(line)
+    if block is not None:
+        entries.append(_parse_one_entry(block))
+    return entries
+
+
+def _parse_one_entry(lines: list[str]) -> _LogEntry:
+    """Parse one entry block (heading + field lines) into a :class:`_LogEntry`."""
+    field_names: set[str] = set()
+    open_value: str | None = None
+    verdict: str | None = None
+    dispute_count = 0
+    for line in lines[1:]:
+        match = _FIELD_LINE.match(line)
+        if match is None:
+            continue
+        name = match.group("name").lower()
+        value = match.group("value").strip()
+        field_names.add(name)
+        if name == "open":
+            open_value = value.lower()
+        elif name == "verdict":
+            verdict = value.lower()
+        elif name == "dispute-unresolved":
+            dispute_count += 1
+
+    heading = _ENTRY_HEADING.match(lines[0])
+    if heading is None:
+        return _LogEntry(
+            sid=None,
+            reviews=None,
+            before=None,
+            after=None,
+            verdict=verdict,
+            field_names=frozenset(field_names),
+            open_value=open_value,
+            dispute_count=dispute_count,
+            malformed=True,
+        )
+    wsid = heading.group("wsid")
+    return _LogEntry(
+        sid=heading.group("sid").strip(),
+        reviews=wsid.strip() if wsid else None,
+        before=(heading.group("before") or "").strip() or None,
+        after=(heading.group("after") or "").strip() or None,
+        verdict=verdict,
+        field_names=frozenset(field_names),
+        open_value=open_value,
+        dispute_count=dispute_count,
+        malformed=False,
+    )
+
+
+def _entry_fields_ok(entry: _LogEntry) -> bool:
+    """True when a well-formed entry carries its required fields (Done/Next/Open
+    for work; Verdict/Group/Findings for review)."""
+    required = _REVIEW_REQUIRED if entry.is_review else _WORK_REQUIRED
+    return required <= entry.field_names
+
+
+def _transition_legal(before: str, after: str) -> bool:
+    """True when ``(before, after)`` is a legal status edge (taskfile §3). Any
+    legal status may transition to ``blocked``; other edges use the explicit
+    table."""
+    if after == "blocked":
+        return before in LEGAL_STATUSES
+    return (before, after) in _LEGAL_TRANSITIONS
+
+
+def _session_log_section(content: str) -> str | None:
+    """Return the ``## Session log`` body (heading to the next ``## `` or EOF), or
+    ``None`` when the section is absent."""
+    lines = content.splitlines()
+    start = next(
+        (i for i, line in enumerate(lines) if line.strip() == SESSION_LOG_SECTION),
+        None,
+    )
+    if start is None:
+        return None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        stripped = lines[j].strip()
+        if stripped.startswith("## ") and stripped != SESSION_LOG_SECTION:
+            end = j
+            break
+    return "\n".join(lines[start + 1 : end])
+
+
+def _has_section(content: str, heading: str) -> bool:
+    return any(line.strip() == heading for line in content.splitlines())
+
+
+def _frontmatter(content: str) -> dict[str, str]:
+    """Parse the leading ``---`` frontmatter into raw ``key: value`` strings
+    (mirrors ``task_store._parse_frontmatter``; empty when no opening fence)."""
+    lines = content.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return {}
+    fields: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            break
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        fields[key.strip()] = value.strip()
+    return fields
+
+
+def _inline_list(raw: str | None) -> tuple[str, ...]:
+    """Parse an inline ``[a, b]`` frontmatter list (mirrors
+    ``task_store._parse_inline_list``); absent/empty yields ``()``."""
+    if raw is None:
+        return ()
+    inner = raw.strip()
+    if inner.startswith("[") and inner.endswith("]"):
+        inner = inner[1:-1]
+    return tuple(item.strip() for item in inner.split(",") if item.strip())
+
+
+def _session_est_from_raw(raw: str | None) -> SessionEst | None:
+    """Parse ``session-est: <current>/<total>`` into :class:`SessionEst`, or
+    ``None`` for any non ``int/int`` shape (mirrors
+    ``task_store._parse_session_est``; never raises)."""
+    if raw is None:
+        return None
+    parts = raw.split("/")
+    if len(parts) != 2:
+        return None
+    current, total = parts[0].strip(), parts[1].strip()
+    if not _ascii_digits(current) or not _ascii_digits(total):
+        return None
+    return SessionEst(current=int(current), total=int(total))
+
+
+def _ascii_digits(text: str) -> bool:
+    return bool(text) and text.isascii() and text.isdigit()
+
+
+def _blocker_rule_ok(status: str | None, blockers: tuple[str, ...]) -> bool:
+    """The blocked⇔≥1-blocker rule (taskfile §1). A ``blocked`` task needs at
+    least one blocker; any other *legal* status needs none; an absent/illegal
+    status is not a blocker-rule question (the status penalty covers it)."""
+    if status == "blocked":
+        return len(blockers) >= 1
+    if status in LEGAL_STATUSES:
+        return len(blockers) == 0
+    return True
+
+
+def _prefetch_wellformed(raw: str | None) -> bool:
+    """True when a present ``prefetch`` is a (possibly empty) list of ``.ai/*.md``
+    paths. An empty ``[]`` is legitimately 'no prefetch'; a non-list or a
+    non-``.ai``/non-``.md`` entry is malformed."""
+    items = _inline_list(raw)
+    if not items:
+        return (raw or "").strip() in ("", "[]")
+    return all(item.startswith(".ai/") and item.endswith(".md") for item in items)
+
+
+# -- scoring ------------------------------------------------------------------
+# Each axis: score = 1 - sum(documented penalties), floored at 0; every penalty
+# appends a warning naming the evidence. An axis with no backing evidence is
+# score=None, confidence=0 (not-assessable), kept distinct from a real 0.0.
+
+
+def _clamp01(value: float) -> float:
+    """Clamp to ``[0, 1]`` and round to 3 places for stable JSON."""
+    return round(max(0.0, min(1.0, value)), 3)
+
+
+def _score_protocol(pm: ProtocolMetrics) -> ScoreComponent:
+    """Frontmatter legality, required sections, status-transition path, and
+    completion hygiene (taskfile §§2/3/5)."""
+    if not pm.task_content_present:
+        return ScoreComponent(
+            SCORE_PROTOCOL,
+            None,
+            0.0,
+            ("no task file content in evidence; protocol not assessable",),
+        )
+    warnings: list[str] = []
+    penalty = 0.0
+    if not pm.frontmatter_present:
+        penalty += _P_STATUS_ILLEGAL
+        warnings.append("task file has no frontmatter fence")
+    else:
+        if not pm.status_legal:
+            penalty += _P_STATUS_ILLEGAL
+            warnings.append(
+                f"frontmatter status {pm.frontmatter_status!r} is not a legal"
+                " lifecycle status"
+            )
+        if not pm.id_matches:
+            penalty += _P_ID
+            warnings.append("frontmatter id missing or does not match the task id")
+        if not (pm.session_est_present and pm.session_est_wellformed):
+            penalty += _P_SESSION_EST
+            warnings.append("frontmatter session-est missing or malformed")
+        if not pm.blocker_rule_ok:
+            penalty += _P_BLOCKER_RULE
+            warnings.append(
+                "blocker rule violated (blocked needs >=1 blocker; a non-blocked"
+                " status needs none)"
+            )
+        if pm.fix_set_present:
+            penalty += _P_FIX_SET
+            warnings.append("fix-set is declared (must be cleared before completion)")
+    for section in pm.missing_sections:
+        penalty += _P_MISSING_SECTION
+        warnings.append(f"required section missing: {section}")
+    if pm.illegal_transitions:
+        penalty += _P_ILLEGAL_TRANSITION
+        warnings.append(
+            "illegal status transition(s): " + "; ".join(pm.illegal_transitions)
+        )
+    if pm.entry_count and not pm.transition_continuity_ok:
+        penalty += _P_CONTINUITY
+        warnings.append("session-log status transitions are not continuous")
+    if pm.entry_count and not pm.final_status_matches:
+        penalty += _P_FINAL_STATUS
+        warnings.append("final session-log status does not match frontmatter status")
+    if pm.completed and not pm.final_open_none:
+        penalty += _P_FINAL_OPEN
+        warnings.append("completed task's final Open is not 'none'")
+    confidence = 1.0 if pm.session_log_present else _CONFIDENCE_NO_SESSION_LOG
+    return ScoreComponent(
+        SCORE_PROTOCOL, _clamp01(1.0 - penalty), confidence, tuple(warnings)
+    )
+
+
+def _score_reliability(rm: RunMetrics) -> ScoreComponent:
+    """Run failures and whether failures left a diagnostic; confidence drops with
+    evidence-degradation warnings."""
+    if rm.run_count == 0:
+        return ScoreComponent(
+            SCORE_RELIABILITY,
+            None,
+            0.0,
+            ("no related runs; run reliability not assessable",),
+        )
+    warnings: list[str] = []
+    score = 1.0 - rm.failure_count / rm.run_count
+    if rm.failure_count:
+        warnings.append(f"{rm.failure_count} of {rm.run_count} run(s) failed")
+    if rm.failed_without_diagnostic_count:
+        score -= _P_NO_DIAGNOSTIC
+        warnings.append(
+            f"{rm.failed_without_diagnostic_count} failed run(s) lack diagnostics"
+            " (no log or spawn.out)"
+        )
+    confidence = _clamp01(1.0 - min(0.6, rm.warning_count * 0.15))
+    if rm.warning_count:
+        warnings.append(
+            f"{rm.warning_count} evidence-degradation warning(s) lower confidence"
+        )
+    return ScoreComponent(SCORE_RELIABILITY, _clamp01(score), confidence, tuple(warnings))
+
+
+def _score_handoff(pm: ProtocolMetrics) -> ScoreComponent:
+    """Session-log entry structure: malformed/incomplete entries, review coverage
+    (once completed), and unresolved disputes."""
+    if not pm.task_content_present:
+        return ScoreComponent(
+            SCORE_HANDOFF,
+            None,
+            0.0,
+            ("no task file content; handoff structure not assessable",),
+        )
+    if not pm.session_log_present:
+        return ScoreComponent(
+            SCORE_HANDOFF,
+            None,
+            0.0,
+            ("task file has no session log; handoff structure not assessable",),
+        )
+    if pm.entry_count == 0:
+        return ScoreComponent(
+            SCORE_HANDOFF, 0.0, 1.0, ("session log present but has no entries",)
+        )
+    warnings: list[str] = []
+    penalty = 0.0
+    if pm.malformed_entry_count:
+        penalty += min(_HANDOFF_GROUP_CAP, pm.malformed_entry_count * _P_MALFORMED_ENTRY)
+        warnings.append(
+            f"{pm.malformed_entry_count} malformed session-log entry heading(s)"
+        )
+    if pm.incomplete_entries:
+        penalty += min(
+            _HANDOFF_GROUP_CAP, len(pm.incomplete_entries) * _P_INCOMPLETE_ENTRY
+        )
+        warnings.append(
+            "session-log entries missing required fields: "
+            + ", ".join(pm.incomplete_entries)
+        )
+    if pm.completed and pm.uncovered_work_entries:
+        penalty += min(
+            _HANDOFF_GROUP_CAP, len(pm.uncovered_work_entries) * _P_UNCOVERED_REVIEW
+        )
+        warnings.append(
+            f"{len(pm.uncovered_work_entries)} work session(s) with no review entry"
+        )
+    if pm.dispute_unresolved_count:
+        penalty += _P_DISPUTE
+        warnings.append(
+            f"{pm.dispute_unresolved_count} unresolved disputed finding(s)"
+        )
+    return ScoreComponent(SCORE_HANDOFF, _clamp01(1.0 - penalty), 1.0, tuple(warnings))
+
+
+def _score_estimate(pm: ProtocolMetrics) -> ScoreComponent:
+    """Session-est planned total vs actual dev sessions (session-log work
+    entries). Overrun scales the score by the ratio; remediation rounds are
+    surfaced as context (they already inflate the count)."""
+    est = pm.session_est
+    if est is None or est.total <= 0:
+        return ScoreComponent(
+            SCORE_ESTIMATE,
+            None,
+            0.0,
+            ("session-est missing, malformed, or zero-total; estimate fit not"
+             " assessable",),
+        )
+    if not pm.session_log_present:
+        return ScoreComponent(
+            SCORE_ESTIMATE,
+            None,
+            0.0,
+            ("no session log to count dev sessions; estimate fit not assessable",),
+        )
+    warnings: list[str] = []
+    planned, actual = est.total, pm.work_entry_count
+    score = 1.0
+    if actual > planned:
+        score = planned / actual
+        warnings.append(
+            f"{actual} dev session(s) exceeded the session-est total of {planned}"
+        )
+    if pm.remediation_count:
+        warnings.append(
+            f"{pm.remediation_count} remediation round(s) (changes-requested rework)"
+        )
+    return ScoreComponent(SCORE_ESTIMATE, _clamp01(score), 1.0, tuple(warnings))
+
+
+def _score_knowledge(pm: ProtocolMetrics, rm: RunMetrics) -> ScoreComponent:
+    """Pack-determinable knowledge-maintenance hygiene: close-out/archive
+    reconciliation, malformed prefetch, and repeated evidence degradation. (The
+    ``.ai/`` file-change and archived-blocker signals are not derivable from the
+    pack — see the module docstring — and are intentionally omitted, not guessed.)"""
+    warnings: list[str] = []
+    penalty = 0.0
+    if pm.completed and rm.target_source != SOURCE_ARCHIVED:
+        penalty += _P_CLOSEOUT
+        warnings.append(
+            "completed task is not archived (close-out/index reconciliation missing)"
+        )
+    if pm.prefetch_present and not pm.prefetch_wellformed:
+        penalty += _P_PREFETCH
+        warnings.append(
+            "prefetch is present but malformed (expected a list of .ai/*.md paths)"
+        )
+    if rm.warning_count >= _WARN_THRESHOLD:
+        penalty += _P_REPEATED_WARN
+        warnings.append(f"repeated missing-evidence warnings ({rm.warning_count})")
+    return ScoreComponent(SCORE_KNOWLEDGE, _clamp01(1.0 - penalty), 1.0, tuple(warnings))
