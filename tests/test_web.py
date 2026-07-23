@@ -1069,6 +1069,79 @@ def test_overview_panels_are_responsive():
     assert ".overview-panels > .overview-attention" in css
 
 
+# ---- subscription usage on overview -------------------------------------------
+#      (2026-07-24-agent-subscription-usage-overview, session-2)
+#
+# The Overview gains an independent, display-only "Subscription usage" section:
+# separate Claude and Codex cards over GET /api/usage (a sixth best-effort
+# source), each with per-window used/remaining meters, plan, reset time, and
+# freshness, plus explicit unavailable/stale states. It is deliberately its own
+# section, laid out below the attention/activity/outcomes grid, and never gates
+# anything. Rendering/degradation/stale/independence behaviour is verified by the
+# jsc keyboard harness (tests/keyboard_harness.js, scenarioSubscriptionUsage);
+# these pin the served-asset wiring/boundary, like the overview checks above.
+
+
+def test_overview_usage_is_a_sixth_best_effort_source():
+    body = app_js()
+    # /api/usage joins loadOverview's parallel best-effort sources; a failed fetch
+    # normalizes to null (this section only), like the other five.
+    assert '"/api/usage"' in body
+    assert "subscriptionUsagePanel" in body
+    assert "usageData ? usageData.providers" in body
+
+
+def test_overview_usage_section_is_independent_and_display_only():
+    body = app_js()
+    # Its own section heading, painted OUTSIDE the overview-panels grid so quota
+    # never lays out as an operational/health panel.
+    assert "Subscription usage" in body
+    assert "overview-usage" in body
+    # Two independent provider cards; one unavailable never suppresses the other.
+    assert "usageCard" in body
+    assert "Claude" in body and "Codex" in body
+    # A usage-source failure degrades only this section.
+    assert "Subscription usage is unavailable." in body
+
+
+def test_overview_usage_is_percent_first_and_explicit():
+    body = app_js()
+    # Percent-first: an exact count only when the provider gives a real numeric
+    # limit, otherwise a percentage, and an explicit "usage unknown" instead of a
+    # misleading 0% for a missing figure (unavailable-not-zero).
+    assert "usageWindowReadout" in body
+    assert "% used" in body
+    assert "usage unknown" in body
+    assert "w.limit != null && w.used != null" in body
+    # Unavailable and stale are explicit states, not zero usage.
+    assert "usageFreshness" in body
+    assert "last observed " in body
+    assert "usage-stale" in body
+
+
+def test_overview_usage_never_exposes_reset_credit_identifiers():
+    body = app_js()
+    # Only the aggregate reset-credit fields the model already sanitized are
+    # rendered — has_credits / unlimited / balance — never a reset-credit id.
+    assert "usageCredits" in body
+    assert "reset credits" in body
+    assert "c.balance" in body
+
+
+def test_overview_usage_styles():
+    css = styles_css()
+    assert ".usage-cards" in css
+    assert ".usage-card" in css
+    assert ".usage-bar" in css
+    assert ".usage-bar-fill" in css
+    # Neutral->warn capacity idiom (mirrors .ctx-meter), no red/danger alarm.
+    assert ".usage-bar.high .usage-bar-fill" in css
+    # An unknown window gets a distinct track, not a 0% fill.
+    assert ".usage-bar.unknown" in css
+    # Two-up on a wider screen, like the metric row.
+    assert "min-width: 520px" in css
+
+
 # ---- dashboard accessibility (2026-07-17-dashboard-accessibility) -------------
 #
 # Structural a11y wiring pinned at the served-asset boundary, like every other

@@ -947,6 +947,149 @@ code {
   }
 }
 
+/* ---- subscription usage (agent capacity) ---- */
+
+/* Display-only capacity cards, one per provider, in their own section below the
+   operational panels — quota is ambient info, deliberately kept out of the
+   attention/activity flow so it never reads as a health signal. Two-up once
+   there is room, like the metric row; a plain stack on a phone. */
+.usage-cards {
+  gap: 12px;
+}
+
+@media (min-width: 520px) {
+  .usage-cards {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.usage-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.usage-provider {
+  font-weight: 650;
+}
+
+/* The plan/tier chip: a low-key monospace console tag, so it reads as metadata
+   next to the provider name rather than a status. */
+.usage-plan {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+
+.usage-windows {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.usage-window {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.uw-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* Window duration label ("5h"/"7d"): a small console marker. */
+.uw-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+/* The figure reads as a gauge value: tabular monospace. */
+.uw-readout {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.uw-meta {
+  font-size: 12px;
+}
+
+/* Capacity gauge: the same neutral->warn idiom as the context meter
+   (.ctx-meter), so a nearly-exhausted window flags amber without implying an
+   error/health state. The "unknown" track (provider gave no percentage) shows a
+   hatched fill rather than a misleading 0% bar. */
+.usage-bar {
+  display: block;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  overflow: hidden;
+}
+
+.usage-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--run-fg);
+}
+
+.usage-bar.high .usage-bar-fill {
+  background: var(--warn-fg);
+}
+
+.usage-bar.unknown {
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--surface-2),
+    var(--surface-2) 4px,
+    var(--border) 4px,
+    var(--border) 8px
+  );
+}
+
+.usage-credits,
+.usage-fresh {
+  font-size: 12px;
+}
+
+/* A "stale" flag on a freshness line: this figure is past the freshness
+   threshold — shown, but marked last-observed. Warn-coloured to draw the eye
+   without alarming; it carries no operational meaning. */
+.usage-flag {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--warn-fg);
+  border: 1px solid var(--warn-fg);
+  border-radius: 999px;
+  padding: 0 6px;
+  margin-left: 6px;
+}
+
+.usage-unavailable .usage-detail {
+  margin: 0;
+}
+
 /* ---- recent commits (repo detail) ---- */
 
 .commits {

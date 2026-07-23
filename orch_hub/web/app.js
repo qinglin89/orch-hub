@@ -4800,6 +4800,181 @@
     );
   }
 
+  // ---- subscription usage (agent capacity) ----
+  //
+  // A display-only, best-effort view of Claude and Codex subscription rate-limit
+  // usage from GET /api/usage. It is deliberately its OWN section, kept out of the
+  // attention/activity/outcomes grid: capacity/quota is ambient information and
+  // must never read as a health signal — it feeds no readiness, attention, or
+  // run/intake decision (the API is display-only and this panel adds no attention
+  // item). Each provider is independent; one unavailable never suppresses the
+  // other. Percent-first throughout: a missing figure reads as unknown/unavailable,
+  // never a misleading 0% (the scope's unavailable-not-zero rule).
+
+  // Human provider name from the stable provider key; falls back to a capitalized
+  // raw key so an unknown future provider still renders sanely.
+  const USAGE_PROVIDER_NAMES = { claude: "Claude", codex: "Codex" };
+  function usageProviderName(provider) {
+    if (USAGE_PROVIDER_NAMES[provider]) return USAGE_PROVIDER_NAMES[provider];
+    if (!provider) return "Provider";
+    return provider.charAt(0).toUpperCase() + provider.slice(1);
+  }
+
+  // A window's short title: the provider's own duration label ("5h"/"7d") when it
+  // supplied one, else a humanized machine key. Never invented from nothing.
+  const USAGE_WINDOW_KEYS = {
+    five_hour: "5h",
+    seven_day: "7d",
+    primary: "primary",
+    secondary: "secondary",
+  };
+  function usageWindowTitle(w) {
+    if (w.label) return w.label;
+    return USAGE_WINDOW_KEYS[w.key] || w.key || "window";
+  }
+
+  // Forward-looking reset time: "resets in 2h" / "resets in 3d", falling back to
+  // the raw value for anything unparseable and to "reset due" once it is past.
+  // Mirrors formatCommitTime's trust-the-hub-value stance (never renders "NaN").
+  function formatResetTime(iso) {
+    if (!iso) return "";
+    const then = new Date(iso);
+    if (isNaN(then.getTime())) return "resets " + iso;
+    const secs = Math.floor((then.getTime() - Date.now()) / 1000);
+    if (secs <= 0) return "reset due";
+    if (secs < 60) return "resets in <1m";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return "resets in " + mins + "m";
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return "resets in " + hrs + "h";
+    const days = Math.floor(hrs / 24);
+    return "resets in " + days + "d";
+  }
+
+  // The primary readout for a window. Percent-first: an exact count is shown ONLY
+  // when the provider gives a real numeric limit (neither Claude nor Codex does
+  // today) — the UI never invents a fixed message total. With no percentage
+  // either, it reads "usage unknown", never a misleading 0%.
+  function usageWindowReadout(w) {
+    if (w.limit != null && w.used != null)
+      return escapeHtml(w.used + " / " + w.limit);
+    if (w.used_percent != null) return escapeHtml(w.used_percent + "% used");
+    return "usage unknown";
+  }
+
+  // A used/remaining meter for one window. Fill width is the used percentage
+  // (derived from an exact count only when the provider gave a real limit); with
+  // no percentage at all the track carries an explicit "unknown" state instead of
+  // rendering as 0% used. The bar is aria-hidden — the readout + meta text already
+  // carry the figures for a screen reader (mirrors the .ctx-meter idiom).
+  function usageWindow(w) {
+    let pct = w.used_percent;
+    if (pct == null && w.limit != null && w.used != null && w.limit > 0)
+      pct = Math.round((w.used / w.limit) * 1000) / 10;
+    const known = pct != null;
+    const clamped = known ? Math.max(0, Math.min(100, pct)) : 0;
+    const high = known && clamped >= 90 ? " high" : "";
+    const remaining =
+      w.remaining_percent != null ? w.remaining_percent + "% left" : "";
+    const meta = [remaining, formatResetTime(w.resets_at)]
+      .filter(Boolean)
+      .join(" · ");
+    return (
+      `<div class="usage-window">` +
+      `<div class="uw-head">` +
+      `<span class="uw-label">${escapeHtml(usageWindowTitle(w))}</span>` +
+      `<span class="uw-readout">${usageWindowReadout(w)}</span>` +
+      `</div>` +
+      `<span class="usage-bar${known ? "" : " unknown"}${high}" aria-hidden="true">` +
+      (known ? `<span class="usage-bar-fill" style="width: ${clamped}%"></span>` : "") +
+      `</span>` +
+      (meta ? `<div class="uw-meta muted">${escapeHtml(meta)}</div>` : "") +
+      `</div>`
+    );
+  }
+
+  // Optional Codex reset-credit note: only the aggregate has-credits / unlimited /
+  // balance the provider exposes — never a reset-credit identifier (the model
+  // drops those by construction). Reading this never spends a credit. Rendered
+  // only when there is something positive to say, so it stays out of the way.
+  function usageCredits(c) {
+    if (!c) return "";
+    let text = "";
+    if (c.unlimited === true) text = "reset credits: unlimited";
+    else if (c.has_credits === true)
+      text =
+        "reset credits available" +
+        (c.balance != null ? " (" + c.balance + ")" : "");
+    if (!text) return "";
+    return `<div class="usage-credits muted">${escapeHtml(text)}</div>`;
+  }
+
+  // The observation-freshness line: when the hub last saw this provider's figures,
+  // plus an explicit "last observed" flag when the data is past the staleness
+  // threshold (the figures stay shown — flagged, not hidden). Absent when the
+  // provider supplied no observation time.
+  function usageFreshness(p) {
+    if (!p.observed_ts) return "";
+    const when = formatCommitTime(p.observed_ts);
+    const label = (p.stale ? "last observed " : "observed ") + when;
+    const flag = p.stale ? ` <span class="usage-flag">stale</span>` : "";
+    return `<div class="usage-fresh muted">${escapeHtml(label)}${flag}</div>`;
+  }
+
+  // One provider card. Available → plan, per-window meters, optional credits, and
+  // freshness (with a "last observed" flag when stale — still shown). Unavailable
+  // → the provider's own reason (e.g. "no Claude usage observed yet"), explicitly,
+  // instead of a zero-usage bar. Both are display-only.
+  function usageCard(p) {
+    const head =
+      `<div class="usage-head">` +
+      `<span class="usage-provider">${escapeHtml(usageProviderName(p.provider))}</span>` +
+      (p.available && p.plan
+        ? `<span class="usage-plan">${escapeHtml(p.plan)}</span>`
+        : "") +
+      `</div>`;
+    if (!p.available)
+      return (
+        `<li class="card usage-card usage-unavailable">` +
+        head +
+        `<p class="usage-detail muted">${escapeHtml(
+          p.detail || "Usage is unavailable."
+        )}</p></li>`
+      );
+    const windows = (p.windows || []).length
+      ? (p.windows || []).map(usageWindow).join("")
+      : `<p class="usage-detail muted">No usage windows reported.</p>`;
+    return (
+      `<li class="card usage-card${p.stale ? " usage-stale" : ""}">` +
+      head +
+      `<div class="usage-windows">${windows}</div>` +
+      usageCredits(p.credits) +
+      usageFreshness(p) +
+      `</li>`
+    );
+  }
+
+  // The Subscription usage section: one card per provider from GET /api/usage. A
+  // null source (the fetch failed) degrades ONLY this section to unavailable — it
+  // never blocks the other panels and never adds a Needs attention item (capacity
+  // is not an operational problem). Its own section, kept out of the
+  // attention/activity/outcomes grid, so quota never reads as health.
+  function subscriptionUsagePanel(usage) {
+    const head = `<section class="section overview-usage"><h2>Subscription usage</h2>`;
+    const foot = `</section>`;
+    if (usage === null)
+      return (
+        head + `<p class="muted">Subscription usage is unavailable.</p>` + foot
+      );
+    if (!usage.length)
+      return head + `<p class="muted">No subscription usage reported.</p>` + foot;
+    return (
+      head +
+      `<ul class="list usage-cards">${usage.map(usageCard).join("")}</ul>` +
+      foot
+    );
+  }
+
   // ---- overview data + paint + bounded refresh ----
   //
   // renderOverview is split into loadOverview (fetch+normalize) and paintOverview
@@ -4812,13 +4987,14 @@
   // but empty. overviewSource swallows non-401 errors to null, so Promise.all
   // only rejects on a 401 (api() already re-gated; the caller returns).
   async function loadOverview() {
-    const [reposData, tasksData, runsData, escData, historyData] =
+    const [reposData, tasksData, runsData, escData, historyData, usageData] =
       await Promise.all([
         overviewSource("/api/repos"),
         overviewSource("/api/tasks"),
         overviewSource("/api/runs"),
         overviewSource("/api/escalations"),
         overviewSource("/api/history/runs?limit=" + OVERVIEW_HISTORY_LIMIT),
+        overviewSource("/api/usage"),
       ]);
     return {
       repos: reposData ? reposData.repos || [] : null,
@@ -4826,6 +5002,9 @@
       runs: runsData ? runsData.runs || [] : null,
       escalations: escData ? escData.escalations || [] : null,
       history: historyData ? historyData.runs || [] : null,
+      // The whole /api/usage payload is `{providers:[...]}`; a failed fetch is
+      // null (this section only). [] = loaded but no providers reported.
+      usage: usageData ? usageData.providers || [] : null,
     };
   }
 
@@ -4848,7 +5027,11 @@
       attentionPanel(data.repos, data.runs, data.escalations) +
       currentActivityPanel(data.runs) +
       recentOutcomesPanel(data.history) +
-      `</div>`;
+      `</div>` +
+      // Its own section AFTER the operational grid: display-only capacity, kept
+      // clear of the attention/activity/outcomes flow so quota never reads as
+      // health. A failed usage source degrades only this section.
+      subscriptionUsagePanel(data.usage);
   }
 
   // True when focus sits on something inside the repaintable Overview body. A

@@ -847,6 +847,41 @@ var TASKS = {
   ],
 };
 
+// The display-only subscription-usage payload (SubscriptionUsage.to_dict shape):
+// both providers available, Claude with a 5h+7d window pair, Codex with one
+// primary window plus reset credits. resets_at is far-future so the forward
+// reset formatter is deterministic regardless of the harness wall clock; the
+// scenario overrides this route for the unavailable/stale/unknown paths.
+var USAGE = {
+  providers: [
+    {
+      provider: "claude",
+      available: true,
+      plan: "max",
+      windows: [
+        { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+        { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: "2999-01-05T00:00:00Z", used: null, limit: null },
+      ],
+      credits: null,
+      observed_ts: "2026-07-20T08:00:00Z",
+      stale: false,
+      detail: null,
+    },
+    {
+      provider: "codex",
+      available: true,
+      plan: "prolite",
+      windows: [
+        { key: "primary", label: "5h", window_minutes: 300, used_percent: 73, remaining_percent: 27, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+      ],
+      credits: { has_credits: true, unlimited: false, balance: "3" },
+      observed_ts: "2026-07-20T07:00:00Z",
+      stale: false,
+      detail: null,
+    },
+  ],
+};
+
 // A deterministic Layer 1 static-metrics report (StaticMetricsReport.to_dict
 // shape), rich enough to exercise the scores, run/session rollup, protocol
 // facts, an n/a (non-assessable) axis, a per-score warning, and a pack-level
@@ -1037,6 +1072,7 @@ function installRoutes(opts) {
       : [],
   });
   route("GET", "/api/history/runs", { runs: [] });
+  route("GET", "/api/usage", USAGE);
   route("GET", "/api/intakes", { intakes: [] });
   route("GET", "/api/repos/" + REPO + "/tasks", { repos: [TASKS.repos[0]] });
   route("GET", "/api/repos/" + REPO + "/commits", { available: true, commits: [] });
@@ -2602,6 +2638,255 @@ async function scenarioLiveRunReadiness() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// Subscription usage: the display-only Overview capacity section over /api/usage.
+// Drives the available, high-usage, numeric-limit, unknown-window, unavailable,
+// stale, and source-failure paths — pinning percent-first rendering, explicit
+// unavailable/stale (never a zero bar), provider independence, and the invariant
+// that usage is a separate section that never affects readiness/attention.
+async function scenarioSubscriptionUsage() {
+  installRoutes({ waiting: false }); // default USAGE fixture: both providers available
+  var cards = function () {
+    return doc.querySelectorAll("#view .usage-card");
+  };
+  var textOf = function (sel) {
+    var el = doc.querySelector(sel);
+    return el ? el.textContent.trim() : null;
+  };
+  var reposReady = function () {
+    var tiles = doc.querySelectorAll("#view .metric");
+    for (var i = 0; i < tiles.length; i++) {
+      var label = tiles[i].querySelector(".metric-label");
+      if (label && label.textContent.trim() === "repos ready")
+        return (tiles[i].querySelector(".metric-value") || {}).textContent;
+    }
+    return null;
+  };
+
+  // ---- 1) both providers available ----
+  await navigate("#/overview");
+  check(
+    "usage: the Subscription usage section renders",
+    !!doc.querySelector("#view .overview-usage"),
+    "no .overview-usage section on the overview"
+  );
+  eq(
+    "usage: the section names itself",
+    textOf("#view .overview-usage h2"),
+    "Subscription usage"
+  );
+  // Its OWN section: NOT nested inside the attention/activity/outcomes grid, so
+  // capacity never lays out as an operational panel (descendant match → null).
+  check(
+    "usage: the section sits outside the operational panels grid",
+    doc.querySelector(".overview-panels .overview-usage") === null,
+    "the usage section is nested inside .overview-panels"
+  );
+  eq("usage: one card per provider", cards().length, 2);
+  var claude = cards()[0];
+  var codex = cards()[1];
+  eq(
+    "usage: the first card is Claude",
+    claude.querySelector(".usage-provider").textContent,
+    "Claude"
+  );
+  eq(
+    "usage: the second card is Codex",
+    codex.querySelector(".usage-provider").textContent,
+    "Codex"
+  );
+  eq(
+    "usage: the plan/tier is shown",
+    claude.querySelector(".usage-plan").textContent,
+    "max"
+  );
+  // Claude has a 5h + 7d window; Codex a single primary window.
+  eq("usage: Claude shows both windows", claude.querySelectorAll(".usage-window").length, 2);
+  eq("usage: Codex shows its one window", codex.querySelectorAll(".usage-window").length, 1);
+  check(
+    "usage: a window draws a used-capacity bar fill",
+    !!claude.querySelector(".usage-bar-fill"),
+    "no .usage-bar-fill in an available window"
+  );
+  check(
+    "usage: the used percentage is shown as the readout",
+    claude.textContent.indexOf("42% used") !== -1,
+    claude.textContent
+  );
+  check(
+    "usage: remaining capacity is shown",
+    claude.textContent.indexOf("58% left") !== -1,
+    claude.textContent
+  );
+  check(
+    "usage: a forward reset time is shown",
+    claude.textContent.indexOf("resets") !== -1,
+    claude.textContent
+  );
+  check(
+    "usage: Codex reset-credit availability is shown (no identifier)",
+    codex.textContent.indexOf("reset credits available (3)") !== -1,
+    codex.textContent
+  );
+  check(
+    "usage: an observation-freshness line is shown",
+    !!claude.querySelector(".usage-fresh") &&
+      claude.querySelector(".usage-fresh").textContent.indexOf("observed ") === 0,
+    claude.querySelector(".usage-fresh") && claude.querySelector(".usage-fresh").textContent
+  );
+  // Display-only: the usage source does not touch the readiness metric or create
+  // an attention row (the default repo is ready → attention is empty).
+  eq("usage: it does not disturb the repos-ready metric", reposReady(), "1/1");
+  eq("usage: it creates no Needs attention row", doc.querySelectorAll("#view .attn").length, 0);
+
+  // ---- 2) high usage flags amber (neutral→warn capacity idiom, not an alarm) ----
+  route("GET", "/api/usage", {
+    providers: [
+      {
+        provider: "claude",
+        available: true,
+        plan: "max",
+        windows: [
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 96, remaining_percent: 4, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: "2026-07-20T08:00:00Z",
+        stale: false,
+        detail: null,
+      },
+    ],
+  });
+  await navigate("#/repos"); // leave + return so the panel repaints from the new route
+  await navigate("#/overview");
+  check(
+    "usage: a nearly-exhausted window flags its bar high",
+    !!doc.querySelector("#view .usage-bar.high"),
+    "no .usage-bar.high for a 96%-used window"
+  );
+
+  // ---- 3) percent-first: an exact count shows only with a real numeric limit ----
+  route("GET", "/api/usage", {
+    providers: [
+      {
+        provider: "codex",
+        available: true,
+        plan: "pro",
+        windows: [
+          // A provider-supplied numeric limit → exact count, never invented.
+          { key: "primary", label: "5h", window_minutes: 300, used_percent: null, remaining_percent: null, resets_at: "2999-01-01T00:00:00Z", used: 100, limit: 500 },
+          // No count and no percentage → explicit unknown, NOT a 0% bar.
+          { key: "secondary", label: "7d", window_minutes: 10080, used_percent: null, remaining_percent: null, resets_at: null, used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: "2026-07-20T08:00:00Z",
+        stale: false,
+        detail: null,
+      },
+    ],
+  });
+  await navigate("#/repos");
+  await navigate("#/overview");
+  check(
+    "usage: an exact numeric limit renders as a count",
+    doc.querySelector("#view .usage-card").textContent.indexOf("100 / 500") !== -1,
+    doc.querySelector("#view .usage-card").textContent
+  );
+  check(
+    "usage: a missing figure reads unknown, never 0% used",
+    doc.querySelector("#view .usage-card").textContent.indexOf("usage unknown") !== -1,
+    "the unknown window did not render an explicit unknown readout"
+  );
+  var unknownBar = doc.querySelector("#view .usage-bar.unknown");
+  check("usage: the unknown window uses the unknown track", !!unknownBar, "no .usage-bar.unknown");
+  check(
+    "usage: the unknown track carries no fill (not a 0% bar)",
+    unknownBar && unknownBar.querySelector(".usage-bar-fill") === null,
+    "an unknown window rendered a bar fill"
+  );
+
+  // ---- 4) one provider unavailable → explicit reason, the other still renders ----
+  route("GET", "/api/usage", {
+    providers: [
+      { provider: "claude", available: false, plan: null, windows: [], credits: null, observed_ts: null, stale: false, detail: "no Claude usage observed yet" },
+      USAGE.providers[1], // codex still available
+    ],
+  });
+  await navigate("#/repos");
+  await navigate("#/overview");
+  var unavail = doc.querySelector("#view .usage-card.usage-unavailable");
+  check("usage: an unavailable provider renders an unavailable card", !!unavail, "no .usage-unavailable card");
+  check(
+    "usage: the unavailable card states the provider's own reason",
+    unavail && unavail.textContent.indexOf("no Claude usage observed yet") !== -1,
+    unavail && unavail.textContent
+  );
+  check(
+    "usage: an unavailable provider draws no capacity bar (not zero usage)",
+    unavail && unavail.querySelector(".usage-bar") === null,
+    "the unavailable card drew a usage bar"
+  );
+  check(
+    "usage: the other provider still renders (independent providers)",
+    doc.querySelectorAll("#view .usage-card").length === 2 &&
+      doc.querySelectorAll("#view .usage-card.usage-unavailable").length === 1 &&
+      !!doc.querySelectorAll("#view .usage-card")[1].querySelector(".usage-bar-fill"),
+    "the available provider was suppressed by the unavailable one"
+  );
+
+  // ---- 5) stale → still shown, flagged last-observed ----
+  route("GET", "/api/usage", {
+    providers: [
+      {
+        provider: "claude",
+        available: true,
+        plan: "max",
+        windows: [
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: "2026-07-20T08:00:00Z",
+        stale: true,
+        detail: null,
+      },
+    ],
+  });
+  await navigate("#/repos");
+  await navigate("#/overview");
+  var staleCard = doc.querySelector("#view .usage-card.usage-stale");
+  check("usage: a stale observation marks its card", !!staleCard, "no .usage-card.usage-stale");
+  check(
+    "usage: a stale card still shows its figures (flagged, not hidden)",
+    staleCard && !!staleCard.querySelector(".usage-bar-fill"),
+    "the stale card dropped its usage bar"
+  );
+  check(
+    "usage: a stale card carries a last-observed flag",
+    staleCard &&
+      !!staleCard.querySelector(".usage-flag") &&
+      staleCard.querySelector(".usage-fresh").textContent.indexOf("last observed ") === 0,
+    staleCard && staleCard.querySelector(".usage-fresh") && staleCard.querySelector(".usage-fresh").textContent
+  );
+
+  // ---- 6) source failure → only this section degrades; the rest stays up ----
+  delete ROUTES["GET /api/usage"]; // fetch → 404 → overviewSource returns null
+  await navigate("#/repos");
+  await navigate("#/overview");
+  check(
+    "usage: a failed usage source degrades only this section",
+    (textOf("#view .overview-usage") || "").indexOf("Subscription usage is unavailable.") !== -1,
+    textOf("#view .overview-usage")
+  );
+  check(
+    "usage: the other overview panels still load when usage fails",
+    !!doc.querySelector("#view .overview-metrics") &&
+      !!doc.querySelector("#view .overview-attention"),
+    "a usage-source failure blanked the rest of the overview"
+  );
+  eq("usage: a usage failure does not disturb the repos-ready metric", reposReady(), "1/1");
+  eq("usage: a usage failure creates no Needs attention row", doc.querySelectorAll("#view .attn").length, 0);
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -2618,6 +2903,7 @@ async function scenarioLiveRunReadiness() {
     await scenarioStaleRoute();
     await scenarioRunHistory();
     await scenarioLiveRunReadiness();
+    await scenarioSubscriptionUsage();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));
