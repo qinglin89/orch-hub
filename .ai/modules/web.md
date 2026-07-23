@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 1a28122553522038c00c5d2b23aa4cd078a77903
 ---
 
 # Modules: Web and Operations
@@ -147,13 +147,23 @@ The Overview route (`#/overview`) aggregates existing protected repo/task/run/
 escalation/history payloads into summary metrics, prioritized attention, live
 activity, and recent outcomes; each non-401 source failure degrades only its
 panel, and its chained background refresh is registered before the initial load
-so router teardown cancels stale paints and polling after navigation.
+so router teardown cancels stale paints and polling after navigation. Its repos
+ready metric and readiness-derived Attention rows use the same display-readiness
+rule as repo views: raw-ready, or active/waiting live run with `git_clean` as
+the sole raw failure.
 
-Repo cards show readiness plus a bare leading run-state dot before the repo name
-(yellow waiting, green active, gray idle; state word only in title/aria text);
-ready cards add latest commit time and active task count from task inventory.
-Cards and repo detail show a yellow "Housekeeping pending" warning from the
-shared repo payload when `.ai/.housekeeping-pending` exists.
+Repo cards and repo detail present readiness through a shared display rule over
+raw `/api/repos` readiness plus `/api/runs`: show READY when raw-ready, or while
+an active/waiting live run has only `git_clean` failing; missing run data,
+ended/idle runs, and additional failures fall back to raw readiness. This is
+presentation-only: Start controls, intake, backend gates, and
+`check_readiness` still consume raw readiness, and waiting runs keep their
+pending-answer Attention item. Repo cards also show a bare leading run-state dot
+before the repo name (yellow waiting, green active, gray idle; state word only
+in title/aria text); display-ready cards add latest commit time and active task
+count from task inventory. Cards and repo detail show a yellow "Housekeeping
+pending" warning from the shared repo payload when `.ai/.housekeeping-pending`
+exists.
 Task cards use only left-border run accents, with no dot/word row, distinct
 from frontmatter status badges. Repo detail adds a recent-commits section with
 unavailable and empty-history states.

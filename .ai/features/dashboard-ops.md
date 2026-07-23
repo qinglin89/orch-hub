@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 1a28122553522038c00c5d2b23aa4cd078a77903
 ---
 
 # Features: Dashboard Ops
@@ -63,8 +63,8 @@ Implemented behavior:
   (`#/overview`). It remains client-side over existing protected APIs,
   parallel-fetching repos, tasks, live runs, escalations, and run history into
   summary metrics, prioritized attention items, current activity, and recent
-  outcomes. Waiting questions, readiness failures, housekeeping, live runs, and
-  ended runs deep-link to existing task/repo/log views.
+  outcomes. Waiting questions, display-readiness failures, housekeeping, live
+  runs, and ended runs deep-link to existing task/repo/log views.
 - Overview fetches are per-source best-effort: non-401 failures degrade only
   the affected panel to an unavailable state, while 401 still returns to the
   login gate. Its route-scoped refresh uses a chained timeout, registers its
@@ -77,13 +77,20 @@ Implemented behavior:
   views, or handoffs. Non-router re-renders with no navigation capture the live
   generation and still paint; feature-level poll/stream/refresh handles still
   own their own cancellation.
-- Repo list renders readiness from `/api/repos` and a tri-state run signal from
-  `/api/runs` as a bare leading dot before the repo name: yellow waiting, green
-  active non-waiting, gray idle; the state word exists only in title/aria text.
-  Ready cards add latest commit time from the shared repo `commit` field plus
-  active task count from `/api/tasks` task-inventory rows; not-ready cards keep
-  readiness failure reasons. Cards render a compact yellow "Housekeeping
-  pending" warning when `/api/repos` reports `housekeeping_pending`.
+- Repo list, repo detail, Overview `REPOS READY`, and readiness-derived
+  Attention rows share one display-readiness rule over raw `/api/repos`
+  readiness plus `/api/runs`: display READY when raw-ready, or when an
+  active/waiting live run exists and `git_clean` is the sole raw failure.
+  Missing run data, ended/idle runs, and any additional failure fall back to raw
+  readiness; Start controls, intake, backend gates, and `check_readiness` still
+  consume raw readiness, and waiting runs keep their pending-answer Attention
+  item. Repo cards also render a tri-state run signal as a bare leading dot
+  before the repo name: yellow waiting, green active non-waiting, gray idle; the
+  state word exists only in title/aria text. Display-ready cards add latest
+  commit time from the shared repo `commit` field plus active task count from
+  `/api/tasks` task-inventory rows; not-ready cards keep readiness failure
+  reasons. Cards render a compact yellow "Housekeeping pending" warning when
+  `/api/repos` reports `housekeeping_pending`.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
   `index_present`, and `missing`/`unknown` sentinel semantics. The all-tasks
