@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "cec19abe4a7ee64945ca177277a135f225a5360e35a35239c64009f3684532af",
+  "canonical_payload_sha256": "fb7ba0a6f291124c1ce62789d8fc52a2e43659de7440beeae46637fe8c03b321",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -153,27 +153,39 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/.env.example",
-      "canonical_sha256": "9ce5c22f171f4327f3acbc30557a98f9b89ba1705589c1405f86c0130e0c4220",
-      "canonical_size_bytes": 1071,
+      "canonical_sha256": "b021b314a1b3b75cd8d107da86fe3466252938c53633db0dd6a03867aeb956ee",
+      "canonical_size_bytes": 1387,
       "target_relative_path": ".cursor/orchestrator/.env.example"
     },
     {
+      "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-config-profiles.md",
+      "canonical_sha256": "ba09d3d8a8d0a327449abe3513064c1c896c1ff69d50fd665838813dd1d1a9ef",
+      "canonical_size_bytes": 8010,
+      "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub-config-profiles.md"
+    },
+    {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub.md",
-      "canonical_sha256": "f6b0acc7ae982f88a6b042374113bab29cc2b0820c8a35128c17b958492d5551",
-      "canonical_size_bytes": 14403,
+      "canonical_sha256": "68352ad1d61db9537116a47d09b1ad58b95a8b42972ede966bdcfefd3cfb8d55",
+      "canonical_size_bytes": 14742,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "da12d0238860270378f3ef06f3942d8b0bccee7317acfea877a9a6f5dc09063f",
-      "canonical_size_bytes": 33496,
+      "canonical_sha256": "a9e1fb0d800201b7f4604491e2fc7bee200841c1d452cefd609aa8996b8888fe",
+      "canonical_size_bytes": 35051,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "8df29dbab2afb4fbfc227bfd34365a86bb8a884216f068ceffce3cb8cb147852",
-      "canonical_size_bytes": 125642,
+      "canonical_sha256": "37ceb50e1529b301f25a676a61a6bb3800b354e9b5b3417d3b2e18be4fc0f3aa",
+      "canonical_size_bytes": 141328,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/orchestrator.toml",
+      "canonical_sha256": "7609d1d81ba3ad10c2afbefb697da74de1b9550a7f15ad3ce393a623cc806a05",
+      "canonical_size_bytes": 1224,
+      "target_relative_path": ".cursor/orchestrator/orchestrator.toml"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/prompts/README.md",
