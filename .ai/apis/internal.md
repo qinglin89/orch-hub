@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # APIs: Internal Interfaces
@@ -62,8 +62,9 @@ target task IO errors fail the build. Persistence writes only
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
 Persisted evaluation listing and artifact reads are structural and contained:
 `list_evaluations` reports newest-first ids plus artifact filenames, while
-`read_artifact` parses `evidence.json`/`static_metrics.json` for a known
-evaluation dir and lets corrupt JSON fail loudly.
+`read_artifact` parses JSON artifacts and `read_text_artifact` reads text
+artifacts such as semantic `report.md` for a known evaluation dir. Corrupt JSON
+fails loudly.
 
 ## Static Metrics Evaluator
 
@@ -88,6 +89,31 @@ atomically into the same evaluation artifact directory, and removes the
 reserved dir on report-write failure. HTTP/dashboard presentation wraps it
 outside the module through the evaluation API routes and Layer 1 dashboard view;
 the evaluator itself never mutates target repos or run records.
+
+## Semantic Evaluator
+
+Input: config, an `EvidencePack` plus `StaticMetricsReport`, or a managed repo
+plus exact task id.
+
+Output: `SemanticReport`, a deterministic Markdown render, and persisted
+`semantic_report.json` plus `report.md` beside the pack/static artifacts.
+
+Behavior: `SemanticEvaluator` is gated by `Config.evaluation_enabled` and raises
+`EvaluationDisabledError` when disabled. `build_semantic_evidence(pack, static)`
+constructs a bounded model input from the task file, static metrics, capped git
+subjects, and explicit omissions; raw logs and unavailable `.ai/` snippets/diffs
+are omitted and lower confidence rather than failing. `build_prompt` requires a
+sentinel-wrapped JSON report. `parse_report` stamps provenance from the harness,
+requires scored rationales and evidence-backed findings, and treats malformed
+model output as `SemanticEvaluationError`. `evaluate(repo, task_id)` mints a
+fresh evaluation dir, writes evidence/static/semantic/Markdown atomically, and
+removes the whole reserved dir on backend/model/schema failure.
+
+`ClaudeSemanticBackend` is the default concrete backend. It runs one stateless
+Claude CLI turn with all built-in tools disabled (`--tools ""`), safe mode,
+no session persistence, plan-mode writes blocked, and a fresh empty cwd outside
+the target repo; this enforces evidence-boundedness structurally rather than
+trusting prompt instructions.
 
 ## Intake Manager
 

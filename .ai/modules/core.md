@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Modules: Core
@@ -46,7 +46,7 @@ Location: `orch_hub/config.py`
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
-`ORCH_HUB_EVAL_ENABLED`, and derived
+`ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, and derived
 `aii-2`/registry file paths:
 
 ```text
@@ -63,6 +63,9 @@ whitespace-only values count as unset; a malformed or out-of-range
 whitespace-only values disable push notifications. `ORCH_HUB_EVAL_ENABLED`
 defaults true and accepts normal truthy/falsy tokens; malformed explicit values
 raise `ValueError`, while falsy values disable evaluation services fail-closed.
+`ORCH_HUB_EVAL_MODEL` selects the semantic evaluator's Claude CLI model and
+defaults to `claude-opus-4-8`; blank/unset uses the default so the backend is
+constructible without launching anything.
 
 ## Models
 
@@ -71,7 +74,7 @@ Location: `orch_hub/models.py`
 Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
 questions, run state, run history, intake state, evaluation target/run links,
-and static-metrics reports.
+static-metrics reports, and semantic reports.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
@@ -98,7 +101,10 @@ serialized payloads. `IntakeEvent` and `IntakeHistoryEntry` expose metadata-only
 intake history. `EvaluationTarget` and `RelatedRun` are the shared shapes for
 evaluation target resolution and run aggregation; `RunRollup`, `RunMetrics`,
 `ProtocolMetrics`, `ScoreComponent`, and `StaticMetricsReport` are the
-deterministic static-metrics output shapes. Evidence composites stay in
+deterministic static-metrics output shapes. `SemanticScore`,
+`SemanticFinding`, `SemanticEvaluatorInfo`, and `SemanticReport` carry Layer 2
+scores, findings, severity/confidence/evidence refs, evaluator identity, and
+suggested improvements. Evidence composites stay in
 `evaluation.py` because they reference `logs.LogSnapshot`, avoiding a
 models/logs import cycle.
 
@@ -168,7 +174,8 @@ and atomically writes `evidence.json` under
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. `list_evaluations`
 enumerates persisted dirs newest-first by `(timestamp, numeric suffix)` and
 reports present artifact filenames; `read_artifact` parses contained artifact
-JSON for the API/dashboard read layer.
+JSON and `read_text_artifact` reads contained text artifacts such as semantic
+`report.md` for the API/dashboard read layer.
 
 Per-run artifact reads are isolated into warnings so corrupt/missing run
 evidence yields a partial pack; target task file IO errors fail loudly because
@@ -205,6 +212,30 @@ or run dirs during scoring. Knowledge-maintenance checks are limited to facts
 the pack actually carries; per-commit touched files and cross-task archived
 blocker references are intentionally omitted until the evidence layer grows
 those inputs.
+
+## Semantic Evaluator
+
+Location: `orch_hub/semantic.py`
+
+Responsibility: compute optional Layer 2 semantic task-quality reports from one
+bounded `EvidencePack` plus its deterministic `StaticMetricsReport`, then
+persist `semantic_report.json` and `report.md` beside `evidence.json` and
+`static_metrics.json` in a fresh evaluation dir. `SemanticEvaluator` shares the
+evaluation gate and raises `EvaluationDisabledError` when disabled. Its evidence
+distillation includes the task file, static report, capped git commit subjects,
+and explicit omissions; raw orchestrator/spawn logs and unavailable `.ai/`
+snippets/diffs stay out of the prompt and lower confidence instead of failing.
+
+The report parser requires sentinel-wrapped JSON, stamps task/evaluation
+provenance itself, rejects malformed schema output, and requires each finding to
+carry at least one non-empty evidence ref. The default `ClaudeSemanticBackend`
+runs one `claude -p --output-format stream-json` turn with `--tools ""`,
+`--safe-mode`, `--no-session-persistence`, and `--permission-mode plan` from a
+fresh empty cwd outside the target repo. That structural boundary is load-bearing:
+the semantic model must judge only the persisted prompt/evidence and cannot read
+live repo files, `.ai/`, raw logs, or secrets. API exposes this as the protected
+`POST /api/repos/{repo_id}/evaluations/{task_id}/semantic` route and evaluation
+detail readback.
 
 ## Intake Manager
 

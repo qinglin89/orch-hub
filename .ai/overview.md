@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Project Overview
@@ -14,7 +14,8 @@ HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
 the mobile dashboard, Bark notifications, remote intake-task, the
-task-evaluation foundation, and deterministic static task metrics: read the
+task-evaluation foundation, deterministic static task metrics, and the optional
+semantic task evaluator: read the
 ai-native-development local registry, list
 managed repos, report launch
 readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
@@ -29,9 +30,11 @@ review, and run a confirmed remote intake loop that drafts a task before
 writing it to the target repo, generate bounded read-only task evidence packs
 under the hub data dir for active or archived tasks, compute deterministic
 protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
-`static_metrics.json` beside the evidence pack, and expose that Layer 1
-evaluation through protected HTTP routes plus the dashboard task-evaluation
-view. Later slices add semantic evaluation and IM bot control.
+`static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
+CLI semantic evaluator that persists `semantic_report.json` plus `report.md`,
+and expose evaluation evidence/static/semantic artifacts through protected HTTP
+routes. The dashboard currently renders the Layer 1 task-evaluation view; later
+slices add semantic UI operations and IM bot control.
 
 ## Users
 
@@ -60,10 +63,14 @@ view. Later slices add semantic evaluation and IM bot control.
   including run/session rollups, taskfile/session-log protocol metrics, five
   score axes, evidence-backed warnings, and `static_metrics.json` persistence
   in the hub-owned evaluation artifact directory.
-- Expose task evaluation as a sidecar HTTP/dashboard workflow: availability,
-  evidence generation/readback, static metrics generation/readback, active or
-  archived task targeting, history selection, and copy/download JSON affordances
-  without semantic model calls or target-repo mutation.
+- Run optional semantic task evaluations from the same bounded evidence/static
+  chain, invoking Claude CLI from an isolated empty cwd with tools disabled so
+  reports are reproducible from persisted artifacts and cannot read target repo
+  files outside the prompt.
+- Expose task evaluation as a sidecar HTTP workflow: availability, evidence
+  generation/readback, static metrics generation/readback, semantic generation/
+  readback, active or archived task targeting, history selection, and artifact
+  inspection without target-repo mutation.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, and log views.
 - Support launchd-based long-lived operation on macOS.
@@ -91,7 +98,8 @@ view. Later slices add semantic evaluation and IM bot control.
 - Local deployment: launchd user-agent template and docs on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
 - Notifications: Bark is the implemented v1 push path; IM bots are later.
-- External command source: `aii-2` from ai-native-development.
+- External command sources: `aii-2` from ai-native-development; Claude CLI for
+  remote intake and semantic evaluation backends.
 
 ## Repository Structure
 
@@ -111,6 +119,7 @@ orch_hub/
   registry.py
   readiness.py
   runs.py
+  semantic.py
   static_metrics.py
   logs.py
   notifications.py

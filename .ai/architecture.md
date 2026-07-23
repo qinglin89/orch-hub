@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Architecture
@@ -8,7 +8,7 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 orch-hub is a local control plane for remotely inspecting managed repos,
 starting deployed orchestrator runs, answering human-input prompts, reading run
 state, drafting new tasks through a confirmed intake loop, and building plus
-viewing read-only task-evaluation evidence/static-metrics artifacts. It coordinates existing systems
+viewing read-only task-evaluation evidence/static/semantic artifacts. It coordinates existing systems
 rather than replacing them:
 ai-native-development remains the managed-repo registry, target repos own their
 task files and deployed orchestrator payloads, and orch-hub owns only its
@@ -145,10 +145,16 @@ adds bounded per-run history/session/log/spawn diagnostics plus a best-effort
 git commit window, and persists `evidence.json` under the hub data dir. The
 static metrics layer computes deterministic, non-semantic run/session,
 taskfile/session-log, score, confidence, and warning rollups from that evidence
-and persists `static_metrics.json` beside `evidence.json`. Protected HTTP
-routes expose availability, evidence/static generation, evaluation history, and
-artifact readback; the dashboard renders the Layer 1 sidecar with copy/download
-JSON affordances and never invokes a semantic model.
+and persists `static_metrics.json` beside `evidence.json`. The semantic layer
+builds a model prompt from the persisted evidence/static chain, records omitted
+inputs such as `.ai/` snippets/diffs and raw logs as confidence degradation, and
+persists `semantic_report.json` plus `report.md` in the same evaluation dir.
+Its default Claude CLI backend runs from an empty non-repo cwd with built-in
+tools disabled, safe mode, no session persistence, and plan-mode writes blocked,
+so the model cannot read live target-repo state outside the prompt. Protected
+HTTP routes expose availability, evidence/static/semantic generation,
+evaluation history, and artifact readback; the dashboard currently renders the
+Layer 1 sidecar with copy/download JSON affordances.
 
 ## Component Boundaries
 
@@ -164,8 +170,12 @@ JSON affordances and never invokes a semantic model.
 - Static metrics owns deterministic scoring over evidence packs and persists
   `static_metrics.json` beside the pack; it does not perform semantic model
   calls or mutate target tasks/run state.
+- Semantic evaluation owns model-judged task/process reports over bounded
+  evidence plus static metrics, persists `semantic_report.json`/`report.md`
+  beside the pack, and enforces read isolation in the backend rather than by
+  prompt instruction alone.
 - Evaluation API/dashboard presentation owns sidecar routing, active/archive
-  target display, deterministic report rendering, and local-inspection
+  target display, deterministic/semantic artifact readback, and local-inspection
   affordances; it does not gate run control or expose raw logs inline.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
@@ -190,7 +200,7 @@ JSON affordances and never invokes a semantic model.
 - FastAPI and uvicorn for the HTTP service.
 - launchd for resident macOS service operation.
 - Optional Bark push endpoint when configured.
-- Claude CLI for the concrete remote intake backend.
+- Claude CLI for the concrete remote intake backend and semantic evaluator.
 - Tailscale or an equivalent private network for remote access.
 
 ## Invariants

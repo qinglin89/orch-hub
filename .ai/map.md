@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Project Map
@@ -12,7 +12,8 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | implemented; ai-native-development registry is source of truth; absolute-path `aii-2` first, registry-file fallback; readiness JSON lists failed checks only; commit and housekeeping metadata are best-effort/display-only data |
 | Task inventory | task_store, api, models | implemented; local parser only; index supplies active ids/summaries after normalizing bare-id or full-cell Markdown-link Task cells to safe bare ids; also supports five-column `id|title|status|session-est|blockers` indexes with `title` as summary; otherwise summaries use the legacy positional third column; task frontmatter supplies authoritative status/blockers; normal single-task content reads are index-gated and contained under `.ai-tasks`; exact-id archived content and typed `session-est` reads are available for run-scoped history access |
 | Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | implemented; optional `ORCH_HUB_EVAL_ENABLED` gate; resolves exact active/archive task ids, aggregates exact `(repo_path, task_id)` runs via read-only record loading, includes bounded events/sessions/log/spawn diagnostics plus best-effort git commit-window metadata, persists `evidence.json` under `<data_dir>/evaluations/`, lists/evaluates persisted artifacts newest-first, and exposes the sidecar through protected HTTP plus dashboard entry points |
-| Task static metrics | static_metrics, evaluation, config, models, api, web | implemented; optional evaluation-gated deterministic Layer 1 report over `EvidencePack`; computes run/session rollups, taskfile/session-log protocol facts, five transparent score axes, confidence, and warnings; persists `static_metrics.json` beside `evidence.json`; exposed through `POST /metrics`, evaluation detail readback, and the dashboard Layer 1 view; no semantic surface yet |
+| Task static metrics | static_metrics, evaluation, config, models, api, web | implemented; optional evaluation-gated deterministic Layer 1 report over `EvidencePack`; computes run/session rollups, taskfile/session-log protocol facts, five transparent score axes, confidence, and warnings; persists `static_metrics.json` beside `evidence.json`; exposed through `POST /metrics`, evaluation detail readback, and the dashboard Layer 1 view; no model call |
+| Task semantic evaluator | semantic, static_metrics, evaluation, config, models, api | implemented; optional Layer 2 model report over bounded evidence plus static metrics; persists `semantic_report.json` and `report.md` beside evidence/static artifacts; default Claude CLI backend disables tools, safe-mode customizations, session persistence, target-repo cwd, and plan-mode writes; exposed through `POST /semantic` and evaluation detail readback |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; env-configurable localhost-default uvicorn entry point; only health plus enumerated dashboard shell assets are public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; lists question files, treats malformed answers as pending repair, writes answers atomically, mirrors answer-mode parser rules for explicit mode normalization, and writes idempotent `stop.flag` |
 | Run lifecycle | runs, sessions, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` subprocess launch with explicit agent-CLI `PATH`, external run dirs, file-backed `run.json` with internal `spawn_out`, per-repo serialization, reattach, live-only `stop_requested` overlay, stop/end classification, per-session context snapshots parsed from logs, protected HTTP start/list/get/sessions/stop routes |
@@ -31,8 +32,9 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 |---|---|
 | Repo discovery and readiness | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
 | Task inventory | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
-| Task evaluation foundation | internal `EvaluationService.resolve_target`, `related_runs`, `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`, `artifact_dir`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}`; `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`; `POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`; dashboard `#/evaluations/{repo}/{task}` |
-| Task static metrics | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`, and `STATIC_METRICS_NAME`; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; detail route readback; dashboard Layer 1 metrics rendering; no semantic route |
+| Task evaluation foundation | internal `EvaluationService.resolve_target`, `related_runs`, `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`, `read_text_artifact`, `artifact_dir`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}`; `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`; `POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`; dashboard `#/evaluations/{repo}/{task}` |
+| Task static metrics | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`, and `STATIC_METRICS_NAME`; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; detail route readback; dashboard Layer 1 metrics rendering |
+| Task semantic evaluator | internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`; `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`; detail route `semantic_report` and `report_md` readback |
 | HTTP API foundation | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history/intake/evaluation APIs, `orch-hub-api` |
 | Control-dir file channel | internal `list_questions`, `pending_questions`, `write_answer`, `request_stop` |
 | Run lifecycle | internal `RunManager`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/sessions`, `POST /api/runs/{run_id}/stop` |
@@ -49,8 +51,8 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 
 | Module | Responsibilities |
 |---|---|
-| config | Environment overrides, default ai-native-development path, bearer token and Bark URL loading, host/port/data-dir/evaluation service settings, derived `aii-2` and registry-file paths |
-| models | Stable repo/readiness/task inventory/question/run/session/history/evaluation-target/static-metrics data structures shared by CLI/API/tests; `RunRecord` can reconstruct its `ManagedRepo` for run-scoped repo reads |
+| config | Environment overrides, default ai-native-development path, bearer token and Bark URL loading, host/port/data-dir/evaluation service settings plus semantic model, derived `aii-2` and registry-file paths |
+| models | Stable repo/readiness/task inventory/question/run/session/history/evaluation-target/static-metrics/semantic-report data structures shared by CLI/API/tests; `RunRecord` can reconstruct its `ManagedRepo` for run-scoped repo reads |
 | registry | Discover managed repos from `aii-2` or registry file |
 | readiness | Validate target repo launch readiness with seven fail-closed checks |
 | git_meta | Read latest/recent/windowed git commit metadata for display and evaluation evidence, degrading to unavailable instead of gating repo/task content |
@@ -62,8 +64,9 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 | intake | Own remote intake lifecycle, hub-owned intake records/events, readiness and repo-busy gates, off-lock transient draft/revise/confirm turns, read-only draft/revise/cancel semantics, startup orphan reconciliation, intake-ready notification triggers, and inventory-verified confirm/rollback |
 | intake_agent | Drive a Claude CLI `/intake-task` session with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | runs | Start/list/get/stop/reattach orchestrator subprocess runs, persist run state, expose read-only run-record loading, enforce per-repo serialization, classify live/end status, append run history events, snapshot/serve session context, and trigger isolated notifications |
-| evaluation | Resolve task evaluation targets, aggregate related run evidence, build bounded evidence packs, persist hub-owned evaluation artifacts, and list/read persisted artifacts behind the optional evaluation gate |
+| evaluation | Resolve task evaluation targets, aggregate related run evidence, build bounded evidence packs, persist hub-owned evaluation artifacts, and list/read JSON/text artifacts behind the optional evaluation gate |
 | static_metrics | Compute deterministic Layer 1 run/session/protocol score reports from evidence packs and persist `static_metrics.json` beside `evidence.json` behind the optional evaluation gate; API/web wrap it for sidecar presentation |
+| semantic | Compute Layer 2 model-judged reports from bounded evidence/static inputs, render Markdown, enforce concrete Claude CLI evidence isolation, and persist semantic artifacts behind the optional evaluation gate |
 | history | Append/read per-run JSONL audit/history events without storing answer text; round-trip answer mode metadata |
 | control_dir | Implement question/answer/stop file-channel handling and pure answer-mode normalization |
 | logs | Locate, read, and stream orchestrator logs from run records |

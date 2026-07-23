@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Features: Dashboard Ops
@@ -145,9 +145,10 @@ Implemented behavior:
   target active/archive state, five score axes, run/session/failure-diagnostic
   rollups, taskfile/session-log protocol facts, evidence warnings, artifact
   timestamps, and evaluation history selection. Generate posts `/metrics` to
-  create a fresh hub-owned evidence+static pair; semantic evaluation is labeled
-  unavailable, and raw evidence/static JSON is offered only through Copy/Download
-  affordances, never inline raw logs.
+  create a fresh hub-owned evidence+static pair; the semantic backend/API route
+  exists but this view does not trigger or render semantic reports yet, and raw
+  evidence/static JSON is offered only through Copy/Download affordances, never
+  inline raw logs.
 - The remote-intake review view polls `GET /api/intakes/{id}` while an intake
   status is `drafting`, `revising`, or `confirming`; it shows live status,
   elapsed time, and a safe-to-navigate-away note, stops polling on resting

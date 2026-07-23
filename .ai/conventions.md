@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Conventions
@@ -83,6 +83,8 @@ verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
 - Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
 - Inject fake record loaders, git runners, and clocks for task-evaluation tests
   instead of reading real run history or invoking real git.
+- Inject fake semantic backends/runners for Layer 2 evaluation tests; do not
+  launch real Claude CLI, and assert the concrete backend's argv/cwd isolation.
 - For non-trivial `orch_hub/web/app.js` behavior, extend the committed
   JavaScriptCore harness (`tests/keyboard_harness.js`, wrapped by
   `tests/test_web_keyboard.py`), which drives the real SPA against a stubbed

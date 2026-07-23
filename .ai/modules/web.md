@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Modules: Web and Operations
@@ -12,7 +12,8 @@ Location: `orch_hub/api.py`
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None, intake_manager=None, evaluation_service=None,
-static_evaluator=None)` builds an app with a default-deny bearer-token middleware,
+static_evaluator=None, semantic_evaluator=None)` builds an app with a
+default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
 escalation, log, and history routes over one `RunManager` instance plus a
@@ -41,16 +42,21 @@ agent-turn failures are returned as auditable intake records rather than 5xx.
 The evaluation routes are `GET /api/evaluation`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`,
-`POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`, and
-`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; they resolve exact
+`POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`,
+`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`, and
+`POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`; they resolve exact
 active-or-archived task ids outside the active task index, write/read only
-hub-owned evaluation artifacts, and map disabled mode to 404 except for the
-availability route.
+hub-owned evaluation artifacts, map disabled mode to 404 except for the
+availability route, and map semantic backend/model/schema failures to 502 with
+no partial artifact. Evaluation detail returns `evidence`, `static_metrics`,
+`semantic_report`, and `report_md`.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.
-The default intake backend is `ClaudeIntakeAgent`. Default run and intake
-managers are both built with `build_notifier(config)`; run-ended /
+The default intake backend is `ClaudeIntakeAgent`; the default semantic backend
+is `ClaudeSemanticBackend`, constructed at app startup but only launched by the
+semantic evaluation route. Default run and intake managers are both built with
+`build_notifier(config)`; run-ended /
 pending-question and intake-ready delivery failures stay isolated in the owning
 manager and never become route errors. The recent-log route adds a nested
 `diagnostic` from
@@ -181,7 +187,9 @@ active/archive state plus scores/run/protocol/evidence-warning rollups, and
 offers raw evidence/static artifacts only as Copy/Download JSON. Task detail and
 run-history groups show evaluation entry links only when availability reports
 enabled; Generate posts `/metrics` and re-renders to the latest deterministic
-Layer 1 report without mutating target task or run state.
+Layer 1 report without mutating target task or run state. The semantic HTTP
+backend exists for the next evaluation-ops UI slice, but the current dashboard
+does not trigger or render semantic reports beyond generic artifact availability.
 
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete

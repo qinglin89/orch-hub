@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # APIs: HTTP
@@ -88,7 +88,7 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 - Shape: `{"repo","task_id","enabled":true,"target","latest_evaluation_id","evaluations"}`.
   `target` is `{present: bool|null, source: "active"|"archived"|null}`.
   `evaluations` is newest-first summaries
-  `{evaluation_id, has_evidence, has_static_metrics}`.
+  `{evaluation_id, has_evidence, has_static_metrics, has_semantic_report}`.
 - Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
   404. A never-evaluated task returns 200 with an empty evaluation list.
 
@@ -96,9 +96,9 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 
 - Purpose: read one persisted evaluation's artifacts for dashboard rendering
   and local inspection.
-- Shape: `{"evaluation_id","evidence","static_metrics"}`. Each artifact is a
-  parsed JSON object or `null` when that artifact is absent from the evaluation
-  dir.
+- Shape: `{"evaluation_id","evidence","static_metrics","semantic_report","report_md"}`.
+  JSON artifacts are parsed objects and `report_md` is raw text; each is `null`
+  when that artifact is absent from the evaluation dir.
 - Errors: unknown repo or unknown evaluation id returns 404; unsafe task id
   returns 400; disabled returns 404; corrupt artifact JSON surfaces as a 500.
 
@@ -111,6 +111,22 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 - Shape: HTTP 201 `{"evaluation_id","evidence"}`.
 - Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
   404.
+
+## `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`
+
+- Purpose: generate a fresh Layer 2 semantic evaluation: evidence plus
+  `static_metrics.json`, `semantic_report.json`, and `report.md` in one
+  hub-owned evaluation dir.
+- Source: delegates to `SemanticEvaluator.evaluate`; the default Claude CLI
+  backend runs from an isolated empty cwd with tools disabled, safe mode, no
+  session persistence, and plan-mode writes blocked, so the model is bounded to
+  the persisted prompt/evidence and cannot read the target repo.
+- Shape: HTTP 201 `{"evaluation_id","semantic_report"}`. The paired evidence,
+  static metrics, and Markdown report are read through the evaluation detail
+  route.
+- Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
+  404; backend/model failures or non-conforming semantic output return 502 and
+  leave no persisted artifact.
 
 ## `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`
 

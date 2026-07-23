@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ---
 
 # Design Principles and Decisions
@@ -16,9 +16,9 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
 - Fail closed before launch: readiness checks should block unclear or unsafe runs.
 - Human-confirmed task creation: remote intake drafts stay hub-owned until the
   user explicitly confirms the complete task file and index row.
-- Read-only task evaluation: evidence packs and deterministic static reports are
-  hub-owned sidecar artifacts and must not mutate target tasks, run state, or
-  protocol memory.
+- Read-only task evaluation: evidence packs, deterministic static reports, and
+  evidence-bounded semantic reports are hub-owned sidecar artifacts and must not
+  mutate target tasks, run state, or protocol memory.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
 
@@ -54,6 +54,8 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
   created.
 - Letting evaluation generation write into target repos or affect run/task
   lifecycle decisions.
+- Letting semantic evaluator backends read live target-repo state outside the
+  persisted evidence/static prompt boundary.
 - Adding watchdog or log-silence detection.
 - Hardcoding target repo paths in product code.
 - Using broad shell commands where structured subprocess arguments are practical.
