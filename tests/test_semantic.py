@@ -188,7 +188,7 @@ def semantic_evaluator(
 
 
 def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = False,
-                present: bool = True) -> SemanticEvidence:
+                ai_snippets: bool = False, present: bool = True) -> SemanticEvidence:
     return SemanticEvidence(
         evaluation_id="e1",
         repo_name="alpha",
@@ -200,6 +200,7 @@ def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = Fal
         git_subjects=(),
         evidence_warnings=tuple(warnings),
         ai_diffs_available=ai_diffs,
+        ai_snippets_available=ai_snippets,
         omissions=(),
     )
 
@@ -290,16 +291,41 @@ def test_evidence_prompt_excludes_logs_and_includes_static_and_markers():
     assert "static metrics unavailable" in prompt.lower()
 
 
+def test_evidence_records_ai_snippets_omission_and_marks_unavailable():
+    # The pack carries no current .ai/ contents, so the evaluator cannot ground a
+    # .ai/ freshness judgment: the omission is recorded and the flag stays False.
+    evidence = build_semantic_evidence(pack(run_ev()), static_report=None)
+
+    assert evidence.ai_snippets_available is False
+    assert any(".ai/ file contents unavailable" in o for o in evidence.omissions)
+    assert evidence.to_dict()["ai_snippets_available"] is False
+
+
+def test_prompt_is_evidence_bounded_and_marks_ai_freshness_unassessable():
+    prompt = build_prompt(build_semantic_evidence(pack(run_ev()), static_report=None))
+
+    # No invitation to read the repository outside the persisted evidence boundary...
+    assert "may read the repository" not in prompt.lower()
+    # ...and the .ai/ freshness dimension is explicitly flagged unassessable.
+    assert "unassessable" in prompt.lower()
+    assert "ai_freshness_utility" in prompt
+
+
 def test_confidence_penalty_grows_as_evidence_thins():
-    full = mk_evidence(static={"scores": []}, ai_diffs=True)
-    no_static = mk_evidence(static=None, ai_diffs=True)
-    warned = mk_evidence(static={"scores": []}, ai_diffs=True, warnings=("w1", "w2", "w3"))
+    full = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=True)
+    no_static = mk_evidence(static=None, ai_diffs=True, ai_snippets=True)
+    warned = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=True,
+                         warnings=("w1", "w2", "w3"))
 
     assert full.confidence_penalty() == 0.0
     assert no_static.confidence_penalty() == pytest.approx(0.30)
     assert warned.confidence_penalty() == pytest.approx(0.15)
+    # A missing .ai/ snippet set is its own degradation, parallel to missing diffs.
+    no_snippets = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=False)
+    assert no_snippets.confidence_penalty() == pytest.approx(0.10)
     # Even the thinnest evidence keeps some confidence (task file is the subject).
-    thin = mk_evidence(static=None, ai_diffs=False, warnings=tuple(f"w{i}" for i in range(20)))
+    thin = mk_evidence(static=None, ai_diffs=False, ai_snippets=False,
+                       warnings=tuple(f"w{i}" for i in range(20)))
     assert thin.confidence_penalty() <= 0.60
 
 
@@ -348,6 +374,43 @@ def test_parse_bad_severity_raises():
     payload = {**VALID_PAYLOAD, "findings": [{**VALID_PAYLOAD["findings"][0], "severity": "catastrophic"}]}
     with pytest.raises(SemanticEvaluationError, match="severity"):
         parse(envelope(payload))
+
+
+def _finding_with_refs(refs: object, *, present: bool = True) -> dict:
+    base = dict(VALID_PAYLOAD["findings"][0])
+    if present:
+        base["evidence_refs"] = refs
+    else:
+        base.pop("evidence_refs", None)
+    return {**VALID_PAYLOAD, "findings": [base]}
+
+
+def test_parse_finding_missing_evidence_refs_raises():
+    # A persisted finding must cite evidence; an absent refs field is rejected.
+    with pytest.raises(SemanticEvaluationError, match="evidence_refs"):
+        parse(envelope(_finding_with_refs(None, present=False)))
+
+
+def test_parse_finding_empty_evidence_refs_raises():
+    with pytest.raises(SemanticEvaluationError, match="evidence_refs"):
+        parse(envelope(_finding_with_refs([])))
+
+
+def test_parse_finding_non_array_evidence_refs_raises():
+    with pytest.raises(SemanticEvaluationError, match="evidence_refs"):
+        parse(envelope(_finding_with_refs("sid-b")))
+
+
+def test_parse_finding_blank_only_evidence_refs_raises():
+    with pytest.raises(SemanticEvaluationError, match="evidence_refs"):
+        parse(envelope(_finding_with_refs(["", "  ", 3])))
+
+
+def test_parse_finding_drops_blank_refs_but_keeps_the_real_ones():
+    # Lenient on members, strict on the whole: blanks/non-strings drop, but at least
+    # one real reference must survive (here it does).
+    report = parse(envelope(_finding_with_refs(["good ref", "", "  ", 7])))
+    assert report.findings[0].evidence_refs == ("good ref",)
 
 
 def test_parse_score_without_rationale_raises():

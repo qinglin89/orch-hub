@@ -20,7 +20,8 @@ The evaluation is built from four composable, independently-tested pieces:
   git commit *subjects* (never diffs), and an explicit ``omissions`` list. Raw
   orchestrator logs / ``spawn.out`` tails are deliberately **excluded** (the scope
   bars unbounded raw logs from the evaluator input) and recorded as an omission,
-  as are the unavailable ``.ai/`` diffs — so a thin input *lowers confidence*
+  as are the unavailable ``.ai/`` diffs and the current ``.ai/`` file contents
+  (leaving ``.ai/`` freshness unassessable) — so a thin input *lowers confidence*
   rather than failing the evaluation.
 - **prompt contract** (:func:`build_prompt`) — render the evidence into the
   evaluator prompt, instructing the model to emit exactly one JSON report between
@@ -113,6 +114,13 @@ _PENALTY_NO_AI_DIFFS = 0.10
 """``.ai/`` changed-file diffs unavailable (the evidence pack carries commit
 subjects only). The common case today, so kept modest; it flips off once a future
 pack carries ``.ai/`` diffs and :attr:`SemanticEvidence.ai_diffs_available` is True."""
+_PENALTY_NO_AI_SNIPPETS = 0.10
+"""Current ``.ai/`` file contents (snippets) unavailable as input — the
+``ai_freshness_utility`` dimension cannot be grounded from the evidence, so it is
+marked unassessable in the prompt and confidence is reduced. A distinct signal from
+the diffs above (current state vs. what changed); like it, the common case today and
+kept modest, flipping off once a future pack carries ``.ai/`` snippets and
+:attr:`SemanticEvidence.ai_snippets_available` is True."""
 _PENALTY_PER_WARNING = 0.05
 """Per evidence-degradation warning (missing/corrupt run artifact)."""
 _PENALTY_WARNING_CAP = 0.30
@@ -158,13 +166,18 @@ class SemanticEvidence:
     ``None`` when unavailable; ``git_subjects`` are commit *subjects* only (never
     diffs); ``evidence_warnings`` are the pack's evidence-degradation notes.
 
-    Two things are deliberately **absent** and recorded in ``omissions`` (which is
+    Three things are deliberately **absent** and recorded in ``omissions`` (which is
     what makes bounded construction auditable rather than silent): the pack's
     bounded orchestrator-log / ``spawn.out`` tails are **excluded** from the model
     input (the scope bars raw logs; their signal survives as the static
-    ``has_diagnostic`` rollup), and ``.ai/`` changed-file diffs are unavailable
-    (``ai_diffs_available`` False — the pack carries commit subjects only). Both
-    lower :meth:`confidence_penalty` rather than failing the evaluation.
+    ``has_diagnostic`` rollup), ``.ai/`` changed-file diffs are unavailable
+    (``ai_diffs_available`` False — the pack carries commit subjects only), and the
+    current ``.ai/`` file contents are unavailable too (``ai_snippets_available``
+    False — the pack carries no ``.ai/`` snippets). The last means ``.ai/``
+    freshness/utility cannot be grounded from the evidence, so the prompt marks the
+    ``ai_freshness_utility`` dimension unassessable rather than inviting the backend
+    to read repo files outside this bounded input. All three lower
+    :meth:`confidence_penalty` rather than failing the evaluation.
     """
 
     evaluation_id: str
@@ -177,6 +190,7 @@ class SemanticEvidence:
     git_subjects: tuple[str, ...]
     evidence_warnings: tuple[str, ...]
     ai_diffs_available: bool
+    ai_snippets_available: bool
     omissions: tuple[str, ...]
 
     @property
@@ -196,6 +210,8 @@ class SemanticEvidence:
             penalty += _PENALTY_NO_STATIC
         if not self.ai_diffs_available:
             penalty += _PENALTY_NO_AI_DIFFS
+        if not self.ai_snippets_available:
+            penalty += _PENALTY_NO_AI_SNIPPETS
         penalty += min(_PENALTY_WARNING_CAP, len(self.evidence_warnings) * _PENALTY_PER_WARNING)
         return min(_PENALTY_CAP, penalty)
 
@@ -211,6 +227,7 @@ class SemanticEvidence:
             "git_subjects": list(self.git_subjects),
             "evidence_warnings": list(self.evidence_warnings),
             "ai_diffs_available": self.ai_diffs_available,
+            "ai_snippets_available": self.ai_snippets_available,
             "omissions": list(self.omissions),
         }
 
@@ -254,6 +271,17 @@ def build_semantic_evidence(
         ".ai/ changed-file diffs unavailable (evidence pack carries commit subjects"
         " only); knowledge-signal judgment rests on the task file and commit subjects"
     )
+    # Current ``.ai/`` file contents are likewise not carried by the pack, so the
+    # evaluator has no grounded view of ``.ai/`` to judge freshness/utility. Rather
+    # than leave that ungrounded or invite a live repo read outside this bounded
+    # input, record it, degrade confidence, and mark the dimension unassessable in
+    # the prompt (:func:`build_prompt`). Flips True when a future pack carries snippets.
+    ai_snippets_available = False
+    omissions.append(
+        ".ai/ file contents unavailable to the evaluator (evidence pack carries no"
+        " .ai/ snippets); the ai_freshness_utility dimension is unassessable from this"
+        " evidence and is marked so in the prompt"
+    )
     if static_report is None:
         omissions.append("static metrics unavailable as input")
     if not pack.target.present:
@@ -270,6 +298,7 @@ def build_semantic_evidence(
         git_subjects=git_subjects,
         evidence_warnings=evidence_warnings,
         ai_diffs_available=ai_diffs_available,
+        ai_snippets_available=ai_snippets_available,
         omissions=tuple(omissions),
     )
 
@@ -309,9 +338,9 @@ def build_prompt(evidence: SemanticEvidence) -> str:
     return f"""You are a READ-ONLY task-quality evaluator for an AI-coding project. \
 You are judging ONE completed task's process and knowledge quality from the bounded \
 evidence below. Do NOT create, edit, or delete any file, run any command that \
-changes state, or start any process — you are only diagnosing. You may read the \
-repository to inspect context, but you produce only the JSON report described at \
-the end.
+changes state, or start any process — you are only diagnosing. Base your judgment \
+ONLY on the bounded evidence below: do not read or rely on repository state that is \
+not shown here, and produce only the JSON report described at the end.
 
 Assess these semantic dimensions (use them as the `dimension` vocabulary for your \
 scores and findings; you may add another dimension if genuinely relevant):
@@ -325,7 +354,12 @@ and protocol soft-failures (things technically legal but weak).
 
 EVIDENCE BOUNDS: raw logs are excluded and some inputs are unavailable — treat the \
 omissions as reduced certainty, NOT as defects. Lower your confidence for thin \
-evidence; do not invent findings you cannot support from the evidence.
+evidence; do not invent findings you cannot support from the evidence. In \
+particular, the current `.ai/` file contents are NOT included here, so `.ai/` \
+freshness/utility is unassessable from this evidence: score the \
+`ai_freshness_utility` dimension null (or low confidence) rather than guessing, and \
+treat any `.ai/`-freshness aspect of `knowledge_signal_density` as only weakly \
+grounded.
 
 == TASK FILE ({evidence.task_id}, source={evidence.target_source}) ==
 {task_block}
@@ -372,11 +406,13 @@ class SemanticBackend(Protocol):
     service parses/validates it. ``info`` is the backend's rerun identity
     (backend/model/schema-version), stamped onto the report.
 
-    Contract: ``evaluate`` MUST be read-only — it may read the repo to inspect
-    context (e.g. ``.ai/``) but must not write target repos, ``.ai/``,
-    ``.ai-tasks/``, run/intake state, or task lifecycle. A backend that cannot run
-    raises :class:`SemanticEvaluationError`, which the service turns into a clean
-    failed evaluation (no partial artifacts, no target mutation).
+    Contract: ``evaluate`` MUST be read-only and evidence-bounded — it bases its
+    judgment on the ``prompt``'s bounded evidence, not on live repository reads
+    outside that persisted boundary (the prompt marks what is not provided, e.g.
+    ``.ai/`` contents, as unassessable), and it must not write target repos,
+    ``.ai/``, ``.ai-tasks/``, run/intake state, or task lifecycle. A backend that
+    cannot run raises :class:`SemanticEvaluationError`, which the service turns into
+    a clean failed evaluation (no partial artifacts, no target mutation).
     """
 
     @property
@@ -424,11 +460,11 @@ def parse_report(
     (``evaluation_id``, repo/task, ``evaluator``, ``generated_ts``, input links)
     are stamped from context so the model cannot spoof what it evaluated. A missing
     envelope, a non-object envelope, or a schema violation (bad severity, a score
-    without a rationale, a non-numeric where a number is required, a missing
-    top-level ``confidence``) raises :class:`SemanticEvaluationError` — schema
-    validation is a hard gate, kept distinct from thin-but-valid evidence. Numeric
-    ranges are clamped to ``[0, 1]`` (lenient on ranges, strict on types/required
-    fields).
+    without a rationale, a finding with no usable ``evidence_refs``, a non-numeric
+    where a number is required, a missing top-level ``confidence``) raises
+    :class:`SemanticEvaluationError` — schema validation is a hard gate, kept
+    distinct from thin-but-valid evidence. Numeric ranges are clamped to ``[0, 1]``
+    (lenient on ranges, strict on types/required fields).
 
     ``overall_confidence`` is the model's reported confidence *degraded* by
     :meth:`SemanticEvidence.confidence_penalty`, and the evidence omissions are
@@ -530,8 +566,10 @@ def _parse_score(entry: object) -> SemanticScore:
 def _parse_finding(entry: object) -> SemanticFinding:
     """Validate one finding entry. ``dimension``/``summary`` are required non-empty
     strings; ``severity`` must be one of :data:`SEMANTIC_SEVERITIES`; ``confidence``
-    is a clamped number; ``evidence_refs`` a list of strings; ``detail``/``suggestion``
-    optional strings."""
+    is a clamped number; ``evidence_refs`` a *required* non-empty list of non-empty
+    strings (a finding with no usable reference is unsupported — the prompt contract
+    requires every finding to cite evidence, and the refs are what keep it auditable
+    rather than an unfalsifiable assertion); ``detail``/``suggestion`` optional strings."""
     if not isinstance(entry, dict):
         raise SemanticEvaluationError("each finding must be a JSON object")
     severity = entry.get("severity")
@@ -544,7 +582,7 @@ def _parse_finding(entry: object) -> SemanticFinding:
         severity=severity,
         summary=_require_nonempty_str(entry, "summary", "finding"),
         confidence=_clamp01(_number(entry.get("confidence"), "finding.confidence", default=0.0)),
-        evidence_refs=_parse_str_list(entry.get("evidence_refs")),
+        evidence_refs=_require_str_list(entry, "evidence_refs", "finding"),
         detail=_optional_str(entry.get("detail")),
         suggestion=_optional_str(entry.get("suggestion")),
     )
@@ -554,11 +592,34 @@ def _parse_str_list(value: object) -> tuple[str, ...]:
     """Coerce a JSON value into a tuple of non-empty strings (absent → empty).
 
     Lenient — a non-list, or non-string / blank members, are dropped rather than
-    rejected: these are best-effort auxiliary fields (improvements, evidence refs),
-    not load-bearing schema like severity or a score's rationale."""
+    rejected: this is for best-effort auxiliary fields (``improvements``), not
+    load-bearing schema like severity or a score's rationale. A finding's
+    ``evidence_refs`` is *not* auxiliary (the prompt requires every finding to cite
+    evidence), so it uses the strict :func:`_require_str_list` gate instead."""
     if not isinstance(value, list):
         return ()
     return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _require_str_list(entry: dict, key: str, what: str) -> tuple[str, ...]:
+    """Return ``entry[key]`` as a non-empty tuple of non-empty strings, else raise.
+
+    The strict counterpart of :func:`_parse_str_list` for a load-bearing list field.
+    A missing/absent value or a non-array is a schema violation, and so is an array
+    with no usable member (empty, or only blank/non-string entries) — the value must
+    yield at least one non-empty string. Blank/non-string members are still dropped
+    (lenient on the members) so long as one real reference survives. Used for a
+    finding's ``evidence_refs``: a persisted finding must cite evidence, so an
+    unsupported one is rejected here rather than stored as a valid diagnosis."""
+    value = entry.get(key)
+    if not isinstance(value, list):
+        raise SemanticEvaluationError(f"{what} {key!r} must be a non-empty JSON array")
+    refs = tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+    if not refs:
+        raise SemanticEvaluationError(
+            f"{what} {key!r} must contain at least one non-empty string"
+        )
+    return refs
 
 
 def _require_confidence(obj: dict, key: str) -> float:
