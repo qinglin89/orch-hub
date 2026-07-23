@@ -153,12 +153,22 @@ def query_effective_config(
 def parse_effective_config(data: object) -> EffectiveConfig:
     """Strictly parse a ``--print-config`` JSON object into an :class:`EffectiveConfig`.
 
-    Fail-closed on the load-bearing fields: a non-object, a ``schema_version``
-    other than :data:`SUPPORTED_SCHEMA_VERSION`, or a missing ``backend`` /
-    ``dev`` / ``review`` all raise :class:`OrchestratorConfigError`. Everything
-    else degrades to a safe default (``profile`` -> ``"default"``, absent lists /
-    maps -> empty) so a benign omission never masquerades as a launch config the
-    orchestrator did not actually resolve.
+    Fail-closed on every launch-relevant field the orchestrator always emits in its
+    ``launch_config_dict``: a non-object, a ``schema_version`` other than
+    :data:`SUPPORTED_SCHEMA_VERSION`, a missing/blank ``backend``, a missing
+    ``dev``/``review`` role, or any required field of the wrong type or empty —
+    ``config_revision``/``effective_revision``/``profile`` (non-empty strings),
+    ``available_profiles`` (string list), role ``model``/``effort`` (non-empty
+    strings), ``max_sessions``/``context_budget`` (ints), ``sources`` (string map),
+    and ``once``/``plan_gate`` (real booleans) — all raise
+    :class:`OrchestratorConfigError`. Only the fields the orchestrator itself leaves
+    null stay optional: a role ``agent`` (``None`` for a Cursor dev role),
+    ``codex_sandbox`` (``None`` for the Cursor backend), and the run-launch fields
+    ``task_id``/``control_dir`` (``None`` in a ``--print-config`` preview). This
+    keeps a malformed-but-schema-1 payload from being served as a launch config the
+    orchestrator never resolved, which would leave the Start dialog previewing
+    null/default values instead of disabling launch (the acceptance requires the
+    config query to fail closed on malformed responses).
     """
     if not isinstance(data, dict):
         raise OrchestratorConfigError(
@@ -171,33 +181,22 @@ def parse_effective_config(data: object) -> EffectiveConfig:
             f" (this hub supports {SUPPORTED_SCHEMA_VERSION}); redeploy the"
             " orchestrator payload"
         )
-    backend = data.get("backend")
-    if not isinstance(backend, str) or not backend:
-        raise OrchestratorConfigError(
-            "orchestrator --print-config output is missing 'backend'"
-        )
     return EffectiveConfig(
         schema_version=version,
-        config_revision=_opt_str(data.get("config_revision")),
-        effective_revision=_opt_str(data.get("effective_revision")),
-        profile=_str_or(data.get("profile"), MODE_DEFAULT),
-        available_profiles=tuple(
-            p for p in _as_list(data.get("available_profiles")) if isinstance(p, str)
-        ),
-        backend=backend,
+        config_revision=_req_str(data, "config_revision"),
+        effective_revision=_req_str(data, "effective_revision"),
+        profile=_req_str(data, "profile"),
+        available_profiles=_req_str_tuple(data, "available_profiles"),
+        backend=_req_str(data, "backend"),
         dev=_role(data.get("dev"), "dev"),
         review=_role(data.get("review"), "review"),
-        max_sessions=_opt_int(data.get("max_sessions")),
-        context_budget=_opt_int(data.get("context_budget")),
+        max_sessions=_req_int(data, "max_sessions"),
+        context_budget=_req_int(data, "context_budget"),
         codex_sandbox=_opt_str(data.get("codex_sandbox")),
-        sources={
-            k: v
-            for k, v in _as_dict(data.get("sources")).items()
-            if isinstance(k, str) and isinstance(v, str)
-        },
+        sources=_req_str_map(data, "sources"),
         task_id=_opt_str(data.get("task_id")),
-        once=bool(data.get("once", False)),
-        plan_gate=bool(data.get("plan_gate", False)),
+        once=_req_bool(data, "once"),
+        plan_gate=_req_bool(data, "plan_gate"),
         control_dir=_opt_str(data.get("control_dir")),
     )
 
@@ -209,8 +208,8 @@ def _role(value: object, name: str) -> RoleConfig:
         )
     return RoleConfig(
         agent=_opt_str(value.get("agent")),
-        model=_opt_str(value.get("model")),
-        effort=_opt_str(value.get("effort")),
+        model=_req_str(value, "model", label=f"{name}.model"),
+        effort=_req_str(value, "effort", label=f"{name}.effort"),
     )
 
 
@@ -227,20 +226,57 @@ def _opt_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _str_or(value: object, default: str) -> str:
-    return value if isinstance(value, str) and value else default
+# The orchestrator's ``launch_config_dict`` always emits these required fields with
+# a fixed type; a missing or wrong-typed one is a malformed response, so each
+# extractor fails closed rather than substituting a hub-owned default.
 
 
-def _opt_int(value: object) -> int | None:
-    return value if isinstance(value, int) and not isinstance(value, bool) else None
+def _req_str(data: dict, key: str, *, label: str | None = None) -> str:
+    value = data.get(key)
+    if not isinstance(value, str) or not value:
+        raise OrchestratorConfigError(
+            f"orchestrator --print-config field {label or key!r} must be a"
+            " non-empty string"
+        )
+    return value
 
 
-def _as_list(value: object) -> list:
-    return value if isinstance(value, list) else []
+def _req_int(data: dict, key: str) -> int:
+    value = data.get(key)
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise OrchestratorConfigError(
+            f"orchestrator --print-config field {key!r} must be an integer"
+        )
+    return value
 
 
-def _as_dict(value: object) -> dict:
-    return value if isinstance(value, dict) else {}
+def _req_bool(data: dict, key: str) -> bool:
+    value = data.get(key)
+    if not isinstance(value, bool):
+        raise OrchestratorConfigError(
+            f"orchestrator --print-config field {key!r} must be a boolean"
+        )
+    return value
+
+
+def _req_str_tuple(data: dict, key: str) -> tuple[str, ...]:
+    value = data.get(key)
+    if not isinstance(value, list) or not all(isinstance(p, str) for p in value):
+        raise OrchestratorConfigError(
+            f"orchestrator --print-config field {key!r} must be a list of strings"
+        )
+    return tuple(value)
+
+
+def _req_str_map(data: dict, key: str) -> dict[str, str]:
+    value = data.get(key)
+    if not isinstance(value, dict) or not all(
+        isinstance(k, str) and isinstance(v, str) for k, v in value.items()
+    ):
+        raise OrchestratorConfigError(
+            f"orchestrator --print-config field {key!r} must be a map of strings"
+        )
+    return dict(value)
 
 
 # -- launch argument construction ---------------------------------------------

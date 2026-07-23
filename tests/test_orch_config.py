@@ -8,6 +8,7 @@ and tested directly.
 
 from __future__ import annotations
 
+import copy
 import subprocess
 from pathlib import Path
 
@@ -206,6 +207,98 @@ def test_parse_tolerates_cursor_null_codex_sandbox():
     config = parse_effective_config(data)
     assert config.codex_sandbox is None
     assert config.dev.agent is None
+
+
+_OMIT = object()
+"""Sentinel for :func:`_malformed`: delete the key rather than set a bad value."""
+
+
+def _malformed(**changes) -> dict:
+    """Deep-copy the valid ``SAMPLE`` and apply top-level overrides; ``_OMIT`` deletes."""
+    data = copy.deepcopy(SAMPLE)
+    for key, value in changes.items():
+        if value is _OMIT:
+            data.pop(key, None)
+        else:
+            data[key] = value
+    return data
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        pytest.param(_malformed(config_revision=_OMIT), id="missing-config-revision"),
+        pytest.param(_malformed(config_revision=7), id="wrong-typed-config-revision"),
+        pytest.param(_malformed(effective_revision=_OMIT), id="missing-effective-revision"),
+        pytest.param(_malformed(effective_revision=""), id="blank-effective-revision"),
+        pytest.param(_malformed(profile=_OMIT), id="missing-profile"),
+        pytest.param(_malformed(profile=7), id="wrong-typed-profile"),
+        pytest.param(_malformed(available_profiles=_OMIT), id="missing-available-profiles"),
+        pytest.param(_malformed(available_profiles="standard"), id="available-profiles-not-a-list"),
+        pytest.param(
+            _malformed(available_profiles=["standard", 3]),
+            id="available-profiles-non-string-item",
+        ),
+        pytest.param(_malformed(max_sessions=_OMIT), id="missing-max-sessions"),
+        pytest.param(_malformed(max_sessions="40"), id="wrong-typed-max-sessions"),
+        pytest.param(_malformed(max_sessions=True), id="bool-max-sessions"),
+        pytest.param(_malformed(context_budget=_OMIT), id="missing-context-budget"),
+        pytest.param(_malformed(context_budget=1.5), id="wrong-typed-context-budget"),
+        pytest.param(_malformed(sources=_OMIT), id="missing-sources"),
+        pytest.param(_malformed(sources=["backend"]), id="sources-not-a-map"),
+        pytest.param(_malformed(sources={"backend": 1}), id="sources-non-string-value"),
+        pytest.param(_malformed(once=_OMIT), id="missing-once"),
+        pytest.param(_malformed(once="false"), id="wrong-typed-once"),
+        pytest.param(_malformed(once=0), id="int-once"),
+        pytest.param(_malformed(plan_gate=1), id="int-plan-gate"),
+        pytest.param(_malformed(dev={"agent": "claude", "effort": "max"}), id="missing-dev-model"),
+        pytest.param(
+            _malformed(dev={"agent": "claude", "model": None, "effort": "max"}),
+            id="null-dev-model",
+        ),
+        pytest.param(
+            _malformed(dev={"agent": "claude", "model": 7, "effort": "max"}),
+            id="wrong-typed-dev-model",
+        ),
+        pytest.param(_malformed(dev={"agent": "claude", "model": "m"}), id="missing-dev-effort"),
+        pytest.param(
+            _malformed(review={"agent": "codex", "model": None, "effort": "xhigh"}),
+            id="null-review-model",
+        ),
+        pytest.param(
+            _malformed(review={"agent": "codex", "model": "gpt-5.5"}),
+            id="missing-review-effort",
+        ),
+    ],
+)
+def test_parse_rejects_malformed_schema_v1_field(data):
+    """A schema-version-1 payload with a missing/wrong-typed required field fails
+    closed, so the config API surfaces the orchestrator error instead of a 200
+    carrying null/default preview data that would leave the Start dialog launchable."""
+    with pytest.raises(OrchestratorConfigError):
+        parse_effective_config(data)
+
+
+def test_parse_accepts_empty_profiles_and_orchestrator_nulls():
+    """Guard against over-tightening: an empty ``available_profiles`` (a repo with
+    no named profiles) plus the genuinely-optional nulls the orchestrator itself
+    emits (role ``agent``, ``codex_sandbox``, ``task_id``, ``control_dir``) stay
+    valid input."""
+    data = {
+        **SAMPLE,
+        "backend": "cursor",
+        "available_profiles": [],
+        "codex_sandbox": None,
+        "task_id": None,
+        "control_dir": None,
+        "dev": {"agent": None, "model": "m", "effort": "e"},
+    }
+    config = parse_effective_config(data)
+    assert config.available_profiles == ()
+    assert config.dev.agent is None
+    assert config.codex_sandbox is None
+    assert config.task_id is None
+    assert config.control_dir is None
 
 
 # -- build_launch_args: the four modes x backends ------------------------------
