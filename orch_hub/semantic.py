@@ -39,11 +39,15 @@ The evaluation is built from four composable, independently-tested pieces:
   ``static_metrics.json`` + ``semantic_report.json`` + a human-readable
   ``report.md`` render), driving an **injected** backend (:class:`SemanticBackend`)
   exactly as the intake manager injects its agent. The concrete backend is
-  :class:`ClaudeSemanticBackend` — one read-only ``claude -p`` turn under
-  ``--permission-mode plan``, model from ``ORCH_HUB_EVAL_MODEL`` — with an injected
-  subprocess seam so every mechanic is unit-tested without launching ``claude``;
-  the default :class:`_UnavailableSemanticBackend` still fails cleanly when no
-  backend is wired.
+  :class:`ClaudeSemanticBackend` — one ``claude -p`` turn whose evidence isolation
+  is *structural*: it runs with every built-in tool disabled (``--tools ""`` — no
+  Read/Bash/Grep, so it cannot open ``.ai/``, raw logs, secrets, or any repo file),
+  with project customizations disabled (``--safe-mode``), and from a fresh hub-owned
+  empty cwd (never the target repo), so the model judges from the bounded prompt
+  alone rather than live repository state; model from ``ORCH_HUB_EVAL_MODEL``, with
+  an injected subprocess seam so every mechanic is unit-tested without launching
+  ``claude``; the default :class:`_UnavailableSemanticBackend` still fails cleanly
+  when no backend is wired.
 """
 
 from __future__ import annotations
@@ -53,6 +57,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -425,13 +430,17 @@ class SemanticBackend(Protocol):
     service parses/validates it. ``info`` is the backend's rerun identity
     (backend/model/schema-version), stamped onto the report.
 
-    Contract: ``evaluate`` MUST be read-only and evidence-bounded — it bases its
-    judgment on the ``prompt``'s bounded evidence, not on live repository reads
-    outside that persisted boundary (the prompt marks what is not provided, e.g.
-    ``.ai/`` contents, as unassessable), and it must not write target repos,
-    ``.ai/``, ``.ai-tasks/``, run/intake state, or task lifecycle. A backend that
-    cannot run raises :class:`SemanticEvaluationError`, which the service turns into
-    a clean failed evaluation (no partial artifacts, no target mutation).
+    Contract: ``evaluate`` MUST be read-only AND evidence-bounded — it bases its
+    judgment ONLY on the ``prompt``'s bounded evidence, never on live repository
+    reads outside that persisted boundary (so the report is reproducible from the
+    persisted artifacts, and the prompt's "unassessable" markers for absent inputs
+    like ``.ai/`` contents actually hold). Evidence-boundedness must be enforced,
+    not merely requested of the model: a prompt instruction alone does not stop a
+    tool-enabled agent from opening ``.ai/``, raw logs, or secrets. It must also not
+    write target repos, ``.ai/``, ``.ai-tasks/``, run/intake state, or task
+    lifecycle. A backend that cannot run raises :class:`SemanticEvaluationError`,
+    which the service turns into a clean failed evaluation (no partial artifacts, no
+    target mutation).
     """
 
     @property
@@ -462,17 +471,30 @@ class _UnavailableSemanticBackend:
 
 
 # -- concrete Claude CLI backend ----------------------------------------------
-# The real evaluator: one headless ``claude -p`` turn, read-only. It mirrors the
-# intake agent's CLI mechanics (:mod:`orch_hub.intake_agent`) but is a *single*
-# stateless turn (no session threading — the whole bounded evidence is in the one
-# prompt), so it stays a local, self-contained backend rather than importing
-# intake internals (the same independence stance the envelope extractor takes).
-# Read-only is structural: the turn runs under ``--permission-mode plan`` (a
-# read-only exploration sandbox — the model may inspect but cannot write), never
-# ``--dangerously-skip-permissions``. The subprocess is an injected seam
-# (:data:`SemanticRunner`) exactly like the run manager's ``spawner`` and the
-# intake agent's ``runner``, so every mechanic is unit-tested with a fake and the
-# thin real runner (:func:`_default_runner`) stays untested.
+# The real evaluator: one headless ``claude -p`` turn. It mirrors the intake
+# agent's CLI mechanics (:mod:`orch_hub.intake_agent`) but is a *single* stateless
+# turn (no session threading — the whole bounded evidence is in the one prompt), so
+# it stays a local, self-contained backend rather than importing intake internals
+# (the same independence stance the envelope extractor takes).
+#
+# Evidence isolation is STRUCTURAL, not prompt-deep. Intake runs its draft turn
+# under ``--permission-mode plan`` — but that is a read-only *exploration* sandbox
+# where the agent still reads/inspects repo files freely (intake WANTS that: it
+# designs a task by reading the repo). A semantic evaluation is the opposite: its
+# report must be bounded to the persisted :class:`SemanticEvidence` and reproducible
+# from it, so the turn must not read live repo state at all. Plan mode only blocks
+# writes, so this backend adds the read gate the evaluator needs: ``--tools ""``
+# disables every built-in tool (no Read/Bash/Grep — it cannot open ``.ai/``, raw
+# logs, secrets, or any file), ``--safe-mode`` disables project customizations (no
+# target-repo ``CLAUDE.md``/skills/hooks/MCP injected into context), and the turn
+# runs from a fresh hub-owned empty cwd (never the target repo — see
+# :meth:`ClaudeSemanticBackend.evaluate`) so even passive cwd/git-status context
+# reaches no repo state. ``--permission-mode plan`` is kept as a write-side
+# belt-and-suspenders and ``--dangerously-skip-permissions`` is never added. The
+# subprocess is an injected seam (:data:`SemanticRunner`) exactly like the run
+# manager's ``spawner`` and the intake agent's ``runner``, so every mechanic is
+# unit-tested with a fake and the thin real runner (:func:`_default_runner`) stays
+# untested.
 
 
 @dataclass(frozen=True)
@@ -515,14 +537,17 @@ def _default_runner(argv: Sequence[str], cwd: Path) -> SemanticRunResult:
 
 
 class ClaudeSemanticBackend:
-    """Drives one read-only evaluation turn through headless ``claude -p``.
+    """Drives one read-only, evidence-bounded evaluation turn through ``claude -p``.
 
-    Implements the :class:`SemanticBackend` protocol. :meth:`evaluate` runs a
-    single ``claude -p --output-format stream-json … --permission-mode plan``
-    process in the target repo, sending the self-contained evaluator prompt
+    Implements the :class:`SemanticBackend` protocol. :meth:`evaluate` runs a single
+    ``claude -p --output-format stream-json … --tools "" --safe-mode
+    --no-session-persistence --permission-mode plan`` process from a fresh hub-owned
+    empty cwd (NOT the target repo), sending the self-contained evaluator prompt
     (:func:`build_prompt`, a plain prompt — not a slash command) and returning the
-    assistant's final text (the report envelope) for the service to parse.
-    ``model`` comes from ``ORCH_HUB_EVAL_MODEL``
+    assistant's final text (the report envelope) for the service to parse. With all
+    tools disabled and an isolated cwd, the model judges from the bounded prompt
+    alone and cannot reach target-repo files — so the report stays reproducible from
+    the persisted evidence. ``model`` comes from ``ORCH_HUB_EVAL_MODEL``
     (via :attr:`~orch_hub.config.Config.eval_model`); ``runner`` is injected for
     tests. Constructing it launches nothing — a subprocess only starts when a
     semantic evaluation is actually requested — so the default app wiring can build
@@ -549,7 +574,17 @@ class ClaudeSemanticBackend:
         )
 
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
-        """Run the one read-only turn and return the assistant's final text.
+        """Run the one read-only, evidence-bounded turn; return the assistant's text.
+
+        Evidence isolation is structural (see :meth:`_argv` for the CLI gates). The
+        turn additionally runs from a fresh hub-owned empty directory rather than
+        ``repo.path``, so that even passive context (the cwd path, a git-status
+        snapshot of the cwd) reflects no target-repo state and the model has nothing
+        but the bounded prompt to judge from. ``repo`` is accepted for protocol
+        conformance but deliberately NOT used as the working directory — reaching
+        into the repo is exactly what the bounded evaluator must not do. The scratch
+        dir is removed after the turn (it only exists so ``claude`` has a benign,
+        empty place to run).
 
         Raises :class:`SemanticEvaluationError` on a nonzero exit or a stream-level
         error (the same success test the orchestrator/intake readers use), so the
@@ -557,7 +592,11 @@ class ClaudeSemanticBackend:
         removed, no partial artifacts, target state untouched).
         """
         argv = self._argv(prompt)
-        result = self._runner(argv, repo.path)
+        sandbox = Path(tempfile.mkdtemp(prefix="orch-hub-semantic-"))
+        try:
+            result = self._runner(argv, sandbox)
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
         text, errored = _extract_assistant_text(result.stdout)
         if result.returncode != 0 or errored:
             tail = (result.stderr or "").strip()
@@ -569,15 +608,29 @@ class ClaudeSemanticBackend:
         return text
 
     def _argv(self, prompt: str) -> list[str]:
-        """Build the ``claude`` argv for the read-only evaluation turn.
+        """Build the ``claude`` argv for the read-only, evidence-bounded turn.
 
-        Mirrors the intake agent's read-only draft argv (``claude -p
-        --output-format stream-json --verbose --model … --effort … --permission-mode
-        plan``) minus session threading — one stateless turn, the whole evidence in
-        the prompt. The read-only gate is load-bearing: ``--permission-mode plan``
-        is present and ``--dangerously-skip-permissions`` is never added, so the
-        evaluator cannot write the target repo, ``.ai/``, or ``.ai-tasks/`` even if
-        the prompt's "diagnose only" instruction were ignored."""
+        The isolation gates are load-bearing — a bounded evaluator must judge from
+        the prompt alone, never live repo state:
+
+        - ``--tools ""`` disables every built-in tool, so the turn has no Read/Bash/
+          Grep/etc. and literally cannot open ``.ai/``, raw logs, secrets, or any
+          target file (the read gate; ``--permission-mode plan`` only blocks
+          *writes*, still allowing reads — see the module comment above).
+        - ``--safe-mode`` disables project customizations (target-repo ``CLAUDE.md``,
+          skills, plugins, hooks, MCP servers, custom agents), so none of that repo
+          state is injected into the model context. Auth/model/permissions still work.
+        - ``--no-session-persistence`` — one stateless turn (no ``--resume``), so it
+          leaves no session transcript on disk.
+        - ``--permission-mode plan`` is kept as a write-side belt-and-suspenders and
+          ``--dangerously-skip-permissions`` is never added, so the evaluator cannot
+          write the target repo, ``.ai/``, or ``.ai-tasks/`` either.
+
+        ``--tools ""`` is placed before another flag (never immediately before the
+        positional prompt) so the variadic option cannot swallow the prompt as a
+        tool name. Combined with the isolated empty cwd in :meth:`evaluate`, the
+        model sees only the bounded evidence prompt.
+        """
         return [
             "claude",
             "-p",
@@ -588,6 +641,10 @@ class ClaudeSemanticBackend:
             self.model,
             "--effort",
             self.effort,
+            "--tools",
+            "",
+            "--safe-mode",
+            "--no-session-persistence",
             "--permission-mode",
             "plan",
             prompt,

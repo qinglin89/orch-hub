@@ -6,8 +6,9 @@ confidence degradation for thin evidence, report persistence beside
 evidence/static artifacts, the read-only/no-mutation service boundary,
 disabled-mode fail-closed, and failure paths — all with an injected fake backend.
 Session-2 adds: the concrete Claude CLI backend over a fake runner (argv shape,
-the read-only ``--permission-mode plan`` gate, stream parsing, exit/stream-error
-failure paths — ``claude`` is never launched), the ``report.md`` Markdown render,
+the structural evidence-isolation gates — all tools disabled, safe-mode, an
+isolated empty cwd, plan-mode write gate — stream parsing, exit/stream-error
+failure paths, ``claude`` is never launched), the ``report.md`` Markdown render,
 and its persistence. The protected HTTP surfaces live in ``tests/test_api.py``.
 """
 
@@ -775,14 +776,22 @@ def test_render_report_md_is_deterministic():
 
 
 class ScriptRunner:
-    """Returns a scripted :class:`SemanticRunResult` per call, recording argv+cwd."""
+    """Returns a scripted :class:`SemanticRunResult` per call, recording argv, cwd,
+    and the cwd's contents AT call time.
+
+    The backend runs the turn in a throwaway sandbox dir it removes after the turn,
+    so the contents are captured here (while the dir still exists) to let a test
+    prove the turn ran in an isolated empty directory, never the target repo.
+    """
 
     def __init__(self, *results: SemanticRunResult):
         self._results = list(results)
-        self.calls: list[tuple[list[str], Path]] = []
+        self.calls: list[tuple[list[str], Path, list[str] | None]] = []
 
     def __call__(self, argv, cwd) -> SemanticRunResult:
-        self.calls.append((list(argv), cwd))
+        cwd = Path(cwd)
+        contents = sorted(p.name for p in cwd.iterdir()) if cwd.is_dir() else None
+        self.calls.append((list(argv), cwd, contents))
         if not self._results:
             raise AssertionError("runner called more times than scripted")
         return self._results.pop(0)
@@ -790,6 +799,14 @@ class ScriptRunner:
     @property
     def argv(self) -> list[str]:
         return self.calls[0][0]
+
+    @property
+    def cwd(self) -> Path:
+        return self.calls[0][1]
+
+    @property
+    def cwd_contents(self) -> list[str] | None:
+        return self.calls[0][2]
 
 
 def stream(text: str, *, is_error: bool = False, returncode: int = 0,
@@ -818,13 +835,45 @@ def test_claude_backend_argv_is_read_only_single_turn(tmp_path):
     assert argv[:5] == ["claude", "-p", "--output-format", "stream-json", "--verbose"]
     assert argv[argv.index("--model") + 1] == "claude-x"
     assert argv[argv.index("--effort") + 1] == "high"
-    # Read-only gate: plan mode present, the write-permitting flag never added.
+    # Read gate (structural): ALL built-in tools disabled, so the model cannot open
+    # .ai/, raw logs, secrets, or any repo file — evidence-bounded, not just
+    # write-safe. Placed before another flag so the variadic --tools cannot eat the
+    # prompt (--tools is not the last-but-one arg).
+    assert argv[argv.index("--tools") + 1] == ""
+    assert argv[argv.index("--tools") + 2].startswith("--")
+    assert "--safe-mode" in argv  # no target-repo CLAUDE.md/skills/hooks/MCP injected
+    assert "--no-session-persistence" in argv
+    # Write gate (belt-and-suspenders): plan mode present, skip-permissions never.
     assert argv[argv.index("--permission-mode") + 1] == "plan"
     assert "--dangerously-skip-permissions" not in argv
     # One stateless turn — the whole evidence is in the prompt, so no session threading.
     assert "--session-id" not in argv and "--resume" not in argv
     assert argv[-1] == "PROMPT-BODY"  # the prompt is the final positional arg
-    assert runner.calls[0][1] == tmp_path  # runs in the target repo
+    # Isolation: the turn runs from a fresh empty dir, NOT the target repo, so even
+    # passive cwd/git-status context cannot reach repo state.
+    assert runner.cwd != tmp_path and tmp_path not in runner.cwd.parents
+    assert runner.cwd_contents == []  # a fresh, empty hub-owned sandbox
+
+
+def test_claude_backend_cannot_read_target_repo_only_the_prompt(tmp_path):
+    # The finding this guards: --permission-mode plan blocks writes but still lets a
+    # tool-enabled agent READ repo files (.ai/, logs, secrets). Prove the default
+    # backend is structurally read-bounded: all tools disabled AND it never runs in
+    # the repo that holds the secret — so it can only judge the bounded prompt.
+    repo_dir = tmp_path / "repo"
+    (repo_dir / ".ai").mkdir(parents=True)
+    (repo_dir / ".ai" / "secret.md").write_text("DEVICE-KEY-SECRET", encoding="utf-8")
+    (repo_dir / ".git").mkdir()  # a git repo, so a cwd here would leak git-status too
+    runner = ScriptRunner(stream(envelope()))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+
+    backend.evaluate("PROMPT", ManagedRepo(name="r", path=repo_dir, manifest=repo_dir / "m.json"))
+
+    # No tools at all → no Read/Bash/Grep the model could use to open secret.md.
+    assert runner.argv[runner.argv.index("--tools") + 1] == ""
+    # And it ran in a fresh empty dir outside the repo tree, never seeing .ai/ or .git.
+    assert runner.cwd != repo_dir and repo_dir not in runner.cwd.parents
+    assert runner.cwd_contents == []
 
 
 def test_claude_backend_returns_assistant_text_and_defaults_effort(tmp_path):
@@ -875,7 +924,9 @@ def test_claude_backend_drives_evaluate_end_to_end(tmp_path):
     eval_dir = config.data_dir / "evaluations" / "alpha" / TASK / report.evaluation_id
     assert (eval_dir / SEMANTIC_REPORT_NAME).is_file()
     assert (eval_dir / SEMANTIC_REPORT_MD_NAME).is_file()
-    # The backend ran read-only in the repo and saw the bounded evidence prompt.
-    assert runner.calls[0][1] == repo.path
-    assert "--permission-mode" in runner.argv and "--dangerously-skip-permissions" not in runner.argv
+    # The backend ran evidence-bounded (all tools disabled) from an isolated empty
+    # cwd — NOT the target repo — and saw only the bounded evidence prompt.
+    assert runner.cwd != repo.path and repo.path not in runner.cwd.parents
+    assert runner.argv[runner.argv.index("--tools") + 1] == ""
+    assert "--safe-mode" in runner.argv and "--dangerously-skip-permissions" not in runner.argv
     assert "handoff_completeness" in runner.argv[-1]
