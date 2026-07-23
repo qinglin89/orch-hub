@@ -1206,9 +1206,15 @@ class SemanticEvaluator:
         failure: each evaluation is self-contained and a retry mints a fresh dir, so
         a leftover would not speed a retry — it would only blur that distinction and
         litter history on a flaky backend.)
+
+        Retention is deferred to after the whole evidence→static→semantic set is
+        durable: this generates with ``prune=False`` and calls
+        :meth:`EvaluationService.auto_prune` only once every artifact is written, so
+        a backend/model/parse/write failure — whose cleanup removes only this new
+        dir — can never first delete the task's older retained evaluations.
         """
         self._require_enabled()
-        pack = self._service.generate_evidence(repo, task_id)
+        pack = self._service.generate_evidence(repo, task_id, prune=False)
         assert pack.evaluation_dir is not None  # generate_evidence always sets it
         eval_dir = pack.evaluation_dir
         try:
@@ -1234,4 +1240,7 @@ class SemanticEvaluator:
             # cleanup the static/evidence generators use.
             shutil.rmtree(eval_dir, ignore_errors=True)
             raise
+        # Retention runs only here — after the complete evaluation is durable — so a
+        # failure above never deletes older retained evaluations (see auto_prune).
+        self._service.auto_prune(repo, task_id, protect=pack.evaluation_id)
         return report

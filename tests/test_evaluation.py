@@ -989,6 +989,30 @@ def test_generate_evidence_default_retention_keeps_modest_history(tmp_path):
     assert len(service.list_evaluations(repo, TASK)) == 5
 
 
+def test_generate_evidence_prune_false_defers_to_explicit_auto_prune(tmp_path):
+    # The metrics/semantic seam: generate_evidence(prune=False) mints and persists
+    # the dir but does NOT prune, so a higher-layer write can still fail and roll
+    # the dir back without retention having already deleted older evaluations. The
+    # caller runs retention itself via auto_prune once its artifacts are durable.
+    config = make_config(tmp_path, retention=1)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    existing = service.generate_evidence(repo, TASK)  # default prune=True path
+    assert len(service.list_evaluations(repo, TASK)) == 1
+
+    fresh = service.generate_evidence(repo, TASK, prune=False)
+    # Deferred: both dirs are live even though retention=1 (no prune happened yet).
+    ids = {s.evaluation_id for s in service.list_evaluations(repo, TASK)}
+    assert ids == {existing.evaluation_id, fresh.evaluation_id}
+
+    # auto_prune enforces the cap, protecting the just-minted id, and never raises.
+    service.auto_prune(repo, TASK, protect=fresh.evaluation_id)
+    remaining = [s.evaluation_id for s in service.list_evaluations(repo, TASK)]
+    assert remaining == [fresh.evaluation_id]
+
+
 def test_prune_evaluations_disabled_service_fails_closed(tmp_path):
     repo = make_repo(tmp_path)
     service = EvaluationService(make_config(tmp_path, enabled=False))

@@ -1301,3 +1301,61 @@ def test_generate_metrics_cleans_up_dir_on_write_failure(tmp_path, monkeypatch):
     eval_id = FIXED_TS.strftime("%Y%m%dT%H%M%SZ")
     eval_dir = tmp_path / "hub-data" / "evaluations" / "alpha" / TASK / eval_id
     assert not eval_dir.exists()
+
+
+def test_generate_metrics_failure_preserves_existing_retained_history(tmp_path, monkeypatch):
+    # Regression: retention must not fire until the metrics pair is durable. With
+    # retention=1 and one existing evaluation, a failed metrics write must leave
+    # that existing evaluation intact — pruning it for the about-to-fail generation
+    # and then rolling back the new dir would leave the task with ZERO evaluations.
+    config = Config(
+        ai_native_path=tmp_path / "ai-native",
+        data_dir=tmp_path / "hub-data",
+        evaluation_enabled=True,
+        eval_retention=1,
+    )
+    repo = _write_archived_completed_task(config, tmp_path)
+    service = EvaluationService(config, git_runner=_fake_git, clock=lambda: FIXED_TS)
+    ev = StaticEvaluator(config, evaluation_service=service, clock=lambda: FIXED_TS)
+
+    first = ev.generate_metrics(repo, TASK)  # the existing retained evaluation
+    assert len(service.list_evaluations(repo, TASK)) == 1
+
+    import orch_hub.static_metrics as sm
+
+    def boom(path, data):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(sm, "_write_json", boom)
+
+    with pytest.raises(OSError):
+        ev.generate_metrics(repo, TASK)
+
+    # The pre-existing evaluation survives the failed second generation (retention
+    # never ran for it), and no failed-attempt dir leaked.
+    remaining = service.list_evaluations(repo, TASK)
+    assert [s.evaluation_id for s in remaining] == [first.evaluation_id]
+    assert service.artifact_dir(repo, TASK, first.evaluation_id).is_dir()
+
+
+def test_generate_metrics_success_still_auto_prunes_to_cap(tmp_path):
+    # The fix moved retention out of generate_evidence but must NOT drop it: a
+    # successful metrics generation still bounds history. With retention=1, a second
+    # successful generation prunes the older evaluation, leaving exactly the newest.
+    config = Config(
+        ai_native_path=tmp_path / "ai-native",
+        data_dir=tmp_path / "hub-data",
+        evaluation_enabled=True,
+        eval_retention=1,
+    )
+    repo = _write_archived_completed_task(config, tmp_path)
+    service = EvaluationService(config, git_runner=_fake_git, clock=lambda: FIXED_TS)
+    ev = StaticEvaluator(config, evaluation_service=service, clock=lambda: FIXED_TS)
+
+    first = ev.generate_metrics(repo, TASK)
+    second = ev.generate_metrics(repo, TASK)
+
+    assert first.evaluation_id != second.evaluation_id  # same-second rerun bumps -N
+    remaining = service.list_evaluations(repo, TASK)
+    assert [s.evaluation_id for s in remaining] == [second.evaluation_id]
+    assert not service.artifact_dir(repo, TASK, first.evaluation_id).exists()

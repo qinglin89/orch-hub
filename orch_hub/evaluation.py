@@ -518,8 +518,8 @@ class EvaluationService:
         sorts past the cap: the generate path passes the just-created id, because a
         same-second collision can reuse a *pruned* base id (which then sorts oldest
         by ``(stamp, suffix)``), and deleting the dir a generation just wrote would
-        break the static/semantic writes that follow — the guard keeps the fresh
-        evaluation at a transient ``keep + 1`` that self-corrects next generation.
+        discard the evidence/metrics/report it just persisted — the guard keeps the
+        fresh evaluation at a transient ``keep + 1`` that self-corrects next generation.
         Scoped strictly to this ``(repo, task)`` subtree — other tasks' evaluations
         are never touched — and removals go through the contained
         :meth:`artifact_dir` (rejecting unsafe segments). Best-effort per dir
@@ -541,6 +541,32 @@ class EvaluationService:
             shutil.rmtree(eval_dir, ignore_errors=True)
             removed.append(entry.evaluation_id)
         return removed
+
+    def auto_prune(
+        self, repo: ManagedRepo, task_id: str, *, protect: str | None = None
+    ) -> None:
+        """Best-effort retention pass, run only after a generation is fully durable.
+
+        Wraps :meth:`prune_evaluations` so retention never fails or rolls back an
+        otherwise-successful generation — a broken directory read/removal is
+        swallowed rather than propagated. The **timing** is the load-bearing part:
+        a generation path must call this only once its whole artifact set is on
+        disk, never before a higher layer's write could still fail and roll the
+        just-minted dir back. :meth:`generate_evidence` calls it for the standalone
+        evidence pack (complete once ``evidence.json`` is written); the metrics and
+        semantic layers call it *after* their own higher-layer artifacts are
+        written (:meth:`orch_hub.static_metrics.StaticEvaluator.generate_metrics`,
+        :meth:`orch_hub.semantic.SemanticEvaluator.evaluate`). Pruning any earlier
+        would let a failed static/semantic write — whose cleanup removes only the
+        new dir — leave the task with *fewer* evaluations than before it ran, by
+        having already deleted the older retained ones. ``protect`` is forwarded to
+        keep the just-minted id alive even when a reused same-second base id sorts
+        it oldest (see :meth:`prune_evaluations`).
+        """
+        try:
+            self.prune_evaluations(repo, task_id, protect=protect)
+        except Exception:
+            pass
 
     def read_artifact(
         self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str
@@ -614,7 +640,9 @@ class EvaluationService:
             git=git,
         )
 
-    def generate_evidence(self, repo: ManagedRepo, task_id: str) -> EvidencePack:
+    def generate_evidence(
+        self, repo: ManagedRepo, task_id: str, *, prune: bool = True
+    ) -> EvidencePack:
         """Build and persist an evidence pack; return it with its artifact dir set.
 
         Mints a fresh, collision-free evaluation id, reserves its contained
@@ -625,6 +653,15 @@ class EvaluationService:
         cleanup — leaving no empty evaluation dir behind. The only writes are the
         pack's own artifacts under ``<data_dir>/evaluations``; target repo, task
         file, run records, ``.ai/``, and ``.ai-tasks/`` are never touched.
+
+        ``prune`` controls the post-write retention pass. It defaults True for the
+        **standalone** evidence path (this method's own artifact set is complete
+        once ``evidence.json`` is written, so retention is safe here). The metrics
+        and semantic layers, which call this to *mint the dir* and then write more
+        artifacts into it, pass ``prune=False`` and run retention themselves only
+        after their higher-layer writes are durable — see :meth:`auto_prune` for
+        why pruning here would otherwise let a failed static/semantic write destroy
+        older retained evaluations.
         """
         self._require_enabled()
         evaluation_id, evaluation_dir = self._reserve_evaluation_dir(repo, task_id)
@@ -637,18 +674,17 @@ class EvaluationService:
             # way). ``ignore_errors`` keeps cleanup itself from masking the cause.
             shutil.rmtree(evaluation_dir, ignore_errors=True)
             raise
-        # Enforce retention AFTER the write succeeds and OUTSIDE the try above: this
-        # is the single choke point every generation path funnels through
-        # (metrics/semantic both mint their dir via generate_evidence), so growth is
-        # bounded without a separate cron. ``protect`` the id just written — a
-        # same-second collision can reuse a pruned base id that now sorts oldest, and
-        # this dir must survive for the static/semantic writes a metrics/semantic
-        # generation performs into it after this returns. Best-effort — housekeeping
-        # must never fail or roll back an otherwise-successful generation.
-        try:
-            self.prune_evaluations(repo, task_id, protect=evaluation_id)
-        except Exception:
-            pass
+        # Retention for the standalone evidence path only: this method's artifacts
+        # are complete once evidence.json is written above, so it is safe to prune
+        # now. The metrics/semantic paths pass ``prune=False`` and prune themselves
+        # AFTER their higher-layer writes land, because those writes can still fail
+        # and roll this dir back — pruning here first would already have deleted the
+        # older retained evaluations (see :meth:`auto_prune`). ``protect`` the id
+        # just written: a same-second collision can reuse a pruned base id that now
+        # sorts oldest, so an unprotected prune could delete the evidence just
+        # persisted here.
+        if prune:
+            self.auto_prune(repo, task_id, protect=evaluation_id)
         return replace(pack, evaluation_dir=evaluation_dir)
 
     def _reserve_evaluation_dir(

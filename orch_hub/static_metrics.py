@@ -301,9 +301,15 @@ class StaticEvaluator:
         removed so no half-pair (evidence without metrics) is left behind,
         mirroring ``generate_evidence``'s own failure cleanup. Read-only over
         target repo/run state — the only writes are the two hub-owned artifacts.
+
+        Retention is applied via ``generate_evidence(prune=False)`` +
+        :meth:`EvaluationService.auto_prune` *after* the metrics write succeeds, not
+        inside ``generate_evidence``: pruning before this write could fail would let
+        a failed metrics generation (whose cleanup removes only the new dir) delete
+        older retained evaluations first, shrinking the task's history below the cap.
         """
         self._require_enabled()
-        pack = self._service.generate_evidence(repo, task_id)
+        pack = self._service.generate_evidence(repo, task_id, prune=False)
         report = _build_report(pack, self._clock().isoformat())
         assert pack.evaluation_dir is not None  # generate_evidence always sets it
         try:
@@ -311,6 +317,9 @@ class StaticEvaluator:
         except Exception:
             shutil.rmtree(pack.evaluation_dir, ignore_errors=True)
             raise
+        # Only now that the evidence+metrics pair is durable: retention can never
+        # have deleted older evaluations for a metrics generation that then failed.
+        self._service.auto_prune(repo, task_id, protect=pack.evaluation_id)
         return report
 
 

@@ -702,6 +702,57 @@ def test_rerun_with_different_model_preserves_both_reports(tmp_path):
     assert models == {"model-a", "model-b"}
 
 
+def test_evaluate_failure_preserves_existing_retained_history(tmp_path):
+    # Regression: retention must not fire until the whole evaluation is durable. A
+    # failed semantic attempt cleans up only its own new dir; if retention had
+    # already pruned older evaluations for that same (about-to-fail) attempt, a
+    # task with retention=1 and one prior evaluation would be left with ZERO. The
+    # pre-existing evaluation must survive the failed second attempt.
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True, eval_retention=1)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+
+    first = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope())
+    ).evaluate(repo, TASK)  # the existing retained evaluation
+    assert [s.evaluation_id for s in _service(config).list_evaluations(repo, TASK)] == [
+        first.evaluation_id
+    ]
+
+    with pytest.raises(SemanticEvaluationError, match="crashed"):
+        semantic_evaluator(
+            config=config, service=_service(config), backend=RaisingBackend()
+        ).evaluate(repo, TASK)
+
+    # The prior evaluation is intact and no failed-attempt dir leaked: retention
+    # never ran for the attempt that failed.
+    remaining = _service(config).list_evaluations(repo, TASK)
+    assert [s.evaluation_id for s in remaining] == [first.evaluation_id]
+    eval_dir = config.data_dir / "evaluations" / "alpha" / TASK / first.evaluation_id
+    assert (eval_dir / SEMANTIC_REPORT_NAME).is_file()
+
+
+def test_evaluate_success_still_auto_prunes_to_cap(tmp_path):
+    # The fix moved retention out of generate_evidence but must NOT drop it: a
+    # successful semantic evaluation still bounds history. With retention=1, a
+    # second successful evaluation prunes the older one, leaving exactly the newest.
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True, eval_retention=1)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+
+    first = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope())
+    ).evaluate(repo, TASK)
+    second = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope())
+    ).evaluate(repo, TASK)
+
+    assert first.evaluation_id != second.evaluation_id  # same-second rerun bumps -N
+    remaining = _service(config).list_evaluations(repo, TASK)
+    assert [s.evaluation_id for s in remaining] == [second.evaluation_id]
+    assert not (config.data_dir / "evaluations" / "alpha" / TASK / first.evaluation_id).exists()
+
+
 # -- Markdown rendering -------------------------------------------------------
 
 
