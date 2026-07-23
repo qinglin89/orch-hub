@@ -679,6 +679,34 @@
     return mine.find((r) => LIVE_STATES.has(r.state)) || mine[mine.length - 1];
   }
 
+  // Whether a repo has a live (active or waiting) run in a raw /api/runs list.
+  // The display-readiness softening below keys off this: a dirty working tree is
+  // only excused while the orchestrator is actually running.
+  function repoHasLiveRun(runs, repoName) {
+    return (runs || []).some(
+      (r) => r.repo_name === repoName && LIVE_STATES.has(r.state)
+    );
+  }
+
+  // The one shared READY/NOT READY *presentation* rule, derived from raw repo
+  // readiness plus live-run state. A repo displays as ready when it is genuinely
+  // raw-ready, OR when a live run is in flight and its ONLY raw failure is
+  // `git_clean`: a dirty tree is an expected transient while a run edits the
+  // working copy, not an operator problem. This softens the display ONLY — every
+  // backend/launch gate (run start, intake, the task-detail Start eligibility)
+  // keeps reading raw `readiness.ready` and is never relaxed here. Missing
+  // readiness (an unavailable /api/repos overlay) stays not-ready, matching the
+  // raw default; once the run ends `hasLiveRun` is false, so a still-dirty tree
+  // reverts to NOT READY. Active-task presence is deliberately NOT an input —
+  // only a live run qualifies.
+  function displayReady(readiness, hasLiveRun) {
+    if (!readiness) return false;
+    if (readiness.ready) return true;
+    if (!hasLiveRun) return false;
+    const checks = readiness.checks || [];
+    return checks.length === 1 && checks[0] && checks[0].name === "git_clean";
+  }
+
   const missingIndexCard = (repoName) =>
     `<li class="card problem"><div class="card-head">
        <span class="name">${escapeHtml(repoName)}</span>
@@ -716,14 +744,17 @@
 
   function repoCard(repo, liveRuns, taskCount) {
     const readiness = repo.readiness || { ready: false, checks: [] };
+    // Present readiness through the shared display rule: a live run whose sole
+    // raw failure is a dirty tree reads as READY (the run signal below is the
+    // independent dimension that says a run is in flight). `liveRuns` is already
+    // this repo's live-run slice, so a non-empty array is "has a live run".
+    const ready = displayReady(readiness, !!(liveRuns && liveRuns.length));
     // The tri-state run signal (yellow=waiting / green=active / gray=idle) is a
     // compact dot leading the repo name (see the card head below), always
     // present so "no live run" reads as an explicit gray idle rather than an
     // absence. The readiness pill keeps the right of the head to itself.
-    const badges = readiness.ready
-      ? badge("ready", "ok")
-      : badge("not ready", "bad");
-    const reasons = readiness.ready
+    const badges = ready ? badge("ready", "ok") : badge("not ready", "bad");
+    const reasons = ready
       ? ""
       : `<ul class="reasons">${(readiness.checks || [])
           .map(
@@ -733,9 +764,9 @@
               )}</li>`
           )
           .join("")}</ul>`;
-    // Ready repos surface at-a-glance metadata (latest commit + active task
-    // count); not-ready repos keep their failure reasons instead.
-    const meta = readiness.ready ? repoMetaLine(repo.commit, taskCount) : "";
+    // Display-ready repos surface at-a-glance metadata (latest commit + active
+    // task count); not-ready repos keep their failure reasons instead.
+    const meta = ready ? repoMetaLine(repo.commit, taskCount) : "";
     return `
       <li class="card repo">
         <a class="card-link" href="${repoHash(repo.name)}">
@@ -1105,9 +1136,11 @@
       if (err instanceof ApiError && err.status === 401) throw err;
     }
     let liveByTask = {};
+    let hasLiveRun = false;
     try {
       const runsData = await api("/api/runs");
       liveByTask = liveRunsByTask(runsData.runs, repoName);
+      hasLiveRun = repoHasLiveRun(runsData.runs, repoName);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
@@ -1143,13 +1176,16 @@
     if (repoDetailStatus && !statuses.includes(repoDetailStatus))
       repoDetailStatus = "";
 
+    // Present readiness through the shared display rule; the lower intake
+    // section still re-derives from raw `readiness` so its gate stays unchanged.
+    const ready = readiness ? displayReady(readiness, hasLiveRun) : null;
     const readyBadge = readiness
-      ? readiness.ready
+      ? ready
         ? badge("ready", "ok")
         : badge("not ready", "bad")
       : "";
     const reasons =
-      readiness && !readiness.ready
+      readiness && !ready
         ? `<ul class="reasons">${(readiness.checks || [])
             .map(
               (c) =>
@@ -4489,10 +4525,14 @@
     }
   }
 
-  // Repos ready vs total from the /api/repos payload.
-  function readinessSummary(repos) {
+  // Repos display-ready vs total, using the shared presentation rule so the
+  // count agrees with the repo cards: a live run whose sole raw failure is a
+  // dirty tree counts as ready. `runs` may be null (its source failed), in which
+  // case repoHasLiveRun is false and every repo falls back to raw readiness.
+  function readinessSummary(repos, runs) {
     let ready = 0;
-    for (const r of repos || []) if (r.readiness && r.readiness.ready) ready++;
+    for (const r of repos || [])
+      if (displayReady(r.readiness, repoHasLiveRun(runs, r.name))) ready++;
     return { ready, total: (repos || []).length };
   }
 
@@ -4570,7 +4610,7 @@
   function overviewMetrics(repos, taskRepos, runs, escalations) {
     const tiles = [];
     if (repos) {
-      const r = readinessSummary(repos);
+      const r = readinessSummary(repos, runs);
       const kind = r.total && r.ready < r.total ? "warn" : r.total ? "ok" : "";
       tiles.push(metricTile(r.ready + "/" + r.total, "repos ready", kind));
     } else {
@@ -4650,8 +4690,11 @@
             : logsHash(w.run_id),
       });
     }
+    // Readiness failures, minus any repo the shared display rule now reads as
+    // ready (live run + dirty tree only). A waiting run still surfaces above for
+    // its pending answer; this only drops the redundant NOT READY row.
     for (const r of repos || []) {
-      if (r.readiness && !r.readiness.ready)
+      if (r.readiness && !displayReady(r.readiness, repoHasLiveRun(runs, r.name)))
         items.push({
           kind: "not-ready",
           badge: badge("not ready", "bad"),

@@ -2418,6 +2418,190 @@ async function scenarioRunHistory() {
   );
 }
 
+// Live-run readiness display: a repo whose ONLY raw readiness failure is a dirty
+// working tree reads as READY *for display* while an active/waiting run is in
+// flight (the tree is dirty because the run is editing it), and reverts to NOT
+// READY the moment the run ends, gains another failure, or the run overlay is
+// unavailable. The softening is presentation-only: the intake gate on repo
+// detail still pre-explains the raw block, proving no launch/intake gate relaxed.
+async function scenarioLiveRunReadiness() {
+  installRoutes({ waiting: false });
+
+  // The exact readiness a live orchestrator run produces. Serialized
+  // readiness.checks holds ONLY the failures, so a single git_clean entry means
+  // the dirty tree is the sole failure.
+  var DIRTY_ONLY = {
+    ready: false,
+    checks: [{ name: "git_clean", message: "working tree has uncommitted changes" }],
+  };
+  // A dirty tree PLUS a structural failure: never display-ready, run or not.
+  var DIRTY_PLUS_STRUCTURAL = {
+    ready: false,
+    checks: [
+      { name: "git_clean", message: "working tree has uncommitted changes" },
+      { name: "aii_status", message: "aii-2 status failed: drift detected" },
+    ],
+  };
+  var reposWith = function (readiness) {
+    return {
+      repos: [
+        {
+          name: REPO,
+          path: "/tmp/" + REPO,
+          readiness: readiness,
+          housekeeping_pending: false,
+          commit: null,
+        },
+      ],
+    };
+  };
+  var runsIn = function (state) {
+    return state === null
+      ? { runs: [] }
+      : {
+          runs: [
+            {
+              run_id: RUN,
+              repo_name: REPO,
+              task_id: TASK,
+              state: state,
+              started_ts: "2026-07-20T08:00:00Z",
+              pending_questions: state === "waiting" ? 1 : 0,
+              stop_requested: false,
+            },
+          ],
+        };
+  };
+  var textOf = function (sel) {
+    var el = doc.querySelector(sel);
+    return el ? el.textContent.trim() : null;
+  };
+  var listBadge = function () {
+    return textOf("#view .card.repo .badges .badge");
+  };
+  var listReasons = function () {
+    return doc.querySelector("#view .card.repo .reasons");
+  };
+  // The overview "repos ready" tile value, found by its label so it can't be
+  // confused with the other metric tiles.
+  var reposReadyMetric = function () {
+    var tiles = doc.querySelectorAll("#view .metric");
+    for (var i = 0; i < tiles.length; i++) {
+      var label = tiles[i].querySelector(".metric-label");
+      if (label && label.textContent.trim() === "repos ready")
+        return (tiles[i].querySelector(".metric-value") || {}).textContent;
+    }
+    return null;
+  };
+
+  // ---- 1) active run + dirty-tree-only failure → display READY ----
+  route("GET", "/api/repos", reposWith(DIRTY_ONLY));
+  route("GET", "/api/runs", runsIn("active"));
+  await navigate("#/repos");
+  eq("readiness: an active-run dirty repo shows READY on the list", listBadge(), "ready");
+  check(
+    "readiness: the softened list card drops its failure reasons",
+    listReasons() === null,
+    "failure reasons still rendered on a display-ready card"
+  );
+  check(
+    "readiness: the run signal stays an independent dimension (active dot present)",
+    !!doc.querySelector("#view .card.repo .run-dot.active"),
+    "the active run-dot vanished from the softened card"
+  );
+
+  await navigate("#/repos/" + REPO);
+  eq("readiness: repo detail shows READY for a live dirty repo", textOf(".detail-head .badge"), "ready");
+  // The Intake gate is deliberately NOT softened — it still reads raw readiness,
+  // so the intake section keeps pre-explaining the dirty-tree block. This proves
+  // the display softening never leaked into a launch/intake gate.
+  check(
+    "readiness: the intake gate on detail still reads raw readiness",
+    (textOf(".section.intake") || "").indexOf("not ready, so a task intake") !== -1,
+    "the intake section dropped its raw-readiness block: " + textOf(".section.intake")
+  );
+
+  await navigate("#/overview");
+  eq("readiness: the overview counts the softened repo as ready", reposReadyMetric(), "1/1");
+  check(
+    "readiness: no NOT READY attention row for the softened repo",
+    doc.querySelector(".attn-not-ready") === null,
+    "a not-ready attention row rendered for a display-ready repo"
+  );
+
+  // ---- 2) waiting run: still READY, but the waiting-answer item remains ----
+  route("GET", "/api/runs", runsIn("waiting"));
+  route("GET", "/api/escalations", {
+    escalations: [
+      { run_id: RUN, repo_name: REPO, task_id: TASK, question: { seq: 1, kind: "escalation", message: "Which way?" } },
+    ],
+  });
+  await navigate("#/repos");
+  eq("readiness: a waiting-run dirty repo also shows READY", listBadge(), "ready");
+  check(
+    "readiness: the waiting card carries the waiting run-dot",
+    !!doc.querySelector("#view .card.repo .run-dot.waiting"),
+    "no waiting run-dot on the waiting card"
+  );
+  await navigate("#/overview");
+  eq("readiness: the waiting repo still counts as ready", reposReadyMetric(), "1/1");
+  check(
+    "readiness: no NOT READY attention row while waiting-softened",
+    doc.querySelector(".attn-not-ready") === null,
+    "a not-ready row rendered for a waiting display-ready repo"
+  );
+  check(
+    "readiness: the waiting-for-answer attention item is still shown",
+    !!doc.querySelector(".attn-waiting"),
+    "the waiting attention item was dropped by the readiness softening"
+  );
+
+  // ---- 3) an additional structural failure → NOT READY even with a live run ----
+  route("GET", "/api/repos", reposWith(DIRTY_PLUS_STRUCTURAL));
+  route("GET", "/api/runs", runsIn("active"));
+  route("GET", "/api/escalations", { escalations: [] });
+  await navigate("#/repos");
+  eq("readiness: a live repo with a structural failure stays NOT READY", listBadge(), "not ready");
+  check("readiness: the structural-failure card keeps its reasons", !!listReasons(), "reasons dropped on a genuinely not-ready repo");
+  await navigate("#/overview");
+  eq("readiness: the overview does not count a structural-failure repo", reposReadyMetric(), "0/1");
+  check(
+    "readiness: a structural-failure repo still appears in readiness attention",
+    !!doc.querySelector(".attn-not-ready"),
+    "the structural-failure repo was wrongly dropped from attention"
+  );
+
+  // ---- 4) ended/idle: dirty tree, no live run (tasks present) → NOT READY ----
+  // /api/tasks still lists an active task for this repo, so a NOT READY result
+  // proves active-task presence is not an exemption — only a live run is.
+  route("GET", "/api/repos", reposWith(DIRTY_ONLY));
+  route("GET", "/api/runs", runsIn(null));
+  await navigate("#/repos");
+  eq("readiness: a dirty repo with no live run shows NOT READY", listBadge(), "not ready");
+  check(
+    "readiness: active tasks alone do not soften readiness (reasons shown)",
+    !!listReasons(),
+    "an idle dirty repo with active tasks was wrongly softened"
+  );
+  await navigate("#/overview");
+  eq("readiness: the overview counts an ended/idle dirty repo as not ready", reposReadyMetric(), "0/1");
+  check(
+    "readiness: an ended/idle dirty repo appears in readiness attention",
+    !!doc.querySelector(".attn-not-ready"),
+    "no not-ready attention row for an idle dirty repo"
+  );
+
+  // ---- 5) run overlay unavailable → fall back to raw readiness (NOT READY) ----
+  route("GET", "/api/repos", reposWith(DIRTY_ONLY));
+  delete ROUTES["GET /api/runs"]; // fetch → 404: the run overlay degrades to none
+  await navigate("#/repos");
+  eq("readiness: unavailable run data falls back to raw NOT READY", listBadge(), "not ready");
+  await navigate("#/overview");
+  eq("readiness: the overview falls back to raw readiness when runs are unavailable", reposReadyMetric(), "0/1");
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -2433,6 +2617,7 @@ async function scenarioRunHistory() {
     await scenarioTaskEval();
     await scenarioStaleRoute();
     await scenarioRunHistory();
+    await scenarioLiveRunReadiness();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));
