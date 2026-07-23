@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "fb7ba0a6f291124c1ce62789d8fc52a2e43659de7440beeae46637fe8c03b321",
+  "canonical_payload_sha256": "319ea7c07c814c9df4bafdd732718a90d6311360a7bbc0f980804a0961d9576b",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -153,14 +153,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/.env.example",
-      "canonical_sha256": "b021b314a1b3b75cd8d107da86fe3466252938c53633db0dd6a03867aeb956ee",
-      "canonical_size_bytes": 1387,
+      "canonical_sha256": "7de96cd57aa836064b96d7b74cc1c7bf6bca2a7ecb687d3f7742645167232b59",
+      "canonical_size_bytes": 1405,
       "target_relative_path": ".cursor/orchestrator/.env.example"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-config-profiles.md",
-      "canonical_sha256": "ba09d3d8a8d0a327449abe3513064c1c896c1ff69d50fd665838813dd1d1a9ef",
-      "canonical_size_bytes": 8010,
+      "canonical_sha256": "6bc0ae1f7f59e5085d3711651b81562261d3e3329bdccf2542a737ff231f3369",
+      "canonical_size_bytes": 8017,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub-config-profiles.md"
     },
     {
@@ -171,8 +171,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "a9e1fb0d800201b7f4604491e2fc7bee200841c1d452cefd609aa8996b8888fe",
-      "canonical_size_bytes": 35051,
+      "canonical_sha256": "5ea73a53f5b238a4f802e1d4411efe00202c4148d575dc44345e8bbc4ebe66ef",
+      "canonical_size_bytes": 35090,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
@@ -183,8 +183,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.toml",
-      "canonical_sha256": "7609d1d81ba3ad10c2afbefb697da74de1b9550a7f15ad3ce393a623cc806a05",
-      "canonical_size_bytes": 1224,
+      "canonical_sha256": "e13f128e1b9aaf6a97f15b283229c51f7942d025938d9c733ff0a9a1467f4a9d",
+      "canonical_size_bytes": 1231,
       "target_relative_path": ".cursor/orchestrator/orchestrator.toml"
     },
     {
@@ -633,8 +633,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "107c1276d2fd56636fbd29209a519008b74add6b1330443cf44998237ae323e5",
-      "canonical_size_bytes": 102201,
+      "canonical_sha256": "6119019f8686824377ec2fdd867465f30467dbc9fb11479ecdc2095d8fe3ae4e",
+      "canonical_size_bytes": 102243,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
@@ -657,6 +657,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "1ef2f2034e3fd79688c43ec805537e4d44882dc7",
+  "source_git_commit": "ff09666a9deccc5138bc67b2a8225dc1293948d6",
   "source_repo": "ai-native-deployment"
 }
