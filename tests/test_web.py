@@ -365,11 +365,15 @@ def test_run_task_view_resolves_task_through_the_run_record():
     assert "data.source" in body
 
 
-def test_log_view_task_link_uses_run_scoped_route():
+def test_log_view_task_link_splits_live_detail_from_archived_fallback():
     body = app_js()
-    # The log view's task back-link routes through the run-scoped task view
-    # (runTaskHash), not taskHash's active-only task detail, so clicking a run's
-    # task link after archival opens the archived file instead of 404-ing.
+    # The log view's task back-link is liveness-aware. A live (active/waiting) run
+    # with repo+task attribution opens the full task detail (taskHash), so run
+    # controls, pending answers, and session/context strips are reachable. Every
+    # other case — an ended run, or a live run missing attribution — keeps the
+    # run-scoped task view (runTaskHash), which resolves active-then-archive so an
+    # archived task stays readable instead of 404-ing on the index-gated detail.
+    assert "live && run.repo_name && run.task_id" in body
     assert "runTaskHash(" in body
 
 

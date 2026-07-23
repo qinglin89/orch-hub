@@ -3473,14 +3473,25 @@
     // open a fresh SSE stream nothing tears down, feeding a detached <pre>.
     if (superseded()) return;
     const live = LIVE_STATES.has(run.state);
-    // The task link goes through the run-scoped task view (resolved from the run
-    // record), not taskHash's index-gated task detail, so it still opens the
-    // task file after close-out archives the task instead of 404-ing.
-    const back = run.task_id
-      ? `<a class="back-link" href="${runTaskHash(
-          run.run_id
-        )}">← ${escapeHtml(run.task_id)}</a>`
-      : `<a class="back-link" href="#/runs">← Runs</a>`;
+    // Where the task back-link points depends on the run's liveness. A live run
+    // (active/waiting) with full repo+task attribution links to the complete
+    // task detail page (taskHash) — run controls, pending answers, and
+    // session/context strips for the run in progress. Anything else — an ended
+    // run, or a live run missing repo/task attribution — uses the run-scoped
+    // task view (runTaskHash), which resolves the task file through the run
+    // record (active then archive) and so survives close-out archiving the task
+    // instead of 404-ing on the index-gated task detail.
+    const back =
+      live && run.repo_name && run.task_id
+        ? `<a class="back-link" href="${taskHash(
+            run.repo_name,
+            run.task_id
+          )}">← ${escapeHtml(run.task_id)}</a>`
+        : run.task_id
+        ? `<a class="back-link" href="${runTaskHash(
+            run.run_id
+          )}">← ${escapeHtml(run.task_id)}</a>`
+        : `<a class="back-link" href="#/runs">← Runs</a>`;
     // The log body is `tabindex="0"` so its scroll region is keyboard-reachable,
     // and deliberately carries no live-region role — the ARIA log role implies
     // one, which would narrate every streamed line. The toolbar's status line

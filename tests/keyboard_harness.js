@@ -1332,6 +1332,41 @@ async function scenarioHeadingOutline() {
   eq("log: the scroll region is keyboard-reachable", out.getAttribute("tabindex"), "0");
   check("log: the log body carries no live-region role", !out.getAttribute("role"), out.getAttribute("role"));
   check("log: log lines are written as text", out.textContent.indexOf("dev session started") !== -1, out.textContent);
+
+  // The task back-link's target is liveness-aware. This RUN is `completed`
+  // (installRoutes), so the ended-run branch keeps the run-scoped task view —
+  // which resolves the task active-then-archive, so an archived task stays
+  // readable instead of 404-ing on the index-gated task detail.
+  var endedBack = doc.querySelector(".back-link");
+  eq(
+    "log: an ended run's task link keeps the archived-safe run-scoped route",
+    endedBack && endedBack.getAttribute("href"),
+    "#/runs/" + RUN + "/task"
+  );
+
+  // A live (active/waiting) run with repo+task attribution instead links to the
+  // full task detail, where the run controls, pending answers, and
+  // session/context strips for the run in progress live. Use a distinct live run
+  // id: a live log view follows via SSE, and this keeps that stream fetch off
+  // RUN's path so the later stale-route "opens no stream" check stays scoped to
+  // its own navigation. (No /logs/stream stub — the follow fails closed after
+  // the back-link paints, which is fine; the link target is what this checks.)
+  var LIVE_RUN = "run-live";
+  route("GET", "/api/runs/" + LIVE_RUN, {
+    run_id: LIVE_RUN,
+    repo_name: REPO,
+    task_id: TASK,
+    state: "waiting",
+    started_ts: "2026-07-20T08:00:00Z",
+    pending_questions: 1,
+  });
+  await navigate("#/runs/" + LIVE_RUN + "/logs");
+  var liveBack = doc.querySelector(".back-link");
+  eq(
+    "log: a live run's task link opens the full task detail",
+    liveBack && liveBack.getAttribute("href"),
+    "#/tasks/" + REPO + "/" + TASK
+  );
 }
 
 // The desktop shell reads a per-view width class off #view (styles.css): the
