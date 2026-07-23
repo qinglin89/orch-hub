@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Modules
@@ -8,9 +8,9 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output, launchd operations dispatch, notification delivery checks, and semantic evaluator doctor checks |
-| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token/Bark URL/evaluation gate/model/retention loading, data-dir setting, and derived `aii-2`/registry paths |
+| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token/Bark URL/evaluation gate/model/retention loading, data-dir setting, Codex home for usage, and derived `aii-2`/registry paths |
 | Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing and lookup |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, evaluation target/run-link, static-metrics report, semantic-report, semantic-doctor, and semantic-job models plus payload helpers and run-record repo reconstruction |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, evaluation target/run-link, static-metrics report, semantic-report, semantic-doctor, semantic-job, and subscription-usage models plus payload helpers and run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent/windowed commit reads for dashboard/API display and evaluation evidence |
@@ -21,6 +21,7 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 | Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` with retention after durable writes |
 | Semantic evaluator | `orch_hub/semantic.py` | Implemented optional evidence-bounded model evaluation over evidence/static artifacts, Claude CLI backend isolation, semantic doctor readiness, `semantic_report.json`, and `report.md` persistence |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | Implemented persisted async semantic-evaluation job status, duplicate in-flight prevention, startup orphan reconciliation, bounded failure diagnostics, and completed-job `evaluation_id` linkage |
+| Usage | `orch_hub/usage.py` | Implemented read-only Claude/Codex subscription-usage normalization, Codex rollout scanning, Claude observation storage/parser, bounded aggregation cache, and fail-soft provider snapshots for display |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |
@@ -30,9 +31,9 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
 | Sessions | `orch_hub/sessions.py` | Implemented tolerant parsing and persistence of per-protocol-session context usage from orchestrator logs |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake/evaluation routes, and uvicorn entry point |
+| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake/evaluation/usage routes, and uvicorn entry point |
 | Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/intake/probe notification formatters |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile-first dashboard SPA assets, including responsive phone/tablet/desktop shell, CSS-only neon-wasteland industrial control-console theme with independent persisted Mode (Dark/Light/System) and Palette (Neon Cyan/Wasteland Orange) selection, Operations Overview aggregation/refresh, route-level accessibility/focus infrastructure, status layout, searchable/counted all-tasks inventory, recent commits, task-detail run controls/session strips, filterable/counted grouped run-history rollups, run-scoped task-file view, task-evaluation Layer 1/Layer 2 sidecar view with doctor-gated semantic controls, and polled remote intake review loop |
+| Web UI | `orch_hub/web/` | Implemented vanilla mobile-first dashboard SPA assets, including responsive phone/tablet/desktop shell, CSS-only neon-wasteland industrial control-console theme with independent persisted Mode (Dark/Light/System) and Palette (Neon Cyan/Wasteland Orange) selection, Operations Overview aggregation/refresh plus Subscription usage cards, route-level accessibility/focus infrastructure, status layout, searchable/counted all-tasks inventory, recent commits, task-detail run controls/session strips, filterable/counted grouped run-history rollups, run-scoped task-file view, task-evaluation Layer 1/Layer 2 sidecar view with doctor-gated semantic controls, and polled remote intake review loop |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
 | Operator docs | `docs/` | Implemented launchd install/start/stop/log guidance plus optional task-evaluation boundary/retention/doctor documentation |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
@@ -41,7 +42,7 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 
 | File | Contains |
 |---|---|
-| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, static metrics, semantic evaluator, intake manager, intake agent |
+| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, static metrics, semantic evaluator, usage, intake manager, intake agent |
 | runtime.md | Run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
 | web.md | API, web UI, and launchd operations |
 
@@ -61,6 +62,9 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 - Semantic evaluation reads only the bounded prompt built from evidence/static
   artifacts and writes only `semantic_report.json` plus `report.md` under the
   evaluation dir; concrete backends must enforce read isolation structurally.
+- Usage reads only provider-owned local signals plus the hub-owned Claude
+  observation store; it never starts probe turns, spends reset credits, or gates
+  readiness, attention, run state, launch, or intake.
 - Intake manager owns intake state, intake-ready notification trigger timing,
   and the confirmation postcondition; API/web layers do not treat drafts as
   active tasks or decide whether a confirm landed.

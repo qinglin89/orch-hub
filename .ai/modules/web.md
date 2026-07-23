@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 1a28122553522038c00c5d2b23aa4cd078a77903
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Modules: Web and Operations
@@ -12,7 +12,8 @@ Location: `orch_hub/api.py`
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None, intake_manager=None, evaluation_service=None,
-static_evaluator=None, semantic_evaluator=None, semantic_job_manager=None)`
+static_evaluator=None, semantic_evaluator=None, semantic_job_manager=None,
+usage_service=None)`
 builds an app with a
 default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
@@ -31,10 +32,14 @@ implemented escalation routes are
 `GET /api/runs/{run_id}/logs` and
 `GET /api/runs/{run_id}/logs/stream`; implemented history route is
 `GET /api/history/runs`; implemented commit route is
-`GET /api/repos/{repo_id}/commits`. `GET /api/repos` includes a best-effort
+`GET /api/repos/{repo_id}/commits`; implemented usage route is
+`GET /api/usage`. `GET /api/repos` includes a best-effort
 `commit` field and display-only `housekeeping_pending` state shared with CLI
 JSON; recent commit lookup failures return `available:false` rather than
-raising. The run-scoped task route reads active task content first and falls
+raising. `GET /api/usage` returns fail-soft Claude/Codex subscription capacity
+from `UsageService` as display-only normalized provider windows, freshness,
+plan, and aggregate credit data, excluding credentials/account/reset-credit
+identifiers. The run-scoped task route reads active task content first and falls
 back to the task archive without opening general archived-task listing. The
 intake routes are `POST /api/intakes`, `GET /api/intakes`,
 `GET /api/intakes/{intake_id}`, `GET /api/intakes/{intake_id}/history`,
@@ -63,7 +68,10 @@ Mutating intake routes return transient records
 `GET /api/intakes/{intake_id}` for the settled outcome.
 The default intake backend is `ClaudeIntakeAgent`; the default semantic backend
 is `ClaudeSemanticBackend`, constructed at app startup but only launched by the
-semantic job manager. Default run and intake managers are both built with
+semantic job manager. The default `UsageService` is constructed before those
+Claude backends so one shared best-effort observer records hub-driven
+`claude -p` stream-json usage without probe turns. Default run and intake
+managers are both built with
 `build_notifier(config)`; run-ended /
 pending-question and intake-ready delivery failures stay isolated in the owning
 manager and never become route errors. The recent-log route adds a nested
@@ -143,14 +151,18 @@ before the action POST, while non-router re-renders with no navigation capture
 the live generation and still paint. Feature-owned cancellation handles remain
 responsible for streams, intake polling, and Overview refresh.
 
-The Overview route (`#/overview`) aggregates existing protected repo/task/run/
-escalation/history payloads into summary metrics, prioritized attention, live
-activity, and recent outcomes; each non-401 source failure degrades only its
-panel, and its chained background refresh is registered before the initial load
-so router teardown cancels stale paints and polling after navigation. Its repos
-ready metric and readiness-derived Attention rows use the same display-readiness
-rule as repo views: raw-ready, or active/waiting live run with `git_clean` as
-the sole raw failure.
+The Overview route (`#/overview`) aggregates protected repo/task/run/
+escalation/history/usage payloads into summary metrics, prioritized attention,
+live activity, recent outcomes, and a separate Subscription usage section; each
+non-401 source failure degrades only its panel/section, and its chained
+background refresh is registered before the initial load so router teardown
+cancels stale paints and polling after navigation. Its repos ready metric and
+readiness-derived Attention rows use the same display-readiness rule as repo
+views: raw-ready, or active/waiting live run with `git_clean` as the sole raw
+failure. Subscription usage cards show Claude/Codex provider windows,
+used/remaining percentages, reset time, plan, freshness/stale and unavailable
+states, and aggregate reset-credit availability, but never create attention
+items or affect readiness/run/intake gates.
 
 Repo cards and repo detail present readiness through a shared display rule over
 raw `/api/repos` readiness plus `/api/runs`: show READY when raw-ready, or while

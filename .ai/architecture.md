@@ -1,14 +1,15 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Architecture
 
 orch-hub is a local control plane for remotely inspecting managed repos,
 starting deployed orchestrator runs, answering human-input prompts, reading run
-state, drafting new tasks through a confirmed intake loop, and building plus
-viewing read-only task-evaluation evidence/static/semantic artifacts. It coordinates existing systems
+state, showing display-only agent subscription capacity, drafting new tasks
+through a confirmed intake loop, and building plus viewing read-only
+task-evaluation evidence/static/semantic artifacts. It coordinates existing systems
 rather than replacing them:
 ai-native-development remains the managed-repo registry, target repos own their
 task files and deployed orchestrator payloads, and orch-hub owns only its
@@ -91,6 +92,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
 | Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
 | Evaluation artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated evidence packs and static/semantic reports are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
+| Agent subscription usage | Codex local session rollouts plus hub-owned `<ORCH_HUB_DATA_DIR>/usage/claude.json` | display-only capacity signal; reads provider data, never starts probe turns, spends reset credits, or gates readiness/runs/intake |
 | Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
@@ -163,6 +165,16 @@ with the doctor when the backend is unavailable, reads/polls persisted semantic
 job state for running/failed/completed UI, and keeps raw evidence/report
 artifacts behind Copy/Download affordances.
 
+Agent subscription usage is a sidecar display flow. `UsageService` reads Claude
+from the latest hub-driven `claude -p` stream-json observation stored in
+`<data_dir>/usage/claude.json` and Codex from recent local rollout
+`rate_limits` snapshots under the configured Codex home. The protected
+`GET /api/usage` route returns both providers fail-soft with normalized windows,
+percentages, reset times, freshness/staleness, plan, and aggregate credit data.
+The Overview renders this below the operational panels; missing, stale, or
+failed sources are explicit card states and never feed attention, readiness,
+run state, or launch/intake gates.
+
 ## Component Boundaries
 
 - Registry discovery does not perform readiness checks.
@@ -197,6 +209,9 @@ artifacts behind Copy/Download affordances.
 - Logs are located from run records only; API and UI callers never pass local
   paths.
 - Notification delivery is isolated from run/intake state persistence.
+- Usage collection owns only display capacity data; it must not start agent
+  turns, call private provider endpoints, scrape UI, spend reset credits, or
+  influence readiness/attention/run/intake decisions.
 - API, CLI, dashboard, launchd, and future bot surfaces stay as adapters over
   shared application services.
 
@@ -213,6 +228,8 @@ artifacts behind Copy/Download affordances.
 - launchd for resident macOS service operation.
 - Optional Bark push endpoint when configured.
 - Claude CLI for the concrete remote intake backend and semantic evaluator.
+- Codex local session rollout files for read-only rate-limit display; orch-hub
+  does not invoke Codex to refresh usage.
 - Tailscale or an equivalent private network for remote access.
 
 ## Invariants
@@ -234,6 +251,8 @@ artifacts behind Copy/Download affordances.
 - Notification delivery must never corrupt run, intake, history, or control-dir
   state.
 - Bark URLs embed device-key secrets and must not be logged.
+- Subscription usage is display-only: unavailable/stale data is shown as such,
+  never as zero usage and never as a launch or health gate.
 
 ## Related Memory
 

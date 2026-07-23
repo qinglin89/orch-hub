@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Modules: Core
@@ -57,7 +57,7 @@ Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`,
-`ORCH_HUB_EVAL_RETENTION`, and derived
+`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CODEX_HOME`, and derived
 `aii-2`/registry file paths:
 
 ```text
@@ -78,7 +78,8 @@ raise `ValueError`, while falsy values disable evaluation services fail-closed.
 defaults to `claude-opus-4-8`; blank/unset uses the default so the backend is
 constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
 to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
-values raise `ValueError`.
+values raise `ValueError`. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
+used only for read-only subscription-usage scans of Codex session rollouts.
 
 ## Models
 
@@ -88,6 +89,10 @@ Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
 questions, run state, run history, intake state, evaluation target/run links,
 static-metrics reports, semantic reports, and semantic evaluator doctor output.
+`UsageWindow`, `UsageCredits`, `ProviderUsage`, and `SubscriptionUsage`
+normalize Claude/Codex subscription-capacity display data; omitted provider
+fields stay `None` rather than zero so unavailable data cannot masquerade as
+unused quota.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
@@ -258,6 +263,25 @@ prompt/evidence and cannot read live repo files, `.ai/`, raw logs, or secrets.
 API exposes generation through `SemanticJobManager` at protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, detail readback, and
 a gated `GET /api/evaluation/doctor` readiness route.
+
+## Usage
+
+Location: `orch_hub/usage.py`
+
+Responsibility: produce provider-normalized, read-only Claude/Codex
+subscription usage for display. Codex usage is read from the newest local
+`rate_limits` snapshots in `<codex_home>/sessions/**/rollout-*.jsonl`, bounded
+by file count and size, with optional primary/secondary windows and aggregate
+credits sanitized by whitelist. Claude usage is retained in
+`<data_dir>/usage/claude.json` from hub-driven `claude -p --output-format
+stream-json` turns; `parse_claude_stream_usage` is tolerant, returns no
+observation on unknown field shapes, and never raises into the driving turn.
+`ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
+so concurrent intake/semantic observations cannot collide. `UsageService`
+aggregates Claude then Codex behind a 30s cache and returns fail-soft
+`ProviderUsage.unavailable(...)` snapshots on missing/failed sources. It never
+starts a model turn, calls provider endpoints, opens credential files, spends
+Codex reset credits, or participates in readiness/attention/run/intake gates.
 
 `SemanticJobManager` in `orch_hub/semantic_jobs.py` persists one current
 `job.json` per `(repo, task)` under

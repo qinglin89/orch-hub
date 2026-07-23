@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Features: Core
@@ -234,16 +234,16 @@ Description: Expose current repo readiness and task inventory data through a
 resident FastAPI app without duplicating core logic, protected by bearer-token
 auth on every non-health path.
 
-Modules: api, config, registry, readiness, task_store, models.
+Modules: api, config, registry, readiness, task_store, models, usage.
 
 APIs: `GET /`, `GET /app.js`, `GET /styles.css`, `GET /api/health`,
-repo/task/run/escalation/log/history/intake/evaluation data routes; `python -m orch_hub.api`;
+repo/task/run/escalation/log/history/intake/evaluation/usage data routes; `python -m orch_hub.api`;
 `orch-hub-api`; `uvicorn orch_hub.api:app`.
 
 Implemented behavior:
 
-- `create_app(config=None)` builds a FastAPI app, capturing explicit config for
-  tests or `Config.from_env()` by default.
+- `create_app(config=None, *, ... injected services ...)` builds a FastAPI app,
+  capturing explicit config for tests or `Config.from_env()` by default.
 - `GET /api/repos` returns the same shape as CLI `repos --json`, including
   readiness failure reasons, best-effort latest commit metadata, and
   display-only housekeeping marker state.

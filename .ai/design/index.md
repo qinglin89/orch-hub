@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Design Principles and Decisions
@@ -19,6 +19,8 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 - Read-only task evaluation: evidence packs, deterministic static reports, and
   evidence-bounded semantic reports are hub-owned sidecar artifacts and must not
   mutate target tasks, run state, or protocol memory.
+- Display-only capacity: agent subscription usage is an operator signal, not a
+  readiness, attention, run-state, launch, or intake gate.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
 
@@ -56,6 +58,9 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
   lifecycle decisions.
 - Letting semantic evaluator backends read live target-repo state outside the
   persisted evidence/static prompt boundary.
+- Starting model turns solely to refresh subscription usage, scraping provider
+  UI/private endpoints, spending Codex reset credits, or treating quota data as
+  repo health.
 - Adding watchdog or log-silence detection.
 - Hardcoding target repo paths in product code.
 - Using broad shell commands where structured subprocess arguments are practical.
@@ -68,4 +73,4 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
   mid-write process crash. Evaluation artifact retention is implemented as a
   per-task newest-N cap.
 - Exact route schema beyond the implemented repo/task/run/escalation/log/history/
-  intake/evaluation and dashboard-shell API surface.
+  intake/evaluation/usage and dashboard-shell API surface.

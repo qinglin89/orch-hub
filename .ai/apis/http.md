@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # APIs: HTTP
@@ -22,10 +22,10 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
   heuristic cache.
 - Dashboard behavior: `#/overview` is the default authenticated landing route
   and derives its metrics, attention list, live activity, and recent outcomes
-  from the existing protected repo/task/run/escalation/history APIs; it adds no
-  Overview-specific HTTP API. Non-401 source failures degrade only the affected
-  panel, 401 re-enters the login gate, and route teardown cancels its chained
-  refresh before stale loads can repaint or keep polling.
+  plus display-only subscription usage from protected repo/task/run/escalation/
+  history/usage APIs. Non-401 source failures degrade only the affected panel or
+  usage section, 401 re-enters the login gate, and route teardown cancels its
+  chained refresh before stale loads can repaint or keep polling.
 
 ## `GET /api/repos`
 
@@ -69,6 +69,25 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 - Shape: `tasks_payload(list_tasks(repos))`, preserving `index_present`,
   ordered tasks, frontmatter-authoritative status/blockers, and `missing` /
   `unknown` sentinel statuses.
+
+## `GET /api/usage`
+
+- Purpose: report display-only Claude and Codex subscription capacity for the
+  Overview without affecting readiness, attention, run state, launch, or intake.
+- Source: delegates to `UsageService`, which reads Claude from the latest
+  hub-driven `claude -p` stream-json observation in the hub data dir and Codex
+  from local Codex rollout `rate_limits` snapshots under `ORCH_HUB_CODEX_HOME`.
+  It never starts probe turns, calls provider endpoints, opens credential files,
+  or consumes reset credits.
+- Shape: `{"providers": [ProviderUsage...]}`. Each provider is
+  `{provider, available, plan, windows, credits, observed_ts, stale, detail}`;
+  windows carry `key`, optional `label`/`window_minutes`, `used_percent`,
+  derived `remaining_percent`, optional `resets_at`, and exact `used`/`limit`
+  only when a provider supplies them.
+- Errors/degradation: protected like every data route. Missing, unsupported,
+  stale, or failed provider sources return explicit provider states rather than
+  zero usage or route failure; account, credential, private endpoint, and
+  reset-credit identifiers are excluded.
 
 ## `GET /api/repos/{repo_id}/orchestrator-config`
 
@@ -385,25 +404,29 @@ verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 
 
 - `create_app(config=None, *, run_manager=None, intake_manager=None,
-  evaluation_service=None, static_evaluator=None, semantic_evaluator=None)`
+  evaluation_service=None, static_evaluator=None, semantic_evaluator=None,
+  semantic_job_manager=None, usage_service=None)`
   captures `Config.from_env()` by default, is testable with explicit/injected
   services, and holds one `RunManager` for run, run-task, escalation, log, and
-  background-monitor scans plus one `IntakeManager` for remote intake routes.
+  background-monitor scans plus one `IntakeManager` for remote intake routes and
+  one `UsageService` for the protected usage route and Claude observation feed.
   Default managers are built with `build_notifier(config)`: run-ended/
   pending-question and intake-ready notifications share the configured Bark
   path, and `None` keeps delivery disabled. The default intake backend is
   `ClaudeIntakeAgent`; the default semantic backend is `ClaudeSemanticBackend`
   constructed at app startup but only invoked by semantic generation or probed
-  by the doctor.
+  by the doctor. Both default Claude backends receive the shared
+  `UsageService.claude_observer()` callback; observer failures are swallowed and
+  never alter intake/semantic outcomes.
 - The app constructs a `RunMonitor` over that manager, exposes it as
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
-  `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, and
-  `ORCH_HUB_EVAL_RETENTION`; surrounding whitespace is stripped and
-  empty/whitespace-only values count as unset.
+  `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`,
+  `ORCH_HUB_EVAL_RETENTION`, and `ORCH_HUB_CODEX_HOME`; surrounding whitespace
+  is stripped and empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;

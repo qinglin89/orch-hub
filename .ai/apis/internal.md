@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # APIs: Internal Interfaces
@@ -125,7 +125,32 @@ probe and returns `SemanticDoctor` (`backend`, `model`, `schema_version`,
 Claude CLI turn with all built-in tools disabled (`--tools ""`), safe mode,
 no session persistence, plan-mode writes blocked, and a fresh empty cwd outside
 the target repo; this enforces evidence-boundedness structurally rather than
-trusting prompt instructions.
+trusting prompt instructions. It accepts an optional usage observer called with
+stdout after the turn returns; observer failures are swallowed so usage
+bookkeeping cannot change semantic-evaluation outcomes.
+
+## Usage Service
+
+Input: config with `codex_home`, optional `ClaudeUsageStore`, and injectable
+clock.
+
+Output: `SubscriptionUsage`, `ProviderUsage`, `UsageWindow`, and optional
+`UsageCredits` values; `UsageService.claude_observer()` callback for hub-driven
+Claude stdout.
+
+Behavior: `read_codex_usage(codex_home)` scans the newest bounded Codex session
+rollout files for `rate_limits`, normalizes dynamic buckets plus optional
+primary/secondary windows and aggregate credits, and never invokes Codex or
+opens credential/reset-credit identifiers. `ClaudeUsageStore` persists the
+latest hub-observed Claude usage under `<data_dir>/usage/claude.json` with
+per-writer temp files plus `os.replace` so concurrent intake/semantic observers
+do not race. `parse_claude_stream_usage(stdout, observed_ts=...)` tolerantly
+extracts supported five-hour/seven-day windows from `claude -p` stream-json and
+returns no observation on absent/unknown/malformed shapes. `UsageService`
+aggregates Claude then Codex behind a 30s cache and returns fail-soft
+unavailable provider snapshots on missing or failed sources. All usage data is
+display-only and must not affect readiness, attention, run state, launch, or
+intake.
 
 ## Intake Manager
 
@@ -158,8 +183,10 @@ perform the `/intake-task` write. `ClaudeIntakeAgent` is the default concrete
 adapter: it shells out to Claude in the target repo, uses stream-json output,
 requires structured draft envelopes, resumes sessions by id, runs draft/revise
 under `--permission-mode plan`, and uses the write-permitted mode only for
-confirm. Bad CLI exits or bad envelopes raise so the manager records failed
-intakes.
+confirm. It accepts an optional usage observer called with stdout after a Claude
+turn returns; observer failures are swallowed so usage bookkeeping cannot change
+intake outcomes. Bad CLI exits or bad envelopes raise so the manager records
+failed intakes.
 
 ## Run Manager
 

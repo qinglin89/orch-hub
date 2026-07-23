@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 1a28122553522038c00c5d2b23aa4cd078a77903
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Features: Dashboard Ops
@@ -15,7 +15,7 @@ run observation, answering waiting questions, run history, and logs.
 Modules: api, web.
 
 APIs: public `GET /`, `GET /app.js`, `GET /styles.css`; protected
-repo/task/run/escalation/log/history/intake/evaluation HTTP APIs, including the
+repo/task/run/escalation/log/history/intake/evaluation/usage HTTP APIs, including the
 run-scoped task file route, orchestrator-config preview route, and run
 effective-config route. Log streaming uses the bearer-authenticated SSE endpoint
 through `fetch`/ReadableStream, not browser `EventSource`.
@@ -61,16 +61,25 @@ Implemented behavior:
   minimum target sizes cover dashboard controls and keyboard-scrollable blocks.
 - The Operations Overview is the default authenticated landing route
   (`#/overview`). It remains client-side over existing protected APIs,
-  parallel-fetching repos, tasks, live runs, escalations, and run history into
-  summary metrics, prioritized attention items, current activity, and recent
-  outcomes. Waiting questions, display-readiness failures, housekeeping, live
-  runs, and ended runs deep-link to existing task/repo/log views.
+  parallel-fetching repos, tasks, live runs, escalations, run history, and
+  subscription usage into summary metrics, prioritized attention items, current
+  activity, recent outcomes, and display-only agent capacity. Waiting questions,
+  display-readiness failures, housekeeping, live runs, and ended runs deep-link
+  to existing task/repo/log views.
 - Overview fetches are per-source best-effort: non-401 failures degrade only
   the affected panel to an unavailable state, while 401 still returns to the
   login gate. Its route-scoped refresh uses a chained timeout, registers its
   cancellation handle before the initial load, drops stale paints after
   navigation, and tears down through the router so requests never overlap or
   keep polling after the view is left.
+- The Overview Subscription usage section is a separate section below the
+  operational panels over protected `GET /api/usage`. It renders independent
+  Claude and Codex cards with plan/tier, every available window, used and
+  remaining percentages, reset time, freshness/stale flags, explicit
+  unavailable/unknown states, and optional aggregate reset-credit availability.
+  It is display-only: source failures degrade only that section, never create
+  Needs attention items, and never affect readiness, run state, or run/intake
+  gates.
 - Route generation is the stale-view ownership guard: router bumps it on every
   entry; routed handlers, `rerender`, and intake action success/error paths
   capture before their own await/POST and skip stale paints, landing, error
@@ -175,6 +184,37 @@ Implemented behavior:
   status is `drafting`, `revising`, or `confirming`; it shows live status,
   elapsed time, and a safe-to-navigate-away note, stops polling on resting
   statuses, and tears down the single poll handle on navigation like live logs.
+
+## Agent Subscription Usage
+
+Status: implemented
+
+Description: Display provider-aware Claude and Codex subscription capacity on
+the Operations Overview without conflating quota with repo health or run state.
+
+Modules: usage, models, config, api, intake_agent, semantic, web.
+
+APIs: protected `GET /api/usage`; internal `UsageService`,
+`ClaudeUsageStore`, `parse_claude_stream_usage`, `read_codex_usage`;
+`ORCH_HUB_CODEX_HOME`.
+
+Implemented behavior:
+
+- `GET /api/usage` returns both providers fail-soft in a normalized payload:
+  provider key, availability/detail, plan, windows, used/remaining percentages,
+  reset times, observation timestamp, staleness, and optional aggregate credits.
+- Codex usage is read only from local session rollout `rate_limits` under the
+  configured Codex home; orch-hub never invokes Codex, opens credentials, or
+  consumes reset credits.
+- Claude usage is retained from hub-driven `claude -p` stream-json turns via a
+  best-effort observer wired into intake and semantic backends; no turn is
+  started solely to refresh usage, and unsupported field shapes degrade to
+  unavailable until a real supported observation is seen.
+- The Overview renders separate Claude/Codex cards with percent-first bars,
+  reset timing, freshness/stale flags, explicit unknown/unavailable states, and
+  aggregate reset-credit availability. Source failures degrade only this
+  section and never create Needs attention rows or affect readiness, run state,
+  launch, or intake gates.
 
 ## Notifications
 

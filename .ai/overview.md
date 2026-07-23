@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
+last-updated: 2026-07-24
+verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 ---
 
 # Project Overview
@@ -13,9 +13,10 @@ The implemented slices are discovery/readiness, task inventory, the FastAPI
 HTTP foundation, fail-closed bearer-token auth, environment-configured service
 binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
-the mobile dashboard, Bark notifications, remote intake-task, the
-task-evaluation foundation, deterministic static task metrics, and the optional
-semantic task evaluator: read the
+the mobile dashboard, display-only agent subscription usage, Bark
+notifications, remote intake-task, the task-evaluation foundation,
+deterministic static task metrics, and the optional semantic task evaluator:
+read the
 ai-native-development local registry, list
 managed repos, report launch
 readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
@@ -34,8 +35,13 @@ protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
 CLI semantic evaluator through persisted async job records that prevent
 duplicate in-flight model calls and link completed jobs to `semantic_report.json`
 plus `report.md`, and expose evaluation evidence/static/semantic artifacts
-through protected HTTP routes. The dashboard renders the task-evaluation sidecar
-with Layer 1 static metrics, doctor-gated Layer 2 semantic job
+through protected HTTP routes. The dashboard renders Claude/Codex subscription
+usage as a separate Overview capacity section over protected `GET /api/usage`:
+Codex is read from local session rollout `rate_limits`, Claude is retained from
+hub-driven `claude -p` stream-json observations, and missing/stale/failing data
+is explicit display state that never affects readiness, attention, run state, or
+launch/intake gates. The dashboard renders the task-evaluation sidecar with
+Layer 1 static metrics, doctor-gated Layer 2 semantic job
 running/failed/completed controls/report rendering, history model/version
 comparison, and artifact copy/download affordances; later slices add IM bot
 control.
@@ -71,6 +77,10 @@ control.
   chain, invoking Claude CLI from an isolated empty cwd with tools disabled so
   reports are reproducible from persisted artifacts and cannot read target repo
   files outside the prompt.
+- Show Claude and Codex subscription usage as display-only capacity data:
+  provider windows, used/remaining percentages, reset time, freshness, and
+  unavailable/stale reasons, without starting probe turns, consuming reset
+  credits, scraping private endpoints/UI, or influencing operational gates.
 - Expose task evaluation as a sidecar HTTP workflow: availability, evidence
   generation/readback, static metrics generation/readback, semantic generation/
   readback, semantic doctor readiness, active or archived task targeting,
@@ -93,6 +103,8 @@ control.
 - Do not treat unconfirmed intake drafts as active tasks or expose them through
   task inventory.
 - Do not hand-edit deployed protocol/orchestrator copies in target repos; canonical changes belong in ai-native-development.
+- Do not treat subscription usage as repo health or launch readiness, and do
+  not start model turns solely to refresh quota data.
 
 ## Tech Stack
 
@@ -104,8 +116,9 @@ control.
 - Local deployment: launchd user-agent template and docs on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
 - Notifications: Bark is the implemented v1 push path; IM bots are later.
-- External command sources: `aii-2` from ai-native-development; Claude CLI for
-  remote intake and semantic evaluation backends.
+- External command/data sources: `aii-2` from ai-native-development; Claude CLI
+  for remote intake and semantic evaluation backends; local Codex session
+  rollout files for read-only rate-limit display.
 
 ## Repository Structure
 
@@ -127,6 +140,7 @@ orch_hub/
   runs.py
   semantic.py
   static_metrics.py
+  usage.py
   logs.py
   notifications.py
   subprocess_utils.py
@@ -146,6 +160,7 @@ tests/
   test_readiness.py
   test_runs.py
   test_task_store.py
+  test_usage.py
 deploy/
   launchd/
     com.qinglin89.orch-hub.plist
