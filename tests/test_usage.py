@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import threading
 from pathlib import Path
 
 from fastapi.testclient import TestClient
@@ -244,6 +245,44 @@ def test_claude_store_latest_handles_corrupt(tmp_path: Path) -> None:
     store.path.parent.mkdir(parents=True, exist_ok=True)
     store.path.write_text("{ not json", encoding="utf-8")
     assert store.latest() is None
+
+
+def test_claude_store_concurrent_record_is_safe(tmp_path: Path) -> None:
+    """Concurrent ``record()`` must not race on a shared temp file.
+
+    Once the intake and semantic observers are wired, hub-driven Claude turns
+    record from daemon threads, so two ``record()`` calls can overlap. A fixed
+    ``claude.json.tmp`` name lets one writer's ``os.replace`` move the temp out
+    from under another (``FileNotFoundError``, lost observation); with per-writer
+    temp files no call raises, one observation wins intact, and no orphan temp is
+    left behind. This fails against the shared-temp-name implementation."""
+    store = ClaudeUsageStore(tmp_path / "data")
+    workers = 16
+    barrier = threading.Barrier(workers)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def worker(i: int) -> None:
+        obs = make_observation(used=float(i))
+        barrier.wait()  # release all threads together to maximize contention
+        try:
+            for _ in range(25):
+                store.record(obs)
+        except BaseException as exc:  # noqa: BLE001 — captured for assertion
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(workers)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == [], f"record() raced under concurrency: {errors!r}"
+    latest = store.latest()
+    assert latest is not None  # a complete, valid observation survived
+    assert latest.windows[0].used_percent in {float(i) for i in range(workers)}
+    assert list(store.path.parent.glob("*.tmp")) == []  # no orphaned temp files
 
 
 def test_claude_usage_unavailable_when_unfed(tmp_path: Path) -> None:

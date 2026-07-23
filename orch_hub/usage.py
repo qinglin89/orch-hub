@@ -42,6 +42,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import threading
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -403,11 +404,25 @@ class ClaudeUsageStore:
         return self._path
 
     def record(self, observation: ClaudeObservation) -> None:
-        """Persist ``observation`` as the latest, atomically (same-dir tmp+rename)."""
+        """Persist ``observation`` as the latest, atomically (same-dir tmp+rename).
+
+        The temp file is *uniquely named* (pid + thread id) rather than a fixed
+        ``claude.json.tmp``: hub-driven Claude turns run on daemon threads
+        (intake, semantic), so two observers can call ``record`` at once, and a
+        shared temp name lets one writer's ``os.replace`` move the file out from
+        under the other — raising ``FileNotFoundError`` and losing an otherwise
+        valid observation. With a per-writer temp file each ``os.replace`` is an
+        independent atomic swap, so concurrent records never collide and the last
+        write simply wins. On a failed write the unique temp is cleaned up so it
+        cannot accumulate as an orphan in this long-lived service."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_name(self._path.name + ".tmp")
-        tmp.write_text(json.dumps(observation.to_dict(), indent=1), encoding="utf-8")
-        os.replace(tmp, self._path)
+        tmp = self._path.with_name(f"{self._path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(json.dumps(observation.to_dict(), indent=1), encoding="utf-8")
+            os.replace(tmp, self._path)
+        except BaseException:  # noqa: BLE001 — clean up the unique temp, then re-raise
+            tmp.unlink(missing_ok=True)
+            raise
 
     def latest(self) -> ClaudeObservation | None:
         """The latest observation, or ``None`` when unfed / unreadable / corrupt."""
