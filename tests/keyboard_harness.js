@@ -1040,6 +1040,18 @@ function installRoutes(opts) {
   // exercise the disabled branch and the entry-link gating), the (repo, task)
   // list, one evaluation's detail, and the deterministic generate POST.
   route("GET", "/api/evaluation", { enabled: true });
+  // Layer 2 backend readiness: enabled + available by default; a scenario flips
+  // `available` to exercise the disabled-trigger gating while Layer 1 stays usable.
+  route("GET", "/api/evaluation/doctor", {
+    enabled: true,
+    semantic: {
+      backend: "claude-cli",
+      model: "claude-opus-4-8",
+      schema_version: "1",
+      available: true,
+      detail: "claude resolved at /usr/local/bin/claude",
+    },
+  });
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
     repo: REPO,
     task_id: TASK,
@@ -1599,6 +1611,24 @@ async function scenarioTaskEval() {
   // block, its evaluator identity, findings ordered most-severe first, evidence
   // refs, a suggestion, the improvements, an n/a axis, and the Markdown download.
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, EVAL_DETAIL_SEMANTIC);
+  // The list now reports this evaluation carries a semantic report with a known
+  // evaluator, so the history picker surfaces the model/version for comparison.
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
+    repo: REPO,
+    task_id: TASK,
+    enabled: true,
+    target: { present: true, source: "active" },
+    latest_evaluation_id: EVAL_ID,
+    evaluations: [
+      {
+        evaluation_id: EVAL_ID,
+        has_evidence: true,
+        has_static_metrics: true,
+        has_semantic_report: true,
+        evaluator: { backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1" },
+      },
+    ],
+  });
   await navigate(evalPath + "/" + EVAL_ID);
   var sem = doc.querySelector(".sem-report");
   check("eval: the semantic report block renders", !!sem && sem.className.indexOf("sem-absent") === -1, "no .sem-report");
@@ -1635,7 +1665,33 @@ async function scenarioTaskEval() {
     mdLink.length && mdLink[0].getAttribute("href").indexOf("data:text/markdown") === 0,
     mdLink.length && mdLink[0].getAttribute("href")
   );
-  // Restore the report-less detail so later scenarios see the default fixture.
+  // The history picker doubles as a run-comparison surface: a semantic entry names
+  // its evaluator model (and schema version) so runs are comparable without
+  // opening each one.
+  var pickOpt = doc.querySelector("#eval-pick option");
+  check(
+    "eval: the history picker names the evaluator model for comparison",
+    pickOpt && pickOpt.textContent.indexOf("claude-opus-4-8") !== -1,
+    "picker option text: " + (pickOpt && pickOpt.textContent)
+  );
+  // Restore the default list + report-less detail so later scenarios (and the
+  // doctor-gating branch below) see the default fixtures.
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
+    repo: REPO,
+    task_id: TASK,
+    enabled: true,
+    target: { present: true, source: "active" },
+    latest_evaluation_id: EVAL_ID,
+    evaluations: [
+      {
+        evaluation_id: EVAL_ID,
+        has_evidence: true,
+        has_static_metrics: true,
+        has_semantic_report: false,
+        evaluator: null,
+      },
+    ],
+  });
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
     evaluation_id: EVAL_ID,
     evidence: EVAL_EVIDENCE,
@@ -1653,6 +1709,49 @@ async function scenarioTaskEval() {
     entry && entry.getAttribute("href"),
     evalPath
   );
+
+  // Doctor gating: the subsystem is enabled but the Layer 2 backend is
+  // unconfigured (available:false). The semantic trigger is disabled with an
+  // explanation, while the free deterministic Layer 1 control stays usable — the
+  // session-1 "502 on click" is pre-empted by the doctor probe.
+  route("GET", "/api/evaluation/doctor", {
+    enabled: true,
+    semantic: {
+      backend: "claude-cli",
+      model: "claude-opus-4-8",
+      schema_version: "1",
+      available: false,
+      detail: "claude executable not found on PATH",
+    },
+  });
+  await navigate(evalPath);
+  check(
+    "eval: an unconfigured backend disables the semantic trigger",
+    (doc.querySelector(".eval-sem-btn") || {}).disabled === true,
+    "the semantic trigger was not disabled for an unavailable backend"
+  );
+  check(
+    "eval: the disabled semantic control explains why",
+    !!doc.querySelector(".eval-sem-unavailable") &&
+      doc.querySelector(".eval-sem-unavailable").textContent.indexOf("not found") !== -1,
+    "no unavailable explanation"
+  );
+  check(
+    "eval: Layer 1 stays usable when Layer 2 is unavailable",
+    !!doc.querySelector(".eval-gen-btn") && doc.querySelector(".eval-gen-btn").disabled !== true,
+    "the Layer 1 Generate control was blocked by an unavailable Layer 2"
+  );
+  // Restore an available backend for later scenarios.
+  route("GET", "/api/evaluation/doctor", {
+    enabled: true,
+    semantic: {
+      backend: "claude-cli",
+      model: "claude-opus-4-8",
+      schema_version: "1",
+      available: true,
+      detail: "claude resolved at /usr/local/bin/claude",
+    },
+  });
 
   // Disabled branch: availability 200 {enabled:false} → the controls are
   // replaced by a concise explanation, and no generate control is offered.

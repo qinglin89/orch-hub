@@ -2887,7 +2887,23 @@
   // the cost/read-only boundary is unmissable: a semantic evaluation runs a Claude
   // model (a real cost, and slow) but is a read-only analysis bounded to the
   // persisted evidence — not an orchestrator run, and it mutates nothing.
-  function evalSemanticSection() {
+  function evalSemanticSection(doctor) {
+    // The doctor gates the trigger: an enabled-but-unconfigured backend (no
+    // `claude` on PATH → doctor.available === false) disables Layer 2 with an
+    // explanation, so an operator is not left to discover it as a 502 on click,
+    // while the deterministic Layer 1 metrics stay usable. A null doctor (the probe
+    // failed, or an older hub has no doctor route) keeps the default enabled
+    // control — the sidecar never blocks on its own readiness check.
+    const unavailable = !!(doctor && doctor.available === false);
+    const actions = unavailable
+      ? `<button type="button" class="eval-sem-btn" disabled
+           aria-describedby="eval-sem-unavailable">Run semantic evaluation…</button>
+        <span class="control-status eval-sem-status eval-sem-unavailable"
+           id="eval-sem-unavailable" role="status">Layer 2 is unavailable on this hub: ${escapeHtml(
+             doctor.detail || "the semantic evaluator backend is not configured"
+           )}. The deterministic Layer 1 metrics above still work.</span>`
+      : `<button type="button" class="eval-sem-btn">Run semantic evaluation…</button>
+        <span class="control-status eval-sem-status" role="status"></span>`;
     return `<section class="section eval-generate eval-semantic-generate"><h2>Layer 2 · Semantic evaluation</h2>
       <p class="muted">A model reads the bounded evidence and static metrics and
          judges what a deterministic check cannot — knowledge-signal density,
@@ -2902,8 +2918,7 @@
          task or run state. Each run creates a fresh evaluation (evidence + metrics +
          semantic report).</p>
       <div class="eval-actions">
-        <button type="button" class="eval-sem-btn">Run semantic evaluation…</button>
-        <span class="control-status eval-sem-status" role="status"></span>
+        ${actions}
       </div></section>`;
   }
 
@@ -2914,13 +2929,25 @@
     if (!evals.length) return "";
     const opts = evals
       .map((e) => {
-        const mark = e.has_semantic_report
+        let mark = e.has_semantic_report
           ? "semantic"
           : e.has_static_metrics
           ? "metrics"
           : e.has_evidence
           ? "evidence only"
           : "empty";
+        // Surface the evaluator model/version on semantic entries so the picker
+        // doubles as a run-comparison surface — an operator can tell which model
+        // and schema judged each run without opening every one. The list route
+        // reads this best-effort; a null evaluator (older/degraded report) just
+        // omits the suffix.
+        if (e.has_semantic_report && e.evaluator) {
+          const bits = [
+            e.evaluator.model,
+            e.evaluator.schema_version ? "v" + e.evaluator.schema_version : "",
+          ].filter(Boolean);
+          if (bits.length) mark += " · " + bits.join(" · ");
+        }
         const sel = e.evaluation_id === selectedId ? " selected" : "";
         return `<option value="${escapeHtml(e.evaluation_id)}"${sel}>${escapeHtml(
           e.evaluation_id + " · " + mark
@@ -3056,6 +3083,24 @@
       return;
     }
 
+    // Layer 2 backend readiness — a cheap config/availability probe (no model
+    // call, no cost): it gates the semantic control so an enabled-but-unconfigured
+    // backend (no `claude` on PATH) disables Layer 2 with an explanation instead of
+    // 502-ing on click, while Layer 1 stays usable. Best-effort — a probe failure
+    // (or an older hub with no doctor route) leaves the control in its default
+    // enabled state rather than blanking the view, since the sidecar is never
+    // load-bearing for run control.
+    let semanticDoctor = null;
+    try {
+      const health = await api("/api/evaluation/doctor");
+      if (superseded()) return;
+      semanticDoctor = health && health.semantic ? health.semantic : null;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err; // re-gate
+      if (superseded()) return;
+      semanticDoctor = null; // probe failed → keep Layer 2 available (session-1)
+    }
+
     // The task's evaluation history + resolved target (active/archived/absent).
     const list = await api(evalListPath(repoName, taskId));
     if (superseded()) return;
@@ -3099,7 +3144,7 @@
          model-judged semantic evaluation (Layer 2). Layer 2 scores and findings are a
          model's judgment, kept visually distinct from the deterministic ones.</p>
       ${evalGenerateSection()}
-      ${evalSemanticSection()}
+      ${evalSemanticSection(semanticDoctor)}
       ${evalPickerSection(repoName, taskId, evals, selectedId)}
       ${evalDetailHtml(taskId, detail, reportJson, evidenceJson, semanticJson, reportMd)}`;
 

@@ -255,7 +255,7 @@ class ReviseIntakeRequest(BaseModel):
     feedback: str
 
 
-def _evaluation_summary(stored) -> dict:
+def _evaluation_summary(stored, evaluator: dict | None = None) -> dict:
     """Map a :class:`~orch_hub.models.StoredEvaluation` to its API summary.
 
     The evaluation-history picker needs the id and which artifacts exist, not the
@@ -266,12 +266,18 @@ def _evaluation_summary(stored) -> dict:
     than part of the HTTP contract. ``report.md`` is not surfaced separately — it is
     written atomically with ``semantic_report.json``, so its presence tracks that
     flag and the detail route serves the rendered text under ``report_md``.
+
+    ``evaluator`` is the optional ``{backend, model, schema_version}`` identity the
+    list route reads best-effort from a present ``semantic_report.json`` so the
+    history picker can compare runs by model/version without opening each one; it
+    is ``None`` for a metrics/evidence-only evaluation or when the read degraded.
     """
     return {
         "evaluation_id": stored.evaluation_id,
         "has_evidence": EVIDENCE_NAME in stored.artifacts,
         "has_static_metrics": STATIC_METRICS_NAME in stored.artifacts,
         "has_semantic_report": SEMANTIC_REPORT_NAME in stored.artifacts,
+        "evaluator": evaluator,
     }
 
 
@@ -1056,8 +1062,11 @@ def create_app(
         status/archive-state signal; the full body stays on the existing task
         routes), degrading to ``null``/``null`` if the task file is genuinely
         unreadable so a target IO error never blanks the list. ``evaluations`` are
-        newest-first ``{evaluation_id, has_evidence, has_static_metrics}``
-        summaries and ``latest_evaluation_id`` names the newest — ``null`` with an
+        newest-first ``{evaluation_id, has_evidence, has_static_metrics,
+        has_semantic_report, evaluator}`` summaries (``evaluator`` is the
+        best-effort ``{backend, model, schema_version}`` read from a present
+        semantic report so the picker can compare runs by model/version, else
+        ``null``) and ``latest_evaluation_id`` names the newest — ``null`` with an
         empty list when none exist yet, a normal 200 (a never-evaluated task is
         not an error). An unsafe ``task_id`` path segment → 400.
         """
@@ -1074,13 +1083,40 @@ def create_app(
             # A genuine target-file IO error (not mere absence) must not blank the
             # evaluation list, which is this route's primary payload.
             target_info = {"present": None, "source": None}
+
+        def _evaluator_of(entry) -> dict | None:
+            # Best-effort model/version identity for the history picker's
+            # comparison, read at the presentation layer (list_evaluations stays a
+            # pure structural manifest). Only touched when a semantic report is
+            # present; any read/parse failure degrades to None so a corrupt or
+            # unreadable report never 500s the newest-first list (its primary
+            # payload) — the detail route is where a corrupt artifact surfaces.
+            if SEMANTIC_REPORT_NAME not in entry.artifacts:
+                return None
+            try:
+                report = evaluation.read_artifact(
+                    repo, task_id, entry.evaluation_id, SEMANTIC_REPORT_NAME
+                )
+            except Exception:
+                return None
+            if not isinstance(report, dict):
+                return None
+            ev = report.get("evaluator")
+            if not isinstance(ev, dict):
+                return None
+            return {
+                "backend": ev.get("backend"),
+                "model": ev.get("model"),
+                "schema_version": ev.get("schema_version"),
+            }
+
         return {
             "repo": repo_id,
             "task_id": task_id,
             "enabled": True,
             "target": target_info,
             "latest_evaluation_id": stored[0].evaluation_id if stored else None,
-            "evaluations": [_evaluation_summary(s) for s in stored],
+            "evaluations": [_evaluation_summary(s, _evaluator_of(s)) for s in stored],
         }
 
     @app.get("/api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}")

@@ -48,6 +48,7 @@ from orch_hub.registry import RegistryError
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
     SEMANTIC_END,
+    SEMANTIC_REPORT_NAME,
     SEMANTIC_START,
     SemanticEvaluationError,
     SemanticEvaluator,
@@ -2394,6 +2395,8 @@ def test_generate_metrics_then_list_and_fetch(tmp_path, monkeypatch):
             "has_evidence": True,
             "has_static_metrics": True,
             "has_semantic_report": False,
+            # No semantic report → no evaluator identity to compare in the picker.
+            "evaluator": None,
         }
     ]
 
@@ -2424,6 +2427,7 @@ def test_generate_evidence_only_has_no_static_metrics(tmp_path, monkeypatch):
             "has_evidence": True,
             "has_static_metrics": False,
             "has_semantic_report": False,
+            "evaluator": None,
         }
     ]
 
@@ -2510,6 +2514,13 @@ def test_generate_semantic_then_list_and_fetch(tmp_path, monkeypatch):
             "has_evidence": True,
             "has_static_metrics": True,
             "has_semantic_report": True,
+            # The evaluator identity is read back best-effort from the persisted
+            # semantic report so the history picker can compare runs by model.
+            "evaluator": {
+                "backend": "fake",
+                "model": "fake-model",
+                "schema_version": "1",
+            },
         }
     ]
 
@@ -2573,6 +2584,53 @@ def test_generate_semantic_is_read_only_over_the_target_repo(tmp_path, monkeypat
     assert task_file.read_text(encoding="utf-8") == before
     assert sorted(p.name for p in (repo.path / ".ai-tasks").iterdir()) == before_listing
     assert (tmp_path / "hub-data" / "evaluations" / repo.name / RUN_TASK_ID).is_dir()
+
+
+def test_list_surfaces_semantic_evaluator_for_picker_comparison(tmp_path, monkeypatch):
+    # The list route reads the persisted semantic report's evaluator best-effort so
+    # the history picker can compare runs by model/version without opening each one.
+    client, service, _static, _sem, repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(available=True)
+    )
+    eval_id = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic"
+    ).json()["evaluation_id"]
+
+    entry = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}"
+    ).json()["evaluations"][0]
+    assert entry["evaluation_id"] == eval_id
+    assert entry["has_semantic_report"] is True
+    assert entry["evaluator"] == {
+        "backend": "fake",
+        "model": "fake-model",
+        "schema_version": "1",
+    }
+
+
+def test_list_evaluator_degrades_to_none_when_semantic_report_unreadable(
+    tmp_path, monkeypatch
+):
+    # The evaluator read is best-effort presentation enrichment, so a corrupt or
+    # unreadable semantic report must never 500 the newest-first list (its primary
+    # payload) — it degrades to a null evaluator while the artifact flag still
+    # reports the report is present. (The detail route is where corruption surfaces.)
+    client, service, _static, _sem, repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(available=True)
+    )
+    eval_id = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic"
+    ).json()["evaluation_id"]
+    report_path = (
+        service.artifact_dir(repo, RUN_TASK_ID, eval_id) / SEMANTIC_REPORT_NAME
+    )
+    report_path.write_text("{ not valid json", encoding="utf-8")
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}")
+    assert listing.status_code == 200  # the corrupt report did not 500 the list
+    entry = listing.json()["evaluations"][0]
+    assert entry["has_semantic_report"] is True  # the file is still present
+    assert entry["evaluator"] is None  # but its identity degraded cleanly
 
 
 # -- error shapes --------------------------------------------------------------
@@ -2661,6 +2719,62 @@ def test_disabled_mode_writes_no_artifacts(tmp_path, monkeypatch):
     # The fail-closed gate short-circuits before any generation: no evaluations
     # tree is created under the hub data dir.
     assert not (tmp_path / "hub-data" / "evaluations").exists()
+
+
+# -- module boundary: disabling evaluation must not break core run control ------
+
+
+def test_disabling_evaluation_leaves_core_run_control_intact(tmp_path, monkeypatch):
+    # The evaluation subsystem is an optional sidecar. A customer deployment can
+    # disable it (ORCH_HUB_EVAL_ENABLED falsy), and every core flow — repo/task
+    # inventory, run start/list/history/logs/sessions, control-dir human input, and
+    # graceful stop — must keep working while only the evaluation routes fail
+    # closed. This pins the module boundary the docs/evaluation.md guarantee.
+    repo = make_run_repo(tmp_path)
+    manager, _spawner = make_run_manager(tmp_path)
+    config = Config(
+        ai_native_path=tmp_path / "ai-native",
+        token=TOKEN,
+        data_dir=tmp_path / "hub-data",
+        evaluation_enabled=False,
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    client = TestClient(api.create_app(config, run_manager=manager))
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+
+    # Evaluation is off: availability says so, and the doctor + task routes 404.
+    assert client.get("/api/evaluation").json() == {"enabled": False}
+    assert client.get("/api/evaluation/doctor").status_code == 404
+    assert (
+        client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").status_code
+        == 404
+    )
+
+    # Repo/task inventory is unaffected.
+    assert client.get("/api/repos").status_code == 200
+    assert client.get("/api/tasks").status_code == 200
+    assert client.get(f"/api/repos/{repo.name}/tasks").status_code == 200
+
+    # Start/list a run.
+    run_id = start_a_run(client, repo)["run_id"]
+    assert client.get("/api/runs").status_code == 200
+    assert client.get(f"/api/runs/{run_id}").status_code == 200
+
+    # Run history, logs, and per-session context all serve.
+    assert client.get("/api/history/runs").status_code == 200
+    assert client.get(f"/api/runs/{run_id}/logs").status_code == 200
+    assert client.get(f"/api/runs/{run_id}/sessions").status_code == 200
+
+    # Control-dir human input round-trips: a pending question can be answered.
+    write_question(control_dir_of(manager, run_id), banner="?")
+    assert client.get("/api/escalations").status_code == 200
+    answered = client.post(
+        f"/api/runs/{run_id}/escalations/1/answer", json={"answer": "go"}
+    )
+    assert answered.status_code == 200
+
+    # Graceful stop still works.
+    assert client.post(f"/api/runs/{run_id}/stop").status_code == 200
 
 
 # -- read-only over the target -------------------------------------------------

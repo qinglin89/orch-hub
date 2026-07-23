@@ -1651,7 +1651,7 @@ def test_evaluation_semantic_trigger_posts_with_cost_and_readonly_copy():
     # re-render to the fresh latest so the produced report paints.
     assert "const evalSemanticPath = (repo, taskId) =>" in body
     assert 'evalListPath(repo, taskId) + "/semantic"' in body
-    assert "function evalSemanticSection()" in body
+    assert "function evalSemanticSection(doctor)" in body
     assert "eval-semantic-generate" in body
     assert 'class="eval-sem-btn"' in body
     assert 'class="eval-cost"' in body
@@ -1719,6 +1719,41 @@ def test_evaluation_history_picker_navigates_to_the_id_route():
     assert 'evalHash(repo, taskId) + "/" + encodeURIComponent(ev.target.value)' in body
 
 
+# ---- semantic (Layer 2) dashboard ops, session-2-cont ----------------------
+#
+# The doctor gate and the history-picker model/version comparison. The doctor
+# route + the evaluator list field are API-tested (test_api.py); these pin the
+# dashboard wiring the JSC harness (scenarioTaskEval) then drives end-to-end.
+
+
+def test_evaluation_semantic_control_gated_by_doctor_probe():
+    body = app_js()
+    # renderTaskEval probes the Layer 2 readiness doctor and passes it to the
+    # semantic section; an unconfigured backend disables the trigger with an
+    # explanation while Layer 1 stays usable.
+    assert 'const health = await api("/api/evaluation/doctor");' in body
+    assert "semanticDoctor = health && health.semantic ? health.semantic : null;" in body
+    assert "${evalSemanticSection(semanticDoctor)}" in body
+    assert "const unavailable = !!(doctor && doctor.available === false);" in body
+    assert 'class="eval-sem-btn" disabled' in body
+    assert "eval-sem-unavailable" in body
+    assert "Layer 2 is unavailable on this hub" in body
+    assert "The deterministic Layer 1 metrics above still work." in body
+    # Best-effort: a 401 re-gates, but any other probe failure keeps Layer 2 in its
+    # default enabled state rather than blanking the sidecar view.
+    assert "semanticDoctor = null; // probe failed" in body
+
+
+def test_evaluation_history_picker_compares_by_evaluator_model():
+    body = app_js()
+    # A semantic entry's picker label carries the evaluator model (and schema
+    # version) so runs are comparable by model/version without opening each one;
+    # the field is best-effort, so a null evaluator just omits the suffix.
+    assert "if (e.has_semantic_report && e.evaluator) {" in body
+    assert "e.evaluator.model," in body
+    assert 'e.evaluator.schema_version ? "v" + e.evaluator.schema_version : ""' in body
+
+
 def test_task_detail_links_to_evaluation_only_when_enabled():
     body = app_js()
     # The entry point is gated on a best-effort availability probe, so a disabled
@@ -1770,6 +1805,8 @@ def test_semantic_layer_styles_are_present():
     # rationale, and the severity-accented finding cards.
     for selector in (
         ".eval-sem-btn",
+        ".eval-sem-btn:disabled",
+        ".eval-sem-unavailable",
         ".eval-cost",
         ".sem-report",
         ".sem-layer-tag",

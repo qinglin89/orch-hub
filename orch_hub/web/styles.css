@@ -1508,6 +1508,16 @@ code {
   line-height: 1.5;
 }
 
+/* Layer 2 unavailable (the doctor reports the backend is not configured): the
+   explanation beside the disabled trigger. Not an error — a configuration state —
+   so a warn tint, not the alarm colour; it says why the control is off and that
+   Layer 1 still works. */
+.eval-sem-unavailable {
+  color: var(--warn-fg);
+  line-height: 1.5;
+  max-width: 56ch;
+}
+
 /* Score axes: one row per axis, a colour-banded percentage and a meter beneath,
    with any evidence-pointing warnings listed under it. */
 .score-list {
