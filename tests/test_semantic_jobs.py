@@ -452,6 +452,30 @@ def test_unsafe_task_id_is_rejected(tmp_path, bad):
         mgr.find_job(repo(), bad)
 
 
+@pytest.mark.parametrize("bad_repo", [".", "-.-", ".."])
+def test_dotlike_repo_name_is_rejected_not_silently_collapsed(tmp_path, bad_repo):
+    """A repo whose slug is a bare dot reference must fail closed, not write a job
+    to a collapsed/escaping path the two-level reconcile scan can never reach.
+
+    Regression for the ``ManagedRepo(name=".")`` gap: ``_slug(".")`` (and
+    ``_slug("-.-")``) is ``.``, and ``base / "." / task`` *collapses* the
+    ``<repo-slug>/`` level, so the record landed at ``semantic-jobs/<task>/job.json``
+    — outside the two-level walk :meth:`reconcile_orphans` scans, so a hub crash
+    left that transient job stranded and its ``(repo, task)`` duplicate slot held
+    forever. (``".."`` instead *escapes* the tree.) The slugged repo segment is now
+    validated, so every such attempt is refused before any dir is created.
+    """
+    mgr = manager(tmp_path)
+    dot_repo = repo(name=bad_repo)
+    with pytest.raises(ValueError):
+        mgr.start_job(dot_repo, TASK)
+    with pytest.raises(ValueError):
+        mgr.find_job(dot_repo, TASK)
+    # Fail-closed before any filesystem write: no job record was persisted, so the
+    # stuck-forever orphan can never exist.
+    assert snapshot_tree(mgr.jobs_dir) == {}
+
+
 def test_manager_only_writes_semantic_jobs_subtree(tmp_path):
     cfg = config(tmp_path)
     mgr = SemanticJobManager(cfg, evaluator=FakeEvaluator(), clock=Clock(), executor=sync_executor)

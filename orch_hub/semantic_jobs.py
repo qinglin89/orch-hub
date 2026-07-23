@@ -34,8 +34,10 @@ tree stays bounded (one tiny file per evaluated task, not one per attempt), the
 duplicate guard and the "current job for this task" read are a single
 deterministic-path load with no directory scan, and a completed attempt's result
 is never lost — it lives in the evaluations tree keyed by ``evaluation_id`` (the
-job record only points at it). The task-id segment is validated as a single safe
-path component, which is what makes the deterministic path containment-safe.
+job record only points at it). Both path components — the slugged repo segment
+and the task-id segment — are validated as single safe path components, which is
+what makes the deterministic path containment-safe (and keeps every record on the
+two-level ``<repo-slug>/<task-id>/`` layout the startup reconcile scan walks).
 
 The manager owns **only** job status. The read-only evaluation itself — evidence,
 static metrics, semantic report, retention — stays entirely in
@@ -139,27 +141,52 @@ def _thread_executor(run: Callable[[], None]) -> None:
 
 
 def _slug(value: str) -> str:
-    """Make a repo name safe as a semantic-jobs path component."""
+    """Make a repo name safe as a semantic-jobs path component.
+
+    Collapses any run of unsafe chars to ``-``, but — like ``runs._slug``/
+    ``evaluation._slug`` — can still yield a bare ``.``/``..`` dot reference (e.g.
+    a repo literally named ``.``), which is NOT a usable single path segment.
+    :func:`_safe_segment` is what rejects those, and
+    :meth:`SemanticJobManager._job_dir_for` runs the slug through it before
+    composing a dir, so a dot-reference slug cannot collapse/escape the intended
+    ``<repo-slug>/<task-id>/`` layout.
+    """
     return _SLUG.sub("-", value).strip("-") or "x"
+
+
+def _safe_segment(value: str, *, label: str) -> str:
+    """Return ``value`` iff it is a single safe path segment, else raise (fail closed).
+
+    Mirrors :func:`orch_hub.evaluation._safe_segment`: rejects an empty value, a
+    separator, a null byte, or a ``.``/``..`` dot reference. Both the slugged repo
+    segment and the task id are path components of the deterministic job dir, so a
+    value that is not a real single segment must be refused before any dir is
+    created — otherwise it steers the record off its intended
+    ``<repo-slug>/<task-id>/`` path (a ``.`` slug collapses the ``<repo-slug>/``
+    level so the record lands where the two-level reconcile scan can never see it;
+    a ``..`` slug escapes the tree). Raises ``ValueError`` (the API maps it to 400).
+    """
+    if (
+        not value
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+        or value in (".", "..")
+    ):
+        raise ValueError(f"unsafe {label} path segment: {value!r}")
+    return value
 
 
 def _validate_task_id(task_id: str) -> None:
     """Reject a task id that is not a single safe path segment (fail closed).
 
-    The task id is a path component of the deterministic job dir, so — like the
-    intake/​evaluation containment rules this locally mirrors — a separator, null
-    byte, ``.``/``..`` dot reference, or empty id is refused before any dir is
-    created, so a crafted id can never steer a write outside the semantic-jobs
-    tree. Raises ``ValueError`` (the API maps it to 400).
+    A public-entry guard: :meth:`SemanticJobManager.start_job`/:meth:`get_job`
+    call it before acquiring the lock, so a crafted id yields a clean 400 before
+    any lock/dir work. The shape check is :func:`_safe_segment`;
+    :meth:`SemanticJobManager._job_dir_for` re-applies it (to the task id and the
+    slugged repo) at the single path-composition point.
     """
-    if (
-        not task_id
-        or "/" in task_id
-        or "\\" in task_id
-        or "\x00" in task_id
-        or task_id in (".", "..")
-    ):
-        raise ValueError(f"unsafe task id path segment: {task_id!r}")
+    _safe_segment(task_id, label="task id")
 
 
 def _bound_error(reason: str) -> str:
@@ -452,15 +479,22 @@ class SemanticJobManager:
     def _job_dir_for(self, repo_name: str, task_id: str) -> Path:
         """Deterministic contained job dir for one ``(repo, task)`` (pure path math).
 
-        ``<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`` — the repo component is
-        slugged and the task component is a validated single safe segment (the
-        caller runs :func:`_validate_task_id` first). As a final defense the
-        resolved path is asserted to stay under the resolved jobs base, so neither
-        a crafted task id nor repo name can steer a read/write outside the
-        semantic-jobs tree. Creates nothing.
+        ``<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`` — both components are
+        validated single safe segments via :func:`_safe_segment` (mirroring
+        :func:`orch_hub.evaluation.task_evaluations_dir`): the repo name is slugged
+        *and then* validated (a slug can still be a bare ``.`` — e.g. a repo named
+        ``.`` — which would collapse the ``<repo-slug>/`` level and drop the record
+        where the two-level :meth:`reconcile_orphans` scan can't reach it, stranding
+        a crashed transient job's duplicate slot forever), and the task id is
+        re-validated even though the public entry already checked it. As a final
+        defense the resolved path is asserted to stay under the resolved jobs base,
+        so neither a crafted task id nor repo name can steer a read/write outside
+        the semantic-jobs tree. Creates nothing.
         """
         base = self.jobs_dir
-        target = base / _slug(repo_name) / task_id
+        repo_seg = _safe_segment(_slug(repo_name), label="repo")
+        task_seg = _safe_segment(task_id, label="task id")
+        target = base / repo_seg / task_seg
         if not target.resolve().is_relative_to(base.resolve()):
             raise ValueError(f"semantic-jobs path escapes {base}: {target}")
         return target
