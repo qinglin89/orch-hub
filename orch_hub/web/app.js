@@ -1591,16 +1591,20 @@
           its <code>claimed-by</code> session is resumable, else the orchestrator
           exits with guidance (README §5.4).</span></label>`
       : "";
-    // Start opens an options dialog rather than launching immediately. Every
-    // dashboard run pins the backend to cc-codex (there is deliberately no
-    // backend selector); the fields below are optional overrides for the
-    // cc-codex run parameters. A blank field is omitted from the argv, so the
-    // orchestrator keeps its own default — only a changed field adds an arg
-    // (see buildExtraArgs). The blocked-task acknowledgement moves inside the
-    // dialog, so it is confirmed together with the launch.
-    // Each field carries an explicit for/id pair (only one options dialog is on
-    // the page at a time, so fixed ids are safe) and the dialog is named by its
-    // own heading through aria-labelledby, so the modal announces what it is.
+    // Start opens a launch-options dialog rather than launching immediately. The
+    // dialog is driven by the repo's OWN deployed orchestrator: on open it queries
+    // GET /api/repos/{repo}/orchestrator-config (`--print-config`) and shows the
+    // resolved model/effort values for the selected Mode + Backend, so orch-hub
+    // never hardcodes model policy. Four modes: Default (inherit the orchestrator
+    // config), Standard / Excellent (named profiles), and Custom (explicit
+    // overrides). Preset modes are read-only; only Custom exposes editable role
+    // fields. The launch payload is the structured `launch` object — the server
+    // turns it into argv via build_launch_args, so the four-mode/backend rules
+    // live in one tested place. The plan-gate toggle is orthogonal to mode and
+    // stays available in every mode. The blocked-task acknowledgement moves inside
+    // the dialog, so it is confirmed together with the launch. Only one options
+    // dialog is on the page at a time, so fixed field ids are safe; the modal is
+    // named by its own heading through aria-labelledby.
     return (
       head +
       `<button type="button" class="open-run-options">Start run…</button>
@@ -1611,36 +1615,26 @@
         blocked ? "1" : ""
       }">
           <h3 id="run-options-title">Start run</h3>
-          <p class="muted opts-note">Backend is fixed to <code>cc-codex</code>.
-            Leave a field blank to use the orchestrator default; only changed
-            fields are passed.</p>
-          <label for="opt-dev-agent">Dev agent
-            <select id="opt-dev-agent" class="opt-dev-agent">
-              <option value="">default</option>
-              <option value="claude">claude</option>
-              <option value="codex">codex</option>
+          <p class="muted opts-note">Values come from this repo's deployed
+            orchestrator. Preset modes are read-only; Custom overrides applicable
+            fields.</p>
+          <label for="opt-mode">Mode
+            <select id="opt-mode" class="opt-mode">
+              <option value="default">Default</option>
+              <option value="standard">Standard</option>
+              <option value="excellent">Excellent</option>
+              <option value="custom">Custom</option>
             </select>
           </label>
-          <label for="opt-dev-model">Dev model
-            <input type="text" id="opt-dev-model" class="opt-dev-model"
-              autocapitalize="off" autocomplete="off" spellcheck="false"
-              placeholder="default" />
+          <label for="opt-backend">Backend
+            <select id="opt-backend" class="opt-backend">
+              <option value="">Inherit (orchestrator default)</option>
+              <option value="cursor">Cursor</option>
+              <option value="cc-codex">cc-codex</option>
+            </select>
           </label>
-          <label for="opt-dev-effort">Dev effort
-            <input type="text" id="opt-dev-effort" class="opt-dev-effort"
-              autocapitalize="off" autocomplete="off" spellcheck="false"
-              placeholder="default" />
-          </label>
-          <label for="opt-review-model">Review model
-            <input type="text" id="opt-review-model" class="opt-review-model"
-              autocapitalize="off" autocomplete="off" spellcheck="false"
-              placeholder="default" />
-          </label>
-          <label for="opt-review-effort">Review effort
-            <input type="text" id="opt-review-effort" class="opt-review-effort"
-              autocapitalize="off" autocomplete="off" spellcheck="false"
-              placeholder="default" />
-          </label>
+          <p class="muted profiles-note" role="status"></p>
+          <div class="config-panel" data-state="idle"></div>
           <label class="opt-toggle"><input type="checkbox" class="opt-plan-gate" />
             <span>Plan-gate: every dev session first proposes its goal and plan
             and blocks for confirmation before implementing (orchestrator
@@ -1675,7 +1669,15 @@
       dialog.addEventListener("close", () => restoreFocus(dialogOpener));
     }
     const startForm = document.querySelector(".start-form");
-    if (startForm) startForm.addEventListener("submit", onStartSubmit);
+    if (startForm) {
+      startForm.addEventListener("submit", onStartSubmit);
+      // Mode / backend changes re-query the orchestrator and repaint the panel.
+      const modeSel = startForm.querySelector(".opt-mode");
+      const backendSel = startForm.querySelector(".opt-backend");
+      if (modeSel) modeSel.addEventListener("change", onLaunchModeChange);
+      if (backendSel)
+        backendSel.addEventListener("change", onLaunchBackendChange);
+    }
     const stopForm = document.querySelector(".stop-form");
     if (stopForm) stopForm.addEventListener("submit", onStopSubmit);
   }
@@ -1684,12 +1686,51 @@
   // back instead of dropping the keyboard user at the top of the document.
   let dialogOpener = null;
 
-  // Open the options dialog. Prefer the native modal (which scopes focus to the
-  // dialog and handles Escape); fall back to a plain open attribute on the rare
-  // browser without <dialog>.showModal so the form is still reachable — there,
-  // focus is moved to the first field by hand.
+  // Live launch-dialog state, reset on each open. `mode`/`backend` mirror the two
+  // selects (backend "" = inherit); `config` is the last EffectiveConfig the
+  // orchestrator returned for the current selection; `available` is its
+  // available_profiles; `resolved` is the orchestrator's own configured backend
+  // (learned from the inherit query), used to seed an explicit backend when a
+  // preset/custom mode needs one. `gen` guards against a slow earlier query
+  // painting over a newer selection; `cache` avoids re-querying an already-seen
+  // (backend, profile) within one dialog session.
+  let launchCfg = null;
+
+  // The committed orchestrator default backend (per the deployed handoff), used
+  // only to seed a preset/custom mode before the first query resolves a real one.
+  const DEFAULT_BACKEND = "cc-codex";
+
+  const orchConfigPath = (repo) =>
+    "/api/repos/" + encodeURIComponent(repo) + "/orchestrator-config";
+
+  // Open the options dialog. Reset the two selects + state, kick the initial
+  // Default query (fire-and-forget — the panel paints when it resolves), then
+  // prefer the native modal (which scopes focus and handles Escape); fall back to
+  // a plain open attribute on the rare browser without <dialog>.showModal,
+  // focusing the first field by hand.
   function openRunOptions(dialog, opener) {
     dialogOpener = opener || null;
+    const form = dialog.querySelector(".start-form");
+    if (form) {
+      const modeSel = form.querySelector(".opt-mode");
+      const backendSel = form.querySelector(".opt-backend");
+      if (modeSel) modeSel.value = "default";
+      if (backendSel) backendSel.value = "";
+      launchCfg = {
+        repo: form.dataset.repo,
+        mode: "default",
+        backend: "",
+        config: null,
+        available: [],
+        resolved: DEFAULT_BACKEND,
+        loading: false,
+        error: null,
+        gen: 0,
+        cache: {},
+      };
+      syncInheritOption();
+      refreshLaunchConfig();
+    }
     if (typeof dialog.showModal === "function") {
       dialog.showModal();
       return;
@@ -1709,42 +1750,302 @@
     }
   }
 
-  // The launch overrides, each as [orchestrator flag, field class]. Order fixes
-  // the argv order; every field is optional.
-  const RUN_OPTION_FIELDS = [
-    ["--dev-agent", "opt-dev-agent"],
-    ["--dev-model", "opt-dev-model"],
-    ["--dev-effort", "opt-dev-effort"],
-    ["--review-model", "opt-review-model"],
-    ["--review-effort", "opt-review-effort"],
-  ];
-
-  // Build the orchestrator extra args for a Start. The backend is always pinned
-  // to cc-codex (never selectable from the dashboard); each override adds its
-  // flag only when the user supplied a value, so a blank field defers to the
-  // orchestrator default and never reaches the argv. Plan-gate is the one
-  // valueless toggle and is appended last (see below).
-  function buildExtraArgs(form) {
-    const args = ["--backend", "cc-codex"];
-    for (const [flag, cls] of RUN_OPTION_FIELDS) {
-      const field = form.querySelector("." + cls);
-      const value = field ? field.value.trim() : "";
-      if (value) args.push(flag, value);
+  // Mode changed: a preset/custom mode needs an explicit backend, so seed one
+  // from the resolved default when the user is still on Inherit, then re-query.
+  function onLaunchModeChange() {
+    if (!launchCfg) return;
+    const modeSel = document.querySelector(".opt-mode");
+    const backendSel = document.querySelector(".opt-backend");
+    launchCfg.mode = modeSel ? modeSel.value : "default";
+    if (launchCfg.mode !== "default" && !launchCfg.backend) {
+      launchCfg.backend = launchCfg.resolved || DEFAULT_BACKEND;
+      if (backendSel) backendSel.value = launchCfg.backend;
     }
-    // Plan-gate is a valueless store_true flag, not a [flag, value] override, so
-    // it can't ride the RUN_OPTION_FIELDS loop. Append a bare "--plan-gate" only
-    // when checked; unchecked omits it so the orchestrator keeps its default
-    // (off). Pinned to the argv tail, after the overrides, for a deterministic
-    // order (…, "--plan-gate").
-    const planGate = form.querySelector(".opt-plan-gate");
-    if (planGate && planGate.checked) args.push("--plan-gate");
-    return args;
+    syncInheritOption();
+    refreshLaunchConfig();
   }
 
-  // Start: POST /api/runs with the fixed cc-codex backend plus any overrides. A
-  // success closes the dialog and re-renders (the run is now live, so the view
-  // flips to Stop); a refusal stays in the open dialog — the backend, not this
-  // form, decides whether the launch is allowed.
+  // Backend changed: re-query for the new backend. Inherit is only valid for
+  // Default, so a manual pick of it in a preset/custom mode reverts to an
+  // explicit backend (belt-and-suspenders with the disabled Inherit option).
+  function onLaunchBackendChange() {
+    if (!launchCfg) return;
+    const backendSel = document.querySelector(".opt-backend");
+    launchCfg.backend = backendSel ? backendSel.value : "";
+    if (launchCfg.mode !== "default" && !launchCfg.backend) {
+      launchCfg.backend = launchCfg.resolved || DEFAULT_BACKEND;
+      if (backendSel) backendSel.value = launchCfg.backend;
+    }
+    refreshLaunchConfig();
+  }
+
+  // The Inherit backend option applies only to Default (a preset/custom launch
+  // needs an explicit backend — build_launch_args rejects an inherited one).
+  // Disable it elsewhere so it cannot be picked.
+  function syncInheritOption() {
+    const opt = document.querySelector('.opt-backend option[value=""]');
+    if (opt) opt.disabled = !!launchCfg && launchCfg.mode !== "default";
+  }
+
+  // Query the orchestrator for the current (mode, backend) and repaint the panel.
+  // Default/Custom omit --profile; Standard/Excellent pass it. A newer selection
+  // (bumped gen) makes a slower earlier response inert. A query failure disables
+  // Launch and surfaces the orchestrator's own error — never a hub default.
+  async function refreshLaunchConfig() {
+    const st = launchCfg;
+    if (!st) return;
+    const gen = ++st.gen;
+    const backend = st.backend; // "" = inherit
+    const profile =
+      st.mode === "standard" || st.mode === "excellent" ? st.mode : "";
+    st.loading = true;
+    st.error = null;
+    renderConfigPanel();
+    const key = backend + "|" + profile;
+    if (st.cache[key]) {
+      applyConfig(st, st.cache[key], backend, profile);
+      renderConfigPanel();
+      return;
+    }
+    let url = orchConfigPath(st.repo);
+    const qs = [];
+    if (backend) qs.push("backend=" + encodeURIComponent(backend));
+    if (profile) qs.push("profile=" + encodeURIComponent(profile));
+    if (qs.length) url += "?" + qs.join("&");
+    try {
+      const config = await api(url);
+      if (gen !== st.gen) return; // a newer selection owns the panel now
+      st.cache[key] = config;
+      applyConfig(st, config, backend, profile);
+      renderConfigPanel();
+    } catch (err) {
+      if (gen !== st.gen) return;
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      st.loading = false;
+      st.config = null;
+      st.error = controlErrorText(
+        err,
+        "Could not read this repo's orchestrator configuration."
+      );
+      renderConfigPanel();
+    }
+  }
+
+  // Fold a successful query into state: store the config + available profiles,
+  // remember the resolved backend from the inherit query (to seed preset modes),
+  // and refresh the mode-option availability.
+  function applyConfig(st, config, backend, profile) {
+    st.loading = false;
+    st.error = null;
+    st.config = config;
+    st.available = Array.isArray(config.available_profiles)
+      ? config.available_profiles
+      : [];
+    if (!backend && !profile && config.backend) st.resolved = config.backend;
+    syncModeAvailability();
+  }
+
+  // A read-only role value in orchestrator notation: `agent:model @ effort`, with
+  // the `agent:` prefix only for a cc-codex role (a Cursor role's agent is absent
+  // or the bare "cursor", which the orchestrator's own notation omits).
+  function roleValueText(role) {
+    role = role || {};
+    const agent =
+      role.agent && role.agent !== "cursor" ? role.agent + ":" : "";
+    return agent + (role.model || "—") + " @ " + (role.effort || "—");
+  }
+
+  // One role as a single compact row. Read-only modes show static
+  // `model @ effort` text; Custom shares the row between individually-labelled
+  // model and effort inputs (a dev-agent select leads the row for cc-codex), with
+  // a decorative `@` between them. The labels are visually hidden but real, so
+  // each control is named for assistive tech without stacking the row.
+  function roleRow(name, key, role, custom) {
+    role = role || {};
+    if (!custom) {
+      return (
+        `<div class="role-row"><span class="role-name">${name}</span>` +
+        `<span class="role-val">${escapeHtml(roleValueText(role))}</span></div>`
+      );
+    }
+    const backend = launchCfg.backend || launchCfg.resolved;
+    const agentSel =
+      key === "dev" && backend === "cc-codex"
+        ? `<label class="visually-hidden" for="opt-dev-agent">Dev agent</label>` +
+          `<select id="opt-dev-agent" class="opt-dev-agent role-agent">` +
+          `<option value="">inherit</option>` +
+          `<option value="claude"${
+            role.agent === "claude" ? " selected" : ""
+          }>claude</option>` +
+          `<option value="codex"${
+            role.agent === "codex" ? " selected" : ""
+          }>codex</option>` +
+          `</select>`
+        : "";
+    return (
+      `<div class="role-row role-row-custom"><span class="role-name">${name}</span>` +
+      agentSel +
+      `<label class="visually-hidden" for="opt-${key}-model">${name} model</label>` +
+      `<input id="opt-${key}-model" class="opt-${key}-model role-model" type="text"` +
+      ` autocapitalize="off" autocomplete="off" spellcheck="false"` +
+      ` value="${escapeHtml(role.model || "")}" placeholder="model id" />` +
+      `<span class="at" aria-hidden="true">@</span>` +
+      `<label class="visually-hidden" for="opt-${key}-effort">${name} effort</label>` +
+      `<input id="opt-${key}-effort" class="opt-${key}-effort role-effort" type="text"` +
+      ` autocapitalize="off" autocomplete="off" spellcheck="false"` +
+      ` value="${escapeHtml(role.effort || "")}" placeholder="effort" />` +
+      `</div>`
+    );
+  }
+
+  // The `sources` provenance map (cli / profile:<name> / env:<NAME> / config) in
+  // an advanced disclosure — handy when an environment override changes Default.
+  function sourcesDetails(sources) {
+    const keys = sources ? Object.keys(sources).sort() : [];
+    if (!keys.length) return "";
+    const rows = keys
+      .map(
+        (k) =>
+          `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(sources[k]))}</dd>`
+      )
+      .join("");
+    return (
+      `<details class="cfg-sources"><summary>Provenance</summary>` +
+      `<dl class="kv">${rows}</dl></details>`
+    );
+  }
+
+  // Repaint the config panel for the current state: loading, a fail-closed query
+  // error (Launch disabled), or the resolved DEV/REVIEW rows plus budget and
+  // provenance. Custom rows are editable; preset rows are static.
+  function renderConfigPanel() {
+    const panel = document.querySelector(".config-panel");
+    if (!panel || !launchCfg) return;
+    const st = launchCfg;
+    if (st.loading) {
+      panel.dataset.state = "loading";
+      panel.innerHTML =
+        '<p class="muted cfg-status" role="status">Querying the orchestrator…</p>';
+      setLaunchEnabled(false);
+      return;
+    }
+    if (st.error) {
+      panel.dataset.state = "error";
+      panel.innerHTML =
+        `<p class="error-text cfg-status" role="status">${escapeHtml(
+          st.error
+        )}</p>` +
+        `<p class="muted">Start is disabled until the query succeeds — an older
+         deployment without <code>--print-config</code> must be redeployed.</p>`;
+      setLaunchEnabled(false);
+      return;
+    }
+    const cfg = st.config;
+    if (!cfg) {
+      panel.dataset.state = "idle";
+      panel.innerHTML = "";
+      setLaunchEnabled(false);
+      return;
+    }
+    panel.dataset.state = "ready";
+    const custom = st.mode === "custom";
+    const budget =
+      `<p class="muted cfg-meta">max sessions ${
+        cfg.max_sessions == null ? "—" : escapeHtml(String(cfg.max_sessions))
+      } · context budget ${escapeHtml(fmtTokensK(cfg.context_budget) || "—")}</p>`;
+    panel.innerHTML =
+      '<div class="role-rows">' +
+      roleRow("DEV", "dev", cfg.dev, custom) +
+      roleRow("REVIEW", "review", cfg.review, custom) +
+      "</div>" +
+      budget +
+      sourcesDetails(cfg.sources);
+    setLaunchEnabled(true);
+  }
+
+  // Reflect available_profiles onto the Mode options: disable Standard/Excellent
+  // the orchestrator does not offer (never silently falling back to Default) and
+  // spell out what is available in the note line.
+  function syncModeAvailability() {
+    const st = launchCfg;
+    if (!st) return;
+    const modeSel = document.querySelector(".opt-mode");
+    if (modeSel) {
+      for (const m of ["standard", "excellent"]) {
+        const opt = modeSel.querySelector('option[value="' + m + '"]');
+        if (!opt) continue;
+        const ok = st.available.indexOf(m) !== -1;
+        opt.disabled = !ok;
+        opt.textContent =
+          m.charAt(0).toUpperCase() + m.slice(1) + (ok ? "" : " (unavailable)");
+      }
+    }
+    const note = document.querySelector(".profiles-note");
+    if (note) {
+      const offered = ["standard", "excellent"].filter(
+        (m) => st.available.indexOf(m) !== -1
+      );
+      note.textContent = offered.length
+        ? "Named profiles available: " + offered.join(", ") + "."
+        : "This orchestrator exposes no named profiles; Standard and Excellent are unavailable.";
+    }
+  }
+
+  function setLaunchEnabled(enabled) {
+    const btn = document.querySelector('.start-form button[type="submit"]');
+    if (btn) btn.disabled = !enabled;
+  }
+
+  // Build the structured `launch` payload for POST /api/runs from the dialog
+  // state. The server turns it into orchestrator argv (build_launch_args), so the
+  // four-mode/backend rules live in one tested place, not here. Default omits the
+  // backend when inheriting; preset modes pass the explicit backend + profile;
+  // Custom passes the explicit backend, applicable dev-agent, and the four role
+  // model/effort values. Plan-gate is orthogonal and honored in every mode.
+  // Returns null (after writing an inline message) when a required Custom field is
+  // blank, so a run is never posted with an incomplete override set.
+  function buildLaunchPayload(form, statusEl) {
+    const st = launchCfg;
+    const launch = { mode: st.mode };
+    if (st.mode === "default") {
+      if (st.backend) launch.backend = st.backend;
+    } else {
+      launch.backend = st.backend || st.resolved || DEFAULT_BACKEND;
+    }
+    if (st.mode === "custom") {
+      const val = (cls) => {
+        const el = form.querySelector("." + cls);
+        return el ? el.value.trim() : "";
+      };
+      const devAgentEl = form.querySelector(".opt-dev-agent");
+      const devAgent = devAgentEl ? devAgentEl.value : "";
+      if (devAgent) launch.dev_agent = devAgent;
+      const devModel = val("opt-dev-model");
+      const devEffort = val("opt-dev-effort");
+      const reviewModel = val("opt-review-model");
+      const reviewEffort = val("opt-review-effort");
+      if (!devModel || !devEffort || !reviewModel || !reviewEffort) {
+        if (statusEl) {
+          statusEl.classList.add("error-text");
+          statusEl.textContent =
+            "Custom needs a model and effort for both dev and review.";
+        }
+        return null;
+      }
+      launch.dev_model = devModel;
+      launch.dev_effort = devEffort;
+      launch.review_model = reviewModel;
+      launch.review_effort = reviewEffort;
+    }
+    const planGate = form.querySelector(".opt-plan-gate");
+    if (planGate && planGate.checked) launch.plan_gate = true;
+    return launch;
+  }
+
+  // Start: POST /api/runs with the structured `launch` selection (the server
+  // builds the argv). A success closes the dialog and re-renders (the run is now
+  // live, so the view flips to Stop); a refusal — a gate 409, a bad launch 400,
+  // or a blank Custom field caught locally — stays in the open dialog.
   async function onStartSubmit(ev) {
     ev.preventDefault();
     const form = ev.currentTarget;
@@ -1756,6 +2057,11 @@
       form.dataset.blocked === "1" ? !!(ackBox && ackBox.checked) : false;
     statusEl.textContent = "";
     statusEl.classList.remove("error-text");
+    const launch = buildLaunchPayload(form, statusEl);
+    if (launch === null) {
+      restoreFocus(button); // a local validation stop keeps the dialog open
+      return;
+    }
     button.disabled = true;
     try {
       await api("/api/runs", {
@@ -1763,7 +2069,7 @@
         body: {
           repo_id: form.dataset.repo,
           task_id: form.dataset.task,
-          extra_args: buildExtraArgs(form),
+          launch: launch,
           acknowledge_blocked: acknowledgeBlocked,
         },
       });
@@ -2097,6 +2403,46 @@
     );
   }
 
+  // Shorten a sha256 revision for display (first 12 chars + ellipsis); a short or
+  // absent value passes through / degrades to an em dash.
+  function shortRev(rev) {
+    if (!rev) return "—";
+    const s = String(rev);
+    return s.length > 12 ? s.slice(0, 12) + "…" : s;
+  }
+
+  // The run's authoritative `effective-config:` snapshot — the startup line every
+  // real run logs, embedded per-run in the history payload and treated as
+  // authoritative if it differs from the Start-dialog preview. Rendered as a
+  // disclosure so a card stays scannable: profile · backend in the summary, then
+  // the resolved DEV/REVIEW roles, config/effective revisions, and provenance
+  // when opened. An absent snapshot (a pre-field or unparsed run) renders nothing.
+  function effectiveConfigBlock(cfg) {
+    if (!cfg || typeof cfg !== "object") return "";
+    const summary = escapeHtml((cfg.profile || "?") + " · " + (cfg.backend || "?"));
+    const rows = [
+      ["profile", cfg.profile || "—"],
+      ["backend", cfg.backend || "—"],
+      ["dev", roleValueText(cfg.dev)],
+      ["review", roleValueText(cfg.review)],
+      ["config rev", shortRev(cfg.config_revision)],
+      ["effective rev", shortRev(cfg.effective_revision)],
+    ];
+    const kv = rows
+      .map(
+        ([k, v]) =>
+          `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`
+      )
+      .join("");
+    return (
+      `<details class="run-config">` +
+      `<summary>Launch config: ${summary}</summary>` +
+      `<dl class="kv">${kv}</dl>` +
+      sourcesDetails(cfg.sources) +
+      `</details>`
+    );
+  }
+
   function historyRunCard(run) {
     const kv = runMetaKv(run);
     // Each entry embeds its persisted per-session snapshot (sessions[] +
@@ -2104,6 +2450,10 @@
     // fetch; an ended run with no parsed sessions renders none. The run's
     // (repo, task) is carried by the enclosing group header, not repeated here.
     const strips = sessionStrips(run.sessions, run.context_budget);
+    // The effective-config snapshot rides the history payload per run; render it
+    // OUTSIDE the card-link — interactive content like <details>/<summary> is
+    // invalid inside an <a> and its click would fight the navigate-to-logs link.
+    const config = effectiveConfigBlock(run.effective_config);
     return `
       <li class="card run">
         <a class="card-link" href="${logsHash(run.run_id)}">
@@ -2114,6 +2464,7 @@
           ${kv ? `<dl class="kv">${kv}</dl>` : ""}
           ${strips}
         </a>
+        ${config}
       </li>`;
   }
 

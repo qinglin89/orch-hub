@@ -177,8 +177,8 @@ function finishElement(el) {
     el._value = "";
   }
   // A <select> is left without a stored value: the accessor below resolves it
-  // from the selected <option>, or the first one — the browser behaviour
-  // buildExtraArgs relies on when every override field is left at "default".
+  // from the selected <option>, or the first one — the browser behaviour the
+  // launch dialog relies on (e.g. the pre-selected Custom dev-agent option).
   if (el.hasAttribute("disabled")) el.disabled = true;
   if (el.hasAttribute("hidden")) el.hidden = true;
   if (tag === "DIALOG") {
@@ -585,7 +585,9 @@ globalThis.fetch = function (path, init) {
   var method = (init && init.method) || "GET";
   var body = init && init.body ? JSON.parse(init.body) : null;
   var bare = String(path).split("?")[0];
-  CALLS.push({ method: method, path: bare, body: body, init: init });
+  // `path` keeps the query string (the launch dialog encodes backend/profile
+  // there); `bare` is the query-stripped route key the ROUTES table matches on.
+  CALLS.push({ method: method, path: bare, url: String(path), body: body, init: init });
   var payload = ROUTES[method + " " + bare];
   var response =
     payload === undefined
@@ -765,6 +767,29 @@ function lastCall(method, path) {
 var REPO = "demo-repo";
 var TASK = "2026-07-17-demo";
 var RUN = "run-1";
+
+// A representative --print-config response for the launch-dialog query. The
+// harness fetch strips the query string, so every (backend, profile) variation
+// resolves to this same object; the recorded request `url` carries the params
+// the dialog actually asked for.
+var ORCH_CONFIG = {
+  schema_version: 1,
+  config_revision: "cfg00000000aaaa1111",
+  effective_revision: "eff00000000bbbb2222",
+  profile: "default",
+  available_profiles: ["standard", "excellent"],
+  backend: "cc-codex",
+  dev: { agent: "claude", model: "claude-opus-4-8", effort: "max" },
+  review: { agent: "codex", model: "gpt-5.5", effort: "xhigh" },
+  max_sessions: 40,
+  context_budget: 200000,
+  codex_sandbox: "danger-full-access",
+  sources: { backend: "config", "dev.model": "config" },
+  task_id: null,
+  once: false,
+  plan_gate: false,
+  control_dir: null,
+};
 
 var REPOS = {
   repos: [
@@ -996,6 +1021,7 @@ function installRoutes(opts) {
     present: true,
     content: "# Demo task\n",
   });
+  route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG);
   route("GET", "/api/runs/" + RUN + "/sessions", { sessions: [], context_budget: 200000 });
   route("GET", "/api/runs/" + RUN, {
     run_id: RUN,
@@ -1290,6 +1316,46 @@ async function scenarioRunOptions() {
   pressEnter(open);
   eq("dialog: activating Start opens it", dialog.open, true);
   check("dialog: focus moves inside on open", dialog.contains(doc.activeElement), describe(doc.activeElement));
+  // Opening kicks the orchestrator-config query; the panel paints when it settles.
+  await flush();
+  check(
+    "dialog: opening queries the deployed orchestrator config",
+    !!lastCall("GET", "/api/repos/" + REPO + "/orchestrator-config"),
+    "no orchestrator-config GET recorded"
+  );
+  var mode = doc.getElementById("opt-mode");
+  var backend = doc.getElementById("opt-backend");
+  check("dialog: a Mode selector is offered", !!mode, "no #opt-mode");
+  check("dialog: a Backend selector is offered", !!backend, "no #opt-backend");
+  eq(
+    "dialog: Mode offers exactly the four launch modes",
+    mode.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
+    "default,standard,excellent,custom"
+  );
+  check("dialog: every field has a label", dialogFieldsAreLabelled(dialog), "an option field has no label[for]");
+  // Default is read-only: the resolved DEV value is static text from the query,
+  // never a hardcoded model id.
+  var devVal = dialog.querySelector(".role-val");
+  check(
+    "dialog: the resolved DEV value renders from the query",
+    !!devVal && devVal.textContent.indexOf("claude-opus-4-8") !== -1,
+    devVal ? describe(devVal) : "no .role-val"
+  );
+
+  // Switching to a named profile re-queries the orchestrator for that profile
+  // plus an explicit backend (seeded from the resolved default) — never a
+  // hardcoded value, and never a silent fall back to Default.
+  mode.value = "standard";
+  dispatch(mode, new Event("change"));
+  await flush();
+  var cfgUrl = lastConfigUrl();
+  check(
+    "dialog: a profile mode queries --profile with an explicit backend",
+    !!cfgUrl &&
+      cfgUrl.indexOf("profile=standard") !== -1 &&
+      cfgUrl.indexOf("backend=cc-codex") !== -1,
+    cfgUrl
+  );
 
   pressEscape();
   eq("dialog: Escape closes it", dialog.open, false);
@@ -1301,25 +1367,69 @@ async function scenarioRunOptions() {
   eq("dialog: Cancel closes it", dialog.open, false);
   activeIs("dialog: Cancel restores focus to the opener", open);
 
-  pressEnter(open);
-  var devModel = doc.getElementById("opt-dev-model");
-  check("dialog: every field has a label", dialogFieldsAreLabelled(dialog), "an option field has no label[for]");
-  type(devModel, "opus");
-  var planGate = dialog.querySelector(".opt-plan-gate");
+  // A Default launch with plan-gate posts the structured selection: mode only
+  // (the backend is inherited, so omitted) plus the orthogonal plan-gate flag.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var openD = doc.querySelector(".open-run-options");
+  var dialogD = doc.querySelector(".run-options");
+  pressEnter(openD);
+  await flush();
+  var planGate = dialogD.querySelector(".opt-plan-gate");
   planGate.focus();
   planGate.checked = true;
   dispatch(planGate, new Event("change"));
-  var launch = dialog.querySelector('button[type="submit"]');
-  pressEnter(launch);
+  var launchD = dialogD.querySelector('button[type="submit"]');
+  pressEnter(launchD);
   await flush();
-  var call = lastCall("POST", "/api/runs");
-  check("dialog: a keyboard launch posts the run", !!call, "no run POST recorded");
-  eq(
-    "dialog: it carries the fixed backend plus only changed fields",
-    call && JSON.stringify(call.body.extra_args),
-    JSON.stringify(["--backend", "cc-codex", "--dev-model", "opus", "--plan-gate"])
+  var callD = lastCall("POST", "/api/runs");
+  check("dialog: a keyboard launch posts the run", !!callD, "no run POST recorded");
+  check(
+    "dialog: it posts a structured launch, not extra_args",
+    !!callD && !!callD.body.launch && callD.body.extra_args === undefined,
+    callD ? JSON.stringify(callD.body) : "no call"
   );
-  eq("dialog: a successful launch closes it", dialog.open, false);
+  eq(
+    "dialog: Default inherits the backend (mode only + plan-gate)",
+    callD && JSON.stringify(callD.body.launch),
+    JSON.stringify({ mode: "default", plan_gate: true })
+  );
+  eq("dialog: a successful launch closes it", dialogD.open, false);
+
+  // Custom exposes editable role fields and posts explicit values with an
+  // explicit backend (seeded from the resolved default, cc-codex).
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var openC = doc.querySelector(".open-run-options");
+  var dialogC = doc.querySelector(".run-options");
+  pressEnter(openC);
+  await flush();
+  var modeC = doc.getElementById("opt-mode");
+  modeC.value = "custom";
+  dispatch(modeC, new Event("change"));
+  await flush();
+  var devModel = doc.getElementById("opt-dev-model");
+  check("dialog: Custom exposes an editable dev model", !!devModel, "no #opt-dev-model in Custom");
+  check("dialog: Custom controls are labelled", dialogFieldsAreLabelled(dialogC), "a Custom field has no label[for]");
+  type(devModel, "opus");
+  type(doc.getElementById("opt-dev-effort"), "high");
+  type(doc.getElementById("opt-review-model"), "gpt");
+  type(doc.getElementById("opt-review-effort"), "xhigh");
+  var launchC = dialogC.querySelector('button[type="submit"]');
+  pressEnter(launchC);
+  await flush();
+  var callC = lastCall("POST", "/api/runs");
+  eq(
+    "dialog: Custom posts explicit backend + role overrides",
+    callC && JSON.stringify(callC.body.launch),
+    JSON.stringify({
+      mode: "custom",
+      backend: "cc-codex",
+      dev_agent: "claude",
+      dev_model: "opus",
+      dev_effort: "high",
+      review_model: "gpt",
+      review_effort: "xhigh",
+    })
+  );
 
   // The no-<dialog>.showModal fallback branch: app.js must still open it, focus
   // into it, close on Escape, and hand focus back without the native API.
@@ -1346,6 +1456,15 @@ async function scenarioRunOptions() {
     "still open"
   );
   activeIs("dialog (no showModal): focus still returns to the opener", plainOpen);
+}
+
+// The url (query string included) of the most recent orchestrator-config GET,
+// so a scenario can assert the backend/profile the dialog actually queried.
+function lastConfigUrl() {
+  var target = "/api/repos/" + REPO + "/orchestrator-config";
+  for (var i = CALLS.length - 1; i >= 0; i--)
+    if (CALLS[i].method === "GET" && CALLS[i].path === target) return CALLS[i].url;
+  return null;
 }
 
 function dialogFieldsAreLabelled(dialog) {

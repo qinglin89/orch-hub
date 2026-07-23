@@ -232,12 +232,31 @@ Current views:
   `GET /api/repos/{repo_id}/tasks/{task_id}`), and — when the run is `waiting` —
   an inline answer box that writes the answer via
   `POST /api/runs/{run_id}/escalations/{seq}/answer` (`"stop"` ends the run).
-- **Run history** — recent runs newest-first from `GET /api/history/runs`, each
-  with its lifecycle state and timestamps; tap through to its log tail.
+- **Run history** — recent runs newest-first from `GET /api/history/runs`,
+  grouped per task with est-vs-actual rollups; each run carries its lifecycle
+  state, timestamps, and the authoritative `effective-config:` launch snapshot
+  (profile, backend, resolved models/efforts, config/effective revisions,
+  provenance). Tap through to its log tail.
 - **Log tail** — one run's orchestrator log. A finished run shows a bounded
   recent tail (`GET /api/runs/{run_id}/logs`); a live run follows the
   bearer-authenticated SSE stream (`GET /api/runs/{run_id}/logs/stream`) via
   `fetch` + a `ReadableStream` reader, with Pause/Reload controls.
+
+Starting a run opens a launch dialog driven by the target repo's **own deployed
+orchestrator**: it calls `GET /api/repos/{repo_id}/orchestrator-config`
+(`orchestrator.py --print-config`) and shows the resolved model/effort values for
+the selected **Mode** and **Backend** — orch-hub never hardcodes model policy.
+The four modes are **Default** (inherit the orchestrator's configuration),
+**Standard** / **Excellent** (its named profiles, disabled with a reason when a
+repo does not offer them), and **Custom** (explicit per-role overrides). Preset
+modes are read-only; only Custom exposes editable fields, and the `--dev-agent`
+choice is offered only for the cc-codex backend. The plan-gate toggle is
+orthogonal and stays available in every mode. The dialog POSTs a structured
+`launch` selection to `POST /api/runs` and the hub builds the orchestrator
+arguments from it (legacy `extra_args` callers stay supported). If the config
+query fails — for example an older deployment predating `--print-config` — Start
+is disabled and the orchestrator's own error is shown rather than a hub default;
+redeploy the orchestrator payload to re-enable it.
 
 ### Deployment assumptions (private network only)
 

@@ -182,73 +182,110 @@ def test_start_reflects_non_runnable_and_not_ready_states():
     assert "not ready to launch" in body
 
 
-# ---- cc-codex launch options (dialog + extra args) --------------------------
+# ---- orchestrator-backed launch options (four-mode dialog) ------------------
 #
-# Session-1 of the launch-options task: Start no longer launches immediately —
-# it opens an options dialog whose submit builds `extra_args` with a *fixed*
-# `--backend cc-codex` plus only the override fields the user changed, then POSTs
-# them to the existing /api/runs route. Like the run-control checks above, the
-# wiring is asserted at the served-asset boundary (no JS runtime in this suite).
+# Session-2 of the launch-profiles task: the Start dialog no longer hardcodes a
+# cc-codex backend or client-built override flags. It queries the repo's own
+# deployed orchestrator (GET /api/repos/{repo}/orchestrator-config) and POSTs a
+# structured `launch` mode selection; the server turns that into argv through
+# build_launch_args. The wiring is asserted at the served-asset boundary (no JS
+# runtime here); the JavaScriptCore keyboard harness covers the behaviour.
 
 
-def test_start_run_pins_the_cc_codex_backend():
-    # Every dashboard-initiated run fixes the backend to cc-codex; the value is
-    # hard-coded in the extra-args builder, never read from a form field.
+def test_launch_dialog_offers_the_four_modes():
+    # Exactly Default / Standard / Excellent / Custom, as a Mode <select>.
     body = app_js()
-    assert '"--backend"' in body
-    assert '"cc-codex"' in body
-    assert "buildExtraArgs" in body
+    assert 'class="opt-mode"' in body
+    for value in ("default", "standard", "excellent", "custom"):
+        assert f'<option value="{value}">' in body
 
 
-def test_start_run_exposes_no_backend_selector():
-    # The control must not let the operator pick the alternative (cursor)
-    # backend. `cursor` is the only other --backend value, so its total absence
-    # from the served script is the proxy for "no backend selector is rendered".
-    assert "cursor" not in app_js()
-
-
-def test_launch_options_dialog_renders_the_supported_overrides():
-    # The options dialog exposes exactly the supported cc-codex overrides, each
-    # with an input/select field. buildExtraArgs trims and skips blanks, so an
-    # unchanged field never reaches the argv and keeps the orchestrator default.
+def test_launch_dialog_exposes_a_backend_selector():
+    # Unlike session-1, the dashboard now lets the operator pick the backend: an
+    # empty-value Inherit option (the orchestrator's configured backend) plus the
+    # two explicit backends. So `cursor` now legitimately appears in the shell.
     body = app_js()
-    assert "run-options" in body  # the <dialog>
-    assert "open-run-options" in body  # the button that opens it
-    for flag in (
-        "--dev-agent",
-        "--dev-model",
-        "--dev-effort",
-        "--review-model",
-        "--review-effort",
-    ):
-        assert flag in body
+    assert 'class="opt-backend"' in body
+    assert '<option value="">Inherit' in body
+    assert '<option value="cursor">' in body
+    assert '<option value="cc-codex">' in body
+
+
+def test_launch_dialog_reads_values_from_the_orchestrator():
+    # Displayed model/effort come from the orchestrator query, never hardcoded
+    # model ids: the dialog fetches the protected config route and repaints on a
+    # mode/backend change. A query failure fails closed — Launch disabled, the
+    # orchestrator's own error shown — instead of falling back to a hub default.
+    body = app_js()
+    assert "orchestrator-config" in body
+    assert "refreshLaunchConfig" in body
+    assert "setLaunchEnabled(false)" in body
+    # The old client-side extra-args builder and the pinned backend list are gone.
+    assert "buildExtraArgs" not in body
+    assert "RUN_OPTION_FIELDS" not in body
+
+
+def test_launch_posts_the_structured_launch_selection():
+    # Start POSTs a structured `launch` object (mode + optional backend/role
+    # overrides); the server builds the argv. No client-assembled `extra_args`.
+    body = app_js()
+    assert "buildLaunchPayload" in body
+    assert "launch: launch," in body
+
+
+def test_custom_mode_exposes_editable_role_fields():
+    # Only Custom makes the role fields editable (preset modes are read-only);
+    # the dev-agent select is cc-codex-only, gated on the backend inside roleRow.
+    body = app_js()
+    assert 'class="opt-mode"' in body
     for cls in (
         "opt-dev-agent",
-        "opt-dev-model",
-        "opt-dev-effort",
-        "opt-review-model",
-        "opt-review-effort",
+        "role-model",
+        "role-effort",
     ):
         assert cls in body
+    # The role ids are templated per role, so the two role model/effort ids come
+    # from one `opt-${key}-model`/`-effort` template rather than five literals.
+    assert 'id="opt-${key}-model"' in body
+    assert 'id="opt-${key}-effort"' in body
 
 
-def test_launch_options_dialog_exposes_the_plan_gate_toggle():
-    # Plan-gate is a valueless store_true flag, not a [flag, value] override, so
-    # it rides its own checkbox (opt-plan-gate) and a dedicated buildExtraArgs
-    # branch that appends a bare `--plan-gate` only when checked. Asserted at the
-    # served-asset boundary like the overrides above.
+def test_plan_gate_toggle_stays_available_and_orthogonal():
+    # Plan-gate is its own checkbox, independent of mode/profile, and rides the
+    # structured payload as `plan_gate: true` — no client-built `--plan-gate`.
     body = app_js()
     assert "opt-plan-gate" in body
-    assert "--plan-gate" in body
+    assert "launch.plan_gate = true;" in body
 
 
-def test_launch_dialog_submit_sends_extra_args_and_keeps_ack():
-    # Start still carries acknowledge_blocked (blocked-task launch) and now also
-    # sends the constructed extra_args to the same /api/runs create route.
+def test_standard_excellent_gate_on_available_profiles():
+    # Standard/Excellent are disabled with a visible reason when the orchestrator
+    # does not offer them; selection never silently falls back to Default.
     body = app_js()
-    assert "extra_args" in body
+    assert "available_profiles" in body
+    assert "syncModeAvailability" in body
+    assert "(unavailable)" in body
+
+
+def test_run_history_renders_the_effective_config_snapshot():
+    # Run detail/history retains the authoritative effective-config: snapshot
+    # (profile, backend, resolved models/efforts, config/effective revisions,
+    # sources) from the embedded per-run history payload.
+    body = app_js()
+    assert "effectiveConfigBlock" in body
+    assert "run.effective_config" in body
+    assert "config rev" in body
+    assert "effective rev" in body
+
+
+def test_launch_dialog_submit_sends_launch_and_keeps_ack():
+    # Start still carries acknowledge_blocked (blocked-task launch) and posts to
+    # the same /api/runs create route, now with the structured `launch` selection
+    # (server-built argv) rather than a client-assembled extra_args list.
+    body = app_js()
     assert "acknowledge_blocked" in body
     assert '"/api/runs"' in body
+    assert "launch: launch," in body
 
 
 # ---- startup-failure diagnostic (spawn.out) ---------------------------------
@@ -1162,8 +1199,14 @@ def test_form_controls_carry_accessible_names():
     assert 'for="intake-feedback"' in body
     for field in ("f-repo", "f-status", "f-search", "rf-repo", "rf-state", "rf-task"):
         assert f'<label for="{field}"' in body
-    for field in ("opt-dev-agent", "opt-dev-model", "opt-review-effort"):
+    # The launch dialog's Mode/Backend selects carry visible labels; the Custom
+    # role controls carry visually-hidden-but-real labels, templated per role
+    # (the harness verifies every dialog control resolves a label[for]).
+    for field in ("opt-mode", "opt-backend"):
         assert f'<label for="{field}"' in body
+    assert 'for="opt-dev-agent">Dev agent</label>' in body
+    assert 'for="opt-${key}-model">${name} model</label>' in body
+    assert 'for="opt-${key}-effort">${name} effort</label>' in body
 
 
 def test_scrollable_regions_are_keyboard_reachable():

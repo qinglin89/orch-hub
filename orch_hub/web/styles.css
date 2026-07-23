@@ -2019,6 +2019,117 @@ code {
   margin-top: 4px;
 }
 
+/* Mode/backend availability note under the two selects. */
+.run-options .profiles-note {
+  margin: -4px 0 12px;
+  font-size: 12px;
+}
+
+/* The orchestrator-driven launch-config panel: DEV/REVIEW rows, budget,
+   provenance. Read-only preset modes show static values; Custom makes the role
+   model/effort into inputs sharing one row around a decorative `@`. */
+.config-panel {
+  margin: 2px 0 14px;
+}
+
+.config-panel .cfg-status {
+  margin: 6px 0;
+  font-size: 13px;
+}
+
+.config-panel .role-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.config-panel .role-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.config-panel .role-name {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  min-width: 3.5em;
+}
+
+.config-panel .role-val {
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.role-row-custom .role-model {
+  flex: 1 1 7em;
+  min-width: 0;
+}
+
+.role-row-custom .role-effort {
+  flex: 0 1 6em;
+  min-width: 0;
+}
+
+.role-row-custom .role-agent {
+  flex: 0 0 auto;
+}
+
+.role-row-custom .at {
+  color: var(--muted);
+  font-family: var(--mono);
+}
+
+.config-panel .cfg-meta {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+
+.config-panel .cfg-sources {
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.config-panel .cfg-sources summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.config-panel .cfg-sources .kv {
+  margin-top: 6px;
+}
+
+/* Run-history: the per-run authoritative effective-config: snapshot disclosure,
+   sat outside the card's navigate-to-logs link. */
+.card.run .run-config {
+  margin: 8px 12px 2px;
+  font-size: 12px;
+}
+
+.card.run .run-config summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
+
+.card.run .run-config .kv {
+  margin-top: 6px;
+}
+
+.card.run .run-config .cfg-sources {
+  margin-top: 6px;
+}
+
+.card.run .run-config .cfg-sources summary {
+  font-family: var(--mono);
+}
+
 /* ---- remote intake (draft review) ---- */
 
 .intake .intake-actions,
