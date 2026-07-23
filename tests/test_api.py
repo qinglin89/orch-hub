@@ -44,6 +44,7 @@ from orch_hub.models import (
     RunRecord,
     TaskSummary,
 )
+from orch_hub.orch_config import OrchestratorConfigError, parse_effective_config
 from orch_hub.registry import RegistryError
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
@@ -822,6 +823,264 @@ def test_start_run_missing_body_fields_is_422(tmp_path, monkeypatch):
     resp = client.post("/api/runs", json={"repo_id": repo.name})
     assert resp.status_code == 422
     assert spawner.calls == []
+
+
+# -- start run: structured launch modes ---------------------------------------
+
+
+def launch_args_of(spawner, call: int = 0) -> tuple:
+    """The launch flags a run received: everything after ``--control-dir <dir>``."""
+    argv = spawner.calls[call]["argv"]
+    idx = argv.index("--control-dir")
+    return argv[idx + 2 :]
+
+
+def start_with_launch(client, repo, launch: dict, **body) -> "object":
+    return client.post(
+        "/api/runs",
+        json={"repo_id": repo.name, "task_id": RUN_TASK_ID, "launch": launch, **body},
+    )
+
+
+def test_launch_default_inherited_omits_backend(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(client, repo, {"mode": "default"})
+    assert resp.status_code == 201, resp.text
+    assert launch_args_of(spawner) == ()  # nothing appended: full inheritance
+
+
+def test_launch_default_explicit_backend(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_with_launch(client, repo, {"mode": "default", "backend": "cc-codex"})
+    assert launch_args_of(spawner) == ("--backend", "cc-codex")
+
+
+def test_launch_standard_passes_profile_only(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_with_launch(client, repo, {"mode": "standard", "backend": "cursor"})
+    assert launch_args_of(spawner) == ("--backend", "cursor", "--profile", "standard")
+
+
+def test_launch_excellent_passes_profile_only(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_with_launch(client, repo, {"mode": "excellent", "backend": "cc-codex"})
+    assert launch_args_of(spawner) == ("--backend", "cc-codex", "--profile", "excellent")
+
+
+def test_launch_custom_cc_codex_full_flags(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_with_launch(
+        client,
+        repo,
+        {
+            "mode": "custom",
+            "backend": "cc-codex",
+            "dev_agent": "claude",
+            "dev_model": "claude-opus-4-8",
+            "dev_effort": "max",
+            "review_model": "gpt-5.5",
+            "review_effort": "xhigh",
+        },
+    )
+    assert launch_args_of(spawner) == (
+        "--backend", "cc-codex",
+        "--dev-agent", "claude",
+        "--dev-model", "claude-opus-4-8",
+        "--dev-effort", "max",
+        "--review-model", "gpt-5.5",
+        "--review-effort", "xhigh",
+    )
+
+
+def test_launch_custom_cursor_rejects_dev_agent(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "mode": "custom",
+            "backend": "cursor",
+            "dev_agent": "claude",
+            "dev_model": "m",
+            "dev_effort": "e",
+            "review_model": "rm",
+            "review_effort": "re",
+        },
+    )
+    assert resp.status_code == 400
+    assert "dev-agent" in resp.json()["detail"]
+    assert spawner.calls == []  # never launched
+
+
+def test_launch_custom_missing_model_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "mode": "custom",
+            "backend": "cc-codex",
+            "dev_effort": "max",
+            "review_model": "gpt-5.5",
+            "review_effort": "xhigh",
+        },
+    )
+    assert resp.status_code == 400
+    assert spawner.calls == []
+
+
+def test_launch_plan_gate_orthogonal_to_mode(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_with_launch(client, repo, {"mode": "default", "plan_gate": True})
+    assert launch_args_of(spawner) == ("--plan-gate",)
+
+
+def test_launch_bad_mode_is_422(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    # Enum-invalid mode is caught by Pydantic before the builder.
+    resp = start_with_launch(client, repo, {"mode": "turbo"})
+    assert resp.status_code == 422
+    assert spawner.calls == []
+
+
+def test_launch_and_extra_args_conflict_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client, repo, {"mode": "default"}, extra_args=["--plan-gate"]
+    )
+    assert resp.status_code == 400
+    assert spawner.calls == []
+
+
+def test_launch_absent_keeps_extra_args_compatible(tmp_path, monkeypatch):
+    # The legacy extra_args path is unchanged when no structured launch is sent.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_a_run(client, repo, extra_args=["--backend", "cc-codex", "--plan-gate"])
+    assert launch_args_of(spawner) == ("--backend", "cc-codex", "--plan-gate")
+
+
+# -- orchestrator-config query route ------------------------------------------
+
+
+SAMPLE_CONFIG = {
+    "schema_version": 1,
+    "config_revision": "cfg-sha",
+    "effective_revision": "eff-sha",
+    "profile": "standard",
+    "available_profiles": ["excellent", "standard"],
+    "backend": "cc-codex",
+    "dev": {"agent": "claude", "model": "claude-opus-4-8", "effort": "max"},
+    "review": {"agent": "codex", "model": "gpt-5.5", "effort": "xhigh"},
+    "max_sessions": 40,
+    "context_budget": 200000,
+    "codex_sandbox": "danger-full-access",
+    "task_id": None,
+    "once": False,
+    "plan_gate": False,
+    "control_dir": None,
+    "sources": {"backend": "config"},
+}
+
+
+def test_orchestrator_config_returns_effective_config(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    captured = {}
+
+    def fake_query(target, *, backend=None, profile=None):
+        captured["repo"] = target.name
+        captured["backend"] = backend
+        captured["profile"] = profile
+        return parse_effective_config(SAMPLE_CONFIG)
+
+    monkeypatch.setattr(api, "query_effective_config", fake_query)
+    resp = client.get(
+        f"/api/repos/{repo.name}/orchestrator-config?backend=cc-codex&profile=standard"
+    )
+    assert resp.status_code == 200
+    assert resp.json() == SAMPLE_CONFIG
+    assert captured == {"repo": repo.name, "backend": "cc-codex", "profile": "standard"}
+
+
+def test_orchestrator_config_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get("/api/repos/ghost/orchestrator-config")
+    assert resp.status_code == 404
+
+
+def test_orchestrator_config_bad_backend_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repos/{repo.name}/orchestrator-config?backend=banana")
+    assert resp.status_code == 400
+
+
+def test_orchestrator_config_query_failure_is_502(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+
+    def failing_query(target, *, backend=None, profile=None):
+        raise OrchestratorConfigError(
+            "orchestrator --print-config failed: unrecognized arguments"
+        )
+
+    monkeypatch.setattr(api, "query_effective_config", failing_query)
+    resp = client.get(f"/api/repos/{repo.name}/orchestrator-config")
+    assert resp.status_code == 502
+    assert "unrecognized arguments" in resp.json()["detail"]
+
+
+def test_orchestrator_config_requires_auth(tmp_path, monkeypatch):
+    repo = make_run_repo(tmp_path)
+    manager, spawner = make_run_manager(tmp_path)
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    unauthed = TestClient(api.create_app(run_config(tmp_path), run_manager=manager))
+    resp = unauthed.get(f"/api/repos/{repo.name}/orchestrator-config")
+    assert resp.status_code == 401
+
+
+# -- run effective-config snapshot route --------------------------------------
+
+
+def effective_config_line(config: dict = SAMPLE_CONFIG) -> str:
+    return "[03:00:00] effective-config: " + json.dumps(
+        config, sort_keys=True, separators=(",", ":")
+    )
+
+
+def test_run_effective_config_live_parses_log(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], [effective_config_line(), "[03:00:01] orchestrator start"])
+
+    resp = client.get(f"/api/runs/{started['run_id']}/effective-config")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == started["run_id"]
+    assert body["effective_config"] == SAMPLE_CONFIG
+
+
+def test_run_effective_config_null_when_absent(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)  # no log with the line
+    resp = client.get(f"/api/runs/{started['run_id']}/effective-config")
+    assert resp.status_code == 200
+    assert resp.json()["effective_config"] is None
+
+
+def test_run_effective_config_unknown_run_is_404(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = client.get("/api/runs/20990101T000000Z-nope-x/effective-config")
+    assert resp.status_code == 404
+
+
+def test_history_runs_embeds_effective_config(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], [effective_config_line()])
+    spawner.procs[0].returncode = 0
+    client.get("/api/runs")  # observe end -> snapshot persisted
+
+    resp = client.get("/api/history/runs?limit=1")
+    assert resp.status_code == 200
+    assert resp.json()["runs"][0]["effective_config"] == SAMPLE_CONFIG
 
 
 # -- list / get ----------------------------------------------------------------

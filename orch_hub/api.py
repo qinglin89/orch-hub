@@ -62,9 +62,16 @@ from .intake import (
 )
 from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
-from .models import ManagedRepo, repos_payload, tasks_payload
+from .models import LaunchSpec, ManagedRepo, repos_payload, tasks_payload
 from .monitor import RunMonitor
 from .notifications import build_notifier
+from .orch_config import (
+    BACKENDS,
+    LaunchError,
+    OrchestratorConfigError,
+    build_launch_args,
+    query_effective_config,
+)
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
 from .runs import (
@@ -192,17 +199,66 @@ class BearerAuthMiddleware:
         return None
 
 
+class LaunchRequest(BaseModel):
+    """A dashboard launch-mode selection for ``POST /api/runs`` (``launch`` field).
+
+    The structured alternative to raw ``extra_args``: the server turns it into the
+    exact orchestrator flags through :func:`orch_hub.orch_config.build_launch_args`,
+    so the four-mode command construction is one tested function rather than logic
+    duplicated in the browser. ``mode`` is ``default``/``standard``/``excellent``/
+    ``custom``; ``backend`` is ``null`` to inherit the orchestrator's configured
+    backend (legal only for ``default``) or an explicit ``cursor``/``cc-codex``.
+    The ``dev_*``/``review_*`` fields apply only to ``custom`` (preset modes take
+    those from the orchestrator); ``dev_agent`` is cc-codex-only. The orthogonal
+    ``plan_gate``/``once``/``max_sessions`` toggles keep their existing per-flag
+    UI semantics in every mode. Enum values are validated here (422); the
+    cross-field/required rules (e.g. custom needs models, no ``--dev-agent`` on
+    Cursor) are enforced by ``build_launch_args`` and surface as 400.
+    """
+
+    mode: Literal["default", "standard", "excellent", "custom"]
+    backend: Literal["cursor", "cc-codex"] | None = None
+    dev_agent: Literal["claude", "codex"] | None = None
+    dev_model: str | None = None
+    dev_effort: str | None = None
+    review_model: str | None = None
+    review_effort: str | None = None
+    plan_gate: bool = False
+    once: bool = False
+    max_sessions: int | None = None
+
+    def to_spec(self) -> LaunchSpec:
+        return LaunchSpec(
+            mode=self.mode,
+            backend=self.backend,
+            dev_agent=self.dev_agent,
+            dev_model=self.dev_model,
+            dev_effort=self.dev_effort,
+            review_model=self.review_model,
+            review_effort=self.review_effort,
+            plan_gate=self.plan_gate,
+            once=self.once,
+            max_sessions=self.max_sessions,
+        )
+
+
 class StartRunRequest(BaseModel):
     """Body for ``POST /api/runs``.
 
     ``repo_id`` is the managed-repo name (resolved through registry discovery,
-    like ``GET /api/repos/{repo_id}/tasks``). ``extra_args`` are appended to the
-    orchestrator argv; ``acknowledge_blocked`` opts into launching a ``blocked``
-    task despite the §5.4 resume caveat.
+    like ``GET /api/repos/{repo_id}/tasks``). ``acknowledge_blocked`` opts into
+    launching a ``blocked`` task despite the §5.4 resume caveat.
+
+    Launch arguments come from exactly one of two mutually exclusive paths: the
+    structured ``launch`` mode selector (server-built argv, the dashboard path) or
+    the legacy raw ``extra_args`` list appended verbatim (preserved for existing
+    API callers). Sending both non-empty is a 400; sending neither inherits the
+    orchestrator defaults.
     """
 
     repo_id: str
     task_id: str
+    launch: LaunchRequest | None = None
     extra_args: list[str] = Field(default_factory=list)
     acknowledge_blocked: bool = False
 
@@ -625,25 +681,78 @@ def create_app(
             "commits": [commit.to_dict() for commit in log.commits],
         }
 
+    @app.get("/api/repos/{repo_id}/orchestrator-config")
+    def get_orchestrator_config(
+        repo_id: str, backend: str | None = None, profile: str | None = None
+    ) -> dict:
+        """Query the repo's deployed orchestrator for its effective launch config.
+
+        Backs the Start-run dialog: runs the repo-local orchestrator with
+        ``--print-config`` (``cwd=<repo>``, no task id/credentials/clean-tree) for
+        the given ``backend``/``profile`` and returns its resolved values,
+        provenance, and revisions verbatim as an :class:`EffectiveConfig` — the
+        orchestrator owns model/effort/profile policy, so the hub never
+        substitutes its own defaults. ``repo_id`` unknown → 404; an unrecognized
+        ``backend`` query value → 400. A query failure (an older deployment
+        without the flag, a nonzero exit, malformed output, or an unsupported
+        schema) → 502 with the orchestrator's reason, so the caller disables Start
+        and surfaces the error rather than silently falling back. ``backend`` may
+        be omitted to inherit the configured backend; ``profile`` selects
+        ``standard``/``excellent`` (an unknown profile fails in the orchestrator
+        and surfaces as 502).
+        """
+        repos = discover_repos(resolved)
+        repo = next((r for r in repos if r.name == repo_id), None)
+        if repo is None:
+            raise HTTPException(status_code=404, detail=f"unknown repo: {repo_id}")
+        if backend is not None and backend not in BACKENDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"unknown backend {backend!r} (expected one of {', '.join(BACKENDS)})",
+            )
+        try:
+            config = query_effective_config(repo, backend=backend, profile=profile)
+        except OrchestratorConfigError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return config.to_dict()
+
     @app.post("/api/runs", status_code=201)
     def start_run(req: StartRunRequest) -> dict:
         """Start an orchestrator run, resolving ``repo_id`` by managed-repo name.
 
-        The run manager applies the fail-closed launch gates (per-repo single
+        Launch arguments come from the structured ``launch`` mode selector
+        (server-built via :func:`build_launch_args`) or, for legacy callers, the
+        raw ``extra_args`` list — mutually exclusive (both non-empty → 400). The
+        run manager then applies the fail-closed launch gates (per-repo single
         run, task inventory/status, readiness) and spawns the deployed
         orchestrator subprocess; gate refusals surface as the mapped 4xx
-        responses above. An unknown ``repo_id`` is a 404. The response is the
-        new run's :class:`RunStatus` (``active`` with no pending questions),
-        the same shape as ``GET /api/runs/{run_id}``.
+        responses above. An unknown ``repo_id`` is a 404; an invalid launch
+        selection (custom missing a model, ``--dev-agent`` on Cursor, ...) is a
+        400. The response is the new run's :class:`RunStatus` (``active`` with no
+        pending questions), the same shape as ``GET /api/runs/{run_id}``.
         """
         repos = discover_repos(resolved)
         repo = next((r for r in repos if r.name == req.repo_id), None)
         if repo is None:
             raise HTTPException(status_code=404, detail=f"unknown repo: {req.repo_id}")
+        if req.launch is not None:
+            if req.extra_args:
+                raise HTTPException(
+                    status_code=400,
+                    detail="send either 'launch' or 'extra_args', not both",
+                )
+            try:
+                extra_args: tuple[str, ...] | list[str] = build_launch_args(
+                    req.launch.to_spec()
+                )
+            except LaunchError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+        else:
+            extra_args = req.extra_args
         record = manager.start_run(
             repo,
             req.task_id,
-            extra_args=req.extra_args,
+            extra_args=extra_args,
             acknowledge_blocked=req.acknowledge_blocked,
         )
         return manager.get_run(record.run_id).to_dict()
@@ -740,6 +849,22 @@ def create_app(
         """
         snapshot = manager.read_sessions(run_id)  # UnknownRunError → 404
         return {"run_id": run_id, **snapshot.to_dict()}
+
+    @app.get("/api/runs/{run_id}/effective-config")
+    def get_run_effective_config(run_id: str) -> dict:
+        """Return one run's authoritative ``effective-config:`` launch snapshot.
+
+        Resolves the run by ``run_id`` (unknown → 404) and returns the exact launch
+        configuration the orchestrator logged at startup — the same
+        :class:`EffectiveConfig` shape as the preview query, but with the real
+        task/profile/models/efforts/sources/revisions, so it is authoritative if
+        the preview and launch-time values differ. A live run is parsed from its
+        current log; an ended run is served from the persisted snapshot. A run with
+        no parseable snapshot yet returns ``effective_config: null`` (graceful, not
+        an error).
+        """
+        config = manager.read_effective_config(run_id)  # UnknownRunError → 404
+        return {"run_id": run_id, "effective_config": config}
 
     @app.get("/api/runs/{run_id}/logs")
     def get_run_logs(run_id: str, tail: int = DEFAULT_TAIL_LINES) -> dict:

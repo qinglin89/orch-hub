@@ -422,12 +422,21 @@ class RunHistoryEntry:
     request. ``None`` — serialized as ``session_est: null`` — is "unknown": a
     task with no readable/parseable ``session-est``. The backend reads it once
     per ``(repo, task)`` and stamps the same value on each of that task's runs.
+
+    ``effective_config`` is the run's authoritative ``effective-config:`` launch
+    snapshot (the raw JSON dict the orchestrator logged at startup — same shape as
+    :class:`EffectiveConfig`), embedded so the history view shows what actually
+    launched (profile/models/efforts/sources/revisions) without a per-run follow-up
+    request. ``None`` — serialized as ``effective_config: null`` — is "unknown": a
+    run with no persisted snapshot yet (live/pre-field) or whose startup line could
+    not be parsed. Read snapshot-only here (cheap), like ``sessions``.
     """
 
     status: RunStatus
     events: tuple[RunEvent, ...] = ()
     sessions: SessionsSnapshot | None = None
     session_est: SessionEst | None = None
+    effective_config: dict | None = None
 
     def to_dict(self) -> dict:
         snapshot = self.sessions if self.sessions is not None else SessionsSnapshot()
@@ -438,6 +447,7 @@ class RunHistoryEntry:
             "session_est": (
                 self.session_est.to_dict() if self.session_est is not None else None
             ),
+            "effective_config": self.effective_config,
         }
 
 
@@ -542,6 +552,120 @@ class SessionEst:
 
     def to_dict(self) -> dict:
         return {"current": self.current, "total": self.total}
+
+
+@dataclass(frozen=True)
+class RoleConfig:
+    """One role's resolved agent/model/effort inside an :class:`EffectiveConfig`.
+
+    The deployed orchestrator's ``--print-config`` output nests a ``dev`` and a
+    ``review`` object of exactly this shape. ``agent`` is the CLI agent name for a
+    cc-codex role (``claude``/``codex`` for dev, ``codex`` for review) or
+    ``cursor`` for a Cursor-backend role, and is ``None`` only when the
+    orchestrator omitted it (e.g. a Cursor dev role, which has no separate CLI
+    agent). ``model``/``effort`` are the resolved values; they are display-only
+    here — orch-hub never validates or duplicates them, the orchestrator owns
+    that policy.
+    """
+
+    agent: str | None
+    model: str | None
+    effort: str | None
+
+    def to_dict(self) -> dict:
+        return {"agent": self.agent, "model": self.model, "effort": self.effort}
+
+
+@dataclass(frozen=True)
+class EffectiveConfig:
+    """The deployed orchestrator's resolved launch configuration, as one snapshot.
+
+    Two sources produce this exact shape (the orchestrator's own
+    ``launch_config_dict``): a preview query
+    (:func:`orch_hub.orch_config.query_effective_config` over ``--print-config``,
+    where the launch fields ``task_id``/``once``/``plan_gate``/``control_dir`` are
+    null/false) and the authoritative ``effective-config:`` line every real run
+    logs at startup (where they are real). orch-hub treats the orchestrator as the
+    single owner of model/effort/profile policy: this is a read-only projection it
+    displays and persists, never a place it invents defaults.
+
+    ``config_revision`` is the sha256 of ``orchestrator.toml`` alone;
+    ``effective_revision`` also changes when an environment override or the
+    selected resolution changes, so it is the correct preview cache key.
+    ``profile`` is the resolved named profile or ``"default"``;
+    ``available_profiles`` is the set a UI may offer (``standard``/``excellent``).
+    ``sources`` is diagnostic provenance per field (``cli``/``profile:<name>``/
+    ``env:<NAME>``/``config``). ``codex_sandbox`` is ``None`` for the Cursor
+    backend. Built strictly (fail-closed) by
+    :func:`orch_hub.orch_config.parse_effective_config`.
+    """
+
+    schema_version: int
+    config_revision: str | None
+    effective_revision: str | None
+    profile: str
+    available_profiles: tuple[str, ...]
+    backend: str
+    dev: RoleConfig
+    review: RoleConfig
+    max_sessions: int | None
+    context_budget: int | None
+    codex_sandbox: str | None
+    sources: dict[str, str]
+    task_id: str | None = None
+    once: bool = False
+    plan_gate: bool = False
+    control_dir: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "schema_version": self.schema_version,
+            "config_revision": self.config_revision,
+            "effective_revision": self.effective_revision,
+            "profile": self.profile,
+            "available_profiles": list(self.available_profiles),
+            "backend": self.backend,
+            "dev": self.dev.to_dict(),
+            "review": self.review.to_dict(),
+            "max_sessions": self.max_sessions,
+            "context_budget": self.context_budget,
+            "codex_sandbox": self.codex_sandbox,
+            "sources": dict(self.sources),
+            "task_id": self.task_id,
+            "once": self.once,
+            "plan_gate": self.plan_gate,
+            "control_dir": self.control_dir,
+        }
+
+
+@dataclass(frozen=True)
+class LaunchSpec:
+    """A dashboard launch-mode selection, before it becomes orchestrator argv.
+
+    The input to :func:`orch_hub.orch_config.build_launch_args`, kept as typed
+    data (not raw arg strings) so command construction is one tested function
+    rather than logic duplicated across the API and the browser. ``mode`` is one
+    of the four UI modes (``default``/``standard``/``excellent``/``custom``);
+    each mode emits only the flags applicable to it. ``backend`` is ``None`` to
+    *inherit* the orchestrator's configured backend (legal only for ``default``,
+    which then omits ``--backend``) or an explicit ``cursor``/``cc-codex``. The
+    ``dev_*``/``review_*`` fields are used only by ``custom`` (the preset modes
+    take those values from the orchestrator, never from the user), and
+    ``dev_agent`` applies only to cc-codex — it is never sent to Cursor. The
+    orthogonal launch flags ``plan_gate``/``once``/``max_sessions`` keep their
+    existing per-flag UI semantics and are honored in every mode.
+    """
+
+    mode: str
+    backend: str | None = None
+    dev_agent: str | None = None
+    dev_model: str | None = None
+    dev_effort: str | None = None
+    review_model: str | None = None
+    review_effort: str | None = None
+    plan_gate: bool = False
+    once: bool = False
+    max_sessions: int | None = None
 
 
 @dataclass(frozen=True)

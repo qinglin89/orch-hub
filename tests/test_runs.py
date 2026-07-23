@@ -24,6 +24,7 @@ from orch_hub.history import (
     read_events,
 )
 from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport, SessionEst
+from orch_hub.orch_config import read_effective_config_snapshot
 from orch_hub.sessions import read_snapshot
 from orch_hub.runs import (
     CAFFEINATE,
@@ -1464,6 +1465,158 @@ def test_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
     assert status.state == "ended"
     assert read_record(manager, record.run_id)["ended_ts"] is not None
     assert not sessions_json(manager, record.run_id).exists()
+
+
+# -- effective-config launch snapshot (effective_config.json) ------------------
+
+
+EFFECTIVE_CONFIG = {
+    "schema_version": 1,
+    "config_revision": "cfg-sha",
+    "effective_revision": "eff-sha",
+    "profile": "standard",
+    "available_profiles": ["excellent", "standard"],
+    "backend": "cc-codex",
+    "dev": {"agent": "claude", "model": "claude-opus-4-8", "effort": "max"},
+    "review": {"agent": "codex", "model": "gpt-5.5", "effort": "xhigh"},
+    "max_sessions": 40,
+    "context_budget": 200000,
+    "codex_sandbox": "danger-full-access",
+    "task_id": TASK_ID,
+    "once": False,
+    "plan_gate": False,
+    "control_dir": "/hub/run/control",
+    "sources": {"backend": "config"},
+}
+
+
+def effective_config_line() -> str:
+    """The startup line the orchestrator logs (timestamp prefix + compact JSON)."""
+    return "[03:00:00] effective-config: " + json.dumps(
+        EFFECTIVE_CONFIG, sort_keys=True, separators=(",", ":")
+    )
+
+
+def effective_config_json(manager: RunManager, run_id: str) -> Path:
+    return manager.runs_dir / run_id / "effective_config.json"
+
+
+def test_run_end_persists_effective_config_snapshot(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # observe end -> snapshot written once
+
+    snap = read_effective_config_snapshot(manager.runs_dir / record.run_id)
+    assert snap == EFFECTIVE_CONFIG
+
+
+def test_read_effective_config_live_parses_current_log(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES[:2])
+
+    assert manager.read_effective_config(record.run_id) == EFFECTIVE_CONFIG
+    # No snapshot file while the run is live — parsed live on demand.
+    assert not effective_config_json(manager, record.run_id).exists()
+
+
+def test_read_effective_config_survives_repo_side_log_deletion(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    log_path = write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # persists the snapshot
+    log_path.unlink()  # repo-side log cleaned up afterward
+
+    assert manager.read_effective_config(record.run_id) == EFFECTIVE_CONFIG  # from snapshot
+
+
+def test_read_effective_config_falls_back_to_spawn_out(tmp_path):
+    # A run whose orchestrator log never appeared still has the line in the hub's
+    # own spawn.out capture (orch.log prints to stdout too), so the snapshot is
+    # recovered from there.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)  # no orchestrator log written
+    (manager.runs_dir / record.run_id / "spawn.out").write_text(
+        effective_config_line() + "\n", encoding="utf-8"
+    )
+
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    assert read_effective_config_snapshot(manager.runs_dir / record.run_id) == EFFECTIVE_CONFIG
+
+
+def test_read_effective_config_none_when_line_absent(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES)  # sessions but no effective-config line
+
+    assert manager.read_effective_config(record.run_id) is None  # live: not found
+    end_run(spawner, 0)
+    manager.list_runs()
+    assert not effective_config_json(manager, record.run_id).exists()  # nothing to persist
+    assert manager.read_effective_config(record.run_id) is None
+
+
+def test_read_effective_config_unknown_run_raises(tmp_path):
+    manager, _, _ = make_manager(tmp_path)
+    with pytest.raises(UnknownRunError):
+        manager.read_effective_config("20990101T000000Z-nope-x")
+
+
+def test_recent_runs_embeds_effective_config(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES)
+    end_run(spawner, 0)
+    manager.list_runs()  # observe end -> snapshot persisted
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.effective_config == EFFECTIVE_CONFIG
+    assert entry.to_dict()["effective_config"] == EFFECTIVE_CONFIG
+
+
+def test_recent_runs_effective_config_none_for_live_run(tmp_path):
+    # History is snapshot-only: a still-running run has no persisted snapshot yet.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES[:2])
+
+    entry = manager.recent_runs(limit=1)[0]
+    assert entry.effective_config is None
+    assert entry.to_dict()["effective_config"] is None
+
+
+def test_effective_config_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
+    # Isolation, like the sessions snapshot: a parse/IO failure is swallowed and the
+    # run still ends and classifies.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES)
+
+    def boom(_record):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("orch_hub.runs.read_effective_config_log", boom)
+    end_run(spawner, 0)
+    status = only_status(manager)  # must not raise
+
+    assert status.state == "ended"
+    assert read_record(manager, record.run_id)["ended_ts"] is not None
+    assert not effective_config_json(manager, record.run_id).exists()
 
 
 # -- load_records (read-only historical reader) -------------------------------

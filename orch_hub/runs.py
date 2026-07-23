@@ -87,6 +87,11 @@ from .notifications import (
     question_notification,
     run_end_notification,
 )
+from .orch_config import (
+    read_effective_config_log,
+    read_effective_config_snapshot,
+    write_effective_config_snapshot,
+)
 from .readiness import check_readiness
 from .sessions import read_live, read_snapshot, write_snapshot
 from .task_store import (
@@ -536,6 +541,7 @@ class RunManager:
                         events=read_events(run_dir),
                         sessions=self._history_sessions(run_dir),
                         session_est=self._history_session_est(record, est_cache),
+                        effective_config=self._history_effective_config(run_dir),
                     )
                 )
             return entries[:bounded]
@@ -598,6 +604,26 @@ class RunManager:
             return read_live(record)
         snapshot = read_snapshot(run_dir)
         return snapshot if snapshot is not None else read_live(record)
+
+    def read_effective_config(self, run_id: str) -> dict | None:
+        """Return one run's authoritative ``effective-config:`` launch snapshot.
+
+        Mirrors :meth:`read_sessions`: a live run is parsed from its current
+        repo-side log (the line is logged at startup, so it is present as soon as
+        the log exists); an ended run is served from the ``effective_config.json``
+        snapshot persisted at its end (which survives repo-side log cleanup),
+        falling back to a live parse only for a pre-field run with no snapshot.
+        Returns the raw JSON dict the orchestrator logged, or ``None`` when no
+        snapshot is available. Unknown ids raise :class:`UnknownRunError`.
+        """
+        with self._lock:
+            run_dir = self._run_dir_for(run_id)
+            record = self._refresh(run_dir, _load_record(run_dir))
+            live = record.error is None and record.ended_ts is None
+        if live:
+            return read_effective_config_log(record)
+        snapshot = read_effective_config_snapshot(run_dir)
+        return snapshot if snapshot is not None else read_effective_config_log(record)
 
     def stop_run(self, run_id: str) -> bool:
         """Request a graceful stop by writing the run's ``stop.flag``.
@@ -717,6 +743,10 @@ class RunManager:
         # the repo-side log. Like the notification below, it runs a single time per
         # run (settled records return early above) and is fully isolated.
         self._snapshot_sessions(run_dir, updated)
+        # Snapshot the run's authoritative effective-config line the same way, so
+        # run history retains what actually launched even after the repo-side log
+        # is cleaned; also isolated (a parse/IO failure never touches run state).
+        self._snapshot_effective_config(run_dir, updated)
         # Fire exactly once, at the live->ended transition (this branch runs a
         # single time per run; settled records return early above). Classify
         # here so the notification carries the same completed/stopped/error/ended
@@ -740,6 +770,18 @@ class RunManager:
         snapshot = read_snapshot(run_dir)
         return snapshot if snapshot is not None else SessionsSnapshot()
 
+    @staticmethod
+    def _history_effective_config(run_dir: Path) -> dict | None:
+        """The run's persisted ``effective-config:`` snapshot for the history view.
+
+        Snapshot-only and cheap, like :meth:`_history_sessions`: an ended run reads
+        its small ``effective_config.json`` (written once at the live->ended
+        transition); a live or pre-field run with no snapshot contributes ``None``
+        rather than triggering a live log parse under the lock. The on-demand
+        detail route (:meth:`read_effective_config`) is the path that live-parses.
+        """
+        return read_effective_config_snapshot(run_dir)
+
     def _snapshot_sessions(self, run_dir: Path, record: RunRecord) -> None:
         """Persist the run's per-session summary at the live->ended transition.
 
@@ -755,6 +797,26 @@ class RunManager:
             # Never let snapshotting touch run state; a missing snapshot is a
             # graceful degradation, not an error. Log only the (non-secret) run id.
             _log.warning("session snapshot failed for run %s", record.run_id)
+
+    def _snapshot_effective_config(self, run_dir: Path, record: RunRecord) -> None:
+        """Persist the run's ``effective-config:`` snapshot at the live->ended
+        transition, mirroring :meth:`_snapshot_sessions`.
+
+        Isolated the same way: parse the authoritative startup line from the log
+        (falling back to ``spawn.out``) and, when present, write it beside
+        ``run.json`` so history keeps what actually launched after the repo-side
+        log is cleaned. A run that never logged the line (an early startup failure)
+        simply gets no snapshot; any parse/IO failure degrades to no snapshot and
+        never propagates into run state.
+        """
+        try:
+            data = read_effective_config_log(record)
+            if data is not None:
+                write_effective_config_snapshot(run_dir, data)
+        except Exception:
+            _log.warning(
+                "effective-config snapshot failed for run %s", record.run_id
+            )
 
     def _emit(self, notification: Notification) -> None:
         """Deliver a notification best-effort; never raise into run state.
