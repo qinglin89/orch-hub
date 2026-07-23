@@ -54,6 +54,7 @@ from orch_hub.semantic import (
     SemanticEvaluationError,
     SemanticEvaluator,
 )
+from orch_hub.semantic_jobs import SEMANTIC_JOB_NAME, SemanticJobManager
 from orch_hub.static_metrics import StaticEvaluator
 from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_store import STATUS_MISSING
@@ -2520,6 +2521,7 @@ def make_eval_client(
     enabled: bool = True,
     records=None,
     semantic_backend=None,
+    semantic_job_executor=None,
 ) -> tuple[TestClient, EvaluationService, StaticEvaluator, SemanticEvaluator, ManagedRepo]:
     repo = repo if repo is not None else make_run_repo(tmp_path)
     config = eval_config(tmp_path, enabled=enabled)
@@ -2539,6 +2541,16 @@ def make_eval_client(
         backend=semantic_backend if semantic_backend is not None else FakeSemanticBackend(),
         clock=lambda: EVAL_CLOCK,
     )
+    # The async semantic-job manager drives that same evaluator. Its executor
+    # defaults to SYNCHRONOUS so a ``POST .../semantic/job`` settles the job before
+    # the request returns — deterministic HTTP tests without a background thread; a
+    # test that needs an in-flight (queued) job passes a deferred executor.
+    sem_jobs = SemanticJobManager(
+        config,
+        evaluator=semantic,
+        clock=lambda: EVAL_CLOCK,
+        executor=semantic_job_executor if semantic_job_executor is not None else (lambda run: run()),
+    )
     monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
     client = TestClient(
         api.create_app(
@@ -2546,6 +2558,7 @@ def make_eval_client(
             evaluation_service=service,
             static_evaluator=static,
             semantic_evaluator=semantic,
+            semantic_job_manager=sem_jobs,
         )
     )
     client.headers["Authorization"] = f"Bearer {TOKEN}"
@@ -2892,6 +2905,167 @@ def test_list_evaluator_degrades_to_none_when_semantic_report_unreadable(
     assert entry["evaluator"] is None  # but its identity degraded cleanly
 
 
+# -- async semantic-evaluation jobs --------------------------------------------
+
+
+class DeferredJobExecutor:
+    """Captures submitted job turns without running them (job stays ``queued``)."""
+
+    def __init__(self):
+        self.pending: list = []
+
+    def __call__(self, run) -> None:
+        self.pending.append(run)
+
+    def run_all(self) -> None:
+        while self.pending:
+            self.pending.pop(0)()
+
+
+def test_start_semantic_job_runs_to_completion(tmp_path, monkeypatch):
+    # POST starts an async job; the synchronous test executor settles it before the
+    # response, so the returned record is the transient queued state and a GET reads
+    # the completed job linking the freshly written evaluation.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+
+    started = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    assert started.status_code == 201
+    body = started.json()["job"]  # same {"job": ...} envelope as the poll route
+    assert body["status"] == "queued"
+    assert body["task_id"] == RUN_TASK_ID
+    # The evaluator identity is stamped so the UI can name the model while running.
+    assert body["backend"] == "fake" and body["model"] == "fake-model"
+
+    got = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    assert got.status_code == 200
+    job = got.json()["job"]
+    assert job["status"] == "completed"
+    assert job["evaluation_id"]
+    # The linked evaluation is a real one, listed with a semantic report.
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["latest_evaluation_id"] == job["evaluation_id"]
+    assert listing["evaluations"][0]["has_semantic_report"] is True
+
+
+def test_get_semantic_job_is_null_for_never_evaluated_task(tmp_path, monkeypatch):
+    # A task with no async job yet is the normal {"job": null} case, not a 404.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    assert resp.status_code == 200
+    assert resp.json() == {"job": None}
+
+
+def test_semantic_job_failure_is_persisted_failed_not_502(tmp_path, monkeypatch):
+    # Unlike the synchronous /semantic route (502 on backend failure), the async
+    # job absorbs the failure into a persisted, reload-survivable failed record with
+    # a bounded diagnostic — the start POST still succeeds (the job exists).
+    client, *_ , repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=RaisingSemanticBackend()
+    )
+
+    started = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    assert started.status_code == 201
+
+    job = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]
+    assert job["status"] == "failed"
+    assert job["evaluation_id"] is None
+    assert "failed" in (job["error"] or "")
+    # Atomic cleanup: the failed turn left no half-written evaluation behind.
+    assert client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()["evaluations"] == []
+    # The retry path is just another start over the terminal job (still 201).
+    assert client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).status_code == 201
+
+
+def test_semantic_job_duplicate_in_flight_returns_same_job(tmp_path, monkeypatch):
+    # With a deferred executor the first job stays queued, so a second POST dedups
+    # to the same job and launches no second evaluation turn.
+    executor = DeferredJobExecutor()
+    client, *_ , repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_job_executor=executor
+    )
+
+    first = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job").json()["job"]
+    second = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job").json()["job"]
+    assert first["job_id"] == second["job_id"]
+    assert first["status"] == second["status"] == "queued"
+    assert len(executor.pending) == 1  # only one turn was ever submitted
+
+    executor.run_all()
+    job = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]
+    assert job["status"] == "completed"
+    # Exactly one evaluation was generated for the two POSTs (no duplicate model call).
+    assert len(client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()["evaluations"]) == 1
+
+
+def test_start_semantic_job_does_not_mutate_target_repo(tmp_path, monkeypatch):
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    task_file = repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md"
+    before = task_file.read_text(encoding="utf-8")
+    before_listing = sorted(p.name for p in (repo.path / ".ai-tasks").iterdir())
+
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+
+    assert task_file.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in (repo.path / ".ai-tasks").iterdir()) == before_listing
+
+
+def test_start_semantic_job_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    resp = client.post(f"/api/repos/ghost/evaluations/{RUN_TASK_ID}/semantic/job")
+    assert resp.status_code == 404
+
+
+def test_get_semantic_job_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    resp = client.get(f"/api/repos/ghost/evaluations/{RUN_TASK_ID}/semantic/job")
+    assert resp.status_code == 404
+
+
+def test_semantic_job_routes_disabled_are_404(tmp_path, monkeypatch):
+    # Enabled-gated like every action route: a disabled hub fails both closed.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch, enabled=False)
+    assert client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).status_code == 404
+    assert client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).status_code == 404
+
+
+def test_app_lifespan_reconciles_orphaned_semantic_jobs(tmp_path, monkeypatch):
+    # A hub restart with an orphaned transient semantic job (a crash mid-turn) must
+    # free the (repo, task) slot on startup: the app lifespan calls reconcile_orphans
+    # over the semantic-job manager, exactly as it does for intakes.
+    config = eval_config(tmp_path)
+    repo = make_run_repo(tmp_path)
+    mgr = SemanticJobManager(
+        config,
+        evaluator=SemanticEvaluator(config, backend=FakeSemanticBackend()),
+        clock=lambda: EVAL_CLOCK,
+    )
+    job_dir = config.data_dir / "semantic-jobs" / repo.name / RUN_TASK_ID
+    job_dir.mkdir(parents=True)
+    (job_dir / SEMANTIC_JOB_NAME).write_text(
+        json.dumps({
+            "job_id": "J", "repo_name": repo.name, "repo_path": str(repo.path),
+            "task_id": RUN_TASK_ID, "status": "running",
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+
+    with TestClient(api.create_app(config, semantic_job_manager=mgr)):  # runs startup
+        pass
+
+    assert mgr.get_job(repo, RUN_TASK_ID).status == "failed"
+
+
 # -- error shapes --------------------------------------------------------------
 
 
@@ -3074,4 +3248,10 @@ def test_evaluation_routes_require_auth(tmp_path, monkeypatch):
     ).status_code == 401
     assert unauthed.post(
         f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic"
+    ).status_code == 401
+    assert unauthed.post(
+        f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).status_code == 401
+    assert unauthed.get(
+        f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic/job"
     ).status_code == 401

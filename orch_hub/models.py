@@ -1396,3 +1396,79 @@ class StoredEvaluation:
             "evaluation_id": self.evaluation_id,
             "artifacts": list(self.artifacts),
         }
+
+
+@dataclass(frozen=True)
+class SemanticJob:
+    """One async Layer-2 semantic-evaluation attempt for a ``(repo, task_id)``.
+
+    Output of the semantic-job manager (:mod:`orch_hub.semantic_jobs`), persisted
+    as ``semantic-jobs/<repo>/<task>/job.json`` so the in-flight and terminal
+    state of a long semantic model turn is observable across reload, navigation,
+    and another browser session — the state the one-shot synchronous
+    :meth:`orch_hub.semantic.SemanticEvaluator.evaluate` call left invisible.
+    There is exactly one record per ``(repo, task)`` (a new attempt overwrites the
+    prior terminal one), so this is the *current* attempt's status, not a history.
+
+    ``status`` is a semantic-job lifecycle label, deliberately distinct from task
+    frontmatter status, run overlay states, and intake status: ``queued`` (created,
+    not yet started) and ``running`` (the model turn is in flight) are transient;
+    ``completed`` and ``failed`` are terminal. ``backend``/``model``/
+    ``schema_version`` are the selected evaluator identity (the
+    :class:`SemanticEvaluatorInfo` triple), stamped at creation so the
+    queued/running UI shows which model is running before any report exists.
+    ``evaluation_id`` is set only on ``completed`` and links the job to the
+    freshly written evaluation dir the dashboard then selects; ``error`` is the
+    bounded failure diagnostic on ``failed`` (never full prompt text or unbounded
+    model output). ``started_ts`` marks the queued→running transition and
+    ``ended_ts`` the terminal transition (both ``None`` until they happen).
+    """
+
+    job_id: str
+    repo_name: str
+    repo_path: Path | None
+    task_id: str
+    status: str
+    backend: str | None = None
+    model: str | None = None
+    schema_version: str | None = None
+    evaluation_id: str | None = None
+    error: str | None = None
+    created_ts: str | None = None
+    updated_ts: str | None = None
+    started_ts: str | None = None
+    ended_ts: str | None = None
+
+    def managed_repo(self) -> ManagedRepo | None:
+        """Reconstruct the job's :class:`ManagedRepo` from persisted fields.
+
+        Mirrors :meth:`RunRecord.managed_repo`/:meth:`IntakeRecord.managed_repo`:
+        the off-lock evaluation turn resolves the repo from job identity alone.
+        Returns ``None`` for a record with no ``repo_path`` (an unreadable
+        ``job.json``), so such a record can never drive an evaluation.
+        """
+        if self.repo_path is None:
+            return None
+        return ManagedRepo(
+            name=self.repo_name or self.repo_path.name,
+            path=self.repo_path,
+            manifest=self.repo_path / ".ai-deploy-manifest.json",
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "job_id": self.job_id,
+            "repo_name": self.repo_name,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "task_id": self.task_id,
+            "status": self.status,
+            "backend": self.backend,
+            "model": self.model,
+            "schema_version": self.schema_version,
+            "evaluation_id": self.evaluation_id,
+            "error": self.error,
+            "created_ts": self.created_ts,
+            "updated_ts": self.updated_ts,
+            "started_ts": self.started_ts,
+            "ended_ts": self.ended_ts,
+        }

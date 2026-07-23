@@ -1151,6 +1151,19 @@ class SemanticEvaluator:
     def enabled(self) -> bool:
         return self._config.evaluation_enabled
 
+    @property
+    def evaluator_info(self) -> SemanticEvaluatorInfo:
+        """The backend's rerun identity (backend/model/schema-version), no probe.
+
+        A pure read of the injected backend's :attr:`SemanticBackend.info` — no
+        model call, no ``claude`` resolution (unlike :meth:`doctor`), no gate. The
+        semantic-job manager (:mod:`orch_hub.semantic_jobs`) stamps this onto a job
+        at creation so the queued/running UI shows which backend/model is running
+        before the report exists; it matches the ``evaluator`` the completed report
+        carries, since both come from the same backend.
+        """
+        return self._backend.info
+
     def _require_enabled(self) -> None:
         if not self._config.evaluation_enabled:
             raise EvaluationDisabledError(

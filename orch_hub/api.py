@@ -89,6 +89,7 @@ from .semantic import (
     SemanticEvaluationError,
     SemanticEvaluator,
 )
+from .semantic_jobs import SemanticJobManager
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from .task_store import (
     list_repo_tasks,
@@ -345,6 +346,7 @@ def create_app(
     evaluation_service: EvaluationService | None = None,
     static_evaluator: StaticEvaluator | None = None,
     semantic_evaluator: SemanticEvaluator | None = None,
+    semantic_job_manager: SemanticJobManager | None = None,
 ) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
 
@@ -430,18 +432,31 @@ def create_app(
             backend=ClaudeSemanticBackend(model=resolved.eval_model),
         )
     )
+    # The async semantic-job manager wraps the (long, synchronous) semantic
+    # evaluator in an observable queued/running/completed/failed job persisted
+    # under the hub data dir, so the dashboard can show in-flight/terminal status
+    # across reload and prevent a duplicate model call per (repo, task). It owns
+    # only job status; the read-only evaluation stays in ``semantic``. Orphaned
+    # transient jobs are reconciled to ``failed`` on lifespan startup below.
+    semantic_jobs = (
+        semantic_job_manager
+        if semantic_job_manager is not None
+        else SemanticJobManager(resolved, evaluator=semantic)
+    )
     monitor = RunMonitor(manager)
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
-        # Recover intake state before serving: an orphaned transient intake
-        # record (a hub that died mid-turn) would hold its repo's intake slot
-        # forever, so fail it once at startup while no turn is in flight. Then own
-        # the monitor's lifetime with the service: start the background poll on
-        # startup, stop it (joining the worker) on shutdown so the service leaves
-        # no thread behind. The auth middleware passes the lifespan scope straight
-        # through, so this runs regardless of the token.
+        # Recover intake and semantic-job state before serving: an orphaned
+        # transient intake record or semantic job (a hub that died mid-turn) would
+        # hold its slot forever — the intake repo slot, or the (repo, task)
+        # semantic-job duplicate slot — so fail each once at startup while no turn
+        # is in flight. Then own the monitor's lifetime with the service: start the
+        # background poll on startup, stop it (joining the worker) on shutdown so
+        # the service leaves no thread behind. The auth middleware passes the
+        # lifespan scope straight through, so this runs regardless of the token.
         intake.reconcile_orphans()
+        semantic_jobs.reconcile_orphans()
         monitor.start()
         try:
             yield
@@ -1394,6 +1409,68 @@ def create_app(
             "evaluation_id": report.evaluation_id,
             "semantic_report": report.to_dict(),
         }
+
+    # -- async semantic-evaluation jobs ---------------------------------------
+    #
+    # The async counterpart of the synchronous ``/semantic`` route above: instead
+    # of blocking one long request on the model turn (which leaves the dashboard
+    # looking idle and offers no reload-survivable state), these start/observe an
+    # explicit persisted job (queued/running/completed/failed). The manager owns
+    # only job status; the evaluation itself is the same read-only
+    # ``SemanticEvaluator.evaluate`` — so no target repo/run mutation is added, and
+    # a backend/model failure is a persisted ``failed`` job with a bounded
+    # diagnostic, not a transport 5xx. Both routes gate on evaluation-enabled (else
+    # 404) exactly like the rest of the sidecar.
+
+    @app.post(
+        "/api/repos/{repo_id}/evaluations/{task_id}/semantic/job", status_code=201
+    )
+    def start_semantic_job(repo_id: str, task_id: str) -> dict:
+        """Start (or reuse) the async semantic-evaluation job for ``(repo, task)``.
+
+        Delegates to :meth:`SemanticJobManager.start_job`: persists a ``queued``
+        job, returns it immediately, and runs the (long) model turn off-thread.
+        The duplicate guard is load-bearing — while a job for this ``(repo, task)``
+        is still ``queued``/``running`` this returns that same in-flight job and
+        starts **no** second model call, so a double click or another browser
+        session cannot fan out duplicate evaluations. The client then polls
+        ``GET .../semantic/job`` for the settled ``completed`` (with
+        ``evaluation_id``) or ``failed`` (with a bounded diagnostic) outcome. The
+        backend/model is not pre-gated on the doctor here: an unavailable backend
+        becomes a persisted ``failed`` job with a diagnostic (a reload-survivable
+        failed state the scope wants), not a start-time error. ``repo_id`` unknown
+        → 404; an unsafe ``task_id`` → 400; disabled → 404. Returns
+        ``{"job": <record>}`` (201) — the same envelope the poll route returns, so
+        a client renders the start result and every poll identically.
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            job = semantic_jobs.start_job(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"job": job.to_dict()}
+
+    @app.get("/api/repos/{repo_id}/evaluations/{task_id}/semantic/job")
+    def get_semantic_job(repo_id: str, task_id: str) -> dict:
+        """Return the current async semantic-evaluation job for ``(repo, task)``.
+
+        The dashboard's page-load state read and poll target: one deterministic
+        job record, so it reflects a running turn or a recently
+        failed/completed attempt across reload, navigation, and another browser
+        session. A task that has never had a semantic job is the normal
+        ``{"job": null}`` case (200), not a 404 — mirroring how the evaluation list
+        route treats a never-evaluated task as an empty result rather than an
+        error. ``repo_id`` unknown → 404; an unsafe ``task_id`` → 400; disabled →
+        404.
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            job = semantic_jobs.find_job(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"job": job.to_dict() if job is not None else None}
 
     return app
 
