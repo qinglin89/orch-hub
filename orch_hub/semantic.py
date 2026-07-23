@@ -596,6 +596,7 @@ class ClaudeSemanticBackend:
         effort: str = DEFAULT_SEMANTIC_EFFORT,
         runner: SemanticRunner = _default_runner,
         which: Callable[[], str | None] | None = None,
+        usage_observer: Callable[[str], None] | None = None,
     ):
         self.model = model
         self.effort = effort
@@ -604,6 +605,13 @@ class ClaudeSemanticBackend:
         # via the module-global :func:`_default_which` at call time (so a test can
         # monkeypatch that global) rather than binding it at construction.
         self._which = which
+        # Best-effort agent-subscription-usage seam (:data:`orch_hub.usage.ClaudeUsageObserver`).
+        # This backend already drives a ``claude -p`` turn, so its stream-json is a place
+        # Claude's 5h/7d subscription usage can be seen without a probe turn. When wired
+        # (by :func:`orch_hub.api.create_app`), the turn's stdout is fed to the observer;
+        # ``None`` keeps the evaluator decoupled from usage. Typed as a plain callable so
+        # this module never imports usage internals.
+        self._usage_observer = usage_observer
 
     @property
     def info(self) -> SemanticEvaluatorInfo:
@@ -661,6 +669,7 @@ class ClaudeSemanticBackend:
             result = self._runner(argv, sandbox)
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
+        self._observe_usage(result.stdout)
         text, errored = _extract_assistant_text(result.stdout)
         if result.returncode != 0 or errored:
             tail = (result.stderr or "").strip()
@@ -713,6 +722,23 @@ class ClaudeSemanticBackend:
             "plan",
             prompt,
         ]
+
+    def _observe_usage(self, stdout: str) -> None:
+        """Feed this turn's stdout to the injected usage observer, best-effort.
+
+        Isolated from evaluation: a missing observer, a parse failure, or a record
+        failure can never affect the evaluation turn (the observer is itself
+        best-effort, and this wraps the call defensively regardless of what callable
+        was injected). Called before the turn's success check, so even a turn that
+        then fails envelope parsing still contributes any usage its stream carried.
+        Display-only agent-subscription-usage bookkeeping.
+        """
+        if self._usage_observer is None:
+            return
+        try:
+            self._usage_observer(stdout)
+        except Exception:  # noqa: BLE001 — usage bookkeeping must never break evaluation
+            pass
 
 
 def _extract_assistant_text(stdout: str) -> tuple[str, bool]:

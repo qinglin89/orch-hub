@@ -147,11 +147,19 @@ class ClaudeIntakeAgent:
         effort: str = DEFAULT_INTAKE_EFFORT,
         runner: AgentRunner = _default_runner,
         new_session_id: Callable[[], str] = _new_uuid,
+        usage_observer: Callable[[str], None] | None = None,
     ):
         self.model = model
         self.effort = effort
         self._runner = runner
         self._new_session_id = new_session_id
+        # Best-effort agent-subscription-usage seam (:data:`orch_hub.usage.ClaudeUsageObserver`).
+        # The hub already drives these ``claude -p`` turns, so their stream-json is the
+        # only place Claude's 5h/7d subscription usage can be seen without a probe turn.
+        # When wired (by :func:`orch_hub.api.create_app`), each turn's stdout is fed to
+        # the observer; ``None`` keeps intake fully decoupled from usage. Typed as a
+        # plain callable so this module never imports usage internals.
+        self._usage_observer = usage_observer
 
     def draft(self, request: str, repo: ManagedRepo) -> AgentDraftResult:
         sid = self._new_session_id()
@@ -198,6 +206,7 @@ class ClaudeIntakeAgent:
         """
         argv = self._argv(prompt, sid=sid, resume=resume, write=write)
         result = self._runner(argv, cwd)
+        self._observe_usage(result.stdout)
         text, errored = _extract_assistant_text(result.stdout)
         if result.returncode != 0 or errored:
             tail = (result.stderr or "").strip()
@@ -239,6 +248,21 @@ class ClaudeIntakeAgent:
             argv += ["--session-id", sid]
         argv.append(prompt)
         return argv
+
+    def _observe_usage(self, stdout: str) -> None:
+        """Feed this turn's stdout to the injected usage observer, best-effort.
+
+        Isolated from intake behavior: a missing observer, a parse failure, or a
+        record failure can never affect the intake turn (the observer is itself
+        best-effort, and this wraps the call defensively regardless of what callable
+        was injected). Display-only agent-subscription-usage bookkeeping.
+        """
+        if self._usage_observer is None:
+            return
+        try:
+            self._usage_observer(stdout)
+        except Exception:  # noqa: BLE001 — usage bookkeeping must never break intake
+            pass
 
 
 def _as_handle(handle: object) -> _ClaudeIntakeHandle:

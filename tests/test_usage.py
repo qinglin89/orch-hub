@@ -25,6 +25,7 @@ from orch_hub.usage import (
     ClaudeUsageStore,
     UsageService,
     claude_usage,
+    parse_claude_stream_usage,
     read_codex_usage,
 )
 
@@ -214,6 +215,214 @@ def test_codex_staleness(tmp_path: Path) -> None:
     assert read_codex_usage(home, now=NOW).stale is False
 
 
+# -- Claude stream-json rate-limit parser -------------------------------------
+# The exact stream-json field shape for Claude's 5h/7d windows is unverified (see
+# the task session log / the module's mapping note), so these fixtures build the
+# best-effort *candidate* shape the parser targets; correcting the parser against a
+# real turn is a matched edit to these fixtures. The key contract asserted here is
+# the graceful one: recognized fields -> observation, everything else -> None (no
+# observation, so Claude reads unavailable), never a raise.
+
+OBS_TS = "2026-07-24T01:00:00Z"
+SYSTEM_EVENT = {"type": "system", "subtype": "init"}
+ASSISTANT_EVENT = {"type": "assistant", "message": {"content": [{"type": "text", "text": "done"}]}}
+
+
+def claude_stream(*events: dict) -> str:
+    """A ``claude -p`` stream-json stdout from the given event objects (one per line)."""
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+def claude_rate_limits(
+    *,
+    five_hour: dict | None = None,
+    seven_day: dict | None = None,
+    plan: str | None = "max",
+    **extra: object,
+) -> dict:
+    """A candidate Claude ``rate_limits`` container (named-window shape)."""
+    container: dict = {}
+    if plan is not None:
+        container["plan"] = plan
+    if five_hour is not None:
+        container["five_hour"] = five_hour
+    if seven_day is not None:
+        container["seven_day"] = seven_day
+    container.update(extra)
+    return container
+
+
+def claude_result(rate_limits: object = None, *, wrapper: str | None = None) -> dict:
+    """A ``result`` event, optionally carrying a rate-limit container top-level or
+    nested one level under ``wrapper`` (``usage``/``payload``/...)."""
+    event: dict = {"type": "result", "subtype": "success", "is_error": False, "result": "done"}
+    if rate_limits is not None:
+        if wrapper is None:
+            event["rate_limits"] = rate_limits
+        else:
+            event[wrapper] = {"rate_limits": rate_limits}
+    return event
+
+
+def supported_claude_stdout(*, five: float = 33.0) -> str:
+    """A stream carrying a recognized 5h+7d rate-limit container — a *supported* turn."""
+    return claude_stream(
+        SYSTEM_EVENT,
+        ASSISTANT_EVENT,
+        claude_result(
+            claude_rate_limits(
+                five_hour={"used_percent": five, "window_minutes": 300, "resets_at": 1785290400},
+                seven_day={"used_percent": 8.5, "window_minutes": 10080, "resets_at": 1785790400},
+            )
+        ),
+    )
+
+
+def test_parse_claude_stream_extracts_5h_and_7d() -> None:
+    obs = parse_claude_stream_usage(supported_claude_stdout(five=42.0), observed_ts=OBS_TS)
+    assert obs is not None
+    assert obs.observed_ts == OBS_TS  # stamped with when the hub saw the turn
+    assert obs.plan == "max"
+    by_key = {w.key: w for w in obs.windows}
+    assert set(by_key) == {"five_hour", "seven_day"}
+    five = by_key["five_hour"]
+    assert five.used_percent == 42.0
+    assert five.remaining_percent == 58.0
+    assert five.window_minutes == 300 and five.label == "5h"
+    assert five.resets_at is not None and five.resets_at.endswith("+00:00")
+    assert by_key["seven_day"].label == "7d"
+    assert by_key["seven_day"].remaining_percent == 91.5
+    # Percent-only provider: no invented numeric message total.
+    assert five.used is None and five.limit is None
+
+
+def test_parse_claude_stream_reads_container_under_wrapper() -> None:
+    # The container may sit one level down under a wrapper key rather than top-level.
+    stdout = claude_stream(
+        claude_result(
+            claude_rate_limits(
+                five_hour={"used_percent": 10.0, "window_minutes": 300, "resets_at": 1785290400}
+            ),
+            wrapper="usage",
+        )
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    assert obs is not None
+    assert [w.key for w in obs.windows] == ["five_hour"]
+
+
+def test_parse_claude_stream_duration_classifies_unnamed_windows() -> None:
+    # A container that lists windows without naming them is classified by duration.
+    stdout = claude_stream(
+        claude_result(
+            {
+                "windows": [
+                    {"used_percent": 30.0, "window_minutes": 300, "resets_at": 1785290400},
+                    {"used_percent": 60.0, "window_minutes": 10080, "resets_at": 1785790400},
+                ]
+            }
+        )
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    assert obs is not None
+    by_key = {w.key: w for w in obs.windows}
+    assert by_key["five_hour"].used_percent == 30.0
+    assert by_key["seven_day"].used_percent == 60.0
+
+
+def test_parse_claude_stream_container_may_be_a_list() -> None:
+    stdout = claude_stream(
+        claude_result(
+            [
+                {"used_percent": 15.0, "window_minutes": 300},
+                {"used_percent": 25.0, "window_minutes": 10080},
+            ]
+        )
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    assert obs is not None
+    assert {w.key for w in obs.windows} == {"five_hour", "seven_day"}
+
+
+def test_parse_claude_stream_reset_accepts_epoch_and_iso() -> None:
+    stdout = claude_stream(
+        claude_result(
+            claude_rate_limits(
+                five_hour={"used_percent": 5.0, "window_minutes": 300, "resets_at": 1785290400},
+                seven_day={"used_percent": 5.0, "window_minutes": 10080, "resets_at": "2026-07-31T00:00:00Z"},
+            )
+        )
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    by_key = {w.key: w for w in obs.windows}
+    assert by_key["five_hour"].resets_at.endswith("+00:00")  # epoch -> ISO UTC
+    assert by_key["seven_day"].resets_at == "2026-07-31T00:00:00+00:00"  # ISO normalized to UTC
+
+
+def test_parse_claude_stream_partial_single_window() -> None:
+    stdout = claude_stream(
+        claude_result(
+            claude_rate_limits(
+                five_hour={"used_percent": 12.0, "window_minutes": 300, "resets_at": 1785290400},
+                seven_day=None,
+            )
+        )
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    assert obs is not None
+    assert [w.key for w in obs.windows] == ["five_hour"]
+
+
+def test_parse_claude_stream_latest_container_wins() -> None:
+    # Two rate-limit events in one turn: the freshest (last) wins.
+    stdout = claude_stream(
+        claude_result(claude_rate_limits(five_hour={"used_percent": 10.0, "window_minutes": 300})),
+        claude_result(claude_rate_limits(five_hour={"used_percent": 90.0, "window_minutes": 300})),
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    assert obs is not None and obs.windows[0].used_percent == 90.0
+
+
+def test_parse_claude_stream_absent_returns_none() -> None:
+    # Ordinary stream-json with no rate-limit fields (the common case until the shape
+    # is confirmed) -> no observation, so the store stays unfed and Claude is unavailable.
+    stdout = claude_stream(SYSTEM_EVENT, ASSISTANT_EVENT, claude_result())
+    assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
+
+
+def test_parse_claude_stream_empty_container_returns_none() -> None:
+    # A container whose windows carry no usable signal contributes nothing (never a
+    # 0%-used stub) -> no observation.
+    stdout = claude_stream(claude_result(claude_rate_limits(five_hour={"window_minutes": 300})))
+    assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
+
+
+def test_parse_claude_stream_malformed_never_raises() -> None:
+    assert parse_claude_stream_usage("", observed_ts=OBS_TS) is None
+    # Non-JSON, a bad line, a JSON array, and a bare JSON string are all skipped.
+    assert parse_claude_stream_usage('not json\n{bad\n[1,2,3]\n"a string"', observed_ts=OBS_TS) is None
+
+
+def test_parse_claude_stream_excludes_account_and_credentials() -> None:
+    # A container laced with account/credential ids must not leak them: the parser
+    # whitelists only window fields + the plan name.
+    stdout = claude_stream(
+        claude_result(
+            claude_rate_limits(
+                five_hour={"used_percent": 7.0, "window_minutes": 300, "resets_at": 1785290400},
+                plan="max",
+                account_id="acct_SECRET",
+                access_token="tok_SECRET",
+                oauth_token="oauth_SECRET",
+            )
+        )
+    )
+    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
+    assert obs is not None
+    assert obs.plan == "max"
+    assert "SECRET" not in json.dumps(obs.to_dict())
+
+
 # -- Claude store + read ------------------------------------------------------
 
 
@@ -364,6 +573,42 @@ def test_service_fail_soft_isolates_providers(tmp_path: Path) -> None:
     assert by_provider[PROVIDER_CLAUDE].available is False
     assert "usage read failed" in (by_provider[PROVIDER_CLAUDE].detail or "")
     assert by_provider[PROVIDER_CODEX].available is False  # independent, still returned
+
+
+# -- UsageService.claude_observer (the hub-driven feed) -----------------------
+
+
+def test_service_claude_observer_records_supported_turn(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    service = UsageService(config, clock=lambda: NOW)
+    assert service.get_usage().providers[0].available is False  # claude unfed to start
+    service.claude_observer()(supported_claude_stdout(five=33.0))
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    assert claude.available is True  # observing invalidated the cache and re-read
+    assert claude.windows[0].used_percent == 33.0
+    assert claude.observed_ts == NOW.isoformat()  # stamped from the service clock
+    assert claude.stale is False
+
+
+def test_service_claude_observer_ignores_unsupported_turn(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    service = UsageService(config, clock=lambda: NOW)
+    service.claude_observer()(claude_stream(SYSTEM_EVENT, ASSISTANT_EVENT, claude_result()))
+    assert {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE].available is False
+    assert service.store.latest() is None  # unsupported output records nothing
+
+
+def test_service_claude_observer_swallows_record_failure(tmp_path: Path) -> None:
+    class BoomStore(ClaudeUsageStore):
+        def record(self, observation):  # noqa: ANN001 - test stub
+            raise RuntimeError("disk full")
+
+    config = make_config(tmp_path)
+    service = UsageService(config, claude_store=BoomStore(config.data_dir), clock=lambda: NOW)
+    # A supported turn whose record() raises must not propagate out of the observer —
+    # usage bookkeeping can never break the driving turn.
+    service.claude_observer()(supported_claude_stdout())
+    assert {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE].available is False
 
 
 # -- HTTP route ---------------------------------------------------------------

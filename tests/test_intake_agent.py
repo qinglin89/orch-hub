@@ -333,6 +333,57 @@ def test_missing_required_key_raises(tmp_path):
         agent.draft(REQUEST, repo)
 
 
+# -- best-effort agent-subscription-usage observer feed -----------------------
+# The hub drives these claude -p turns, so their stream-json is where Claude's 5h/7d
+# usage is seen without a probe turn. The agent forwards each turn's raw stdout to an
+# injected observer, best-effort: it feeds every turn (even one that then errors), and
+# a missing/raising observer never affects intake. The stream-json -> observation
+# parsing itself lives in orch_hub.usage and is tested in test_usage.py.
+
+
+def test_draft_turn_feeds_usage_observer(tmp_path):
+    repo = make_repo(tmp_path)
+    seen: list[str] = []
+    turn = stream(draft_envelope())
+    agent = ClaudeIntakeAgent(
+        runner=ScriptRunner(turn), new_session_id=lambda: "sid-u", usage_observer=seen.append
+    )
+
+    result = agent.draft(REQUEST, repo)
+
+    assert seen == [turn.stdout]  # the turn's raw stdout reached the observer
+    assert result.draft.task_id == TASK_ID  # drafting is unaffected by the feed
+
+
+def test_usage_observer_failure_does_not_break_intake(tmp_path):
+    repo = make_repo(tmp_path)
+
+    def boom(_stdout: str) -> None:
+        raise RuntimeError("usage bookkeeping boom")
+
+    agent = ClaudeIntakeAgent(
+        runner=ScriptRunner(stream(draft_envelope())), new_session_id=lambda: "s", usage_observer=boom
+    )
+
+    result = agent.draft(REQUEST, repo)  # must not raise
+    assert result.draft.task_id == TASK_ID
+
+
+def test_usage_observer_fires_even_when_turn_errors(tmp_path):
+    # The feed runs before the turn's success check, so a turn that consumed usage but
+    # then fails still records it. A raising turn still raises IntakeAgentError.
+    repo = make_repo(tmp_path)
+    seen: list[str] = []
+    turn = stream("boom", is_error=True, returncode=1)
+    agent = ClaudeIntakeAgent(
+        runner=ScriptRunner(turn), new_session_id=lambda: "s", usage_observer=seen.append
+    )
+
+    with pytest.raises(IntakeAgentError):
+        agent.draft(REQUEST, repo)
+    assert seen == [turn.stdout]
+
+
 # -- confirm fallback + failure -----------------------------------------------
 
 

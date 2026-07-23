@@ -979,6 +979,43 @@ def test_claude_backend_stream_error_raises(tmp_path):
         backend.evaluate("p", _repo(tmp_path))
 
 
+# -- best-effort agent-subscription-usage observer feed ------------------------
+# This backend also drives a claude -p turn, so its stream-json is another place
+# Claude's 5h/7d usage can be seen without a probe turn. It forwards the turn's raw
+# stdout to an injected observer, best-effort: it feeds even a turn that then errors,
+# and a raising observer never affects evaluation. stream-json -> observation parsing
+# lives in orch_hub.usage (test_usage.py); here we assert only the seam.
+
+
+def test_semantic_backend_feeds_usage_observer(tmp_path):
+    seen: list[str] = []
+    turn = stream("REPORT ENVELOPE")
+    backend = ClaudeSemanticBackend(model="m", runner=ScriptRunner(turn), usage_observer=seen.append)
+
+    text = backend.evaluate("PROMPT", _repo(tmp_path))
+
+    assert seen == [turn.stdout]  # the turn's raw stdout reached the observer
+    assert text == "REPORT ENVELOPE"  # evaluation output unaffected by the feed
+
+
+def test_semantic_usage_observer_failure_does_not_break_evaluate(tmp_path):
+    def boom(_stdout: str) -> None:
+        raise RuntimeError("usage bookkeeping boom")
+
+    backend = ClaudeSemanticBackend(model="m", runner=ScriptRunner(stream("OK")), usage_observer=boom)
+    assert backend.evaluate("PROMPT", _repo(tmp_path)) == "OK"  # must not raise
+
+
+def test_semantic_usage_observer_fires_even_when_turn_errors(tmp_path):
+    seen: list[str] = []
+    turn = stream("partial", is_error=True)
+    backend = ClaudeSemanticBackend(model="m", runner=ScriptRunner(turn), usage_observer=seen.append)
+
+    with pytest.raises(SemanticEvaluationError):
+        backend.evaluate("PROMPT", _repo(tmp_path))
+    assert seen == [turn.stdout]  # observed before the success check, even on failure
+
+
 def test_claude_backend_drives_evaluate_end_to_end(tmp_path):
     # The real backend class over a fake runner drives the whole service: bounded
     # prompt in, envelope out, full artifact chain persisted — no claude launched.

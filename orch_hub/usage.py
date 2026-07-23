@@ -26,10 +26,15 @@ differently:
   five-hour / seven-day usage is captured by *observing the hub's own*
   ``claude -p`` sessions and retaining the latest observation in a hub-owned store
   (:class:`ClaudeUsageStore`). No Claude turn is ever started just to refresh
-  usage, and no interactive UI or private OAuth endpoint is scraped. (The parser
-  that turns a session's stream-json into an observation, and the wiring that
-  feeds it, land in a follow-up slice; this module owns the store, the staleness
-  model, and the read side, so an unfed store simply reads as *unavailable*.)
+  usage, and no interactive UI or private OAuth endpoint is scraped.
+  :func:`parse_claude_stream_usage` turns one turn's ``stream-json`` stdout into an
+  observation, and :meth:`UsageService.claude_observer` is the best-effort seam the
+  hub-driven ``claude -p`` backends (intake agent, semantic backend) feed each turn
+  into. The exact ``stream-json`` field names for the 5h/7d windows are the one
+  piece not yet confirmed against a real turn (see the task session log), so the
+  parser targets documented best-effort candidates and degrades to *no observation*
+  — the store stays unfed and Claude reads *unavailable* — on anything it does not
+  recognize, exactly the graceful state the scope mandates.
 
 :class:`UsageService` aggregates both behind a small bounded cache so a burst of
 Overview refreshes does not re-scan rollout files every time, and degrades each
@@ -459,6 +464,206 @@ def claude_usage(store: ClaudeUsageStore, *, now: dt.datetime | None = None) -> 
     )
 
 
+# -- Claude: parse a hub-driven ``claude -p`` turn's stream-json for usage -----
+#
+# THE ONE UNVERIFIED MAPPING. The hub never starts a probe turn (the scope bars it),
+# so Claude usage can only be read from the stream-json of turns the hub already
+# drives (intake, semantic eval). The exact field names ``claude -p`` emits for the
+# five-hour / seven-day subscription windows are not yet confirmed against a real
+# turn — no stored stream-json ``result`` event carries them, and running a turn
+# just to learn the shape is barred. So the parser targets these best-effort
+# *candidates* and, on anything it does not recognize, returns ``None`` (no
+# observation) — the store stays unfed and Claude reads *unavailable*, the scope's
+# mandated graceful state. When a real turn is captured, correcting these constants
+# (and the matching fixture in ``tests/test_usage.py``) is the whole fix: the store,
+# the read side, the wiring, and the UI do not change. Everything below is tolerant
+# and never raises — a malformed line is skipped like the orchestrator/intake
+# readers do, and the freshest usable container in the stream wins.
+
+_CLAUDE_CONTAINER_KEYS = (
+    "rate_limits", "rateLimits", "usage_limits", "usageLimits",
+    "subscription", "subscription_usage", "limits",
+)
+"""Candidate keys under which a stream event may carry the rate-limit container."""
+
+_CLAUDE_WINDOW_KEYS = {
+    "five_hour": ("five_hour", "fiveHour", "five_hourly", "5h", "hourly"),
+    "seven_day": ("seven_day", "sevenDay", "weekly", "7d"),
+}
+"""Candidate keys for each named window, mapped to the stable machine key the UI
+targets (``five_hour`` / ``seven_day``). A window that arrives unnamed (in a list)
+is classified by duration instead (:func:`_classify_claude_window`)."""
+
+_CLAUDE_USED_KEYS = ("used_percent", "usedPercent", "utilization", "percent_used", "used_pct")
+_CLAUDE_RESET_KEYS = ("resets_at", "resetsAt", "reset_at", "resetAt", "reset")
+_CLAUDE_WINDOW_MINUTES_KEYS = ("window_minutes", "windowMinutes", "window_size_minutes", "duration_minutes")
+_CLAUDE_PLAN_KEYS = ("plan", "plan_type", "planType", "subscription_type", "subscriptionType", "tier")
+_CLAUDE_WINDOW_LIST_KEYS = ("windows", "buckets", "rate_limits", "limits")
+
+_CLAUDE_DEFAULT_MINUTES = {"five_hour": 300, "seven_day": 10080}
+"""Fallback duration for a named window that omits its own — the 5h / 7d its key
+already implies, so a window label still renders when only the percent/reset came."""
+
+
+def _first(data: dict, keys: Iterable[str]) -> object:
+    """The first present, non-``None`` value among ``keys`` in ``data`` (else None)."""
+    for key in keys:
+        if isinstance(data, dict) and data.get(key) is not None:
+            return data[key]
+    return None
+
+
+def _claude_reset(value: object) -> str | None:
+    """A window reset time as ISO-8601 UTC, from either epoch seconds or an ISO
+    string (both plausible in the unverified shape). ``None`` when absent/unusable."""
+    if _is_number(value):
+        return _iso_from_epoch(value)
+    if isinstance(value, str):
+        parsed = _parse_iso(value)
+        return parsed.isoformat() if parsed is not None else None
+    return None
+
+
+def _claude_window(key: str, raw: object) -> UsageWindow | None:
+    """Normalize one Claude window dict into a :class:`UsageWindow`.
+
+    ``None`` when the window carries no usable signal (neither a used-percent nor a
+    reset time), so an empty stub never renders as "0% used". Percent-first like
+    Codex: ``used``/``limit`` stay ``None`` — Claude reports percentages, so no
+    numeric message total is invented (the scope's unavailable-not-zero /
+    no-invented-total rules)."""
+    if not isinstance(raw, dict):
+        return None
+    used = _percent(_first(raw, _CLAUDE_USED_KEYS))
+    resets = _claude_reset(_first(raw, _CLAUDE_RESET_KEYS))
+    if used is None and resets is None:
+        return None
+    minutes_raw = _first(raw, _CLAUDE_WINDOW_MINUTES_KEYS)
+    minutes = int(minutes_raw) if _is_number(minutes_raw) else _CLAUDE_DEFAULT_MINUTES.get(key)
+    return UsageWindow(
+        key=key,
+        label=_window_label(minutes),
+        window_minutes=minutes,
+        used_percent=used,
+        remaining_percent=_remaining(used),
+        resets_at=resets,
+    )
+
+
+def _classify_claude_window(raw: object) -> str | None:
+    """Classify an unnamed window dict as ``five_hour``/``seven_day`` by duration.
+
+    For a container that lists windows without naming them, the duration separates
+    them: under a day is the five-hour window, a day or more the seven-day. ``None``
+    when no duration is present to classify on."""
+    if not isinstance(raw, dict):
+        return None
+    minutes = _first(raw, _CLAUDE_WINDOW_MINUTES_KEYS)
+    if not _is_number(minutes):
+        return None
+    return "five_hour" if int(minutes) < 1440 else "seven_day"
+
+
+def _claude_windows(container: object) -> list[UsageWindow]:
+    """Extract the 5h/7d windows from a rate-limit container (freshest-first order).
+
+    Handles both plausible shapes: a dict keyed by window name
+    (``{"five_hour": {...}, "seven_day": {...}}``) and a list of unnamed window
+    dicts classified by duration. Windows are keyed by the stable machine key and
+    de-duplicated (first per key wins)."""
+    windows: list[UsageWindow] = []
+    seen: set[str] = set()
+
+    def _add(key: str, raw: object) -> None:
+        if key in seen:
+            return
+        window = _claude_window(key, raw)
+        if window is not None:
+            windows.append(window)
+            seen.add(key)
+
+    if isinstance(container, dict):
+        for key, candidates in _CLAUDE_WINDOW_KEYS.items():
+            _add(key, _first(container, candidates))
+        listish = _first(container, _CLAUDE_WINDOW_LIST_KEYS)
+        if isinstance(listish, list):
+            for raw in listish:
+                key = _classify_claude_window(raw)
+                if key is not None:
+                    _add(key, raw)
+    elif isinstance(container, list):
+        for raw in container:
+            key = _classify_claude_window(raw)
+            if key is not None:
+                _add(key, raw)
+    return windows
+
+
+def _claude_container(event: dict) -> object | None:
+    """Locate a rate-limit container on one stream-json event, if any.
+
+    Looks under the candidate container keys at the event top level and one level
+    down under the common wrappers (``result``/``usage``/``message``/``payload``),
+    since the shape is unverified. Returns the first container found, else ``None``."""
+    container = _first(event, _CLAUDE_CONTAINER_KEYS)
+    if container is not None:
+        return container
+    for wrapper_key in ("result", "usage", "message", "payload"):
+        wrapper = event.get(wrapper_key)
+        if isinstance(wrapper, dict):
+            container = _first(wrapper, _CLAUDE_CONTAINER_KEYS)
+            if container is not None:
+                return container
+    return None
+
+
+def _claude_plan(event: dict, container: object) -> str | None:
+    """Sanitized plan/tier name, from the container or the event — never an account
+    or credential (only the plan naming, mirroring the Codex whitelist stance)."""
+    for source in (container, event):
+        if isinstance(source, dict):
+            value = _first(source, _CLAUDE_PLAN_KEYS)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def parse_claude_stream_usage(stdout: str, *, observed_ts: str) -> ClaudeObservation | None:
+    """Parse a hub-driven ``claude -p`` turn's stream-json stdout for usage.
+
+    Tolerant and best-effort (see the module-level mapping note above): scans the
+    JSONL events for a rate-limit container in the candidate shape, extracts the
+    five-hour / seven-day windows, and returns a :class:`ClaudeObservation` stamped
+    with ``observed_ts`` (when the hub saw the turn — the honest observation time,
+    since the hub is watching this turn live). Returns ``None`` — meaning *no
+    supported usage was seen*, so the store stays unfed and Claude reads unavailable
+    — when the stdout carries no recognizable rate-limit fields (the common case
+    until the shape is confirmed against a real turn), is empty, or is unparseable.
+    Never raises: a malformed line is skipped, and the last usable container in the
+    stream wins (freshest)."""
+    latest: tuple[list[UsageWindow], str | None] | None = None
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        container = _claude_container(event)
+        if container is None:
+            continue
+        windows = _claude_windows(container)
+        if windows:
+            latest = (windows, _claude_plan(event, container))
+    if latest is None:
+        return None
+    windows, plan = latest
+    return ClaudeObservation(observed_ts=observed_ts, plan=plan, windows=tuple(windows))
+
+
 # -- aggregation service ------------------------------------------------------
 
 
@@ -469,6 +674,18 @@ def _safe(provider: str, fn: Callable[[], ProviderUsage]) -> ProviderUsage:
         return fn()
     except Exception as exc:  # noqa: BLE001 — display-only; degrade, never raise
         return ProviderUsage.unavailable(provider, f"usage read failed: {type(exc).__name__}")
+
+
+ClaudeUsageObserver = Callable[[str], None]
+"""Best-effort seam: given one hub-driven ``claude -p`` turn's raw stdout, record a
+Claude usage observation when the supported rate-limit fields are present.
+
+The hub-driven ``claude -p`` backends (the intake agent and the semantic backend)
+call it once per turn, so a turn the hub already runs updates Claude usage without a
+probe turn — and without those modules importing usage internals (they take a plain
+``Callable[[str], None]``). It MUST never raise: usage bookkeeping can never affect a
+turn. :meth:`UsageService.claude_observer` is the production implementation; the
+backends default to a no-op when no observer is wired."""
 
 
 class UsageService:
@@ -501,6 +718,30 @@ class UsageService:
         """Persist a fresh Claude observation and drop the cached snapshot."""
         self._store.record(observation)
         self._cache = None
+
+    def claude_observer(self) -> ClaudeUsageObserver:
+        """A best-effort callback that feeds one ``claude -p`` turn's stdout to the store.
+
+        This is the :data:`ClaudeUsageObserver` seam the hub-driven Claude backends
+        (intake agent, semantic backend) call each turn, so a turn the hub already
+        runs updates Claude usage without a probe turn. The callback parses the stdout
+        (:func:`parse_claude_stream_usage`, stamping the observation with this
+        service's clock) and records only when the supported rate-limit fields are
+        present; unsupported/empty output records nothing, and every exception is
+        swallowed so usage bookkeeping can never affect the driving turn. Records run
+        through the concurrency-safe store, so intake and semantic turns on separate
+        daemon threads can observe at once."""
+        def observe(stdout: str) -> None:
+            try:
+                observation = parse_claude_stream_usage(
+                    stdout, observed_ts=self._clock().isoformat()
+                )
+                if observation is not None:
+                    self.record_claude_observation(observation)
+            except Exception:  # noqa: BLE001 — display-only; never affect the driving turn
+                pass
+
+        return observe
 
     def get_usage(self) -> SubscriptionUsage:
         """The current combined usage snapshot, served from the bounded cache."""

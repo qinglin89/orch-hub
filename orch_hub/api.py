@@ -390,12 +390,24 @@ def create_app(
         if run_manager is not None
         else RunManager(resolved, notifier=build_notifier(resolved))
     )
+    # Read-only, display-only agent-subscription-usage sidecar (Claude + Codex).
+    # Built here — before the hub-driven Claude backends — so its best-effort observer
+    # can be wired into them: each intake/semantic ``claude -p`` turn feeds its
+    # stream-json to ``usage``, so Claude's 5h/7d subscription usage is captured
+    # without ever starting a probe turn (Codex is read separately from its own local
+    # rollouts). Building it starts no subprocess and no Claude turn, a read only ever
+    # touches Codex's local rollouts and the hub-owned Claude store, and every failure
+    # degrades to an *unavailable* card rather than erroring. It is not gated by
+    # evaluation and never participates in readiness/attention/run decisions. Tests
+    # inject one over a fake store / temp Codex home.
+    usage = usage_service if usage_service is not None else UsageService(resolved)
+    claude_usage_observer = usage.claude_observer()
     intake = (
         intake_manager
         if intake_manager is not None
         else IntakeManager(
             resolved,
-            agent=ClaudeIntakeAgent(),
+            agent=ClaudeIntakeAgent(usage_observer=claude_usage_observer),
             notifier=build_notifier(resolved),
         )
     )
@@ -432,7 +444,9 @@ def create_app(
             resolved,
             evaluation_service=evaluation,
             static_evaluator=static_metrics,
-            backend=ClaudeSemanticBackend(model=resolved.eval_model),
+            backend=ClaudeSemanticBackend(
+                model=resolved.eval_model, usage_observer=claude_usage_observer
+            ),
         )
     )
     # The async semantic-job manager wraps the (long, synchronous) semantic
@@ -446,13 +460,6 @@ def create_app(
         if semantic_job_manager is not None
         else SemanticJobManager(resolved, evaluator=semantic)
     )
-    # Read-only, display-only agent-subscription-usage sidecar (Claude + Codex).
-    # Built unconditionally — it starts no subprocess and no Claude turn; a read
-    # only ever touches Codex's local rollouts and the hub-owned Claude store, and
-    # every failure degrades to an *unavailable* card rather than erroring. It is
-    # not gated by evaluation and never participates in readiness/attention/run
-    # decisions. Tests inject one over a fake store / temp Codex home.
-    usage = usage_service if usage_service is not None else UsageService(resolved)
     monitor = RunMonitor(manager)
 
     @asynccontextmanager
