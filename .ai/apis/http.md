@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # APIs: HTTP
@@ -76,7 +76,16 @@ verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 - Shape: `{"enabled": bool}`.
 - Auth: protected like every non-health data route.
 - Disabled behavior: this is the only evaluation route that returns 200 while
-  disabled; all task-specific evaluation routes fail closed as 404.
+  disabled; every other evaluation route fails closed as 404.
+
+## `GET /api/evaluation/doctor`
+
+- Purpose: report Layer 2 semantic-evaluator readiness without a model call.
+- Shape: `{"enabled": true, "semantic": SemanticDoctor}` where `semantic` is
+  `{backend, model, schema_version, available, detail}`.
+- Disabled behavior: enabled-gated like action routes; disabled returns 404.
+- Boundary: used by dashboard/CLI smoke checks only; never gates Start/Stop,
+  run history, logs, or control-dir answers.
 
 ## `GET /api/repos/{repo_id}/evaluations/{task_id}`
 
@@ -88,7 +97,11 @@ verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 - Shape: `{"repo","task_id","enabled":true,"target","latest_evaluation_id","evaluations"}`.
   `target` is `{present: bool|null, source: "active"|"archived"|null}`.
   `evaluations` is newest-first summaries
-  `{evaluation_id, has_evidence, has_static_metrics, has_semantic_report}`.
+  `{evaluation_id, has_evidence, has_static_metrics, has_semantic_report,
+  evaluator}`. `evaluator` is best-effort `{backend, model, schema_version}`
+  read from a present semantic report for history-picker comparison, or `null`
+  for non-semantic/degraded entries; corrupt semantic report JSON never 500s the
+  list route.
 - Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
   404. A never-evaluated task returns 200 with an empty evaluation list.
 
@@ -332,20 +345,26 @@ verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ## Current HTTP Behavior
 
 
-- `create_app(config=None, *, run_manager=None, intake_manager=None)` captures `Config.from_env()`
-  by default, is testable with an explicit `Config`, and holds one `RunManager`
-  instance for run, run-task, escalation, log, and background-monitor scans plus
-  one `IntakeManager` instance for remote intake routes. Default managers are
-  built with `build_notifier(config)`: run-ended/pending-question and
-  intake-ready notifications share the configured Bark path, and `None` keeps
-  delivery disabled. The default intake backend is `ClaudeIntakeAgent`.
+- `create_app(config=None, *, run_manager=None, intake_manager=None,
+  evaluation_service=None, static_evaluator=None, semantic_evaluator=None)`
+  captures `Config.from_env()` by default, is testable with explicit/injected
+  services, and holds one `RunManager` for run, run-task, escalation, log, and
+  background-monitor scans plus one `IntakeManager` for remote intake routes.
+  Default managers are built with `build_notifier(config)`: run-ended/
+  pending-question and intake-ready notifications share the configured Bark
+  path, and `None` keeps delivery disabled. The default intake backend is
+  `ClaudeIntakeAgent`; the default semantic backend is `ClaudeSemanticBackend`
+  constructed at app startup but only invoked by semantic generation or probed
+  by the doctor.
 - The app constructs a `RunMonitor` over that manager, exposes it as
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
-  `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, and `ORCH_HUB_BARK_URL`; surrounding
-  whitespace is stripped and empty/whitespace-only values count as unset.
+  `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
+  `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, and
+  `ORCH_HUB_EVAL_RETENTION`; surrounding whitespace is stripped and
+  empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;

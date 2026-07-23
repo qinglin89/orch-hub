@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 8c5c0c06bcaf283d0eb8311baee141e0ca641347
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Features: Dashboard Ops
@@ -144,14 +144,18 @@ Implemented behavior:
   evaluation" entry link for active tasks; run-history task groups show gated
   "Evaluation" links for archived/completed tasks. Disabled hubs hide entry
   links and the evaluation route shows a concise disabled explanation.
-- The evaluation view renders deterministic Layer 1 static metrics only:
-  target active/archive state, five score axes, run/session/failure-diagnostic
-  rollups, taskfile/session-log protocol facts, evidence warnings, artifact
-  timestamps, and evaluation history selection. Generate posts `/metrics` to
-  create a fresh hub-owned evidence+static pair; the semantic backend/API route
-  exists but this view does not trigger or render semantic reports yet, and raw
-  evidence/static JSON is offered only through Copy/Download affordances, never
-  inline raw logs.
+- The evaluation view renders two visually distinct layers over the same
+  evidence: deterministic Layer 1 static metrics and optional Layer 2 semantic
+  model judgments. Generate posts `/metrics`; Run semantic evaluation posts
+  `/semantic`, shows model-cost/read-only/not-an-orchestrator-run copy, handles
+  in-progress/success/failure inline, and lands on the fresh latest evaluation.
+  The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
+  semantic backend disables only the Layer 2 trigger with an explanation while
+  Layer 1 stays usable. Semantic reports render evaluator provenance, per-axis
+  rationales, severity/confidence/evidence-ref findings, suggested improvements,
+  JSON and `report.md` downloads, and history-picker model/schema labels. Raw
+  evidence/static/semantic JSON and Markdown are offered only through
+  Copy/Download affordances, never inline raw logs.
 - The remote-intake review view polls `GET /api/intakes/{id}` while an intake
   status is `drafting`, `revising`, or `confirming`; it shows live status,
   elapsed time, and a safe-to-navigate-away note, stops polling on resting

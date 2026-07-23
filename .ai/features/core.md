@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Features: Core
@@ -93,6 +93,8 @@ Implemented behavior:
 
 - `ORCH_HUB_EVAL_ENABLED` defaults true for local use; falsy tokens disable the
   service fail-closed, and malformed explicit values raise config errors.
+- `ORCH_HUB_EVAL_RETENTION` defaults to keeping the 20 newest evaluations per
+  task; `0` disables pruning, and malformed/negative values fail startup.
 - Target resolution reads active `.ai-tasks/<task_id>.md` first, then
   `.ai-tasks/archive/<task_id>.md`, by exact id and contained path checks.
 - Related-run aggregation includes every persisted run with exact
@@ -108,15 +110,17 @@ Implemented behavior:
 - `generate_evidence` persists `evidence.json` atomically under
   `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`, cleaning an empty
   reserved dir on failure. It never mutates target repos, task files, run
-  records, `.ai/`, or `.ai-tasks/`.
+  records, `.ai/`, or `.ai-tasks/`. Standalone evidence generation auto-prunes
+  after the evidence artifact is durable; metrics/semantic generation defer
+  retention until their full artifact set is durable, protecting the new id.
 - `list_evaluations` enumerates persisted evaluation dirs newest-first by
   `(timestamp, numeric collision suffix)` and reports only which artifact files
   exist; `read_artifact` returns parsed JSON artifacts and `read_text_artifact`
   returns text artifacts such as `report.md` for a contained evaluation dir.
 - HTTP routes expose availability, persisted evaluation listing, evaluation
-  detail readback, and evidence generation while preserving the same disabled
-  fail-closed gate: only `GET /api/evaluation` returns 200 while disabled; the
-  action/read routes 404.
+  detail readback, evidence generation, and the semantic doctor while preserving
+  the same disabled fail-closed gate: only `GET /api/evaluation` returns 200
+  while disabled; every other evaluation route 404s.
 - Static and semantic reports are computed by separate downstream layers; no
   scoring or model calls are part of this foundation.
 
@@ -160,13 +164,13 @@ Implemented behavior:
   `EvaluationService.generate_evidence`, writes `static_metrics.json`
   atomically in the same evaluation artifact directory as `evidence.json`, and
   cleans the reserved directory on report-write failure so no half-pair
-  remains.
+  remains; retention runs only after the static artifact is durable.
 - `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` runs a fresh
   deterministic evidence+static refresh and returns the new report; the detail
   route can later read the paired `evidence` and `static_metrics` artifacts.
-- The dashboard renders the deterministic Layer 1 report and offers raw JSON
-  only through copy/download affordances rather than inline log/evidence display;
-  semantic generation remains HTTP/backend-only until the ops UI slice.
+- The dashboard renders deterministic Layer 1 reports as distinct from Layer 2
+  semantic reports and offers raw JSON only through copy/download affordances
+  rather than inline log/evidence display.
 - Static metrics have no semantic model call; semantic evaluation is the
   downstream Layer 2 route.
 - Tests cover run/session rollups, protocol parsing, score axes, partial
@@ -181,19 +185,21 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: semantic, static_metrics, evaluation, config, models, api.
+Modules: semantic, static_metrics, evaluation, config, models, api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`;
-protected `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic` plus
-evaluation detail readback of `semantic_report` and `report_md`.
+protected `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`,
+`GET /api/evaluation/doctor`, CLI `orch-hub eval doctor`, dashboard Layer 2
+controls, and evaluation detail readback of `semantic_report` and `report_md`.
 
 Implemented behavior:
 
 - `SemanticEvaluator` shares `ORCH_HUB_EVAL_ENABLED`, builds a fresh evidence
   pack, computes static metrics, invokes an injected backend, and persists
   `evidence.json`, `static_metrics.json`, `semantic_report.json`, and
-  `report.md` as one all-or-nothing evaluation dir.
+  `report.md` as one all-or-nothing evaluation dir. Retention runs only after
+  the complete semantic artifact set is durable.
 - The report schema has no naked overall score: it carries per-dimension scores
   with rationales/confidence, findings with severity/confidence/evidence refs,
   evaluator identity, linked input ids, summary, and suggested improvements.
@@ -204,8 +210,12 @@ Implemented behavior:
   stateless `claude -p` turn from a fresh empty cwd outside the target repo with
   `--tools ""`, `--safe-mode`, `--no-session-persistence`, and
   `--permission-mode plan`.
+- The semantic doctor is a cheap availability/config probe: HTTP returns
+  `SemanticDoctor` and CLI exits 0 only when evaluation is enabled and the
+  backend resolves. It never performs a model call or gates run control.
 - Reruns preserve history by minting a fresh evaluation dir each time; evaluator
-  backend/model/schema identity distinguishes comparable reports.
+  backend/model/schema identity distinguishes comparable reports and is surfaced
+  in dashboard history picker labels.
 - Backend/model failures or non-conforming output remove the reserved dir and
   surface as 502 over HTTP; disabled mode still fails closed at service/API
   boundaries.

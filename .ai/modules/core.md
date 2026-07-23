@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Modules: Core
@@ -36,8 +36,18 @@ plist's Bark URL when the shell env is unset, sends one probe notification
 directly through `build_notifier(config)`, and reports delivery failure without
 printing the secret endpoint.
 
+Evaluation commands expose operator smoke checks:
+
+```bash
+orch-hub eval doctor
+```
+
+`eval doctor` reports the optional evaluation gate, semantic backend/model/
+schema, retention setting, and backend availability without a model call; it
+exits 0 only when evaluation is enabled and the backend is available.
+
 Dependencies: config, registry, readiness, housekeeping, models, launchd,
-notifications.
+notifications, semantic.
 
 ## Config
 
@@ -46,7 +56,8 @@ Location: `orch_hub/config.py`
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
-`ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, and derived
+`ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`,
+`ORCH_HUB_EVAL_RETENTION`, and derived
 `aii-2`/registry file paths:
 
 ```text
@@ -65,7 +76,9 @@ defaults true and accepts normal truthy/falsy tokens; malformed explicit values
 raise `ValueError`, while falsy values disable evaluation services fail-closed.
 `ORCH_HUB_EVAL_MODEL` selects the semantic evaluator's Claude CLI model and
 defaults to `claude-opus-4-8`; blank/unset uses the default so the backend is
-constructible without launching anything.
+constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
+to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
+values raise `ValueError`.
 
 ## Models
 
@@ -74,7 +87,7 @@ Location: `orch_hub/models.py`
 Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
 questions, run state, run history, intake state, evaluation target/run links,
-static-metrics reports, and semantic reports.
+static-metrics reports, semantic reports, and semantic evaluator doctor output.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
@@ -175,7 +188,11 @@ and atomically writes `evidence.json` under
 enumerates persisted dirs newest-first by `(timestamp, numeric suffix)` and
 reports present artifact filenames; `read_artifact` parses contained artifact
 JSON and `read_text_artifact` reads contained text artifacts such as semantic
-`report.md` for the API/dashboard read layer.
+`report.md` for the API/dashboard read layer. Retention is per task via
+`ORCH_HUB_EVAL_RETENTION`; `prune_evaluations` removes older evaluation dirs
+inside that `(repo, task)` subtree, and generation paths prune only after their
+complete artifact set is durable, protecting the just-written id so failed
+static/semantic attempts never shrink retained history.
 
 Per-run artifact reads are isolated into warnings so corrupt/missing run
 evidence yields a partial pack; target task file IO errors fail loudly because
@@ -205,7 +222,9 @@ evaluation_id=None)` delegates to `EvaluationService.generate_evidence`, writes
 `static_metrics.json` atomically in the same evaluation dir, and cleans the
 reserved dir if the report write fails. `api.py` exposes this as the protected
 `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` deterministic refresh
-route; dashboard rendering stays in `web/`.
+route; dashboard rendering stays in `web/`. Metrics generation mints evidence
+with retention deferred and auto-prunes only after `static_metrics.json` is
+durable.
 
 The evaluator is read-only over packs: it never reaches back into target repos
 or run dirs during scoring. Knowledge-maintenance checks are limited to facts
@@ -231,11 +250,13 @@ provenance itself, rejects malformed schema output, and requires each finding to
 carry at least one non-empty evidence ref. The default `ClaudeSemanticBackend`
 runs one `claude -p --output-format stream-json` turn with `--tools ""`,
 `--safe-mode`, `--no-session-persistence`, and `--permission-mode plan` from a
-fresh empty cwd outside the target repo. That structural boundary is load-bearing:
-the semantic model must judge only the persisted prompt/evidence and cannot read
-live repo files, `.ai/`, raw logs, or secrets. API exposes this as the protected
-`POST /api/repos/{repo_id}/evaluations/{task_id}/semantic` route and evaluation
-detail readback.
+fresh empty cwd outside the target repo. Its `doctor()` is a no-cost
+`claude`-resolution probe surfaced through HTTP/CLI so an unavailable backend
+can disable Layer 2 without affecting Layer 1 or run control. That structural
+boundary is load-bearing: the semantic model must judge only the persisted
+prompt/evidence and cannot read live repo files, `.ai/`, raw logs, or secrets.
+API exposes generation as `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`,
+detail readback, and a gated `GET /api/evaluation/doctor` readiness route.
 
 ## Intake Manager
 

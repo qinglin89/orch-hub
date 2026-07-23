@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Architecture
@@ -153,8 +153,11 @@ Its default Claude CLI backend runs from an empty non-repo cwd with built-in
 tools disabled, safe mode, no session persistence, and plan-mode writes blocked,
 so the model cannot read live target-repo state outside the prompt. Protected
 HTTP routes expose availability, evidence/static/semantic generation,
-evaluation history, and artifact readback; the dashboard currently renders the
-Layer 1 sidecar with copy/download JSON affordances.
+semantic doctor readiness, evaluation history, and artifact readback. The
+dashboard renders Layer 1 static metrics and Layer 2 semantic reports as
+distinct sections, gates the semantic trigger with the doctor when the backend
+is unavailable, and keeps raw evidence/report artifacts behind Copy/Download
+affordances.
 
 ## Component Boundaries
 
@@ -175,8 +178,9 @@ Layer 1 sidecar with copy/download JSON affordances.
   beside the pack, and enforces read isolation in the backend rather than by
   prompt instruction alone.
 - Evaluation API/dashboard presentation owns sidecar routing, active/archive
-  target display, deterministic/semantic artifact readback, and local-inspection
-  affordances; it does not gate run control or expose raw logs inline.
+  target display, deterministic/semantic artifact readback, semantic doctor
+  gating, history model/version comparison, and local-inspection affordances; it
+  does not gate run control or expose raw logs inline.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
 - Control-dir handling owns only the file-channel mechanics for questions,

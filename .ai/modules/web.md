@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 8c5c0c06bcaf283d0eb8311baee141e0ca641347
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Modules: Web and Operations
@@ -42,6 +42,7 @@ agent-turn failures are returned as auditable intake records rather than 5xx.
 The evaluation routes are `GET /api/evaluation`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`,
+`GET /api/evaluation/doctor`,
 `POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`,
 `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`, and
 `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`; they resolve exact
@@ -49,7 +50,9 @@ active-or-archived task ids outside the active task index, write/read only
 hub-owned evaluation artifacts, map disabled mode to 404 except for the
 availability route, and map semantic backend/model/schema failures to 502 with
 no partial artifact. Evaluation detail returns `evidence`, `static_metrics`,
-`semantic_report`, and `report_md`.
+`semantic_report`, and `report_md`; evaluation list summaries include
+best-effort semantic evaluator identity for history comparison, and the doctor
+route reports Layer 2 backend availability without a model call.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.
@@ -107,8 +110,8 @@ route, repo/task/detail/run views, repo/task run-state signals,
 searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
 run controls, live per-session context strips, waiting-question answer forms,
 filterable/counted/collapsible grouped run history with est-vs-actual rollups, a
-run-scoped task-file view, task-evaluation Layer 1 sidecar view and entry
-points, remote intake start/review views, and recent/live log views;
+run-scoped task-file view, task-evaluation Layer 1/Layer 2 sidecar view and
+entry points, remote intake start/review views, and recent/live log views;
 `styles.css` holds the mobile-first responsive layout. The dashboard
 reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
@@ -184,14 +187,20 @@ context, and summed wall-clock from run-record ISO timestamps.
 
 Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
 Tasks tab active. It probes availability first, distinguishes disabled,
-never-generated, evidence-only, and full static-metrics states, renders target
-active/archive state plus scores/run/protocol/evidence-warning rollups, and
-offers raw evidence/static artifacts only as Copy/Download JSON. Task detail and
+never-generated, evidence-only, static-metrics, and semantic-report states,
+renders target active/archive state plus deterministic score/run/protocol/
+evidence-warning rollups, and offers raw evidence/static/semantic JSON plus
+semantic `report.md` only as Copy/Download artifacts. Task detail and
 run-history groups show evaluation entry links only when availability reports
 enabled; Generate posts `/metrics` and re-renders to the latest deterministic
-Layer 1 report without mutating target task or run state. The semantic HTTP
-backend exists for the next evaluation-ops UI slice, but the current dashboard
-does not trigger or render semantic reports beyond generic artifact availability.
+Layer 1 report without mutating target task or run state. Run semantic
+evaluation posts `/semantic` with explicit cost/read-only/not-an-orchestrator
+copy, shows busy/failure states inline, re-renders to the fresh latest report,
+and renders evaluator provenance, per-axis rationales, severity/confidence/
+evidence-ref findings, and suggested improvements. A best-effort
+`GET /api/evaluation/doctor` probe disables only the Layer 2 trigger when the
+semantic backend is unavailable while keeping Layer 1 usable; a failed probe
+degrades to the default enabled trigger.
 
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-10
-verified-against: 081a639107fe7eba4a4189e896267b5f1feba966
+last-updated: 2026-07-23
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # APIs: CLI
@@ -102,3 +102,17 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   with the failure type/detail after redacting the resolved Bark URL/device key.
 - Non-goal: does not call `RunManager` or write run records, history events,
   task files, or control-dir files.
+
+## `orch-hub eval doctor`
+
+- Purpose: smoke-check whether optional Layer 2 semantic evaluation is enabled,
+  configured, and runnable.
+- Output: human-readable backend, model, schema version, retention setting,
+  availability, and detail.
+- Behavior: resolves `Config.from_env()`, fails closed when evaluation is
+  disabled, and calls `ClaudeSemanticBackend.doctor()` to resolve `claude` on
+  the augmented agent PATH without launching a model turn.
+- Exit code: `0` only when evaluation is enabled and the semantic backend is
+  available; disabled, unavailable, or malformed config exits non-zero.
+- Non-goal: does not generate evaluation artifacts, call the model, inspect
+  repos, start/stop runs, or gate run-control flows.

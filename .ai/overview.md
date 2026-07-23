@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Project Overview
@@ -33,8 +33,10 @@ protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
 `static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
 CLI semantic evaluator that persists `semantic_report.json` plus `report.md`,
 and expose evaluation evidence/static/semantic artifacts through protected HTTP
-routes. The dashboard currently renders the Layer 1 task-evaluation view; later
-slices add semantic UI operations and IM bot control.
+routes. The dashboard renders the task-evaluation sidecar with Layer 1 static
+metrics, doctor-gated Layer 2 semantic evaluation controls/report rendering,
+history model/version comparison, and artifact copy/download affordances; later
+slices add IM bot control.
 
 ## Users
 
@@ -69,10 +71,12 @@ slices add semantic UI operations and IM bot control.
   files outside the prompt.
 - Expose task evaluation as a sidecar HTTP workflow: availability, evidence
   generation/readback, static metrics generation/readback, semantic generation/
-  readback, active or archived task targeting, history selection, and artifact
-  inspection without target-repo mutation.
+  readback, semantic doctor readiness, active or archived task targeting,
+  history selection with evaluator model/version identity, retention, and
+  artifact inspection without target-repo mutation.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
-- Provide a mobile-first dashboard for repo, task, run, question, and log views.
+- Provide a mobile-first dashboard for repo, task, run, question, log, intake,
+  and task-evaluation views.
 - Support launchd-based long-lived operation on macOS.
 
 ## Non-Goals

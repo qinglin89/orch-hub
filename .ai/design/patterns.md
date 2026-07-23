@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
+last-updated: 2026-07-23
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Design: Patterns
@@ -55,8 +55,14 @@ verified-against: 9d6d2609fb57375489cc8358d30224efddd7ba82
   pending so split UTF-8 characters are not corrupted across reads.
 - Keep dashboard data access behind the API: the SPA renders readiness,
   task-store sentinel states, task content, run state, answers, history, logs,
-  and task-evaluation evidence/static-metrics summaries from HTTP payloads
+  and task-evaluation evidence/static/semantic summaries from HTTP payloads
   rather than reading repo files or recomputing checks.
+- Keep evaluation listing structural in `EvaluationService`; presentation-only
+  enrichment such as semantic evaluator model/schema labels belongs in API/web
+  adapters and must degrade without blanking the primary list payload.
+- Run evaluation retention only after the top-level generation's artifact set is
+  durable, and protect the just-written evaluation id; failed static/semantic
+  attempts must not delete older retained history.
 - Serve dashboard shell assets through an enumerated allowlist rather than a
   broad static mount; every non-shell data route stays bearer-protected.
 - Keep dashboard presentation CSS-only: theme tokens, system fonts, semantic

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # Design Principles and Decisions
@@ -63,8 +63,9 @@ verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ## Open Design Items
 
 - Retention/reconciliation policy for hub-owned run dirs, intake dirs, and
-  evaluation artifacts under `ORCH_HUB_DATA_DIR`, including per-run
-  `events.jsonl` history, stuck `confirming` intake records after a mid-write
-  process crash, and generated evidence/static/semantic report history.
+  run dirs and intake dirs under `ORCH_HUB_DATA_DIR`, including per-run
+  `events.jsonl` history and stuck `confirming` intake records after a
+  mid-write process crash. Evaluation artifact retention is implemented as a
+  per-task newest-N cap.
 - Exact route schema beyond the implemented repo/task/run/escalation/log/history/
   intake/evaluation and dashboard-shell API surface.

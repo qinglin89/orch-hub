@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 ---
 
 # APIs: Internal Interfaces
@@ -64,7 +64,10 @@ Persisted evaluation listing and artifact reads are structural and contained:
 `list_evaluations` reports newest-first ids plus artifact filenames, while
 `read_artifact` parses JSON artifacts and `read_text_artifact` reads text
 artifacts such as semantic `report.md` for a known evaluation dir. Corrupt JSON
-fails loudly.
+fails loudly. `prune_evaluations`/`auto_prune` enforce the per-task retention
+cap under the hub-owned evaluation tree; top-level generation paths call
+retention only after their complete artifact set is durable and protect the
+just-written id.
 
 ## Static Metrics Evaluator
 
@@ -86,9 +89,11 @@ status-transition path, and completion hygiene, then returns five transparent
 score components with evidence-backed warnings and confidence. `generate_metrics`
 delegates to `EvaluationService.generate_evidence`, writes `static_metrics.json`
 atomically into the same evaluation artifact directory, and removes the
-reserved dir on report-write failure. HTTP/dashboard presentation wraps it
-outside the module through the evaluation API routes and Layer 1 dashboard view;
-the evaluator itself never mutates target repos or run records.
+reserved dir on report-write failure. It mints evidence with retention deferred
+and prunes only after the static artifact is durable. HTTP/dashboard
+presentation wraps it outside the module through the evaluation API routes and
+Layer 1 dashboard view; the evaluator itself never mutates target repos or run
+records.
 
 ## Semantic Evaluator
 
@@ -106,8 +111,15 @@ are omitted and lower confidence rather than failing. `build_prompt` requires a
 sentinel-wrapped JSON report. `parse_report` stamps provenance from the harness,
 requires scored rationales and evidence-backed findings, and treats malformed
 model output as `SemanticEvaluationError`. `evaluate(repo, task_id)` mints a
-fresh evaluation dir, writes evidence/static/semantic/Markdown atomically, and
-removes the whole reserved dir on backend/model/schema failure.
+fresh evaluation dir, writes evidence/static/semantic/Markdown atomically,
+removes the whole reserved dir on backend/model/schema failure, and prunes older
+evaluations only after the whole semantic artifact set is durable.
+
+`SemanticEvaluator.doctor()` delegates to the backend's no-cost availability
+probe and returns `SemanticDoctor` (`backend`, `model`, `schema_version`,
+`available`, `detail`) when enabled; disabled mode raises
+`EvaluationDisabledError`. The concrete Claude backend's doctor resolves
+`claude` on the augmented run PATH without launching a subprocess or model turn.
 
 `ClaudeSemanticBackend` is the default concrete backend. It runs one stateless
 Claude CLI turn with all built-in tools disabled (`--tools ""`), safe mode,
