@@ -866,3 +866,25 @@ def test_read_artifact_absent_dir_or_file_is_none(tmp_path):
         service.read_artifact(repo, TASK, pack.evaluation_id, "static_metrics.json")
         is None
     )
+
+
+def test_read_text_artifact_reads_verbatim_and_absent_is_none(tmp_path):
+    # The text sibling of read_artifact (for the semantic layer's report.md):
+    # returns raw text for a present file, None for an absent dir/file, and stays
+    # contained (an unsafe artifact name is rejected).
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    pack = service.generate_evidence(repo, TASK)  # mints the dir with evidence.json
+    md_path = pack.evaluation_dir / "report.md"
+    md_path.write_text("# a report\nline\n", encoding="utf-8")
+
+    assert service.read_text_artifact(repo, TASK, pack.evaluation_id, "report.md") == "# a report\nline\n"
+    # Absent artifact and absent dir both read as None, not an error.
+    assert service.read_text_artifact(repo, TASK, pack.evaluation_id, "missing.md") is None
+    assert service.read_text_artifact(repo, TASK, "20990101T000000Z", "report.md") is None
+    # Containment: a path-traversal artifact name is rejected before any read.
+    with pytest.raises(ValueError):
+        service.read_text_artifact(repo, TASK, pack.evaluation_id, "../evidence.json")

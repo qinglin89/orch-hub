@@ -1,12 +1,14 @@
 """Tests for the optional read-only semantic task evaluator (Layer 2).
 
-Covers the session-1 acceptance subset: the report schema, bounded evidence
-construction (excludes raw logs, records omissions), the prompt contract, envelope
-parse/schema validation, confidence degradation for thin evidence, report
-persistence beside evidence/static artifacts, the read-only/no-mutation service
-boundary, disabled-mode fail-closed, and failure paths — all with an injected fake
-backend. The concrete configured/CLI backend, rerun/version history, Markdown
-rendering, and API surfaces are session-2.
+Covers the report schema, bounded evidence construction (excludes raw logs,
+records omissions), the prompt contract, envelope parse/schema validation,
+confidence degradation for thin evidence, report persistence beside
+evidence/static artifacts, the read-only/no-mutation service boundary,
+disabled-mode fail-closed, and failure paths — all with an injected fake backend.
+Session-2 adds: the concrete Claude CLI backend over a fake runner (argv shape,
+the read-only ``--permission-mode plan`` gate, stream parsing, exit/stream-error
+failure paths — ``claude`` is never launched), the ``report.md`` Markdown render,
+and its persistence. The protected HTTP surfaces live in ``tests/test_api.py``.
 """
 
 from __future__ import annotations
@@ -38,18 +40,24 @@ from orch_hub.models import (
     SemanticScore,
 )
 from orch_hub.semantic import (
+    DEFAULT_SEMANTIC_EFFORT,
+    SEMANTIC_BACKEND_CLAUDE,
     SEMANTIC_END,
+    SEMANTIC_REPORT_MD_NAME,
     SEMANTIC_REPORT_NAME,
     SEMANTIC_SCHEMA_VERSION,
     SEMANTIC_SEVERITIES,
     SEMANTIC_START,
+    ClaudeSemanticBackend,
     SemanticEvaluationError,
     SemanticEvaluator,
     SemanticEvidence,
+    SemanticRunResult,
     _UnavailableSemanticBackend,
     build_prompt,
     build_semantic_evidence,
     parse_report,
+    render_report_md,
 )
 from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from orch_hub.subprocess_utils import CommandResult
@@ -542,6 +550,9 @@ def test_evaluate_persists_semantic_report_beside_evidence_and_static(tmp_path):
     assert (eval_dir / EVIDENCE_NAME).is_file()
     assert (eval_dir / STATIC_METRICS_NAME).is_file()
     assert (eval_dir / SEMANTIC_REPORT_NAME).is_file()
+    # The human-readable render is persisted beside the JSON, in one atomic step.
+    md = (eval_dir / SEMANTIC_REPORT_MD_NAME).read_text(encoding="utf-8")
+    assert md.startswith("# Semantic Task Evaluation") and "handoff_completeness" in md
 
     persisted = json.loads((eval_dir / SEMANTIC_REPORT_NAME).read_text(encoding="utf-8"))
     assert persisted["evaluation_id"] == report.evaluation_id == FIXED_ID
@@ -634,3 +645,237 @@ def test_evaluate_over_absent_task_still_persists_low_confidence_report(tmp_path
     assert report.target_present is False and report.target_source is None
     eval_dir = config.data_dir / "evaluations" / "alpha" / other / FIXED_ID
     assert (eval_dir / SEMANTIC_REPORT_NAME).is_file()
+
+
+def test_rerun_with_different_model_preserves_both_reports(tmp_path):
+    # The scope's rerun/version history: re-evaluating (here with a different
+    # evaluator model) mints a fresh dir rather than overwriting, so prior reports
+    # survive for comparison — the per-evaluation-dir layout gives this for free.
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+
+    r1 = semantic_evaluator(
+        config=config, service=_service(config),
+        backend=FakeBackend(envelope(), info=evaluator_info(model="model-a")),
+    ).evaluate(repo, TASK)
+    r2 = semantic_evaluator(
+        config=config, service=_service(config),
+        backend=FakeBackend(envelope(), info=evaluator_info(model="model-b")),
+    ).evaluate(repo, TASK)
+
+    assert r1.evaluation_id != r2.evaluation_id  # a same-second rerun bumps a -N suffix
+    stored = _service(config).list_evaluations(repo, TASK)
+    assert len(stored) == 2
+    assert all(SEMANTIC_REPORT_NAME in s.artifacts for s in stored)
+    # Each persisted report is stamped with the model that judged it — the two are
+    # told apart by evaluator identity, not conflated.
+    models = {
+        json.loads(
+            (config.data_dir / "evaluations" / "alpha" / TASK / s.evaluation_id
+             / SEMANTIC_REPORT_NAME).read_text(encoding="utf-8")
+        )["evaluator"]["model"]
+        for s in stored
+    }
+    assert models == {"model-a", "model-b"}
+
+
+# -- Markdown rendering -------------------------------------------------------
+
+
+def _report(*, summary: str | None = "ok", scores=(), findings=(), improvements=(),
+            warnings=(), confidence: float = 0.7) -> SemanticReport:
+    return SemanticReport(
+        evaluation_id=FIXED_ID,
+        generated_ts=FIXED_TS.isoformat(),
+        repo_name="alpha",
+        task_id=TASK,
+        target_present=True,
+        target_source=SOURCE_ACTIVE,
+        evaluator=evaluator_info(),
+        summary=summary,
+        overall_confidence=confidence,
+        scores=tuple(scores),
+        findings=tuple(findings),
+        improvements=tuple(improvements),
+        input_evidence_id=FIXED_ID,
+        input_static_metrics=True,
+        warnings=tuple(warnings),
+    )
+
+
+def test_render_report_md_has_all_sections():
+    md = render_report_md(_report(
+        summary="handled cleanly",
+        scores=(SemanticScore("handoff_completeness", 0.9, 0.8, "log complete"),),
+        findings=(SemanticFinding("rediscovery_risk", "low", "thin note", 0.6,
+                                  evidence_refs=("sid-a",), suggestion="record more"),),
+        improvements=("tighten the contract",),
+        warnings=("static metrics unavailable",),
+    ))
+
+    assert f"# Semantic Task Evaluation — {TASK}" in md
+    assert "fake / fake-model (schema v1)" in md  # evaluator provenance from context
+    assert "## Summary" in md and "handled cleanly" in md
+    assert "## Scores" in md and "| handoff_completeness | 0.90 | 0.80 | log complete |" in md
+    assert "### [LOW] rediscovery_risk — thin note" in md
+    assert "- Evidence: sid-a" in md and "- Suggestion: record more" in md
+    assert "## Suggested Improvements" in md and "- tighten the contract" in md
+    assert "## Evidence Notes" in md and "- static metrics unavailable" in md
+
+
+def test_render_report_md_marks_unassessable_score_as_na():
+    # A null score (the model could not assess the axis) renders `n/a`, not 0.00.
+    md = render_report_md(_report(
+        scores=(SemanticScore("ai_freshness_utility", None, 0.3, "cannot ground"),)
+    ))
+    assert "| ai_freshness_utility | n/a | 0.30 | cannot ground |" in md
+
+
+def test_render_report_md_orders_findings_by_severity():
+    findings = (
+        SemanticFinding("d1", "low", "low one", 0.5, evidence_refs=("a",)),
+        SemanticFinding("d2", "high", "high one", 0.9, evidence_refs=("b",)),
+        SemanticFinding("d3", "info", "info one", 0.4, evidence_refs=("c",)),
+    )
+    md = render_report_md(_report(findings=findings))
+
+    positions = [md.index("high one"), md.index("low one"), md.index("info one")]
+    assert positions == sorted(positions)  # high before low before info
+
+
+def test_render_report_md_handles_empty_report():
+    md = render_report_md(_report(summary=None, scores=(), findings=(), improvements=(), warnings=()))
+
+    assert "_(no summary provided)_" in md
+    assert "_(no scores)_" in md
+    assert "_(no findings)_" in md
+    assert "_(none)_" in md  # no improvements
+    assert "## Evidence Notes" not in md  # the section is omitted when there are none
+
+
+def test_render_report_md_escapes_pipes_and_newlines_in_table_cells():
+    # A rationale containing a pipe or newline must not break the one-line table row.
+    md = render_report_md(_report(scores=(SemanticScore("d", 0.5, 0.5, "a | b\nc"),)))
+
+    row = next(line for line in md.splitlines() if line.startswith("| d "))
+    assert "a \\| b c" in row  # pipe escaped, newline folded to a space
+    assert "\n" not in row
+
+
+def test_render_report_md_is_deterministic():
+    report = _report(
+        scores=(SemanticScore("d", 0.5, 0.5, "why"),),
+        findings=(SemanticFinding("d", "low", "s", 0.5, evidence_refs=("a",)),),
+    )
+    assert render_report_md(report) == render_report_md(report)
+
+
+# -- concrete Claude CLI backend (fake runner; claude never launched) ----------
+
+
+class ScriptRunner:
+    """Returns a scripted :class:`SemanticRunResult` per call, recording argv+cwd."""
+
+    def __init__(self, *results: SemanticRunResult):
+        self._results = list(results)
+        self.calls: list[tuple[list[str], Path]] = []
+
+    def __call__(self, argv, cwd) -> SemanticRunResult:
+        self.calls.append((list(argv), cwd))
+        if not self._results:
+            raise AssertionError("runner called more times than scripted")
+        return self._results.pop(0)
+
+    @property
+    def argv(self) -> list[str]:
+        return self.calls[0][0]
+
+
+def stream(text: str, *, is_error: bool = False, returncode: int = 0,
+           stderr: str = "") -> SemanticRunResult:
+    """A claude ``stream-json`` stdout carrying ``text`` as the assistant reply."""
+    lines = [
+        json.dumps({"type": "system", "subtype": "init"}),
+        json.dumps({"type": "assistant",
+                    "message": {"content": [{"type": "text", "text": text}]}}),
+        json.dumps({"type": "result", "is_error": is_error, "result": text}),
+    ]
+    return SemanticRunResult(stdout="\n".join(lines), stderr=stderr, returncode=returncode)
+
+
+def _repo(tmp_path: Path) -> ManagedRepo:
+    return ManagedRepo(name="alpha", path=tmp_path, manifest=tmp_path / "m.json")
+
+
+def test_claude_backend_argv_is_read_only_single_turn(tmp_path):
+    runner = ScriptRunner(stream(envelope()))
+    backend = ClaudeSemanticBackend(model="claude-x", effort="high", runner=runner)
+
+    backend.evaluate("PROMPT-BODY", _repo(tmp_path))
+
+    argv = runner.argv
+    assert argv[:5] == ["claude", "-p", "--output-format", "stream-json", "--verbose"]
+    assert argv[argv.index("--model") + 1] == "claude-x"
+    assert argv[argv.index("--effort") + 1] == "high"
+    # Read-only gate: plan mode present, the write-permitting flag never added.
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert "--dangerously-skip-permissions" not in argv
+    # One stateless turn — the whole evidence is in the prompt, so no session threading.
+    assert "--session-id" not in argv and "--resume" not in argv
+    assert argv[-1] == "PROMPT-BODY"  # the prompt is the final positional arg
+    assert runner.calls[0][1] == tmp_path  # runs in the target repo
+
+
+def test_claude_backend_returns_assistant_text_and_defaults_effort(tmp_path):
+    runner = ScriptRunner(stream("MY ENVELOPE TEXT"))
+    backend = ClaudeSemanticBackend(model="claude-x", runner=runner)
+
+    assert backend.evaluate("p", _repo(tmp_path)) == "MY ENVELOPE TEXT"
+    assert backend.effort == DEFAULT_SEMANTIC_EFFORT
+
+
+def test_claude_backend_info_reports_claude_cli_and_model():
+    info = ClaudeSemanticBackend(model="claude-x").info
+    assert info.backend == SEMANTIC_BACKEND_CLAUDE
+    assert info.model == "claude-x"
+    assert info.schema_version == SEMANTIC_SCHEMA_VERSION
+
+
+def test_claude_backend_nonzero_exit_raises_with_stderr_tail(tmp_path):
+    runner = ScriptRunner(SemanticRunResult(stdout="", stderr="claude: BOOM detail", returncode=1))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+
+    with pytest.raises(SemanticEvaluationError, match="BOOM detail"):
+        backend.evaluate("p", _repo(tmp_path))
+
+
+def test_claude_backend_stream_error_raises(tmp_path):
+    runner = ScriptRunner(stream("partial", is_error=True))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+
+    with pytest.raises(SemanticEvaluationError, match="stream_error=True"):
+        backend.evaluate("p", _repo(tmp_path))
+
+
+def test_claude_backend_drives_evaluate_end_to_end(tmp_path):
+    # The real backend class over a fake runner drives the whole service: bounded
+    # prompt in, envelope out, full artifact chain persisted — no claude launched.
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    runner = ScriptRunner(stream(envelope()))
+    backend = ClaudeSemanticBackend(model="claude-x", runner=runner)
+    ev = semantic_evaluator(config=config, service=_service(config), backend=backend)
+
+    report = ev.evaluate(repo, TASK)
+
+    assert report.evaluator.backend == SEMANTIC_BACKEND_CLAUDE
+    assert report.evaluator.model == "claude-x"
+    eval_dir = config.data_dir / "evaluations" / "alpha" / TASK / report.evaluation_id
+    assert (eval_dir / SEMANTIC_REPORT_NAME).is_file()
+    assert (eval_dir / SEMANTIC_REPORT_MD_NAME).is_file()
+    # The backend ran read-only in the repo and saw the bounded evidence prompt.
+    assert runner.calls[0][1] == repo.path
+    assert "--permission-mode" in runner.argv and "--dangerously-skip-permissions" not in runner.argv
+    assert "handoff_completeness" in runner.argv[-1]

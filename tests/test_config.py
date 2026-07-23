@@ -18,7 +18,9 @@ from orch_hub.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    DEFAULT_EVAL_MODEL,
     EVAL_ENABLED_ENV,
+    EVAL_MODEL_ENV,
     HOST_ENV,
     PORT_ENV,
     TOKEN_ENV,
@@ -172,3 +174,13 @@ def test_evaluation_enabled_malformed_is_explicit_error():
     # A typo'd gate must fail at startup, not silently guess on/off.
     with pytest.raises(ValueError, match=EVAL_ENABLED_ENV):
         Config.from_env({EVAL_ENABLED_ENV: "maybe"})
+
+
+def test_eval_model_defaults_and_overrides():
+    # Always a concrete string so the semantic backend is unconditionally
+    # constructible; overridden by ORCH_HUB_EVAL_MODEL.
+    assert Config.from_env({}).eval_model == DEFAULT_EVAL_MODEL
+    assert Config.from_env({EVAL_MODEL_ENV: "claude-sonnet-5"}).eval_model == "claude-sonnet-5"
+    # Empty/whitespace-only counts as unset and falls back to the default.
+    assert Config.from_env({EVAL_MODEL_ENV: "  "}).eval_model == DEFAULT_EVAL_MODEL
+    assert Config.from_env({EVAL_MODEL_ENV: " claude-x "}).eval_model == "claude-x"

@@ -36,12 +36,14 @@ The evaluation is built from four composable, independently-tested pieces:
   kept distinct from thin-but-valid evidence (degraded confidence).
 - **read-only service** (:class:`SemanticEvaluator`) — orchestrate the above over a
   freshly generated, self-contained evaluation dir (``evidence.json`` +
-  ``static_metrics.json`` + ``semantic_report.json``), driving an **injected**
-  backend (:class:`SemanticBackend`) exactly as the intake manager injects its
-  agent. The concrete configured/CLI backend lands in session-2; session-1 proves
-  the whole boundary with a fake backend and the default
-  :class:`_UnavailableSemanticBackend` (so the service is always constructible and
-  an unconfigured backend fails cleanly, never crashes).
+  ``static_metrics.json`` + ``semantic_report.json`` + a human-readable
+  ``report.md`` render), driving an **injected** backend (:class:`SemanticBackend`)
+  exactly as the intake manager injects its agent. The concrete backend is
+  :class:`ClaudeSemanticBackend` — one read-only ``claude -p`` turn under
+  ``--permission-mode plan``, model from ``ORCH_HUB_EVAL_MODEL`` — with an injected
+  subprocess seam so every mechanic is unit-tested without launching ``claude``;
+  the default :class:`_UnavailableSemanticBackend` still fails cleanly when no
+  backend is wired.
 """
 
 from __future__ import annotations
@@ -50,7 +52,8 @@ import datetime as dt
 import json
 import os
 import shutil
-from collections.abc import Callable
+import subprocess
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -66,16 +69,32 @@ from .models import (
     SemanticScore,
     StaticMetricsReport,
 )
+from .runs import _orchestrator_env
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 
 SEMANTIC_REPORT_NAME = "semantic_report.json"
 """The persisted semantic report, written in the evaluation's artifact dir beside
 ``evidence.json`` and ``static_metrics.json`` (one dir per evaluation)."""
 
+SEMANTIC_REPORT_MD_NAME = "report.md"
+"""The persisted human-readable semantic report, rendered from the same
+:class:`~orch_hub.models.SemanticReport` and written beside
+``semantic_report.json`` (an export a human can read directly from the data dir,
+and the download affordance the dashboard layer surfaces). Written atomically in
+the same step as the JSON — a dir with the JSON has this too."""
+
 SEMANTIC_SCHEMA_VERSION = "1"
 """Version of the semantic prompt/report contract. Stamped onto every report's
 :class:`~orch_hub.models.SemanticEvaluatorInfo` so a rerun under a newer contract
 is comparable rather than silently conflated with an older one."""
+
+SEMANTIC_BACKEND_CLAUDE = "claude-cli"
+"""``SemanticEvaluatorInfo.backend`` value for the concrete Claude CLI backend."""
+
+DEFAULT_SEMANTIC_EFFORT = "high"
+"""Reasoning effort for the semantic evaluation turn. Judging one task's process
+quality is a bounded analysis, so this defaults below the orchestrator's ``max``;
+injectable, and the model itself comes from ``ORCH_HUB_EVAL_MODEL``."""
 
 # Sentinels delimiting the imposed report JSON envelope. Distinct opaque markers
 # (not ```` ```json ````) so evidence text that itself contains Markdown fences
@@ -442,6 +461,180 @@ class _UnavailableSemanticBackend:
         raise SemanticEvaluationError("no semantic evaluator backend configured")
 
 
+# -- concrete Claude CLI backend ----------------------------------------------
+# The real evaluator: one headless ``claude -p`` turn, read-only. It mirrors the
+# intake agent's CLI mechanics (:mod:`orch_hub.intake_agent`) but is a *single*
+# stateless turn (no session threading — the whole bounded evidence is in the one
+# prompt), so it stays a local, self-contained backend rather than importing
+# intake internals (the same independence stance the envelope extractor takes).
+# Read-only is structural: the turn runs under ``--permission-mode plan`` (a
+# read-only exploration sandbox — the model may inspect but cannot write), never
+# ``--dangerously-skip-permissions``. The subprocess is an injected seam
+# (:data:`SemanticRunner`) exactly like the run manager's ``spawner`` and the
+# intake agent's ``runner``, so every mechanic is unit-tested with a fake and the
+# thin real runner (:func:`_default_runner`) stays untested.
+
+
+@dataclass(frozen=True)
+class SemanticRunResult:
+    """One completed CLI turn: captured stdout/stderr and the exit code."""
+
+    stdout: str
+    stderr: str
+    returncode: int
+
+
+SemanticRunner = Callable[[Sequence[str], Path], SemanticRunResult]
+"""Runs one evaluator-CLI turn to completion in ``cwd`` and returns its captured
+output (blocking and output-capturing — the ``stream-json`` stdout must be parsed,
+not detached). Tests inject a fake; :func:`_default_runner` is the real one."""
+
+
+def _default_runner(argv: Sequence[str], cwd: Path) -> SemanticRunResult:
+    """Run ``claude`` to completion, capturing stdout/stderr (the real runner).
+
+    Uses the augmented PATH shared with detached orchestrator and intake runs
+    (:func:`orch_hub.runs._orchestrator_env`): the hub may run under launchd with
+    a sparse PATH while ``claude`` is installed under the user's home, and this
+    backend launches it by name. ``capture_output`` drains both pipes so a large
+    ``stream-json`` stdout cannot deadlock against stderr. Untested, like runs'
+    ``_default_spawner`` and the intake agent's ``_default_runner``.
+    """
+    proc = subprocess.run(
+        list(argv),
+        cwd=str(cwd),
+        env=_orchestrator_env(),
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return SemanticRunResult(
+        stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode
+    )
+
+
+class ClaudeSemanticBackend:
+    """Drives one read-only evaluation turn through headless ``claude -p``.
+
+    Implements the :class:`SemanticBackend` protocol. :meth:`evaluate` runs a
+    single ``claude -p --output-format stream-json … --permission-mode plan``
+    process in the target repo, sending the self-contained evaluator prompt
+    (:func:`build_prompt`, a plain prompt — not a slash command) and returning the
+    assistant's final text (the report envelope) for the service to parse.
+    ``model`` comes from ``ORCH_HUB_EVAL_MODEL``
+    (via :attr:`~orch_hub.config.Config.eval_model`); ``runner`` is injected for
+    tests. Constructing it launches nothing — a subprocess only starts when a
+    semantic evaluation is actually requested — so the default app wiring can build
+    it unconditionally, exactly like the intake agent.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        effort: str = DEFAULT_SEMANTIC_EFFORT,
+        runner: SemanticRunner = _default_runner,
+    ):
+        self.model = model
+        self.effort = effort
+        self._runner = runner
+
+    @property
+    def info(self) -> SemanticEvaluatorInfo:
+        return SemanticEvaluatorInfo(
+            backend=SEMANTIC_BACKEND_CLAUDE,
+            model=self.model,
+            schema_version=SEMANTIC_SCHEMA_VERSION,
+        )
+
+    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+        """Run the one read-only turn and return the assistant's final text.
+
+        Raises :class:`SemanticEvaluationError` on a nonzero exit or a stream-level
+        error (the same success test the orchestrator/intake readers use), so the
+        service turns a backend/model failure into a clean failed evaluation (dir
+        removed, no partial artifacts, target state untouched).
+        """
+        argv = self._argv(prompt)
+        result = self._runner(argv, repo.path)
+        text, errored = _extract_assistant_text(result.stdout)
+        if result.returncode != 0 or errored:
+            tail = (result.stderr or "").strip()
+            suffix = f": {tail[-500:]}" if tail else ""
+            raise SemanticEvaluationError(
+                f"claude semantic evaluation turn failed (exit {result.returncode},"
+                f" stream_error={errored}){suffix}"
+            )
+        return text
+
+    def _argv(self, prompt: str) -> list[str]:
+        """Build the ``claude`` argv for the read-only evaluation turn.
+
+        Mirrors the intake agent's read-only draft argv (``claude -p
+        --output-format stream-json --verbose --model … --effort … --permission-mode
+        plan``) minus session threading — one stateless turn, the whole evidence in
+        the prompt. The read-only gate is load-bearing: ``--permission-mode plan``
+        is present and ``--dangerously-skip-permissions`` is never added, so the
+        evaluator cannot write the target repo, ``.ai/``, or ``.ai-tasks/`` even if
+        the prompt's "diagnose only" instruction were ignored."""
+        return [
+            "claude",
+            "-p",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--model",
+            self.model,
+            "--effort",
+            self.effort,
+            "--permission-mode",
+            "plan",
+            prompt,
+        ]
+
+
+def _extract_assistant_text(stdout: str) -> tuple[str, bool]:
+    """Concatenate assistant text from a claude ``stream-json`` stdout.
+
+    Returns ``(text, errored)`` where ``text`` is every assistant text block
+    joined (the ``result`` event's ``result`` string is a fallback when no
+    assistant text streamed) and ``errored`` is set by a ``result`` event with
+    ``is_error``. A local copy of the intake agent's reader (kept here so the
+    semantic module stays independent of intake internals), tolerant of non-JSON
+    lines like the orchestrator's own reader.
+    """
+    chunks: list[str] = []
+    result_text = ""
+    errored = False
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            ev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict):
+            continue
+        etype = ev.get("type")
+        if etype == "assistant":
+            msg = ev.get("message")
+            content = (msg or {}).get("content") if isinstance(msg, dict) else None
+            for block in content or []:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+        elif etype == "result":
+            if ev.get("is_error"):
+                errored = True
+            res = ev.get("result")
+            if isinstance(res, str):
+                result_text = res
+    return ("".join(chunks) or result_text), errored
+
+
 # -- report parse / validate --------------------------------------------------
 
 
@@ -680,6 +873,109 @@ def _write_json(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def _write_text(path: Path, text: str) -> None:
+    """Persist a text artifact atomically (same-dir tmp + rename), the ``report.md``
+    counterpart of :func:`_write_json` for non-JSON siblings."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# -- Markdown rendering -------------------------------------------------------
+
+
+def render_report_md(report: SemanticReport) -> str:
+    """Render a :class:`~orch_hub.models.SemanticReport` as human-readable Markdown.
+
+    Pure and deterministic (a fixed report renders byte-identically) — the
+    ``report.md`` sibling of ``semantic_report.json``. Sections mirror the report
+    shape: a provenance header, the narrative summary (the explanation that
+    replaces a naked overall score), a scores table (``n/a`` for an axis the model
+    could not assess), findings ordered most-severe first, suggested improvements,
+    and the evidence-degradation notes — so a human reading the file alone sees the
+    whole diagnosis with its confidence and evidence caveats.
+    """
+    ev = report.evaluator
+    target = report.target_source or ("present" if report.target_present else "absent")
+    lines: list[str] = [
+        f"# Semantic Task Evaluation — {report.task_id}",
+        "",
+        f"- **Repository:** {report.repo_name}",
+        f"- **Evaluation ID:** {report.evaluation_id}",
+        f"- **Generated:** {report.generated_ts or 'n/a'}",
+        f"- **Evaluator:** {ev.backend} / {ev.model or 'n/a'} (schema v{ev.schema_version})",
+        f"- **Target:** {target}",
+        f"- **Overall confidence:** {_fmt_num(report.overall_confidence)}",
+        f"- **Static metrics input:** {'yes' if report.input_static_metrics else 'no'}",
+        "",
+        "## Summary",
+        "",
+        report.summary or "_(no summary provided)_",
+        "",
+        "## Scores",
+        "",
+    ]
+    if report.scores:
+        lines += ["| Dimension | Score | Confidence | Rationale |", "|---|---|---|---|"]
+        lines += [
+            f"| {s.dimension} | {_fmt_score(s.score)} | {_fmt_num(s.confidence)}"
+            f" | {_md_cell(s.rationale)} |"
+            for s in report.scores
+        ]
+    else:
+        lines.append("_(no scores)_")
+
+    lines += ["", "## Findings", ""]
+    if report.findings:
+        for f in _findings_by_severity(report.findings):
+            lines += [f"### [{f.severity.upper()}] {f.dimension} — {f.summary}", ""]
+            if f.detail:
+                lines += [f.detail, ""]
+            lines.append(f"- Confidence: {_fmt_num(f.confidence)}")
+            if f.evidence_refs:
+                lines.append(f"- Evidence: {'; '.join(f.evidence_refs)}")
+            if f.suggestion:
+                lines.append(f"- Suggestion: {f.suggestion}")
+            lines.append("")
+    else:
+        lines += ["_(no findings)_", ""]
+
+    lines += ["## Suggested Improvements", ""]
+    lines += [f"- {imp}" for imp in report.improvements] if report.improvements else ["_(none)_"]
+
+    if report.warnings:
+        lines += ["", "## Evidence Notes", ""]
+        lines += [f"- {w}" for w in report.warnings]
+
+    return "\n".join(lines) + "\n"
+
+
+def _findings_by_severity(
+    findings: Sequence[SemanticFinding],
+) -> list[SemanticFinding]:
+    """Findings most-severe first (``high`` → ``info``), stable within a severity
+    (Python's ``reverse=True`` preserves input order among equal keys)."""
+    rank = {sev: i for i, sev in enumerate(SEMANTIC_SEVERITIES)}
+    return sorted(findings, key=lambda f: rank.get(f.severity, -1), reverse=True)
+
+
+def _fmt_num(value: float) -> str:
+    """Two-decimal fixed format for a 0.0–1.0 confidence/score, stable in text."""
+    return f"{value:.2f}"
+
+
+def _fmt_score(score: float | None) -> str:
+    """A score cell: ``n/a`` when the model marked the axis unassessable, else the
+    two-decimal number."""
+    return "n/a" if score is None else _fmt_num(score)
+
+
+def _md_cell(text: str) -> str:
+    """Make free text safe inside a one-line Markdown table cell: newlines become
+    spaces and a literal ``|`` is escaped so a rationale cannot break the row."""
+    return text.replace("\n", " ").replace("|", "\\|")
+
+
 class SemanticEvaluator:
     """Read-only semantic task evaluator, gated by ``evaluation_enabled``.
 
@@ -757,16 +1053,25 @@ class SemanticEvaluator:
 
         Generates a fresh, self-contained evaluation (``evidence.json`` +
         ``static_metrics.json``), builds the bounded evidence and prompt, drives the
-        injected backend read-only, validates the returned report, and writes
-        ``semantic_report.json`` into the same dir — so one dir holds the whole
-        evidence→static→semantic chain, tied by ``evaluation_id``.
+        injected backend read-only, validates the returned report, and writes both
+        ``semantic_report.json`` and its human-readable ``report.md`` render into
+        the same dir — so one dir holds the whole evidence→static→semantic chain,
+        tied by ``evaluation_id``. A rerun (a different model, or just a
+        re-request) mints its own dir, preserving prior reports for comparison.
 
         Atomic and fail-closed: :meth:`EvaluationService.generate_evidence` mints
         and reserves the dir (removing it on its own failure); every step after is
         wrapped so a static-write, backend/model, parse/schema, or report-write
         failure removes the whole reserved dir and re-raises — a failed evaluation
         leaves no half-written artifacts and, being confined to the hub data dir,
-        never touches target repo/run/task state.
+        never touches target repo/run/task state. The all-or-nothing cleanup is
+        deliberate: it keeps the invariant that every dir this method mints is a
+        *complete* semantic evaluation, so an evidence+static-only dir unambiguously
+        means a deterministic ``/metrics`` run, not a semantic attempt that failed
+        at the model step. (Rejected keeping the evidence+static dir on a semantic
+        failure: each evaluation is self-contained and a retry mints a fresh dir, so
+        a leftover would not speed a retry — it would only blur that distinction and
+        litter history on a flaky backend.)
         """
         self._require_enabled()
         pack = self._service.generate_evidence(repo, task_id)
@@ -787,6 +1092,7 @@ class SemanticEvaluator:
                 evidence=evidence,
             )
             _write_json(eval_dir / SEMANTIC_REPORT_NAME, report.to_dict())
+            _write_text(eval_dir / SEMANTIC_REPORT_MD_NAME, render_report_md(report))
         except Exception:
             # generate_evidence created this dir; remove the whole reserved
             # evaluation (evidence + static + any partial semantic write) so a

@@ -46,6 +46,12 @@ from orch_hub.models import (
 )
 from orch_hub.registry import RegistryError
 from orch_hub.runs import RunManager
+from orch_hub.semantic import (
+    SEMANTIC_END,
+    SEMANTIC_START,
+    SemanticEvaluationError,
+    SemanticEvaluator,
+)
 from orch_hub.static_metrics import StaticEvaluator
 from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_store import STATUS_MISSING
@@ -2175,6 +2181,58 @@ def fake_eval_git(args, **kwargs) -> CommandResult:
     return CommandResult(tuple(str(a) for a in args), 128, "", "")
 
 
+SEMANTIC_PAYLOAD = {
+    "summary": "The task landed with a complete handoff.",
+    "confidence": 0.8,
+    "scores": [
+        {"dimension": "handoff_completeness", "score": 0.9, "confidence": 0.8,
+         "rationale": "session log complete"},
+    ],
+    "findings": [
+        {"dimension": "rediscovery_risk", "severity": "low", "summary": "thin note",
+         "confidence": 0.6, "evidence_refs": ["session-log entry sid-a"],
+         "suggestion": "record more in .ai/"},
+    ],
+    "improvements": ["Add a decision-trace reminder to the dev contract."],
+}
+
+
+def semantic_envelope(payload: dict | None = None) -> str:
+    body = json.dumps(SEMANTIC_PAYLOAD if payload is None else payload)
+    return f"here is my judgment\n{SEMANTIC_START}\n{body}\n{SEMANTIC_END}\nend"
+
+
+class FakeSemanticBackend:
+    """A semantic backend returning canned envelope text (no ``claude`` launched)."""
+
+    def __init__(self, text: str | None = None):
+        self._text = text if text is not None else semantic_envelope()
+        self.prompts: list[str] = []
+
+    @property
+    def info(self):
+        from orch_hub.models import SemanticEvaluatorInfo
+
+        return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
+
+    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+        self.prompts.append(prompt)
+        return self._text
+
+
+class RaisingSemanticBackend:
+    """A semantic backend whose model turn fails (a process/model error)."""
+
+    @property
+    def info(self):
+        from orch_hub.models import SemanticEvaluatorInfo
+
+        return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
+
+    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+        raise SemanticEvaluationError("claude semantic evaluation turn failed (exit 1)")
+
+
 def make_eval_client(
     tmp_path,
     monkeypatch,
@@ -2182,7 +2240,8 @@ def make_eval_client(
     repo: ManagedRepo | None = None,
     enabled: bool = True,
     records=None,
-) -> tuple[TestClient, EvaluationService, StaticEvaluator, ManagedRepo]:
+    semantic_backend=None,
+) -> tuple[TestClient, EvaluationService, StaticEvaluator, SemanticEvaluator, ManagedRepo]:
     repo = repo if repo is not None else make_run_repo(tmp_path)
     config = eval_config(tmp_path, enabled=enabled)
     loader = lambda cfg: list(records or [])
@@ -2192,12 +2251,26 @@ def make_eval_client(
     static = StaticEvaluator(
         config, evaluation_service=service, clock=lambda: EVAL_CLOCK
     )
+    # Inject a fake semantic backend so the ``/semantic`` route never launches
+    # ``claude``; it shares the same service + static evaluator as the other routes.
+    semantic = SemanticEvaluator(
+        config,
+        evaluation_service=service,
+        static_evaluator=static,
+        backend=semantic_backend if semantic_backend is not None else FakeSemanticBackend(),
+        clock=lambda: EVAL_CLOCK,
+    )
     monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
     client = TestClient(
-        api.create_app(config, evaluation_service=service, static_evaluator=static)
+        api.create_app(
+            config,
+            evaluation_service=service,
+            static_evaluator=static,
+            semantic_evaluator=semantic,
+        )
     )
     client.headers["Authorization"] = f"Bearer {TOKEN}"
-    return client, service, static, repo
+    return client, service, static, semantic, repo
 
 
 # -- availability --------------------------------------------------------------
@@ -2252,7 +2325,12 @@ def test_generate_metrics_then_list_and_fetch(tmp_path, monkeypatch):
     listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
     assert listing["latest_evaluation_id"] == eval_id
     assert listing["evaluations"] == [
-        {"evaluation_id": eval_id, "has_evidence": True, "has_static_metrics": True}
+        {
+            "evaluation_id": eval_id,
+            "has_evidence": True,
+            "has_static_metrics": True,
+            "has_semantic_report": False,
+        }
     ]
 
     detail = client.get(
@@ -2263,6 +2341,8 @@ def test_generate_metrics_then_list_and_fetch(tmp_path, monkeypatch):
     # Evidence is generated alongside metrics and readable for local inspection.
     assert detail["evidence"]["evaluation_id"] == eval_id
     assert detail["evidence"]["summary"]["run_count"] == 0
+    # A deterministic metrics run has no semantic layer.
+    assert detail["semantic_report"] is None and detail["report_md"] is None
 
 
 def test_generate_evidence_only_has_no_static_metrics(tmp_path, monkeypatch):
@@ -2275,7 +2355,12 @@ def test_generate_evidence_only_has_no_static_metrics(tmp_path, monkeypatch):
 
     listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
     assert listing["evaluations"] == [
-        {"evaluation_id": eval_id, "has_evidence": True, "has_static_metrics": False}
+        {
+            "evaluation_id": eval_id,
+            "has_evidence": True,
+            "has_static_metrics": False,
+            "has_semantic_report": False,
+        }
     ]
 
     detail = client.get(
@@ -2283,6 +2368,7 @@ def test_generate_evidence_only_has_no_static_metrics(tmp_path, monkeypatch):
     ).json()
     assert detail["evidence"]["evaluation_id"] == eval_id
     assert detail["static_metrics"] is None  # evidence-only: no report artifact
+    assert detail["semantic_report"] is None and detail["report_md"] is None
 
 
 def test_generate_metrics_refresh_creates_second_evaluation(tmp_path, monkeypatch):
@@ -2332,6 +2418,97 @@ def test_unknown_task_evaluates_as_absent_target(tmp_path, monkeypatch):
     gen = client.post(f"/api/repos/{repo.name}/evaluations/{ghost}/metrics")
     assert gen.status_code == 201
     assert gen.json()["static_metrics"]["target_present"] is False
+
+
+# -- semantic (Layer 2) --------------------------------------------------------
+
+
+def test_generate_semantic_then_list_and_fetch(tmp_path, monkeypatch):
+    # A semantic evaluation over a fake backend persists the full chain and is
+    # listed and read back through the same sidecar routes as Layer 1.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+
+    gen = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
+    assert gen.status_code == 201
+    eval_id = gen.json()["evaluation_id"]
+    report = gen.json()["semantic_report"]
+    assert report["evaluation_id"] == eval_id
+    assert report["task_id"] == RUN_TASK_ID
+    assert report["evaluator"]["backend"] == "fake"
+    assert report["scores"] and report["findings"]
+    # Static metrics were fed as input (the chain is evidence→static→semantic).
+    assert report["input_static_metrics"] is True
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["evaluations"] == [
+        {
+            "evaluation_id": eval_id,
+            "has_evidence": True,
+            "has_static_metrics": True,
+            "has_semantic_report": True,
+        }
+    ]
+
+    detail = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{eval_id}"
+    ).json()
+    assert detail["semantic_report"] == report
+    # All three JSON layers plus the rendered Markdown export are readable.
+    assert detail["evidence"]["evaluation_id"] == eval_id
+    assert detail["static_metrics"]["evaluation_id"] == eval_id
+    assert detail["report_md"].startswith("# Semantic Task Evaluation")
+    assert "handoff_completeness" in detail["report_md"]
+
+
+def test_generate_semantic_backend_failure_is_502(tmp_path, monkeypatch):
+    # A backend/model failure is a 502 (upstream evaluator failed) and, because
+    # cleanup is atomic, leaves no persisted evaluation behind.
+    client, *_ , repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=RaisingSemanticBackend()
+    )
+
+    resp = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
+    assert resp.status_code == 502
+    assert "failed" in resp.json()["detail"]
+
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["evaluations"] == []  # nothing half-written
+
+
+def test_generate_semantic_schema_violation_is_502(tmp_path, monkeypatch):
+    # A non-conforming model response (missing the required confidence) is also a
+    # 502 from the semantic layer's schema gate, with no artifact persisted.
+    bad = semantic_envelope({"scores": [], "findings": []})
+    client, *_ , repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(bad)
+    )
+
+    resp = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
+    assert resp.status_code == 502
+    # Atomic cleanup removed the reserved evaluation dir: nothing is listed.
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["evaluations"] == []
+
+
+def test_generate_semantic_unknown_repo_is_404(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    resp = client.post(f"/api/repos/ghost/evaluations/{RUN_TASK_ID}/semantic")
+    assert resp.status_code == 404
+
+
+def test_generate_semantic_is_read_only_over_the_target_repo(tmp_path, monkeypatch):
+    # The service boundary is read-only: a semantic run never touches the target
+    # task file or its .ai-tasks/ dir, only the hub-owned evaluations tree.
+    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    task_file = repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md"
+    before = task_file.read_text(encoding="utf-8")
+    before_listing = sorted(p.name for p in (repo.path / ".ai-tasks").iterdir())
+
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
+
+    assert task_file.read_text(encoding="utf-8") == before
+    assert sorted(p.name for p in (repo.path / ".ai-tasks").iterdir()) == before_listing
+    assert (tmp_path / "hub-data" / "evaluations" / repo.name / RUN_TASK_ID).is_dir()
 
 
 # -- error shapes --------------------------------------------------------------
@@ -2408,6 +2585,7 @@ def test_disabled_mode_action_routes_are_404(tmp_path, monkeypatch):
         client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/anything"),
         client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/evidence"),
         client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics"),
+        client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic"),
     ):
         assert resp.status_code == 404
         assert "disabled" in resp.json()["detail"]
@@ -2456,4 +2634,7 @@ def test_evaluation_routes_require_auth(tmp_path, monkeypatch):
     ).status_code == 401
     assert unauthed.post(
         f"/api/repos/r/evaluations/{RUN_TASK_ID}/metrics"
+    ).status_code == 401
+    assert unauthed.post(
+        f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic"
     ).status_code == 401

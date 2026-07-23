@@ -75,6 +75,13 @@ from .runs import (
     RunManager,
     UnknownRunError,
 )
+from .semantic import (
+    SEMANTIC_REPORT_MD_NAME,
+    SEMANTIC_REPORT_NAME,
+    ClaudeSemanticBackend,
+    SemanticEvaluationError,
+    SemanticEvaluator,
+)
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from .task_store import (
     list_repo_tasks,
@@ -253,14 +260,18 @@ def _evaluation_summary(stored) -> dict:
 
     The evaluation-history picker needs the id and which artifacts exist, not the
     concrete filenames: this translates the stored ``artifacts`` set into the
-    stable ``has_evidence``/``has_static_metrics`` booleans, keeping
-    ``evidence.json`` / ``static_metrics.json`` an internal detail of the
-    evaluation subsystem rather than part of the HTTP contract.
+    stable ``has_evidence``/``has_static_metrics``/``has_semantic_report``
+    booleans, keeping ``evidence.json`` / ``static_metrics.json`` /
+    ``semantic_report.json`` an internal detail of the evaluation subsystem rather
+    than part of the HTTP contract. ``report.md`` is not surfaced separately — it is
+    written atomically with ``semantic_report.json``, so its presence tracks that
+    flag and the detail route serves the rendered text under ``report_md``.
     """
     return {
         "evaluation_id": stored.evaluation_id,
         "has_evidence": EVIDENCE_NAME in stored.artifacts,
         "has_static_metrics": STATIC_METRICS_NAME in stored.artifacts,
+        "has_semantic_report": SEMANTIC_REPORT_NAME in stored.artifacts,
     }
 
 
@@ -271,6 +282,7 @@ def create_app(
     intake_manager: IntakeManager | None = None,
     evaluation_service: EvaluationService | None = None,
     static_evaluator: StaticEvaluator | None = None,
+    semantic_evaluator: SemanticEvaluator | None = None,
 ) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
 
@@ -337,6 +349,24 @@ def create_app(
         static_evaluator
         if static_evaluator is not None
         else StaticEvaluator(resolved, evaluation_service=evaluation)
+    )
+    # The semantic (Layer 2) evaluator shares the same evaluation service + static
+    # evaluator, so an injected fake service flows to all three layers. Its default
+    # backend is the concrete Claude CLI driver (:class:`ClaudeSemanticBackend`,
+    # read-only under ``--permission-mode plan``, model from ``ORCH_HUB_EVAL_MODEL``);
+    # constructing it launches nothing, so building the app spawns no subprocess —
+    # a semantic evaluation only reaches ``claude`` when the ``/semantic`` route is
+    # hit. If ``claude`` is unavailable the turn fails cleanly as a 502. Tests inject
+    # one wired with a fake backend so the read-only boundary is exercised over HTTP.
+    semantic = (
+        semantic_evaluator
+        if semantic_evaluator is not None
+        else SemanticEvaluator(
+            resolved,
+            evaluation_service=evaluation,
+            static_evaluator=static_metrics,
+            backend=ClaudeSemanticBackend(model=resolved.eval_model),
+        )
     )
     monitor = RunMonitor(manager)
 
@@ -1042,14 +1072,15 @@ def create_app(
     ) -> dict:
         """Return one persisted evaluation's full artifacts for ``(repo, task)``.
 
-        ``evidence`` is the bounded evidence pack and ``static_metrics`` the Layer
-        1 report; each is ``null`` when that artifact was not generated (an
-        evidence-only evaluation has no report). The pair backs both the metrics
-        view and the local-inspection download affordances. ``repo_id`` unknown →
-        404; an ``evaluation_id`` with no persisted dir → 404 (kept distinct from a
-        present dir missing one artifact, which is a ``null`` field). An unsafe
-        ``task_id`` → 400; a corrupt persisted artifact surfaces as a 500 rather
-        than being masked as "not generated".
+        ``evidence`` is the bounded evidence pack, ``static_metrics`` the Layer 1
+        report, ``semantic_report`` the Layer 2 model judgment, and ``report_md``
+        its human-readable render; each is ``null`` when that artifact was not
+        generated (an evidence-only evaluation has evidence but no reports). The set
+        backs both the metrics/semantic views and the local-inspection download
+        affordances. ``repo_id`` unknown → 404; an ``evaluation_id`` with no
+        persisted dir → 404 (kept distinct from a present dir missing one artifact,
+        which is a ``null`` field). An unsafe ``task_id`` → 400; a corrupt persisted
+        artifact surfaces as a 500 rather than being masked as "not generated".
         """
         require_evaluation_enabled()
         repo = resolve_repo(repo_id)
@@ -1087,10 +1118,26 @@ def create_app(
             if STATIC_METRICS_NAME in stored.artifacts
             else None
         )
+        semantic = (
+            evaluation.read_artifact(
+                repo, task_id, evaluation_id, SEMANTIC_REPORT_NAME
+            )
+            if SEMANTIC_REPORT_NAME in stored.artifacts
+            else None
+        )
+        report_md = (
+            evaluation.read_text_artifact(
+                repo, task_id, evaluation_id, SEMANTIC_REPORT_MD_NAME
+            )
+            if SEMANTIC_REPORT_MD_NAME in stored.artifacts
+            else None
+        )
         return {
             "evaluation_id": evaluation_id,
             "evidence": evidence,
             "static_metrics": static,
+            "semantic_report": semantic,
+            "report_md": report_md,
         }
 
     @app.post(
@@ -1137,6 +1184,37 @@ def create_app(
         return {
             "evaluation_id": report.evaluation_id,
             "static_metrics": report.to_dict(),
+        }
+
+    @app.post(
+        "/api/repos/{repo_id}/evaluations/{task_id}/semantic", status_code=201
+    )
+    def generate_task_semantic(repo_id: str, task_id: str) -> dict:
+        """Generate a fresh Layer 2 semantic evaluation for ``(repo, task)``.
+
+        Delegates to :meth:`SemanticEvaluator.evaluate`, which mints one
+        self-contained evaluation dir holding ``evidence.json`` +
+        ``static_metrics.json`` + ``semantic_report.json`` + ``report.md``, driving
+        the configured read-only Claude CLI backend. Hub-owned artifacts only; the
+        target task/run state and ``.ai/``/``.ai-tasks/`` are never touched, and the
+        cleanup is atomic so a failed turn leaves nothing behind. ``repo_id`` unknown
+        → 404; an unsafe id → 400; disabled → 404; a backend/model failure or a
+        non-conforming model response → 502 (the upstream evaluator failed), with no
+        persisted artifact. Returns the new ``evaluation_id`` and the report (201);
+        its paired evidence/static/report.md are then readable through the detail
+        route.
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            report = semantic.evaluate(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except SemanticEvaluationError as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        return {
+            "evaluation_id": report.evaluation_id,
+            "semantic_report": report.to_dict(),
         }
 
     return app

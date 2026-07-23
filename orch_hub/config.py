@@ -57,6 +57,20 @@ or blank means the default; an unrecognized value fails loudly (like a malformed
 DEFAULT_EVAL_ENABLED = True
 """Task evaluation is enabled by default (local use); disable it explicitly."""
 
+EVAL_MODEL_ENV = "ORCH_HUB_EVAL_MODEL"
+"""Environment variable selecting the model for the semantic task evaluator.
+
+The optional semantic evaluator (Layer 2 of the evaluation subsystem) drives a
+Claude CLI backend; this picks which model judges task quality. Unset or blank
+means :data:`DEFAULT_EVAL_MODEL`. It only matters when evaluation is enabled and
+a semantic evaluation is requested — the deterministic Layer 1 static metrics
+make no model call."""
+
+DEFAULT_EVAL_MODEL = "claude-opus-4-8"
+"""Default semantic-evaluator model (mirrors the intake agent's cc model). A
+strong model is appropriate for judging task/process quality; override with
+``ORCH_HUB_EVAL_MODEL``."""
+
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 
@@ -148,6 +162,15 @@ class Config:
     and disable — hence a real boolean, not a nullable value.
     """
 
+    eval_model: str = DEFAULT_EVAL_MODEL
+    """Model id for the semantic task evaluator's Claude CLI backend.
+
+    Selected by ``ORCH_HUB_EVAL_MODEL``; defaults to :data:`DEFAULT_EVAL_MODEL`.
+    Always a concrete string (never ``None``) so the backend can be constructed
+    unconditionally — it only reaches a subprocess when a semantic evaluation is
+    actually requested while evaluation is enabled.
+    """
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
@@ -178,6 +201,7 @@ class Config:
                 default=DEFAULT_EVAL_ENABLED,
                 env_name=EVAL_ENABLED_ENV,
             ),
+            eval_model=(env.get(EVAL_MODEL_ENV) or "").strip() or DEFAULT_EVAL_MODEL,
         )
 
     @property

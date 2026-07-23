@@ -522,6 +522,27 @@ class EvaluationService:
             return None
         return json.loads(path.read_text(encoding="utf-8"))
 
+    def read_text_artifact(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str
+    ) -> str | None:
+        """Read one persisted *text* artifact verbatim, or ``None`` when absent.
+
+        The text parallel of :meth:`read_artifact` for a non-JSON sibling
+        artifact (the semantic layer's ``report.md`` — a human-readable export
+        rendered beside ``semantic_report.json``). Same containment: ``name`` is
+        re-validated as a single safe segment and resolution goes through
+        :meth:`artifact_dir`, so a crafted repo/task/evaluation id is rejected
+        before any read; a missing dir or file both read as ``None``. Gated and
+        read-only. Kept distinct from :meth:`read_artifact` because a Markdown
+        artifact must not be run through ``json.loads``.
+        """
+        self._require_enabled()
+        eval_dir = self.artifact_dir(repo, task_id, evaluation_id)
+        path = eval_dir / _safe_segment(name, label="artifact name")
+        if not path.is_file():
+            return None
+        return path.read_text(encoding="utf-8")
+
     def build_evidence(
         self, repo: ManagedRepo, task_id: str, *, evaluation_id: str
     ) -> EvidencePack:
