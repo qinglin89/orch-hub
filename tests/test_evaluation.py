@@ -37,11 +37,17 @@ TASK = "2026-07-22-task-evaluation-foundation"
 FIXED_CLOCK = dt.datetime(2026, 7, 22, 9, 0, 0, tzinfo=dt.timezone.utc)
 
 
-def make_config(tmp_path: Path, *, enabled: bool = True) -> Config:
+def make_config(
+    tmp_path: Path, *, enabled: bool = True, retention: int | None = None
+) -> Config:
+    kwargs = {}
+    if retention is not None:
+        kwargs["eval_retention"] = retention
     return Config(
         ai_native_path=tmp_path / "ai-native",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=enabled,
+        **kwargs,
     )
 
 
@@ -888,3 +894,103 @@ def test_read_text_artifact_reads_verbatim_and_absent_is_none(tmp_path):
     # Containment: a path-traversal artifact name is rejected before any read.
     with pytest.raises(ValueError):
         service.read_text_artifact(repo, TASK, pack.evaluation_id, "../evidence.json")
+
+
+# -- retention / cleanup ------------------------------------------------------
+#
+# Evaluation artifacts accumulate one dir per generation; retention keeps only the
+# newest N per task so the sidecar tree stays bounded. The fixed clock mints one
+# base stamp with bumping suffixes, so a plain count check is deterministic.
+
+
+def test_prune_evaluations_keeps_newest_and_removes_older(tmp_path):
+    # Isolate the explicit prune primitive: generate with retention disabled (0) so
+    # auto-prune does not fire, giving six distinct evaluations, then prune to 3.
+    config = make_config(tmp_path, retention=0)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    ids = [service.generate_evidence(repo, TASK).evaluation_id for _ in range(6)]
+    assert len(set(ids)) == 6  # no reuse when nothing is pruned mid-run
+
+    removed = service.prune_evaluations(repo, TASK, keep=3)
+
+    remaining = [s.evaluation_id for s in service.list_evaluations(repo, TASK)]
+    assert len(remaining) == 3
+    # The three newest (last-minted) survive; the three oldest are removed.
+    assert remaining == list(reversed(ids))[:3]
+    assert set(removed) == set(ids[:3])
+    assert set(remaining).isdisjoint(set(removed))
+    # Every removed dir is actually gone from disk.
+    for rid in removed:
+        assert not service.artifact_dir(repo, TASK, rid).exists()
+
+
+def test_prune_evaluations_keep_zero_disables(tmp_path):
+    config = make_config(tmp_path, retention=0)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    for _ in range(4):
+        service.generate_evidence(repo, TASK)
+    # keep=0 is an explicit no-op: retention disabled, keep everything.
+    assert service.prune_evaluations(repo, TASK, keep=0) == []
+    assert len(service.list_evaluations(repo, TASK)) == 4
+
+
+def test_prune_evaluations_is_scoped_to_one_task(tmp_path):
+    config = make_config(tmp_path, retention=1)
+    repo = make_repo(tmp_path)
+    other = "2026-07-22-some-other-task"
+    write_active_task(repo, TASK, "# body")
+    write_active_task(repo, other, "# body")
+    service = make_service(config)
+
+    service.generate_evidence(repo, TASK)
+    service.generate_evidence(repo, TASK)
+    service.generate_evidence(repo, other)
+    service.prune_evaluations(repo, TASK, keep=1)
+
+    # Pruning TASK never touches the other task's evaluations.
+    assert len(service.list_evaluations(repo, TASK)) == 1
+    assert len(service.list_evaluations(repo, other)) == 1
+
+
+def test_generate_evidence_auto_prunes_to_config_cap(tmp_path):
+    # Retention is enforced automatically on generation, so growth stays bounded
+    # without a manual prune. The just-generated dir always survives (a metrics or
+    # semantic flow writes into it after generate_evidence returns).
+    config = make_config(tmp_path, retention=2)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    for _ in range(5):
+        pack = service.generate_evidence(repo, TASK)
+        # The returned dir must exist for the subsequent static/semantic writes.
+        assert pack.evaluation_dir.is_dir()
+        # Bounded to the cap (transiently cap+1 when the fresh id sorts oldest).
+        assert len(service.list_evaluations(repo, TASK)) <= config.eval_retention + 1
+
+    assert len(service.list_evaluations(repo, TASK)) <= config.eval_retention + 1
+
+
+def test_generate_evidence_default_retention_keeps_modest_history(tmp_path):
+    # The default cap is generous, so a handful of evaluations are all retained.
+    config = make_config(tmp_path)  # default retention
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    for _ in range(5):
+        service.generate_evidence(repo, TASK)
+    assert len(service.list_evaluations(repo, TASK)) == 5
+
+
+def test_prune_evaluations_disabled_service_fails_closed(tmp_path):
+    repo = make_repo(tmp_path)
+    service = EvaluationService(make_config(tmp_path, enabled=False))
+    with pytest.raises(EvaluationDisabledError):
+        service.prune_evaluations(repo, TASK)

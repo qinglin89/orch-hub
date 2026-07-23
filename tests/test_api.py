@@ -2205,8 +2205,9 @@ def semantic_envelope(payload: dict | None = None) -> str:
 class FakeSemanticBackend:
     """A semantic backend returning canned envelope text (no ``claude`` launched)."""
 
-    def __init__(self, text: str | None = None):
+    def __init__(self, text: str | None = None, *, available: bool = True):
         self._text = text if text is not None else semantic_envelope()
+        self._available = available
         self.prompts: list[str] = []
 
     @property
@@ -2218,6 +2219,17 @@ class FakeSemanticBackend:
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
         self.prompts.append(prompt)
         return self._text
+
+    def doctor(self):
+        from orch_hub.models import SemanticDoctor
+
+        return SemanticDoctor(
+            backend="fake",
+            model="fake-model",
+            schema_version="1",
+            available=self._available,
+            detail="claude resolved at /fake/claude" if self._available else "not found",
+        )
 
 
 class RaisingSemanticBackend:
@@ -2231,6 +2243,13 @@ class RaisingSemanticBackend:
 
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
         raise SemanticEvaluationError("claude semantic evaluation turn failed (exit 1)")
+
+    def doctor(self):
+        from orch_hub.models import SemanticDoctor
+
+        return SemanticDoctor(
+            backend="fake", model="fake-model", schema_version="1", available=True
+        )
 
 
 def make_eval_client(
@@ -2290,6 +2309,51 @@ def test_evaluation_availability_reports_disabled(tmp_path, monkeypatch):
     resp = client.get("/api/evaluation")
     assert resp.status_code == 200
     assert resp.json() == {"enabled": False}
+
+
+# -- doctor (Layer 2 readiness probe) ------------------------------------------
+
+
+def test_evaluation_doctor_reports_available_backend(tmp_path, monkeypatch):
+    # The doctor is a config/availability probe: enabled + a resolvable backend →
+    # 200 with the semantic readiness, no model call, no run-control impact.
+    client, *_ = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(available=True)
+    )
+    resp = client.get("/api/evaluation/doctor")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert body["semantic"]["available"] is True
+    assert body["semantic"]["backend"] == "fake"
+    assert body["semantic"]["model"] == "fake-model"
+    assert body["semantic"]["schema_version"] == "1"
+
+
+def test_evaluation_doctor_reports_unconfigured_backend(tmp_path, monkeypatch):
+    # An enabled-but-unconfigured backend is a 200 with available:false (NOT a
+    # failure) so the dashboard can disable the Layer 2 control while keeping
+    # Layer 1 usable, rather than the session-1 502-on-click.
+    client, *_ = make_eval_client(
+        tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(available=False)
+    )
+    resp = client.get("/api/evaluation/doctor")
+    assert resp.status_code == 200
+    assert resp.json()["semantic"]["available"] is False
+
+
+def test_evaluation_doctor_disabled_is_404(tmp_path, monkeypatch):
+    # Enabled-gated like every action route: a disabled hub fails closed at 404.
+    client, *_ = make_eval_client(tmp_path, monkeypatch, enabled=False)
+    resp = client.get("/api/evaluation/doctor")
+    assert resp.status_code == 404
+
+
+def test_evaluation_doctor_requires_auth(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    del client.headers["Authorization"]
+    resp = client.get("/api/evaluation/doctor")
+    assert resp.status_code == 401
 
 
 # -- generate / list / fetch ---------------------------------------------------

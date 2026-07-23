@@ -1095,6 +1095,37 @@ class SemanticEvaluatorInfo:
 
 
 @dataclass(frozen=True)
+class SemanticDoctor:
+    """A semantic-evaluator readiness/smoke check — is Layer 2 runnable and how.
+
+    Output of the evaluator doctor (:meth:`orch_hub.semantic.SemanticBackend.doctor`
+    and :meth:`~orch_hub.semantic.SemanticEvaluator.doctor`): a
+    *configuration/availability* probe, deliberately NOT a full evaluation (no
+    model call, no cost). It carries the evaluator identity (``backend``/``model``/
+    ``schema_version`` — the same triple as :class:`SemanticEvaluatorInfo`) plus
+    ``available`` (whether the backend can actually run — e.g. the ``claude`` CLI
+    resolves on the augmented PATH) and a human-readable ``detail`` (the resolved
+    path, or why it is unavailable). It gates the dashboard's Layer 2 control and
+    the ``orch-hub eval doctor`` CLI; it never gates run Start/Stop/log flows.
+    """
+
+    backend: str
+    model: str | None
+    schema_version: str
+    available: bool
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "backend": self.backend,
+            "model": self.model,
+            "schema_version": self.schema_version,
+            "available": self.available,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
 class SemanticScore:
     """One semantic score axis with its explanation (never a naked number).
 

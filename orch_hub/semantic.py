@@ -68,6 +68,7 @@ from .evaluation import EvaluationDisabledError, EvaluationService, EvidencePack
 from .models import (
     EvaluationTarget,
     ManagedRepo,
+    SemanticDoctor,
     SemanticEvaluatorInfo,
     SemanticFinding,
     SemanticReport,
@@ -448,6 +449,17 @@ class SemanticBackend(Protocol):
 
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str: ...
 
+    def doctor(self) -> SemanticDoctor:
+        """Report whether this backend can actually run, without a model call.
+
+        A cheap, side-effect-free configuration/availability probe (no ``evaluate``
+        turn, no cost) used to gate the dashboard's Layer 2 control and answer
+        ``orch-hub eval doctor``. It reports the backend identity plus ``available``
+        — e.g. the concrete Claude backend checks that ``claude`` resolves on PATH.
+        It MUST NOT launch an evaluation or mutate any state.
+        """
+        ...
+
 
 class _UnavailableSemanticBackend:
     """Default backend: no concrete evaluator model is wired yet.
@@ -468,6 +480,16 @@ class _UnavailableSemanticBackend:
 
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
         raise SemanticEvaluationError("no semantic evaluator backend configured")
+
+    def doctor(self) -> SemanticDoctor:
+        """Never available — no concrete evaluator model is wired."""
+        return SemanticDoctor(
+            backend="unavailable",
+            model=None,
+            schema_version=SEMANTIC_SCHEMA_VERSION,
+            available=False,
+            detail="no semantic evaluator backend configured",
+        )
 
 
 # -- concrete Claude CLI backend ----------------------------------------------
@@ -536,6 +558,19 @@ def _default_runner(argv: Sequence[str], cwd: Path) -> SemanticRunResult:
     )
 
 
+def _default_which() -> str | None:
+    """Resolve the ``claude`` executable on the augmented PATH, or ``None``.
+
+    Uses the same augmented PATH the real evaluator/orchestrator/intake runs use
+    (:func:`orch_hub.runs._orchestrator_env`) so a doctor probe agrees with what a
+    real ``evaluate`` turn would find — the hub may run under launchd with a sparse
+    PATH while ``claude`` is installed under the user's home. Pure filesystem
+    resolution (``shutil.which``): no subprocess, no model call, safe to call on a
+    dashboard view load. Looked up as a module global inside
+    :meth:`ClaudeSemanticBackend.doctor` so a test can monkeypatch it."""
+    return shutil.which("claude", path=_orchestrator_env().get("PATH"))
+
+
 class ClaudeSemanticBackend:
     """Drives one read-only, evidence-bounded evaluation turn through ``claude -p``.
 
@@ -560,10 +595,15 @@ class ClaudeSemanticBackend:
         model: str,
         effort: str = DEFAULT_SEMANTIC_EFFORT,
         runner: SemanticRunner = _default_runner,
+        which: Callable[[], str | None] | None = None,
     ):
         self.model = model
         self.effort = effort
         self._runner = runner
+        # Injectable ``claude`` resolver for :meth:`doctor`; ``None`` means resolve
+        # via the module-global :func:`_default_which` at call time (so a test can
+        # monkeypatch that global) rather than binding it at construction.
+        self._which = which
 
     @property
     def info(self) -> SemanticEvaluatorInfo:
@@ -571,6 +611,30 @@ class ClaudeSemanticBackend:
             backend=SEMANTIC_BACKEND_CLAUDE,
             model=self.model,
             schema_version=SEMANTIC_SCHEMA_VERSION,
+        )
+
+    def doctor(self) -> SemanticDoctor:
+        """Report whether ``claude`` is runnable, without launching an evaluation.
+
+        A cheap availability probe: it resolves the ``claude`` executable on the
+        augmented PATH (:func:`_default_which`, or the injected resolver) — the
+        exact failure the session-1 UI could only surface as a 502 on click. It
+        runs no ``claude`` process and makes no model call, so it is safe to call
+        on a dashboard view load to gate the Layer 2 control. ``available`` is
+        whether the CLI resolved; ``detail`` carries the resolved path or the
+        not-found reason."""
+        resolver = self._which if self._which is not None else _default_which
+        path = resolver()
+        if path:
+            detail = f"claude resolved at {path}"
+        else:
+            detail = "claude executable not found on PATH"
+        return SemanticDoctor(
+            backend=SEMANTIC_BACKEND_CLAUDE,
+            model=self.model,
+            schema_version=SEMANTIC_SCHEMA_VERSION,
+            available=bool(path),
+            detail=detail,
         )
 
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
@@ -1092,6 +1156,19 @@ class SemanticEvaluator:
             raise EvaluationDisabledError(
                 "task evaluation is disabled (ORCH_HUB_EVAL_ENABLED)"
             )
+
+    def doctor(self) -> SemanticDoctor:
+        """Report Layer 2 readiness (backend availability + identity), gated.
+
+        Fails closed with :class:`~orch_hub.evaluation.EvaluationDisabledError`
+        when the subsystem is disabled (like every other operation), so the API
+        maps a disabled hub to the uniform 404. Otherwise it delegates to the
+        injected backend's :meth:`SemanticBackend.doctor` — a cheap
+        configuration/availability check with no model call — so the dashboard can
+        disable the Layer 2 control (keeping Layer 1 usable) and the CLI can smoke
+        check the evaluator without ever gating run Start/Stop/log flows."""
+        self._require_enabled()
+        return self._backend.doctor()
 
     def build_evidence(self, pack: EvidencePack) -> SemanticEvidence:
         """Build the bounded semantic evidence for an already-assembled pack.

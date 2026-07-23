@@ -499,6 +499,49 @@ class EvaluationService:
         stored.sort(key=lambda e: _evaluation_order_key(e.evaluation_id), reverse=True)
         return stored
 
+    def prune_evaluations(
+        self,
+        repo: ManagedRepo,
+        task_id: str,
+        *,
+        keep: int | None = None,
+        protect: str | None = None,
+    ) -> list[str]:
+        """Remove all but the ``keep`` newest evaluations for ``(repo, task_id)``.
+
+        The retention primitive: enumerate the task's evaluations newest-first
+        (:meth:`list_evaluations`) and delete every one past the ``keep`` cap, so
+        ``<data_dir>/evaluations`` stays bounded while the freshest history is kept
+        for trend analysis. ``keep`` defaults to ``Config.eval_retention``; ``keep
+        <= 0`` disables retention (a no-op, returning ``[]``), so a deployment can
+        opt out. ``protect`` is an evaluation id that is never removed even if it
+        sorts past the cap: the generate path passes the just-created id, because a
+        same-second collision can reuse a *pruned* base id (which then sorts oldest
+        by ``(stamp, suffix)``), and deleting the dir a generation just wrote would
+        break the static/semantic writes that follow — the guard keeps the fresh
+        evaluation at a transient ``keep + 1`` that self-corrects next generation.
+        Scoped strictly to this ``(repo, task)`` subtree — other tasks' evaluations
+        are never touched — and removals go through the contained
+        :meth:`artifact_dir` (rejecting unsafe segments). Best-effort per dir
+        (``rmtree(ignore_errors=True)``, matching the generate-failure cleanup), so
+        one un-removable dir cannot fail the prune. Returns the ids it removed,
+        newest-first among the removed. Gated and hub-owned: it only ever deletes
+        the subsystem's own artifacts, never target repo/task/run state.
+        """
+        self._require_enabled()
+        limit = self._config.eval_retention if keep is None else keep
+        if limit <= 0:
+            return []
+        stored = self.list_evaluations(repo, task_id)
+        removed: list[str] = []
+        for entry in stored[limit:]:
+            if entry.evaluation_id == protect:
+                continue
+            eval_dir = self.artifact_dir(repo, task_id, entry.evaluation_id)
+            shutil.rmtree(eval_dir, ignore_errors=True)
+            removed.append(entry.evaluation_id)
+        return removed
+
     def read_artifact(
         self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str
     ) -> dict | None:
@@ -594,6 +637,18 @@ class EvaluationService:
             # way). ``ignore_errors`` keeps cleanup itself from masking the cause.
             shutil.rmtree(evaluation_dir, ignore_errors=True)
             raise
+        # Enforce retention AFTER the write succeeds and OUTSIDE the try above: this
+        # is the single choke point every generation path funnels through
+        # (metrics/semantic both mint their dir via generate_evidence), so growth is
+        # bounded without a separate cron. ``protect`` the id just written — a
+        # same-second collision can reuse a pruned base id that now sorts oldest, and
+        # this dir must survive for the static/semantic writes a metrics/semantic
+        # generation performs into it after this returns. Best-effort — housekeeping
+        # must never fail or roll back an otherwise-successful generation.
+        try:
+            self.prune_evaluations(repo, task_id, protect=evaluation_id)
+        except Exception:
+            pass
         return replace(pack, evaluation_dir=evaluation_dir)
 
     def _reserve_evaluation_dir(

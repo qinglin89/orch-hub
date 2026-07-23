@@ -13,7 +13,13 @@ from types import SimpleNamespace
 from urllib.error import URLError
 
 from orch_hub import cli
-from orch_hub.config import BARK_URL_ENV, PORT_ENV, TOKEN_ENV
+from orch_hub.config import (
+    BARK_URL_ENV,
+    EVAL_ENABLED_ENV,
+    EVAL_RETENTION_ENV,
+    PORT_ENV,
+    TOKEN_ENV,
+)
 from orch_hub.launchd import LaunchdError, PLIST_NAME
 from orch_hub.models import CommitInfo, ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.registry import RegistryError
@@ -368,3 +374,60 @@ def test_notify_test_falls_back_to_installed_plist(tmp_path, monkeypatch, capsys
     assert rc == 0
     assert seen["bark_url"] == "https://bark.example/PLISTKEY"
     assert len(notifier.sent) == 1
+
+
+# -- eval doctor (Layer 2 config/availability smoke check) --------------------
+#
+# Controls availability through the semantic module's ``_default_which`` resolver
+# (resolved at call time), so the real backend path runs without launching
+# ``claude``. Env is pinned per test so the check is hermetic.
+
+
+def test_eval_doctor_available_exits_zero(monkeypatch, capsys):
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    monkeypatch.delenv(EVAL_RETENTION_ENV, raising=False)
+    monkeypatch.setattr("orch_hub.semantic._default_which", lambda: "/usr/bin/claude")
+
+    rc = cli.main(["eval", "doctor"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "evaluation enabled: yes" in out
+    assert "available: yes" in out
+    assert "backend: claude-cli" in out
+
+
+def test_eval_doctor_unconfigured_exits_nonzero(monkeypatch, capsys):
+    # Enabled but ``claude`` unresolved: the exact session-1 gap, now a clear
+    # non-zero smoke-check signal instead of a 502 on click.
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    monkeypatch.delenv(EVAL_RETENTION_ENV, raising=False)
+    monkeypatch.setattr("orch_hub.semantic._default_which", lambda: None)
+
+    rc = cli.main(["eval", "doctor"])
+
+    assert rc == 1
+    assert "available: no" in capsys.readouterr().out
+
+
+def test_eval_doctor_disabled_exits_nonzero(monkeypatch, capsys):
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "0")
+    monkeypatch.delenv(EVAL_RETENTION_ENV, raising=False)
+
+    rc = cli.main(["eval", "doctor"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "evaluation enabled: no" in out
+    assert "disabled" in out
+
+
+def test_eval_doctor_reports_config_error(monkeypatch, capsys):
+    # A malformed service env surfaces as an operational error, not a traceback.
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    monkeypatch.setenv(EVAL_RETENTION_ENV, "lots")
+
+    rc = cli.main(["eval", "doctor"])
+
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err

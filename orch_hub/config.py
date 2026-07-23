@@ -71,6 +71,22 @@ DEFAULT_EVAL_MODEL = "claude-opus-4-8"
 strong model is appropriate for judging task/process quality; override with
 ``ORCH_HUB_EVAL_MODEL``."""
 
+EVAL_RETENTION_ENV = "ORCH_HUB_EVAL_RETENTION"
+"""Environment variable bounding how many evaluations are kept per task.
+
+Evaluation artifacts (evidence/static/semantic packs) accumulate one dir per
+generation under ``<data_dir>/evaluations/<repo>/<task>/``. This caps how many of
+the newest evaluations are retained per task, so the sidecar tree cannot grow
+unbounded while enough history is kept for internal trend analysis. Unset or
+blank means :data:`DEFAULT_EVAL_RETENTION`; an explicit ``0`` disables retention
+(keep everything); a positive integer is the cap. A negative or non-integer value
+fails loudly (like a malformed ``ORCH_HUB_PORT``) rather than silently guessing."""
+
+DEFAULT_EVAL_RETENTION = 20
+"""Default per-task evaluation retention cap: keep the 20 newest evaluations and
+prune older ones on the next generation. Generous enough for trend analysis over
+a task's evaluation history, bounded enough to avoid unbounded growth."""
+
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 
@@ -95,6 +111,27 @@ def _parse_bool(raw: str | None, *, default: bool, env_name: str) -> bool:
         f"{env_name} must be a boolean"
         f" (one of {', '.join(sorted(_TRUE_TOKENS | _FALSE_TOKENS))}), got {raw!r}"
     )
+
+
+def _parse_retention(raw: str | None) -> int:
+    """Parse ``EVAL_RETENTION_ENV``: unset/blank means the default; a non-negative
+    integer is honored (``0`` disables retention); a negative or non-integer value
+    is an explicit error rather than a silent fallback, so a typo surfaces at
+    startup instead of quietly unbounding or capping evaluation history."""
+    value = (raw or "").strip()
+    if not value:
+        return DEFAULT_EVAL_RETENTION
+    try:
+        retention = int(value)
+    except ValueError:
+        raise ValueError(
+            f"{EVAL_RETENTION_ENV} must be a non-negative integer, got {value!r}"
+        ) from None
+    if retention < 0:
+        raise ValueError(
+            f"{EVAL_RETENTION_ENV} must be non-negative (0 disables), got {retention}"
+        )
+    return retention
 
 
 def _parse_port(raw: str | None) -> int:
@@ -171,6 +208,15 @@ class Config:
     actually requested while evaluation is enabled.
     """
 
+    eval_retention: int = DEFAULT_EVAL_RETENTION
+    """Per-task cap on retained evaluations (``ORCH_HUB_EVAL_RETENTION``).
+
+    The evaluation subsystem keeps the ``eval_retention`` newest evaluations per
+    task and prunes older ones on the next generation, so ``<data_dir>/evaluations``
+    stays bounded. ``0`` disables retention (keep everything); a positive integer
+    is the cap. Only meaningful when evaluation is enabled.
+    """
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
@@ -202,6 +248,7 @@ class Config:
                 env_name=EVAL_ENABLED_ENV,
             ),
             eval_model=(env.get(EVAL_MODEL_ENV) or "").strip() or DEFAULT_EVAL_MODEL,
+            eval_retention=_parse_retention(env.get(EVAL_RETENTION_ENV)),
         )
 
     @property

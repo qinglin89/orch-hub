@@ -19,8 +19,10 @@ from orch_hub.config import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     DEFAULT_EVAL_MODEL,
+    DEFAULT_EVAL_RETENTION,
     EVAL_ENABLED_ENV,
     EVAL_MODEL_ENV,
+    EVAL_RETENTION_ENV,
     HOST_ENV,
     PORT_ENV,
     TOKEN_ENV,
@@ -184,3 +186,36 @@ def test_eval_model_defaults_and_overrides():
     # Empty/whitespace-only counts as unset and falls back to the default.
     assert Config.from_env({EVAL_MODEL_ENV: "  "}).eval_model == DEFAULT_EVAL_MODEL
     assert Config.from_env({EVAL_MODEL_ENV: " claude-x "}).eval_model == "claude-x"
+
+
+def test_eval_retention_defaults_to_bounded_cap():
+    # A bounded default so evaluation artifacts cannot grow unbounded, without an
+    # env var; also the dataclass default when constructed directly.
+    assert Config.from_env({}).eval_retention == DEFAULT_EVAL_RETENTION
+    assert Config(ai_native_path=Path("/root/ai-native")).eval_retention == (
+        DEFAULT_EVAL_RETENTION
+    )
+
+
+def test_eval_retention_override_and_disable():
+    # A positive integer is the per-task cap; 0 disables retention (keep all).
+    assert Config.from_env({EVAL_RETENTION_ENV: "5"}).eval_retention == 5
+    assert Config.from_env({EVAL_RETENTION_ENV: " 42 "}).eval_retention == 42
+    assert Config.from_env({EVAL_RETENTION_ENV: "0"}).eval_retention == 0
+
+
+def test_eval_retention_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({EVAL_RETENTION_ENV: ""}).eval_retention == (
+        DEFAULT_EVAL_RETENTION
+    )
+    assert Config.from_env({EVAL_RETENTION_ENV: "   "}).eval_retention == (
+        DEFAULT_EVAL_RETENTION
+    )
+
+
+def test_eval_retention_malformed_or_negative_is_explicit_error():
+    # A typo must surface at startup rather than silently unbounding or capping.
+    with pytest.raises(ValueError, match=EVAL_RETENTION_ENV):
+        Config.from_env({EVAL_RETENTION_ENV: "lots"})
+    with pytest.raises(ValueError, match=EVAL_RETENTION_ENV):
+        Config.from_env({EVAL_RETENTION_ENV: "-1"})

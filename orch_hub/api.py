@@ -1029,6 +1029,23 @@ def create_app(
         """
         return {"enabled": evaluation.enabled}
 
+    @app.get("/api/evaluation/doctor")
+    def evaluation_doctor() -> dict:
+        """Report Layer 2 semantic-evaluator readiness (a config/availability probe).
+
+        Delegates to :meth:`SemanticEvaluator.doctor`: a cheap check (no model
+        call, no cost) of whether the semantic backend can actually run — e.g. the
+        Claude CLI resolves on PATH — plus the evaluator identity. The dashboard
+        calls it to disable the Layer 2 control with an explanation when the backend
+        is unconfigured while keeping Layer 1 usable, and ``orch-hub eval doctor``
+        smoke checks the same thing. Enabled-gated like every action route
+        (disabled → 404 via the ``EvaluationDisabledError`` handler); it deliberately
+        does NOT gate any run Start/Stop/log flow. Shape:
+        ``{"enabled": true, "semantic": SemanticDoctor}``.
+        """
+        require_evaluation_enabled()
+        return {"enabled": True, "semantic": semantic.doctor().to_dict()}
+
     @app.get("/api/repos/{repo_id}/evaluations/{task_id}")
     def list_task_evaluations(repo_id: str, task_id: str) -> dict:
         """List a task's persisted evaluations plus its resolved target state.

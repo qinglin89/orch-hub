@@ -43,6 +43,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return args.launchd_handler(args)
     if args.command == "notify":
         return args.notify_handler(args)
+    if args.command == "eval":
+        return args.eval_handler(args)
     parser.error(f"unknown command: {args.command}")  # pragma: no cover
     return 2
 
@@ -117,6 +119,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_plist_path_arg(notify_test_p)
     notify_test_p.set_defaults(notify_handler=_cmd_notify_test)
+
+    # Optional task-evaluation operations. `doctor` is a config/availability smoke
+    # check for the Layer 2 semantic evaluator; the verb group is `eval` so later
+    # evaluation ops (e.g. prune) can be added without a rename.
+    eval_p = sub.add_parser("eval", help="task-evaluation operations")
+    eval_sub = eval_p.add_subparsers(dest="eval_command", required=True)
+    eval_doctor_p = eval_sub.add_parser(
+        "doctor",
+        help="check the semantic evaluator is enabled, configured, and available",
+    )
+    eval_doctor_p.set_defaults(eval_handler=_cmd_eval_doctor)
     return parser
 
 
@@ -352,6 +365,49 @@ def _cmd_notify_test(args: argparse.Namespace) -> int:
         return 1
     print("test notification sent; check your device")
     return 0
+
+
+def _cmd_eval_doctor(args: argparse.Namespace) -> int:
+    """Smoke check the Layer 2 semantic evaluator's config and availability.
+
+    A configuration/availability probe, deliberately NOT a full evaluation: it
+    runs no ``claude`` turn and makes no model call, so it costs nothing. Exit 0
+    only when the subsystem is enabled AND the backend is available (the ``claude``
+    CLI resolves on the augmented PATH); a disabled subsystem or an unresolved CLI
+    exits non-zero so a script can detect "Layer 2 not ready". The Layer 1 static
+    evaluator has no external dependency, so it needs no probe. This never touches
+    run/Start/Stop/log state.
+    """
+    from .semantic import ClaudeSemanticBackend
+
+    try:
+        config = Config.from_env()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"evaluation enabled: {'yes' if config.evaluation_enabled else 'no'}")
+    if not config.evaluation_enabled:
+        print(
+            "semantic evaluator: unavailable (task evaluation is disabled via "
+            "ORCH_HUB_EVAL_ENABLED)"
+        )
+        return 1
+    doctor = ClaudeSemanticBackend(model=config.eval_model).doctor()
+    print(f"backend: {doctor.backend}")
+    print(f"model: {doctor.model or 'n/a'}")
+    print(f"schema version: {doctor.schema_version}")
+    print(
+        "retention: "
+        + (
+            f"keep {config.eval_retention} newest per task"
+            if config.eval_retention > 0
+            else "disabled (unbounded)"
+        )
+    )
+    print(f"available: {'yes' if doctor.available else 'no'}")
+    if doctor.detail:
+        print(f"detail: {doctor.detail}")
+    return 0 if doctor.available else 1
 
 
 def _redact_secret(text: str, secret: str | None) -> str:

@@ -35,6 +35,7 @@ from orch_hub.models import (
     EvaluationTarget,
     ManagedRepo,
     RunRecord,
+    SemanticDoctor,
     SemanticEvaluatorInfo,
     SemanticFinding,
     SemanticReport,
@@ -55,6 +56,7 @@ from orch_hub.semantic import (
     SemanticEvidence,
     SemanticRunResult,
     _UnavailableSemanticBackend,
+    _default_which,
     build_prompt,
     build_semantic_evidence,
     parse_report,
@@ -162,6 +164,15 @@ class FakeBackend:
         self.repos.append(repo)
         return self._text
 
+    def doctor(self) -> SemanticDoctor:
+        return SemanticDoctor(
+            backend=self._info.backend,
+            model=self._info.model,
+            schema_version=self._info.schema_version,
+            available=True,
+            detail="fake backend always available",
+        )
+
 
 class RaisingBackend:
     """A backend whose model turn fails (a process/model error)."""
@@ -172,6 +183,16 @@ class RaisingBackend:
 
     def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
         raise SemanticEvaluationError("model process crashed")
+
+    def doctor(self) -> SemanticDoctor:
+        # doctor is a config/availability probe independent of evaluate() failing.
+        info = evaluator_info()
+        return SemanticDoctor(
+            backend=info.backend,
+            model=info.model,
+            schema_version=info.schema_version,
+            available=True,
+        )
 
 
 def _fake_git(args, **kwargs):
@@ -930,3 +951,71 @@ def test_claude_backend_drives_evaluate_end_to_end(tmp_path):
     assert runner.argv[runner.argv.index("--tools") + 1] == ""
     assert "--safe-mode" in runner.argv and "--dangerously-skip-permissions" not in runner.argv
     assert "handoff_completeness" in runner.argv[-1]
+
+
+# -- evaluator doctor (config/availability smoke check, no model call) ---------
+
+
+def test_claude_backend_doctor_available_when_claude_resolves():
+    # A resolvable ``claude`` → available, with the resolved path in the detail and
+    # the backend identity carried through. No runner is invoked (no model call).
+    backend = ClaudeSemanticBackend(model="claude-x", which=lambda: "/opt/bin/claude")
+    doctor = backend.doctor()
+    assert isinstance(doctor, SemanticDoctor)
+    assert doctor.available is True
+    assert doctor.backend == SEMANTIC_BACKEND_CLAUDE
+    assert doctor.model == "claude-x"
+    assert doctor.schema_version == SEMANTIC_SCHEMA_VERSION
+    assert "/opt/bin/claude" in doctor.detail
+
+
+def test_claude_backend_doctor_unavailable_when_claude_missing():
+    # The exact session-1 failure (no ``claude`` on PATH) surfaced up front as a
+    # doctor signal instead of only as a 502 on click.
+    backend = ClaudeSemanticBackend(model="m", which=lambda: None)
+    doctor = backend.doctor()
+    assert doctor.available is False
+    assert "not found" in doctor.detail
+
+
+def test_claude_backend_doctor_uses_default_resolver_at_call_time(monkeypatch):
+    # With no injected resolver, doctor resolves via the module-global
+    # ``_default_which`` looked up at call time (so it is monkeypatchable and never
+    # binds a stale default at construction).
+    backend = ClaudeSemanticBackend(model="m")  # no which injected
+    monkeypatch.setattr("orch_hub.semantic._default_which", lambda: "/usr/bin/claude")
+    assert backend.doctor().available is True
+    monkeypatch.setattr("orch_hub.semantic._default_which", lambda: None)
+    assert backend.doctor().available is False
+
+
+def test_default_which_is_side_effect_free_callable():
+    # Whatever the host PATH holds, resolution is a pure str|None (no subprocess,
+    # no raise) so it is safe to call on a dashboard view load.
+    result = _default_which()
+    assert result is None or isinstance(result, str)
+
+
+def test_unavailable_backend_doctor_reports_not_configured():
+    doctor = _UnavailableSemanticBackend().doctor()
+    assert doctor.available is False
+    assert doctor.backend == "unavailable"
+    assert doctor.model is None
+
+
+def test_evaluator_doctor_delegates_to_backend():
+    # The evaluator's doctor is the backend's doctor when enabled — the dashboard
+    # and CLI read Layer 2 readiness through one gated surface.
+    backend = ClaudeSemanticBackend(model="claude-x", which=lambda: "/bin/claude")
+    doctor = semantic_evaluator(enabled=True, backend=backend).doctor()
+    assert doctor.available is True
+    assert doctor.backend == SEMANTIC_BACKEND_CLAUDE
+    assert doctor.model == "claude-x"
+
+
+def test_evaluator_doctor_fails_closed_when_disabled():
+    # Gated like every other operation: a disabled hub gives the uniform
+    # fail-closed boundary the API maps to 404 — never a run-control gate.
+    backend = ClaudeSemanticBackend(model="m", which=lambda: "/bin/claude")
+    with pytest.raises(EvaluationDisabledError):
+        semantic_evaluator(enabled=False, backend=backend).doctor()
