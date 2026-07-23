@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 8c5c0c06bcaf283d0eb8311baee141e0ca641347
 ---
 
 # Modules: Web and Operations
@@ -162,9 +162,11 @@ server state so reloads and other devices do not re-enable it. Launch refusal UI
 renders structured 409 details such as readiness `reasons`, repo-busy `run_id`,
 or blocked-task `acknowledge_required`. The log view renders the recent-log
 route's `spawn.out` diagnostic and falls back to it when a live stream ends
-before any orchestrator log line is seen; its task back-link routes to
-`#/runs/{run_id}/task` so archived task files stay reachable through run history
-while normal task views stay active-only.
+before any orchestrator log line is seen; its task back-link sends live
+`active`/`waiting` runs with repo+task attribution to the full task detail
+route for controls/questions/session strips, while ended or
+attribution-incomplete runs use `#/runs/{run_id}/task` so archived task files
+stay reachable through run history and normal task views stay active-only.
 
 Task detail fetches `GET /api/runs/{run_id}/sessions` for live runs only and
 renders compact protocol-session strips against the returned context budget.

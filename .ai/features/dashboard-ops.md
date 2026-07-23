@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+verified-against: 8c5c0c06bcaf283d0eb8311baee141e0ca641347
 ---
 
 # Features: Dashboard Ops
@@ -131,9 +131,12 @@ Implemented behavior:
   lines are preserved, `event: end` closes the stream, navigation/reload/pause
   aborts the active stream, and untrusted log content is appended as text nodes.
 - A run-scoped task view at `#/runs/{run_id}/task` fetches
-  `GET /api/runs/{run_id}/task`, shows the active/archived source, and is used
-  by the log view's task back-link so run task links still open after close-out
-  archives the task. The Tasks page remains active-task-only.
+  `GET /api/runs/{run_id}/task` and shows the active/archived source. The log
+  view's task back-link is liveness-aware: live `active`/`waiting` runs with
+  repo+task attribution open the full task detail route for controls,
+  questions, and session strips; ended or attribution-incomplete runs keep the
+  run-scoped fallback so task files still open after close-out archival. The
+  Tasks page remains active-task-only.
 - A task-evaluation sidecar view at
   `#/evaluations/{repo}/{task}[/{evaluation_id}]` probes `GET /api/evaluation`
   first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts
