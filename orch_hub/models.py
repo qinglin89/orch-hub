@@ -1068,6 +1068,157 @@ class StaticMetricsReport:
 
 
 @dataclass(frozen=True)
+class SemanticEvaluatorInfo:
+    """Which evaluator produced a semantic report — the rerun/version identity.
+
+    Output of the semantic evaluator (:mod:`orch_hub.semantic`), stamped by the
+    harness (not the model) so a report says exactly what judged it. ``backend``
+    is the concrete adapter (``"fake"`` in tests, ``"claude-cli"`` for the real
+    driver); ``model`` is the model id it ran (``None`` for a backend with no
+    model, e.g. the unavailable default); ``schema_version`` is the semantic
+    prompt/report contract version the report conforms to. The scope asks for
+    reruns with different evaluator versions/models preserved for comparison:
+    each semantic evaluation lands in its own evaluation dir, and this triple is
+    how two reports over the same task are told apart.
+    """
+
+    backend: str
+    model: str | None
+    schema_version: str
+
+    def to_dict(self) -> dict:
+        return {
+            "backend": self.backend,
+            "model": self.model,
+            "schema_version": self.schema_version,
+        }
+
+
+@dataclass(frozen=True)
+class SemanticScore:
+    """One semantic score axis with its explanation (never a naked number).
+
+    Part of the semantic report (:mod:`orch_hub.semantic`). Unlike the static
+    :class:`ScoreComponent` — whose ``warnings`` are deterministic
+    evidence-pointing penalties — a semantic score carries a required, free-text
+    ``rationale`` the evaluator model wrote: the scope forbids a naked overall
+    score, so every axis must justify itself. ``dimension`` is a semantic axis
+    key (e.g. ``handoff_completeness``); ``score`` is ``0.0``–``1.0`` (1.0 =
+    strong) or ``None`` when the model could not assess it from the evidence;
+    ``confidence`` is ``0.0``–``1.0``.
+    """
+
+    dimension: str
+    score: float | None
+    confidence: float
+    rationale: str
+
+    def to_dict(self) -> dict:
+        return {
+            "dimension": self.dimension,
+            "score": self.score,
+            "confidence": self.confidence,
+            "rationale": self.rationale,
+        }
+
+
+@dataclass(frozen=True)
+class SemanticFinding:
+    """One semantic diagnosis: a dimension, its severity, and how to fix it.
+
+    Part of the semantic report (:mod:`orch_hub.semantic`). Where a
+    :class:`SemanticScore` rates an axis, a finding names a concrete issue on it:
+    ``dimension`` is the semantic axis, ``severity`` one of
+    ``info``/``low``/``medium``/``high``, ``summary`` a one-line claim, ``detail``
+    the optional explanation, ``confidence`` the model's ``0.0``–``1.0`` certainty,
+    ``evidence_refs`` the pointers into the evidence it rests on (e.g.
+    ``"session-log entry sid-b"``, ``"score:handoff"``), and ``suggestion`` a
+    concrete improvement (often a system/protocol change, per the scope's
+    "suggested system improvements"). The evidence refs are what keep a finding
+    auditable rather than an unfalsifiable assertion.
+    """
+
+    dimension: str
+    severity: str
+    summary: str
+    confidence: float
+    evidence_refs: tuple[str, ...] = ()
+    detail: str | None = None
+    suggestion: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "dimension": self.dimension,
+            "severity": self.severity,
+            "summary": self.summary,
+            "confidence": self.confidence,
+            "evidence_refs": list(self.evidence_refs),
+            "detail": self.detail,
+            "suggestion": self.suggestion,
+        }
+
+
+@dataclass(frozen=True)
+class SemanticReport:
+    """The full semantic evaluation report for one task, persisted as
+    ``semantic_report.json`` beside ``evidence.json``/``static_metrics.json``.
+
+    Top-level output of the semantic evaluator (:mod:`orch_hub.semantic`): the
+    Layer-2 counterpart to :class:`StaticMetricsReport`, judged by a model over a
+    bounded evidence input rather than computed deterministically. Task identity
+    and provenance are stamped by the harness so the artifact is self-describing
+    and the model cannot spoof what it evaluated: ``evaluation_id`` names the
+    evaluation dir (shared with the evidence/static artifacts it consumed),
+    ``evaluator`` records which backend/model/version produced it (rerun
+    identity), and ``input_evidence_id``/``input_static_metrics`` link the report
+    to the evidence and static-metrics inputs actually used.
+
+    The model supplies the judgment: ``summary`` (narrative overall assessment —
+    the explanation that replaces a naked overall score), ``scores`` (per-axis,
+    each with a rationale), ``findings`` (diagnoses with severity and fixes), and
+    ``improvements`` (suggested system/protocol changes). ``overall_confidence``
+    is the model's confidence *after* the harness degrades it for missing/partial
+    evidence (so a thin evidence input lowers confidence instead of failing the
+    evaluation); ``warnings`` records those evidence omissions/degradations.
+    """
+
+    evaluation_id: str
+    generated_ts: str | None
+    repo_name: str
+    task_id: str
+    target_present: bool
+    target_source: str | None
+    evaluator: SemanticEvaluatorInfo
+    summary: str | None
+    overall_confidence: float
+    scores: tuple[SemanticScore, ...] = ()
+    findings: tuple[SemanticFinding, ...] = ()
+    improvements: tuple[str, ...] = ()
+    input_evidence_id: str | None = None
+    input_static_metrics: bool = False
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "evaluation_id": self.evaluation_id,
+            "generated_ts": self.generated_ts,
+            "repo_name": self.repo_name,
+            "task_id": self.task_id,
+            "target_present": self.target_present,
+            "target_source": self.target_source,
+            "evaluator": self.evaluator.to_dict(),
+            "summary": self.summary,
+            "overall_confidence": self.overall_confidence,
+            "scores": [score.to_dict() for score in self.scores],
+            "findings": [finding.to_dict() for finding in self.findings],
+            "improvements": list(self.improvements),
+            "input_evidence_id": self.input_evidence_id,
+            "input_static_metrics": self.input_static_metrics,
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
 class StoredEvaluation:
     """One persisted evaluation directory for a ``(repo, task_id)``, enumerated.
 
