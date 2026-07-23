@@ -1472,8 +1472,11 @@ code {
   flex-wrap: wrap;
 }
 
-/* The Generate button is a primary action, matching the run-control button. */
-.eval-gen-btn {
+/* The Generate buttons are primary actions, matching the run-control button. The
+   Layer 2 semantic trigger shares the shape; its heavier cost is carried by the
+   adjacent .eval-cost callout, not by an alarm colour on the button itself. */
+.eval-gen-btn,
+.eval-sem-btn {
   background: var(--accent);
   color: var(--accent-text);
   border: none;
@@ -1486,9 +1489,23 @@ code {
   box-shadow: 0 0 18px -5px var(--glow-strong);
 }
 
-.eval-gen-btn:disabled {
+.eval-gen-btn:disabled,
+.eval-sem-btn:disabled {
   opacity: 0.6;
   cursor: default;
+}
+
+/* The Layer 2 cost/scope callout: a warn-tinted box that makes the model cost and
+   the read-only (not-an-orchestrator-run) boundary unmissable before triggering. */
+.eval-cost {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--warn-fg);
+  border-radius: 10px;
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 13px;
+  line-height: 1.5;
 }
 
 /* Score axes: one row per axis, a colour-banded percentage and a meter beneath,
@@ -1627,6 +1644,134 @@ code {
 .eval-count {
   margin: 6px 0 0;
   font-size: 12px;
+}
+
+/* ---- semantic (Layer 2 model judgment) report ---- */
+
+/* The Layer 2 block is visually set apart from the deterministic sections above
+   it — a left accent rail in the "run"/model hue — so a model score or finding is
+   never read as a deterministic one. */
+.sem-report {
+  border-left: 3px solid var(--run-fg);
+  padding-left: 12px;
+}
+
+.sem-report h3 {
+  margin: 16px 0 6px;
+  font-size: 13px;
+  letter-spacing: 0.02em;
+}
+
+/* The "Layer 2 · model judgment" tag beside the heading, in the model hue. */
+.sem-layer-tag {
+  margin-left: 8px;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--run-fg);
+  white-space: nowrap;
+}
+
+.sem-summary {
+  margin: 8px 0 0;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* A score axis rationale: the required explanation under each semantic score,
+   muted so the banded number leads but the justification is always present. */
+.sem-rationale {
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* Findings: one card per diagnosis, ordered most-severe first, with a left accent
+   keyed to severity (high=danger, medium=warn; low/info stay neutral). */
+.sem-findings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.sem-finding {
+  border: 1px solid var(--border);
+  border-left-width: 3px;
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--surface-2);
+}
+.sem-finding.sev-high {
+  border-left-color: var(--danger);
+}
+.sem-finding.sev-medium {
+  border-left-color: var(--warn-fg);
+}
+
+.sem-finding-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+}
+
+.sem-dim {
+  font-family: var(--mono);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text);
+  font-weight: 650;
+}
+
+.sem-finding-summary {
+  margin: 6px 0 0;
+  font-weight: 600;
+  word-break: break-word;
+}
+
+.sem-finding-detail {
+  margin: 4px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+.sem-refs,
+.sem-suggestion {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  word-break: break-word;
+}
+
+/* A mono uppercase inline label ("EVIDENCE", "SUGGESTION") leading a finding's
+   secondary lines. */
+.sem-label {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-right: 4px;
+}
+
+.sem-improvements {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.sem-improvements li {
+  word-break: break-word;
 }
 
 /* ---- waiting-question answer box ---- */

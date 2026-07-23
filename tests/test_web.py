@@ -1594,14 +1594,20 @@ def test_evaluation_view_renders_layer1_metrics():
     assert "Evidence warnings" in body
 
 
-def test_evaluation_view_distinguishes_static_missing_and_semantic():
+def test_evaluation_view_distinguishes_static_and_semantic_layers():
     body = app_js()
-    # Static-deterministic vs future-semantic, and the three distinct empty
-    # states (none yet / evidence-only / disabled) kept apart.
-    assert "Deterministic static metrics (Layer 1)." in body
-    assert "Semantic" in body and "is not yet available" in body
+    # The header note frames the two layers as one evidence judged two ways:
+    # deterministic Layer 1 vs a model-judged Layer 2, so a reader can tell which
+    # numbers are deterministic and which are a model's judgment.
+    assert "Two layers over the same evidence" in body
+    assert "static metrics (Layer 1)" in body
+    assert "model-judged semantic evaluation (Layer 2)" in body
+    assert "model's judgment, kept visually distinct" in body
+    # The distinct empty/absent states are kept apart: no evaluation yet, an
+    # evidence-only evaluation, and a metrics-only evaluation with no Layer 2 report.
     assert "No evaluation has been generated for this task yet." in body
     assert "This evaluation has an evidence pack but no computed" in body
+    assert "This evaluation has deterministic metrics only." in body
 
 
 def test_evaluation_generate_posts_deterministic_refresh():
@@ -1626,6 +1632,84 @@ def test_evaluation_offers_copy_download_and_never_inlines_raw_logs():
     # The evidence pack is offered as an artifact, not rendered inline, so bounded
     # log tails stay out of the UI.
     assert "run logs are not shown in the dashboard" in body
+
+
+# ---- semantic (Layer 2) dashboard, session-1 -------------------------------
+#
+# The backend `/semantic` route + detail readback (`semantic_report`/`report_md`)
+# and the `has_semantic_report` list flag are already API-tested (test_api.py);
+# these served-asset checks pin the dashboard wiring the JSC harness then drives
+# end-to-end (scenarioTaskEval): the trigger + its cost/read-only copy, the
+# in-progress/success/failure states, the model-judgment report render, and the
+# static-vs-semantic distinction.
+
+
+def test_evaluation_semantic_trigger_posts_with_cost_and_readonly_copy():
+    body = app_js()
+    # A distinct Layer 2 section carries the cost + read-only-analysis boundary and
+    # a trigger that POSTs /semantic, mirroring the metrics trigger's guarded
+    # re-render to the fresh latest so the produced report paints.
+    assert "const evalSemanticPath = (repo, taskId) =>" in body
+    assert 'evalListPath(repo, taskId) + "/semantic"' in body
+    assert "function evalSemanticSection()" in body
+    assert "eval-semantic-generate" in body
+    assert 'class="eval-sem-btn"' in body
+    assert 'class="eval-cost"' in body
+    # The cost + not-an-orchestrator-run + no-mutation boundary is stated in copy.
+    assert "consumes model usage (a real cost)" in body
+    assert "read-only analysis" in body
+    assert "does not start an orchestrator task run" in body
+    assert "never modifies the" in body
+    # Trigger handler: busy/in-progress note, POST, guarded re-render, error text.
+    assert "async function onEvalSemantic(repo, taskId, button)" in body
+    assert 'await api(evalSemanticPath(repo, taskId), { method: "POST" });' in body
+    assert "Running the semantic evaluator" in body
+    assert "rerender(renderTaskEval(repo, taskId, null))" in body
+    assert 'controlErrorText(err, "Semantic evaluation failed.")' in body
+
+
+def test_evaluation_semantic_report_renders_scores_findings_and_provenance():
+    body = app_js()
+    # The Layer 2 report block: a "model judgment" tag distinct from Layer 1, the
+    # evaluator provenance, per-axis scores with the required rationale, findings
+    # ordered most-severe first with severity badge + evidence refs + suggestion,
+    # and the suggested improvements.
+    assert "function semanticReportSection(report)" in body
+    assert "Layer 2 · model judgment" in body
+    assert "sem-report" in body
+    assert "function semanticScoreRow(s)" in body
+    assert 'class="sem-rationale"' in body
+    assert "function semanticFindingItem(f)" in body
+    assert "function semanticFindingsSorted(findings)" in body
+    assert "semRank(b.severity) - semRank(a.severity)" in body
+    assert "function semSeverityKind(sev)" in body
+    assert 'badge(f.severity, semSeverityKind(f.severity))' in body
+    assert "sev-${escapeHtml(f.severity)}" in body
+    assert ">Evidence</span>" in body
+    assert ">Suggestion</span>" in body
+    assert 'class="sem-improvements"' in body
+    # The overall confidence + evaluator identity are shown (no naked score).
+    assert '["overall confidence", conf]' in body
+    assert '["evaluator", evaluatorTxt]' in body
+    # The dimension vocabulary is humanized, and an absent semantic layer is called
+    # out as a distinct state rather than looking like a failed report.
+    assert "const SEMANTIC_DIM_LABELS = {" in body
+    assert "function semanticAbsentSection()" in body
+
+
+def test_evaluation_semantic_artifacts_are_copy_downloadable():
+    body = app_js()
+    # The semantic report JSON and its Markdown render join the local-inspection
+    # affordances (a text/markdown data: URI for report.md), keyed so the copy
+    # handler resolves each artifact string.
+    assert "function evalMdArtifactRow(label, artifactKey, text, taskId, fileStem)" in body
+    assert '"data:text/markdown;charset=utf-8," + encodeURIComponent(text)' in body
+    assert 'evalArtifactRow("Semantic report", "semantic"' in body
+    assert 'evalMdArtifactRow("Semantic report (Markdown)", "report_md"' in body
+    assert "semantic: semanticJson" in body
+    assert "report_md: reportMd" in body
+    # The history picker distinguishes a semantic evaluation from a metrics-only one.
+    assert "e.has_semantic_report" in body
 
 
 def test_evaluation_history_picker_navigates_to_the_id_route():
@@ -1675,5 +1759,27 @@ def test_evaluation_styles_are_present():
         ".eval-flags",
         ".eval-entry",
         ".tg-actions",
+    ):
+        assert selector in css, selector
+
+
+def test_semantic_layer_styles_are_present():
+    css = styles_css()
+    # The Layer 2 trigger button, its cost callout, the model-judgment block set
+    # apart from the deterministic sections, the "model judgment" tag, the score
+    # rationale, and the severity-accented finding cards.
+    for selector in (
+        ".eval-sem-btn",
+        ".eval-cost",
+        ".sem-report",
+        ".sem-layer-tag",
+        ".sem-summary",
+        ".sem-rationale",
+        ".sem-findings",
+        ".sem-finding",
+        ".sem-finding.sev-high",
+        ".sem-finding.sev-medium",
+        ".sem-improvements",
+        ".sem-label",
     ):
         assert selector in css, selector

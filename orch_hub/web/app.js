@@ -2394,6 +2394,8 @@
     evalListPath(repo, taskId) + "/" + encodeURIComponent(id);
   const evalMetricsPath = (repo, taskId) =>
     evalListPath(repo, taskId) + "/metrics";
+  const evalSemanticPath = (repo, taskId) =>
+    evalListPath(repo, taskId) + "/semantic";
 
   // Human labels for the five deterministic score axes (machine keys from the
   // report); an unknown key passes through so a new axis still renders.
@@ -2405,6 +2407,36 @@
     knowledge: "Knowledge",
   };
   const scoreLabel = (name) => SCORE_LABELS[name] || name;
+
+  // Human labels for the semantic (Layer 2) score/finding dimensions. The model
+  // is offered this vocabulary but may add a relevant one, so an unknown key
+  // passes through humanized rather than being dropped.
+  const SEMANTIC_DIM_LABELS = {
+    knowledge_signal_density: "Knowledge signal density",
+    ai_freshness_utility: ".ai/ freshness & utility",
+    handoff_completeness: "Handoff completeness",
+    decision_trace: "Decision trace",
+    acceptance_coverage: "Acceptance coverage",
+    scope_slice_fit: "Scope / slice fit",
+    rediscovery_risk: "Rediscovery risk",
+    protocol_soft_failures: "Protocol soft-failures",
+  };
+  const semDimLabel = (name) =>
+    SEMANTIC_DIM_LABELS[name] || String(name || "").replace(/_/g, " ");
+
+  // Finding severity, low→high; the rank orders findings most-severe first and
+  // the kind maps to a status badge colour (high=bad, medium=warn, low/info stay
+  // neutral so only the two urgent bands carry an alarm colour).
+  const SEMANTIC_SEVERITY_RANK = { info: 0, low: 1, medium: 2, high: 3 };
+  function semRank(sev) {
+    const r = SEMANTIC_SEVERITY_RANK[sev];
+    return r === undefined ? -1 : r;
+  }
+  function semSeverityKind(sev) {
+    if (sev === "high") return "bad";
+    if (sev === "medium") return "warn";
+    return ""; // low / info: neutral
+  }
 
   // A score is 0..1 (1 = clean) or null when the axis is not assessable from the
   // evidence; the level drives the meter/percentage colour, kept distinct from a
@@ -2615,11 +2647,38 @@
     );
   }
 
-  function evalArtifactsSection(taskId, reportJson, evidenceJson) {
+  // The report.md counterpart of evalArtifactRow: a text/markdown data: URI so the
+  // human-readable semantic report exports/opens directly, alongside the raw JSON.
+  function evalMdArtifactRow(label, artifactKey, text, taskId, fileStem) {
+    const filename = fileStem + "-" + taskId + ".md";
+    const href =
+      "data:text/markdown;charset=utf-8," + encodeURIComponent(text);
+    return (
+      `<div class="eval-artifact">` +
+      `<span class="ea-label">${escapeHtml(label)}</span>` +
+      `<button type="button" class="eval-copy" data-artifact="${escapeHtml(
+        artifactKey
+      )}">Copy</button>` +
+      `<a class="eval-dl text-link" download="${escapeHtml(
+        filename
+      )}" href="${escapeHtml(href)}">Download</a>` +
+      `</div>`
+    );
+  }
+
+  function evalArtifactsSection(taskId, reportJson, evidenceJson, semanticJson, reportMd) {
     const items = [];
     if (reportJson)
       items.push(
         evalArtifactRow("Static metrics", "report", reportJson, taskId, "static_metrics")
+      );
+    if (semanticJson)
+      items.push(
+        evalArtifactRow("Semantic report", "semantic", semanticJson, taskId, "semantic_report")
+      );
+    if (reportMd)
+      items.push(
+        evalMdArtifactRow("Semantic report (Markdown)", "report_md", reportMd, taskId, "report")
       );
     if (evidenceJson)
       items.push(
@@ -2627,23 +2686,170 @@
       );
     if (!items.length) return "";
     return `<section class="section eval-artifacts"><h2>Local inspection</h2>
-      <p class="muted">Copy or download the raw JSON for local inspection. Raw
-         run logs are not shown in the dashboard.</p>
+      <p class="muted">Copy or download the raw JSON or Markdown for local
+         inspection. Raw run logs are not shown in the dashboard.</p>
       ${items.join("")}
       <span class="control-status eval-copy-status" role="status"></span>
     </section>`;
   }
 
-  // The metrics body for the selected evaluation. Three distinct states, kept
+  // ---- semantic (Layer 2 model judgment) rendering ----
+  //
+  // A semantic report is the model's judgment over the same bounded evidence the
+  // static layer scored deterministically. It is rendered as a visually distinct
+  // Layer 2 block (a "model judgment" tag, its own accent) so a reader never
+  // confuses a model score/finding with a deterministic one. Every axis carries a
+  // rationale, every finding cites evidence refs — the prompt/schema require it —
+  // so the render surfaces both rather than showing naked numbers.
+
+  // One semantic score axis: dimension label, banded score meter (reusing the
+  // Layer 1 meter), confidence, and the required rationale beneath.
+  function semanticScoreRow(s) {
+    const na = s.score === null || s.score === undefined;
+    const scoreTxt = na ? "n/a" : Math.round(s.score * 100) + "%";
+    const conf = Math.round((s.confidence || 0) * 100) + "%";
+    return (
+      `<li class="eval-score sem-score">` +
+      `<div class="eval-score-head">` +
+      `<span class="es-name">${escapeHtml(semDimLabel(s.dimension))}</span>` +
+      `<span class="es-score ${scoreLevel(s.score)}">${scoreTxt}</span>` +
+      `<span class="es-conf muted">confidence ${conf}</span>` +
+      `</div>` +
+      scoreMeter(s.score) +
+      (s.rationale
+        ? `<p class="sem-rationale">${escapeHtml(s.rationale)}</p>`
+        : "") +
+      `</li>`
+    );
+  }
+
+  // One finding: a severity badge, the dimension, its confidence, the one-line
+  // summary, optional detail, the cited evidence refs (what keeps it auditable),
+  // and an optional concrete suggestion.
+  function semanticFindingItem(f) {
+    const conf = Math.round((f.confidence || 0) * 100) + "%";
+    const refs = (f.evidence_refs || []).filter(Boolean);
+    const refsHtml = refs.length
+      ? `<p class="sem-refs"><span class="sem-label">Evidence</span> ${escapeHtml(
+          refs.join("; ")
+        )}</p>`
+      : "";
+    const detailHtml = f.detail
+      ? `<p class="sem-finding-detail">${escapeHtml(f.detail)}</p>`
+      : "";
+    const suggestionHtml = f.suggestion
+      ? `<p class="sem-suggestion"><span class="sem-label">Suggestion</span> ${escapeHtml(
+          f.suggestion
+        )}</p>`
+      : "";
+    return (
+      `<li class="sem-finding sev-${escapeHtml(f.severity)}">` +
+      `<div class="sem-finding-head">` +
+      badge(f.severity, semSeverityKind(f.severity)) +
+      `<span class="sem-dim">${escapeHtml(semDimLabel(f.dimension))}</span>` +
+      `<span class="es-conf muted">confidence ${conf}</span>` +
+      `</div>` +
+      `<p class="sem-finding-summary">${escapeHtml(f.summary)}</p>` +
+      detailHtml +
+      refsHtml +
+      suggestionHtml +
+      `</li>`
+    );
+  }
+
+  // Findings most-severe first (high→info); a copy is sorted so the source order
+  // is untouched. An unknown severity ranks below info rather than throwing.
+  function semanticFindingsSorted(findings) {
+    return findings.slice().sort((a, b) => semRank(b.severity) - semRank(a.severity));
+  }
+
+  // The full Layer 2 report block for the selected evaluation. Distinct from the
+  // static sections above it: a provenance line (which model/version judged this),
+  // the narrative summary that replaces a naked overall score, per-axis scores
+  // with rationales, severity-ordered findings, suggested improvements, and the
+  // evidence-degradation notes that explain a lowered confidence.
+  function semanticReportSection(report) {
+    const ev = report.evaluator || {};
+    const conf = Math.round((report.overall_confidence || 0) * 100) + "%";
+    const evaluatorTxt =
+      (ev.backend || "?") +
+      " / " +
+      (ev.model || "n/a") +
+      " · schema v" +
+      (ev.schema_version || "?");
+    const overall = `<dl class="kv sem-overall">${evalKv([
+      ["overall confidence", conf],
+      ["evaluator", evaluatorTxt],
+      ["static metrics input", report.input_static_metrics ? "yes" : "no"],
+    ])}</dl>`;
+    const summary = report.summary
+      ? `<p class="sem-summary">${escapeHtml(report.summary)}</p>`
+      : `<p class="muted">No narrative summary was provided.</p>`;
+    const scores = report.scores || [];
+    const scoresHtml = scores.length
+      ? `<h3>Score axes</h3><ul class="score-list sem-scores">${scores
+          .map(semanticScoreRow)
+          .join("")}</ul>`
+      : `<h3>Score axes</h3><p class="muted">No score axes were returned.</p>`;
+    const findings = report.findings || [];
+    const findingsHtml = findings.length
+      ? `<h3>Findings</h3><ul class="sem-findings">${semanticFindingsSorted(findings)
+          .map(semanticFindingItem)
+          .join("")}</ul>`
+      : `<h3>Findings</h3><p class="muted">No findings were raised.</p>`;
+    const improvements = report.improvements || [];
+    const impHtml = improvements.length
+      ? `<h3>Suggested improvements</h3><ul class="sem-improvements">${improvements
+          .map((i) => `<li>${escapeHtml(i)}</li>`)
+          .join("")}</ul>`
+      : "";
+    const warnings = report.warnings || [];
+    const warnHtml = warnings.length
+      ? `<h3>Evidence notes</h3><ul class="eval-warnings sem-warnings">${warnings
+          .map((w) => `<li>${escapeHtml(w)}</li>`)
+          .join("")}</ul>`
+      : "";
+    return (
+      `<section class="section sem-report">` +
+      `<h2>Semantic evaluation <span class="sem-layer-tag">Layer 2 · model judgment</span></h2>` +
+      overall +
+      summary +
+      scoresHtml +
+      findingsHtml +
+      impHtml +
+      warnHtml +
+      `</section>`
+    );
+  }
+
+  // Shown for a full Layer 1 evaluation that carries no semantic report yet, so
+  // the operator sees that Layer 2 is available but not run for THIS evaluation
+  // (the two layers are the same evidence judged two ways).
+  function semanticAbsentSection() {
+    return `<section class="section sem-report sem-absent">
+      <h2>Semantic evaluation <span class="sem-layer-tag">Layer 2 · model judgment</span></h2>
+      <p class="muted">This evaluation has deterministic metrics only. Run a semantic
+         evaluation above to add the model-judged Layer 2 report.</p></section>`;
+  }
+
+  // The metrics body for the selected evaluation. Distinct states, kept
   // deliberately separate: no evaluation yet, an evidence-only evaluation with no
-  // computed metrics, and a full Layer 1 report.
-  function evalDetailHtml(taskId, detail, reportJson, evidenceJson) {
+  // computed metrics, a full Layer 1 report without a semantic layer, and a full
+  // report carrying a Layer 2 semantic judgment.
+  function evalDetailHtml(taskId, detail, reportJson, evidenceJson, semanticJson, reportMd) {
     if (!detail)
       return `<section class="section"><h2>Metrics</h2>
         <p class="muted">No evaluation has been generated for this task yet. Use
            Generate metrics above to compute the first one.</p></section>`;
     const report = detail.static_metrics;
-    const artifacts = evalArtifactsSection(taskId, reportJson, evidenceJson);
+    const semantic = detail.semantic_report;
+    const artifacts = evalArtifactsSection(
+      taskId,
+      reportJson,
+      evidenceJson,
+      semanticJson,
+      reportMd
+    );
     if (!report)
       return (
         `<section class="section"><h2>Metrics</h2>
@@ -2651,25 +2857,53 @@
              Layer 1 metrics. Generate metrics to compute them, or download the
              evidence below.</p></section>` + artifacts
       );
+    const semanticHtml = semantic
+      ? semanticReportSection(semantic)
+      : semanticAbsentSection();
     return (
       evalScoresSection(report) +
       evalRunsSection(report) +
       evalProtocolSection(report.protocol) +
       evalEvidenceWarnings(report.warnings) +
+      semanticHtml +
       evalMetaSection(detail.evaluation_id, report.generated_ts) +
       artifacts
     );
   }
 
   function evalGenerateSection() {
-    return `<section class="section eval-generate"><h2>Generate</h2>
+    return `<section class="section eval-generate"><h2>Layer 1 · Deterministic metrics</h2>
       <p class="muted">Recompute deterministic evidence and Layer 1 metrics from
-         the task file and its run history. This writes only hub-owned artifacts;
-         the task and run records are never modified, and no semantic model is
-         invoked.</p>
+         the task file and its run history. This is free and instant: it writes
+         only hub-owned artifacts, never modifies the task or run records, and
+         invokes no model.</p>
       <div class="eval-actions">
         <button type="button" class="eval-gen-btn">Generate metrics</button>
         <span class="control-status eval-status" role="status"></span>
+      </div></section>`;
+  }
+
+  // The Layer 2 trigger, deliberately separated from the free Layer 1 generate so
+  // the cost/read-only boundary is unmissable: a semantic evaluation runs a Claude
+  // model (a real cost, and slow) but is a read-only analysis bounded to the
+  // persisted evidence — not an orchestrator run, and it mutates nothing.
+  function evalSemanticSection() {
+    return `<section class="section eval-generate eval-semantic-generate"><h2>Layer 2 · Semantic evaluation</h2>
+      <p class="muted">A model reads the bounded evidence and static metrics and
+         judges what a deterministic check cannot — knowledge-signal density,
+         handoff and decision-trace completeness, acceptance coverage, and protocol
+         soft-failures — returning scored axes and findings with suggested
+         improvements.</p>
+      <p class="eval-cost"><strong>Cost &amp; scope:</strong> this runs a Claude
+         model, so it takes a little while and consumes model usage (a real cost),
+         unlike the free Layer 1 metrics. It is a <strong>read-only analysis
+         session</strong> bounded to the persisted evidence: it does not read live
+         repo files, does not start an orchestrator task run, and never modifies the
+         task or run state. Each run creates a fresh evaluation (evidence + metrics +
+         semantic report).</p>
+      <div class="eval-actions">
+        <button type="button" class="eval-sem-btn">Run semantic evaluation…</button>
+        <span class="control-status eval-sem-status" role="status"></span>
       </div></section>`;
   }
 
@@ -2680,7 +2914,9 @@
     if (!evals.length) return "";
     const opts = evals
       .map((e) => {
-        const mark = e.has_static_metrics
+        const mark = e.has_semantic_report
+          ? "semantic"
+          : e.has_static_metrics
           ? "metrics"
           : e.has_evidence
           ? "evidence only"
@@ -2751,17 +2987,48 @@
     }
   }
 
-  function wireEvalControls(repo, taskId, reportJson, evidenceJson) {
+  // Run a Layer 2 semantic evaluation: POST /semantic drives the model turn (a
+  // read-only, evidence-bounded analysis — never a repo/task write), which mints a
+  // fresh evaluation dir, then re-render to that new latest so the report paints.
+  // The request is slow (a model turn), so the button stays busy with an
+  // in-progress note; a navigation during it drops the follow-up via the guard
+  // captured before the POST, and a backend/model failure (502) surfaces inline —
+  // none of which touches the run controls on other views.
+  async function onEvalSemantic(repo, taskId, button) {
+    const statusEl = document.querySelector(".eval-sem-status");
+    const superseded = routeGuard();
+    setControlBusy(button, statusEl, true);
+    if (statusEl)
+      statusEl.textContent =
+        "Running the semantic evaluator… this uses a model and can take a little while.";
+    try {
+      await api(evalSemanticPath(repo, taskId), { method: "POST" });
+      if (superseded()) return;
+      rerender(renderTaskEval(repo, taskId, null)); // land on the fresh latest
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the button and its status line are gone
+      setControlBusy(button, statusEl, false);
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = controlErrorText(err, "Semantic evaluation failed.");
+      }
+    }
+  }
+
+  function wireEvalControls(repo, taskId, strings) {
     const genBtn = document.querySelector(".eval-gen-btn");
     if (genBtn)
       genBtn.addEventListener("click", () => onEvalGenerate(repo, taskId, genBtn));
+    const semBtn = document.querySelector(".eval-sem-btn");
+    if (semBtn)
+      semBtn.addEventListener("click", () => onEvalSemantic(repo, taskId, semBtn));
     const pick = document.getElementById("eval-pick");
     if (pick)
       pick.addEventListener("change", (ev) => {
         location.hash =
           evalHash(repo, taskId) + "/" + encodeURIComponent(ev.target.value);
       });
-    const strings = { report: reportJson, evidence: evidenceJson };
     document.querySelectorAll(".eval-copy").forEach((btn) => {
       btn.addEventListener("click", () => evalCopy(strings[btn.dataset.artifact]));
     });
@@ -2803,11 +3070,21 @@
     }
 
     // Pretty JSON for the copy/download affordances, computed once and closed
-    // over by the copy handlers. No raw evidence is rendered inline.
+    // over by the copy handlers. report.md is passed through as raw text. No raw
+    // evidence is rendered inline.
     const report = detail ? detail.static_metrics : null;
     const evidence = detail ? detail.evidence : null;
+    const semantic = detail ? detail.semantic_report : null;
+    const reportMd = detail ? detail.report_md : null;
     const reportJson = report ? JSON.stringify(report, null, 2) : "";
     const evidenceJson = evidence ? JSON.stringify(evidence, null, 2) : "";
+    const semanticJson = semantic ? JSON.stringify(semantic, null, 2) : "";
+    const strings = {
+      report: reportJson,
+      evidence: evidenceJson,
+      semantic: semanticJson,
+      report_md: reportMd || "",
+    };
 
     view().innerHTML = `
       <a class="back-link" href="${repoHash(repoName)}">← ${escapeHtml(
@@ -2817,13 +3094,16 @@
         ${pageTitle(taskId, "task-id big")}
         ${evalTargetBadge(list.target)}
       </div>
-      <p class="eval-kind muted">Deterministic static metrics (Layer 1). Semantic
-         evaluation is not yet available.</p>
+      <p class="eval-kind muted">Two layers over the same evidence: deterministic
+         static metrics (Layer 1), computed from the task file and run history, and a
+         model-judged semantic evaluation (Layer 2). Layer 2 scores and findings are a
+         model's judgment, kept visually distinct from the deterministic ones.</p>
       ${evalGenerateSection()}
+      ${evalSemanticSection()}
       ${evalPickerSection(repoName, taskId, evals, selectedId)}
-      ${evalDetailHtml(taskId, detail, reportJson, evidenceJson)}`;
+      ${evalDetailHtml(taskId, detail, reportJson, evidenceJson, semanticJson, reportMd)}`;
 
-    wireEvalControls(repoName, taskId, reportJson, evidenceJson);
+    wireEvalControls(repoName, taskId, strings);
   }
 
   // ---- remote intake (draft → review → confirm / cancel) ----

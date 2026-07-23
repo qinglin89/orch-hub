@@ -890,6 +890,68 @@ var EVAL_EVIDENCE = {
   summary: { run_count: 0, runs_ended: 0, has_task_content: true, git_available: false, warning_count: 1 },
 };
 
+// A Layer 2 semantic report (SemanticReport.to_dict shape). Findings are given in
+// a non-severity order so the render's most-severe-first sort is exercised; one
+// score axis is non-assessable (null → n/a); every axis carries a rationale and
+// every finding cites evidence, as the schema requires.
+var SEM_REPORT = {
+  evaluation_id: EVAL_ID,
+  generated_ts: "2026-07-22T09:05:00Z",
+  repo_name: REPO,
+  task_id: TASK,
+  target_present: true,
+  target_source: "active",
+  evaluator: { backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1" },
+  summary: "The task handed off cleanly but the decision trace is thin.",
+  overall_confidence: 0.7,
+  scores: [
+    { dimension: "handoff_completeness", score: 0.8, confidence: 0.9, rationale: "Session log carried Next/Open." },
+    { dimension: "ai_freshness_utility", score: null, confidence: 0.0, rationale: "Not assessable without .ai/ contents." },
+    { dimension: "decision_trace", score: 0.4, confidence: 0.7, rationale: "Rejected alternatives were not recorded." },
+  ],
+  findings: [
+    {
+      dimension: "decision_trace",
+      severity: "medium",
+      summary: "Rejected alternatives absent from the log.",
+      detail: "The session log states the choice but not what was rejected.",
+      confidence: 0.7,
+      evidence_refs: ["session-log entry sid-b"],
+      suggestion: "Record rejected alternatives in the Done bullet.",
+    },
+    {
+      dimension: "acceptance_coverage",
+      severity: "high",
+      summary: "One acceptance criterion has no evidence.",
+      detail: null,
+      confidence: 0.8,
+      evidence_refs: ["task Acceptance line 3"],
+      suggestion: "Add a test proving the third criterion.",
+    },
+    {
+      dimension: "protocol_soft_failures",
+      severity: "low",
+      summary: "session-est was raised late.",
+      confidence: 0.5,
+      evidence_refs: ["frontmatter session-est"],
+      suggestion: null,
+    },
+  ],
+  improvements: ["Prompt dev sessions to record rejected alternatives."],
+  input_evidence_id: EVAL_ID,
+  input_static_metrics: true,
+  warnings: [".ai/ file contents unavailable to the evaluator"],
+};
+var SEM_REPORT_MD = "# Semantic Task Evaluation — " + TASK + "\n\n- Overall confidence: 0.70\n";
+// The detail payload for an evaluation that carries the Layer 2 report too.
+var EVAL_DETAIL_SEMANTIC = {
+  evaluation_id: EVAL_ID,
+  evidence: EVAL_EVIDENCE,
+  static_metrics: EVAL_REPORT,
+  semantic_report: SEM_REPORT,
+  report_md: SEM_REPORT_MD,
+};
+
 function installRoutes(opts) {
   ROUTES = {};
   var waiting = opts && opts.waiting;
@@ -985,17 +1047,28 @@ function installRoutes(opts) {
     target: { present: true, source: "active" },
     latest_evaluation_id: EVAL_ID,
     evaluations: [
-      { evaluation_id: EVAL_ID, has_evidence: true, has_static_metrics: true },
+      {
+        evaluation_id: EVAL_ID,
+        has_evidence: true,
+        has_static_metrics: true,
+        has_semantic_report: false,
+      },
     ],
   });
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
     evaluation_id: EVAL_ID,
     evidence: EVAL_EVIDENCE,
     static_metrics: EVAL_REPORT,
+    semantic_report: null,
+    report_md: null,
   });
   route("POST", "/api/repos/" + REPO + "/evaluations/" + TASK + "/metrics", {
     evaluation_id: EVAL_ID,
     static_metrics: EVAL_REPORT,
+  });
+  route("POST", "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic", {
+    evaluation_id: EVAL_ID,
+    semantic_report: SEM_REPORT,
   });
 }
 
@@ -1419,6 +1492,7 @@ async function scenarioTaskEval() {
   installRoutes({ waiting: false });
   var evalPath = "#/evaluations/" + REPO + "/" + TASK;
   var metricsPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/metrics";
+  var semanticPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic";
 
   await navigate(evalPath);
   var heading = pageHeading();
@@ -1438,9 +1512,10 @@ async function scenarioTaskEval() {
   // Enabled → the generate control shows and the disabled note is absent.
   check("eval: the Generate control is present", !!doc.querySelector(".eval-gen-btn"), "no .eval-gen-btn");
   check(
-    "eval: it labels itself deterministic vs semantic",
+    "eval: it labels itself deterministic Layer 1 vs semantic Layer 2",
     (doc.querySelector(".eval-kind") || {}).textContent &&
-      doc.querySelector(".eval-kind").textContent.indexOf("Semantic") !== -1,
+      doc.querySelector(".eval-kind").textContent.indexOf("Layer 1") !== -1 &&
+      doc.querySelector(".eval-kind").textContent.indexOf("Layer 2") !== -1,
     "no static-vs-semantic note"
   );
 
@@ -1484,6 +1559,90 @@ async function scenarioTaskEval() {
   pressEnter(doc.querySelector(".eval-gen-btn"));
   await flush();
   check("eval: Generate posts the metrics refresh", !!lastCall("POST", metricsPath), "no metrics POST");
+
+  // Layer 2 semantic controls: the trigger and its cost/read-only copy are present
+  // on an enabled hub, and the default evaluation carries no semantic report yet,
+  // so the distinct "deterministic metrics only" note stands in for the report.
+  check("eval: the semantic trigger is present", !!doc.querySelector(".eval-sem-btn"), "no .eval-sem-btn");
+  check(
+    "eval: the semantic cost/read-only copy is present",
+    !!doc.querySelector(".eval-cost") &&
+      doc.querySelector(".eval-cost").textContent.indexOf("read-only") !== -1,
+    "no cost/read-only copy"
+  );
+  check(
+    "eval: a report-less evaluation shows the Layer 2 absent note",
+    !!doc.querySelector(".sem-absent"),
+    "no semantic-absent note"
+  );
+
+  // Triggering shows the in-progress state (busy trigger + running note) while the
+  // model turn is in flight, then posts to /semantic once.
+  var releaseSem = defer("POST", semanticPath);
+  pressEnter(doc.querySelector(".eval-sem-btn"));
+  check(
+    "eval: the semantic run disables its trigger while in flight",
+    doc.querySelector(".eval-sem-btn").disabled === true,
+    "trigger not disabled during the run"
+  );
+  check(
+    "eval: the semantic run shows an in-progress note",
+    (doc.querySelector(".eval-sem-status") || {}).textContent &&
+      doc.querySelector(".eval-sem-status").textContent.indexOf("Running") !== -1,
+    "no in-progress note"
+  );
+  await releaseSem();
+  await flush();
+  check("eval: the semantic run posts to /semantic", !!lastCall("POST", semanticPath), "no semantic POST");
+
+  // A semantic-carrying evaluation paints the Layer 2 report: the model-judgment
+  // block, its evaluator identity, findings ordered most-severe first, evidence
+  // refs, a suggestion, the improvements, an n/a axis, and the Markdown download.
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, EVAL_DETAIL_SEMANTIC);
+  await navigate(evalPath + "/" + EVAL_ID);
+  var sem = doc.querySelector(".sem-report");
+  check("eval: the semantic report block renders", !!sem && sem.className.indexOf("sem-absent") === -1, "no .sem-report");
+  check(
+    "eval: the report names its evaluator model",
+    sem && sem.textContent.indexOf("claude-opus-4-8") !== -1,
+    "no evaluator identity"
+  );
+  var findings = doc.querySelectorAll(".sem-finding");
+  eq("eval: all three findings render", findings.length, 3);
+  check(
+    "eval: findings are ordered most-severe first",
+    findings.length && findings[0].className.indexOf("sev-high") !== -1,
+    "first finding is not high severity: " + (findings.length && findings[0].className)
+  );
+  check(
+    "eval: a finding cites its evidence refs",
+    sem && sem.textContent.indexOf("session-log entry sid-b") !== -1,
+    "no evidence refs rendered"
+  );
+  check("eval: a finding shows its suggestion", !!doc.querySelector(".sem-suggestion"), "no suggestion rendered");
+  check("eval: suggested improvements render", !!doc.querySelector(".sem-improvements"), "no improvements list");
+  check(
+    "eval: a non-assessable semantic axis reads n/a",
+    doc.querySelector(".sem-scores").textContent.indexOf("n/a") !== -1,
+    "no n/a semantic score"
+  );
+  var mdLink = doc.querySelectorAll(".eval-dl").filter(function (a) {
+    return (a.getAttribute("download") || "").indexOf(".md") !== -1;
+  });
+  check("eval: the Markdown report is a download artifact", mdLink.length > 0, "no report.md download");
+  check(
+    "eval: the report.md download is a text/markdown data: URI",
+    mdLink.length && mdLink[0].getAttribute("href").indexOf("data:text/markdown") === 0,
+    mdLink.length && mdLink[0].getAttribute("href")
+  );
+  // Restore the report-less detail so later scenarios see the default fixture.
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
+    evaluation_id: EVAL_ID,
+    evidence: EVAL_EVIDENCE,
+    static_metrics: EVAL_REPORT,
+    semantic_report: null,
+    report_md: null,
+  });
 
   // The entry point from task detail appears when the subsystem is enabled.
   await navigate("#/tasks/" + REPO + "/" + TASK);
