@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-16
-verified-against: de6beadfc1fcd986289f757d4cdbea7af31a069e
+last-updated: 2026-07-23
+verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 ---
 
 # Features: Run Control
@@ -13,11 +13,13 @@ Description: Start, stop, list, get, and reattach orchestrator subprocesses.
 Each run attaches to one repo and one task. Same-repo live runs are serialized;
 cross-repo runs may overlap.
 
-Modules: runs, config, control_dir, models, readiness, task_store.
+Modules: runs, config, control_dir, models, readiness, task_store,
+orch_config.
 
 APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
 `GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/sessions`,
-`POST /api/runs/{run_id}/stop`.
+`GET /api/runs/{run_id}/effective-config`, `POST /api/runs/{run_id}/stop`,
+`GET /api/repos/{repo_id}/orchestrator-config`.
 
 Implemented behavior:
 
@@ -36,6 +38,17 @@ Implemented behavior:
   stdout/stderr redirected to `spawn.out`, `start_new_session=True`, and an
   explicit `PATH` that includes common user-installed agent CLI directories
   before the inherited and baseline macOS paths.
+- `orch_config.query_effective_config` asks the repo-local deployed
+  orchestrator for `--print-config` with `cwd=<repo>` and optional
+  `--backend`/`--profile`; missing old deployments, nonzero exits, malformed
+  schema-v1 payloads, or unsupported schema versions fail closed instead of
+  substituting hub launch defaults.
+- Structured dashboard launches use `LaunchSpec`/`build_launch_args` before
+  reaching `RunManager.start_run`: Default inherits all orchestrator settings
+  and omits flags unless a backend was explicitly selected; Standard/Excellent
+  emit only `--backend <b> --profile <mode>`; Custom emits complete applicable
+  role overrides and never sends `--dev-agent` to Cursor. Legacy `extra_args`
+  callers remain verbatim and mutually exclusive with structured `launch`.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
   it persists the internal `spawn_out` path so reattached runs and pre-field
   records can still surface startup diagnostics. In-memory `Popen` handles only
@@ -58,6 +71,10 @@ Implemented behavior:
   orchestrator log on demand, terminal runs serve the `sessions.json` snapshot
   persisted at the observed live-to-ended transition. Parsing failures are
   isolated from run state.
+- The real run's startup `effective-config:` JSON is parsed from the located
+  orchestrator log or `spawn.out`, persisted as `effective_config.json` at the
+  live-to-ended transition, served by `GET /api/runs/{run_id}/effective-config`,
+  and embedded snapshot-only in run history.
 
 ## Control-dir File Channel
 
@@ -186,7 +203,8 @@ metadata for later inspection without copying human answer text into history.
 Modules: history, runs, api, models, control_dir.
 
 APIs: `GET /api/history/runs`, `GET /api/runs/{run_id}/task`,
-`GET /api/runs/{run_id}/sessions`.
+`GET /api/runs/{run_id}/sessions`,
+`GET /api/runs/{run_id}/effective-config`.
 
 Implemented behavior:
 
@@ -206,8 +224,9 @@ Implemented behavior:
 - `GET /api/history/runs` returns recent runs newest-first with the normal
   serialized run status plus embedded persisted events, per-run persisted
   session snapshots (`sessions`, `context_budget`), and the task's typed
-  `session_est` (`null` when unknown); `limit` defaults to 50 and is clamped to
-  `0..200`.
+  `session_est` (`null` when unknown), and the persisted run
+  `effective_config` snapshot (`null` when absent); `limit` defaults to 50 and
+  is clamped to `0..200`.
 - `GET /api/runs/{run_id}/task` reads the task file through the persisted run
   identity: active `.ai-tasks/<task_id>.md` first, then
   `.ai-tasks/archive/<task_id>.md`. It returns `source:
@@ -217,5 +236,9 @@ Implemented behavior:
   context_budget}`. Unknown runs are 404; live runs parse the current log;
   ended runs prefer the persisted snapshot and still return 200 with empty or
   partial data when logs are absent or malformed.
+- `GET /api/runs/{run_id}/effective-config` returns `{run_id,
+  effective_config}`. Live runs parse the current log, ended runs prefer the
+  persisted snapshot and fall back to log parsing for pre-field runs; unknown
+  runs are 404 and absent/unparsed snapshots return `null`.
 - History readback treats missing `events.jsonl` as empty history and surfaces
   unreadable or malformed event lines as `history_error` events.

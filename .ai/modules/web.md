@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 ---
 
 # Modules: Web and Operations
@@ -19,8 +19,10 @@ public `GET /api/health`, public dashboard shell routes served with
 escalation, log, and history routes over one `RunManager` instance plus a
 lifespan-owned `RunMonitor`, plus protected intake routes over one
 `IntakeManager`. Implemented run
-routes are `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`,
-`GET /api/runs/{run_id}/task`, `GET /api/runs/{run_id}/sessions`, and
+routes are `GET /api/repos/{repo_id}/orchestrator-config`,
+`POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`,
+`GET /api/runs/{run_id}/task`, `GET /api/runs/{run_id}/sessions`,
+`GET /api/runs/{run_id}/effective-config`, and
 `POST /api/runs/{run_id}/stop`;
 implemented escalation routes are
 `GET /api/escalations` and
@@ -75,7 +77,11 @@ bearer header, not `EventSource` or query tokens. `RegistryError` returns HTTP
 state conflicts return HTTP 409 with structured details where useful.
 The escalation answer route preserves omitted-mode legacy writes but normalizes
 explicit `mode: "answer"|"discuss"` against question kind before writing and
-audits the mode without copying answer text into history.
+audits the mode without copying answer text into history. The orchestrator-config
+route is protected, not readiness-gated, and maps missing/old deployment,
+nonzero, malformed, or unsupported `--print-config` responses to 502 so Start
+fails closed instead of using hub defaults. `POST /api/runs` accepts either
+structured `launch` (server-built argv) or legacy `extra_args`, never both.
 
 ## Web UI
 
@@ -109,9 +115,10 @@ route-level headings/focus/announcements, an Operations Overview default landing
 route, repo/task/detail/run views, repo/task run-state signals,
 searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
 run controls, live per-session context strips, waiting-question answer forms,
-filterable/counted/collapsible grouped run history with est-vs-actual rollups, a
-run-scoped task-file view, task-evaluation Layer 1/Layer 2 sidecar view and
-entry points, remote intake start/review views, and recent/live log views;
+filterable/counted/collapsible grouped run history with est-vs-actual rollups
+and effective-config disclosures, a run-scoped task-file view, task-evaluation
+Layer 1/Layer 2 sidecar view and entry points, remote intake start/review views,
+and recent/live log views;
 `styles.css` holds the mobile-first responsive layout. The dashboard
 reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
@@ -154,11 +161,16 @@ repo, status, blockers). It keeps missing-index cards outside status/search
 filters, shows visible-of-total task counts, distinguishes empty inventory from
 no matches, and has one Clear action for all task filters.
 
-Run controls stay frontend-only over the existing API: Start posts
-`{repo_id, task_id, acknowledge_blocked, extra_args}` to `POST /api/runs` from a
-launch-options dialog whose first args are always `--backend cc-codex`, followed
-by only user-changed cc-codex overrides and, when enabled, a bare
-`--plan-gate`; it does not expose a backend selector.
+Run controls stay frontend-only over protected HTTP APIs: Start opens a
+four-mode launch dialog (Default, Standard, Excellent, Custom) that queries
+`GET /api/repos/{repo_id}/orchestrator-config` for the selected backend/profile.
+Preset modes render read-only DEV/REVIEW `agent:model @ effort` rows from the
+orchestrator; Custom renders editable model/effort inputs in the same row and a
+cc-codex-only dev-agent select. Query failures disable Launch and surface the
+orchestrator/parser error; Standard/Excellent mode options are disabled with a
+visible reason when `available_profiles` omits them. Submit posts
+`{repo_id, task_id, acknowledge_blocked, launch}` to `POST /api/runs`, and the
+plan-gate checkbox sets `launch.plan_gate=true` independently of mode/backend.
 Stop posts to `POST /api/runs/{run_id}/stop`; while a live run record carries
 `stop_requested`, the Stop control renders disabled as "Stop requested" from
 server state so reloads and other devices do not re-enable it. Launch refusal UI
@@ -181,9 +193,10 @@ Run history consumes the embedded `sessions`/`context_budget` and `session_est`
 fields from `GET /api/history/runs`, filters the already-fetched newest-first
 list by repo, run state, and task-id text before grouping by `(repo, task)`,
 shows filtered group/run counts plus distinct empty/no-match states, preserves
-log links on visible run cards, and lets each task group collapse without
-hiding its rollup. Rollups show observed dev-session count vs estimate, peak
-context, and summed wall-clock from run-record ISO timestamps.
+log links on visible run cards, renders each run's embedded `effective_config`
+snapshot as a disclosure outside the log-link card, and lets each task group
+collapse without hiding its rollup. Rollups show observed dev-session count vs
+estimate, peak context, and summed wall-clock from run-record ISO timestamps.
 
 Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
 Tasks tab active. It probes availability first, distinguishes disabled,

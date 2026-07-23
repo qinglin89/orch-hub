@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 ---
 
 # APIs: HTTP
@@ -69,6 +69,21 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 - Shape: `tasks_payload(list_tasks(repos))`, preserving `index_present`,
   ordered tasks, frontmatter-authoritative status/blockers, and `missing` /
   `unknown` sentinel statuses.
+
+## `GET /api/repos/{repo_id}/orchestrator-config`
+
+- Purpose: query the target repo's deployed orchestrator for the Start dialog's
+  resolved launch configuration via `orchestrator.py --print-config`.
+- Source: resolves `repo_id` through registry discovery, then runs the
+  repo-local orchestrator with `cwd=<repo>` and optional `backend`/`profile`
+  query params. It does not read `orchestrator.toml` directly and is not
+  readiness-gated.
+- Shape: `EffectiveConfig.to_dict()` with schema/revisions/profile list,
+  backend, `dev`/`review` role agent/model/effort, budgets, sandbox,
+  provenance `sources`, and preview launch fields.
+- Errors: unknown repo returns 404; unrecognized backend returns 400; missing
+  old deployments, nonzero `--print-config`, malformed output, or unsupported
+  schema return 502 with the orchestrator/parser reason so launch fails closed.
 
 ## `GET /api/evaluation`
 
@@ -154,14 +169,15 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 
 ## `POST /api/runs`
 
-- Purpose: start an orchestrator run for `{repo_id, task_id, extra_args,
+- Purpose: start an orchestrator run for `{repo_id, task_id, launch|extra_args,
   acknowledge_blocked}`.
 - Source: resolves `repo_id` through registry discovery, then delegates launch
   gates and subprocess start to the app's single `RunManager`.
-- Dashboard caller: the task-detail Start dialog sends `extra_args` beginning
-  with fixed `["--backend", "cc-codex"]` plus only changed cc-codex override
-  fields and an optional bare `--plan-gate`; the dashboard does not expose a
-  backend selector.
+- Dashboard caller: the task-detail Start dialog sends structured `launch`
+  selection (`mode`, optional `backend`, Custom role overrides, and orthogonal
+  `plan_gate`); the server maps it through `build_launch_args`. Legacy
+  `extra_args` callers remain supported verbatim, but `launch` plus non-empty
+  `extra_args` is 400.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
 
 ## `GET /api/runs`
@@ -180,7 +196,8 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 - Shape: `{"runs": [RunHistoryEntry.to_dict(), ...]}` where each entry embeds
   the normal `RunStatus` fields, including `stop_requested`, plus `events`,
   persisted session snapshot fields (`sessions`, `context_budget`), and
-  `session_est` (`{"current","total"}` or `null` when unknown).
+  `session_est` (`{"current","total"}` or `null` when unknown), and
+  `effective_config` (`null` when the run has no persisted startup snapshot).
 - Query: `limit` defaults to 50 and is clamped to `0..200`.
 
 ## `GET /api/runs/{run_id}`
@@ -216,6 +233,18 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
   `role`, `kind` (`session` or `plan-gate`), `sid`, `turns`, `context_tokens`,
   `status_before`, `end_status`, `start_hms`, and `open`. Empty or partial data
   is HTTP 200; unknown runs return HTTP 404.
+
+## `GET /api/runs/{run_id}/effective-config`
+
+- Purpose: return the real run's authoritative `effective-config:` launch
+  snapshot, authoritative if it differs from the Start-dialog preview.
+- Source: resolves `run_id` through `RunManager.read_effective_config`. Live
+  runs parse the located orchestrator log; ended runs prefer the persisted
+  `<run>/effective_config.json` written at live-to-ended transition and fall
+  back to log parsing for pre-field runs.
+- Shape: `{"run_id", "effective_config"}` where `effective_config` is the raw
+  orchestrator JSON object or `null` when absent/unparsed. Unknown runs return
+  404.
 
 ## `POST /api/runs/{run_id}/stop`
 
@@ -388,8 +417,10 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 - Run-manager/control-dir errors map to client-actionable statuses:
   `UnknownRunError` → 404; `RepoBusyError`, `RunEndedError`,
   `BlockedTaskError`, `LaunchBlockedError`, and `DuplicateAnswerError` → 409;
-  empty answer or answer-mode guard `ValueError` → 400. `LaunchBlockedError`
-  includes `reasons`; `BlockedTaskError` includes `acknowledge_required: true`.
+  structured launch `LaunchError`, empty answer, or answer-mode guard
+  `ValueError` → 400; orchestrator-config query failures → 502.
+  `LaunchBlockedError` includes `reasons`; `BlockedTaskError` includes
+  `acknowledge_required: true`.
 - Intake-manager errors map to client-actionable statuses: `UnknownIntakeError`
   → 404; `IntakeBusyError`, `IntakeNotReadyError`, and `IntakeStateError` →
   409; empty request/feedback `ValueError` → 400. Agent failures are lifecycle
@@ -403,9 +434,8 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
   uses `/api/repos/{repo_id}/commits` for recent commits, and treats
   `available:false` as a graceful unavailable state.
 - The dashboard task-detail run controls consume these existing run APIs
-  directly: Start sends `{repo_id, task_id, acknowledge_blocked, extra_args}`
-  to `POST /api/runs` with fixed `--backend cc-codex`, optional cc-codex
-  overrides, and a default-off plan-gate checkbox that appends a bare
-  `--plan-gate`; Stop sends `POST /api/runs/{run_id}/stop`, and frontend error
-  rendering preserves structured 409 fields instead of flattening every refusal
-  to `detail`.
+  directly: Start first queries `GET /api/repos/{repo_id}/orchestrator-config`
+  and then sends `{repo_id, task_id, acknowledge_blocked, launch}` to
+  `POST /api/runs`; Stop sends `POST /api/runs/{run_id}/stop`, and frontend
+  error rendering preserves structured 409 fields instead of flattening every
+  refusal to `detail`.

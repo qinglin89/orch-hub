@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-22
-verified-against: 89f9fd3867fd6a1c44f057cc300ab04a1d60b5ef
+last-updated: 2026-07-23
+verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 ---
 
 # Modules: Runtime
@@ -52,9 +52,13 @@ live to ended: it parses the repo-side orchestrator log once into `sessions.json
 beside `run.json`, isolated so parse/IO failures cannot affect run state.
 `read_sessions(run_id)` serves live runs from the current log, ended runs from
 the persisted snapshot, and falls back to live parsing only for pre-field runs
-with no snapshot. `recent_runs()` embeds each run's persisted snapshot plus the
-current active-or-archived `session-est` value, deduped per `(repo, task)` and
-degraded to unknown on task-file read failures.
+with no snapshot. The same transition snapshots the real startup
+`effective-config:` JSON into `effective_config.json`; `read_effective_config`
+serves live runs from the current log, ended runs from the snapshot with log
+fallback, and `recent_runs()` embeds the persisted effective config plus each
+run's persisted session snapshot and current active-or-archived `session-est`.
+Task estimates are deduped per `(repo, task)` and degrade to unknown on
+task-file read failures.
 
 The manager also owns notification trigger timing when a notifier is
 configured: run-end notifications fire once at the observed live-to-ended
@@ -68,6 +72,25 @@ question pushes keep the same trigger path but use compact notification text so
 the full plan report does not enter the Bark/APNs payload. Delivery goes through
 `_emit`, which dispatches best-effort work off the lock by default and swallows
 backend exceptions so notification failures cannot corrupt run state.
+
+## Orchestrator Launch Config
+
+Location: `orch_hub/orch_config.py`
+
+Responsibility: keep orch-hub read-only with respect to orchestrator launch
+policy. `query_effective_config(repo, backend=None, profile=None)` runs the
+repo-local deployed orchestrator Python with `orchestrator.py --print-config`
+and optional `--backend`/`--profile`, using `cwd=<repo>` and strict parsing.
+It fails closed on missing deployment binaries, timeouts, nonzero exits,
+non-JSON, unsupported schema versions, or malformed schema-v1 fields the
+orchestrator always emits (revisions, profile/profile list, backend, role
+model/effort, budgets, provenance, booleans). `build_launch_args(LaunchSpec)`
+is the single argv builder for structured dashboard launches: Default inherits,
+Standard/Excellent pass only backend plus profile, Custom passes complete
+applicable role overrides, and `--dev-agent` is cc-codex-only. Snapshot helpers
+parse `effective-config:` log lines, persist/load `effective_config.json`, and
+are deliberately tolerant/raw because snapshots are display/history data, not
+launch-preview validation.
 
 ## Run Monitor
 

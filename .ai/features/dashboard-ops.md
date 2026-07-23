@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 ---
 
 # Features: Dashboard Ops
@@ -16,7 +16,8 @@ Modules: api, web.
 
 APIs: public `GET /`, `GET /app.js`, `GET /styles.css`; protected
 repo/task/run/escalation/log/history/intake/evaluation HTTP APIs, including the
-run-scoped task file route. Log streaming uses the bearer-authenticated SSE endpoint
+run-scoped task file route, orchestrator-config preview route, and run
+effective-config route. Log streaming uses the bearer-authenticated SSE endpoint
 through `fetch`/ReadableStream, not browser `EventSource`.
 
 Implemented behavior:
@@ -105,14 +106,17 @@ Implemented behavior:
   Waiting-question forms send explicit answer modes: ordinary questions show
   Discuss/Answer, plan gates show Feedback/Confirm, Confirm allows empty input
   for one-tap approval, and guard 400 details appear inline.
-- Task detail Start opens a cc-codex launch-options dialog and posts
-  `extra_args` with fixed `["--backend", "cc-codex"]` plus only changed
-  overrides for `--dev-agent`, `--dev-model`, `--dev-effort`,
-  `--review-model`, and `--review-effort`; a default-off plan-gate checkbox
-  appends a single bare `--plan-gate` token when enabled. No backend selector is
-  exposed. Stop posts to `POST /api/runs/{run_id}/stop`. `blocked` tasks require
-  an explicit acknowledgement checkbox; stale/raced starts render the backend
-  409 response instead of trusting frontend state.
+- Task detail Start opens a four-mode launch dialog driven by the repo's
+  deployed orchestrator: Default inherits, Standard/Excellent select named
+  profiles, and Custom exposes explicit role model/effort inputs plus a
+  cc-codex-only dev-agent select. It queries
+  `GET /api/repos/{repo_id}/orchestrator-config` for each backend/profile
+  selection, disables Launch on query failure, disables unavailable named
+  profiles from `available_profiles`, and posts structured `launch` to
+  `POST /api/runs`; the plan-gate checkbox sets `launch.plan_gate=true`
+  independently of mode. Stop posts to `POST /api/runs/{run_id}/stop`.
+  `blocked` tasks require an explicit acknowledgement checkbox; stale/raced
+  starts render the backend 409 response instead of trusting frontend state.
 - Start is hidden or replaced with an explanation when the dashboard already
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
@@ -122,8 +126,9 @@ Implemented behavior:
   distinguishes empty history from no matches, and lets task groups collapse
   while keeping each group's header and rollup visible. Each task group shows
   per-run session strips from persisted snapshots plus a rollup of observed dev
-  sessions vs frontmatter `session-est`, peak per-session context, and summed
-  run wall-clock from `started_ts`/`ended_ts`.
+  sessions vs frontmatter `session-est`, peak per-session context, summed run
+  wall-clock from `started_ts`/`ended_ts`, and each run's embedded
+  `effective_config` launch snapshot as an out-of-link disclosure.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls

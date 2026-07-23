@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 ---
 
 # Modules
@@ -22,7 +22,8 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 | Semantic evaluator | `orch_hub/semantic.py` | Implemented optional evidence-bounded model evaluation over evidence/static artifacts, Claude CLI backend isolation, semantic doctor readiness, `semantic_report.json`, and `report.md` persistence |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
-| Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session snapshot handling, and per-repo serialization |
+| Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |
+| Orchestrator launch config | `orch_hub/orch_config.py` | Implemented deployed-orchestrator `--print-config` query/strict parsing, structured launch-mode argv construction, and tolerant `effective-config:` snapshot helpers |
 | Run monitor | `orch_hub/monitor.py` | Implemented resident daemon-thread status scanner for proactive notification delivery |
 | History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
@@ -40,7 +41,7 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
 | File | Contains |
 |---|---|
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, static metrics, semantic evaluator, intake manager, intake agent |
-| runtime.md | Run manager, monitor, history, control-dir, logs, notifications |
+| runtime.md | Run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
 | web.md | API, web UI, and launchd operations |
 
 ## Boundary Rules
@@ -63,6 +64,9 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
   and the confirmation postcondition; API/web layers do not treat drafts as
   active tasks or decide whether a confirm landed.
 - Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
+- Orchestrator launch config asks deployed orchestrators for effective launch
+  policy and builds argv from structured selections; it never imports deployed
+  orchestrator code or reads target `orchestrator.toml` directly.
 - History serializes run/audit metadata only; `RunManager` decides when events
   are written.
 - Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
