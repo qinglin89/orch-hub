@@ -13,8 +13,10 @@ import pytest
 from orch_hub.config import (
     AI_NATIVE_PATH_ENV,
     BARK_URL_ENV,
+    CODEX_HOME_ENV,
     DATA_DIR_ENV,
     DEFAULT_AI_NATIVE_PATH,
+    DEFAULT_CODEX_HOME,
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
     DEFAULT_PORT,
@@ -134,6 +136,21 @@ def test_data_dir_from_env_expands_user():
 def test_data_dir_empty_or_whitespace_counts_as_unset():
     assert Config.from_env({DATA_DIR_ENV: ""}).data_dir == DEFAULT_DATA_DIR
     assert Config.from_env({DATA_DIR_ENV: "   "}).data_dir == DEFAULT_DATA_DIR
+
+
+def test_codex_home_defaults_when_env_absent():
+    assert Config.from_env({}).codex_home == DEFAULT_CODEX_HOME
+
+
+def test_codex_home_from_env_expands_user():
+    cfg = Config.from_env({CODEX_HOME_ENV: "~/alt-codex"})
+    assert cfg.codex_home == Path("~/alt-codex").expanduser()
+    assert not str(cfg.codex_home).startswith("~")
+
+
+def test_codex_home_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({CODEX_HOME_ENV: ""}).codex_home == DEFAULT_CODEX_HOME
+    assert Config.from_env({CODEX_HOME_ENV: "   "}).codex_home == DEFAULT_CODEX_HOME
 
 
 def test_bark_url_defaults_to_none():

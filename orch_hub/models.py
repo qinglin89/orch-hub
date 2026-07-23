@@ -1472,3 +1472,137 @@ class SemanticJob:
             "started_ts": self.started_ts,
             "ended_ts": self.ended_ts,
         }
+
+
+# -- agent subscription usage -------------------------------------------------
+# Read-only, display-only view of the *agent CLI subscriptions* (Claude, Codex)
+# the hub drives — how much of each provider's rate-limit windows is spent and
+# when they reset — so the Operations Overview can show available agent capacity
+# without conflating it with repo health, run state, or launch gates. The shapes
+# are provider-neutral and normalized (:mod:`orch_hub.usage` fills them from each
+# provider's own local signal); they are strictly informational and never feed
+# readiness, attention, or any run/intake decision.
+
+PROVIDER_CLAUDE = "claude"
+PROVIDER_CODEX = "codex"
+
+
+@dataclass(frozen=True)
+class UsageCredits:
+    """Optional reset-credit balance a provider exposes alongside its limits.
+
+    Codex reports a ``credits`` object (whether the account holds rate-limit
+    reset credits, and a coarse balance). This carries only the *aggregate*
+    fields — ``has_credits`` / ``unlimited`` / ``balance`` — and deliberately
+    never any per-credit / reset-credit *identifier* (the scope bars exposing
+    those). ``balance`` is kept as the provider's opaque string (e.g. ``"0"``);
+    it is a count, not an id. Reading this never *consumes* a reset credit — the
+    hub only ever reads the local rate-limit signal, never the credit-spend path.
+    """
+
+    has_credits: bool | None = None
+    unlimited: bool | None = None
+    balance: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "has_credits": self.has_credits,
+            "unlimited": self.unlimited,
+            "balance": self.balance,
+        }
+
+
+@dataclass(frozen=True)
+class UsageWindow:
+    """One rate-limit window (bucket) of a provider subscription.
+
+    A provider exposes one or more windows — Codex a ``primary`` (often 5h) and
+    optional ``secondary`` (often weekly); Claude a five-hour and a seven-day
+    window. ``key`` is the stable machine key (``"primary"``/``"secondary"`` or
+    ``"five_hour"``/``"seven_day"``) and ``label`` the human name. Usage is
+    expressed as ``used_percent`` with a derived ``remaining_percent`` — the UI
+    must not invent a fixed message total, so ``used``/``limit`` are populated
+    *only* when the provider gives an exact numeric count/limit (neither Claude
+    nor Codex does today; both report percent). ``resets_at`` is the window reset
+    time as an ISO-8601 UTC string (derived from the provider's epoch), or
+    ``None`` when unknown. Any field the provider omits stays ``None`` rather than
+    defaulting to zero, so a missing signal never reads as "0% used".
+    """
+
+    key: str
+    label: str | None = None
+    window_minutes: int | None = None
+    used_percent: float | None = None
+    remaining_percent: float | None = None
+    resets_at: str | None = None
+    used: int | None = None
+    limit: int | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "key": self.key,
+            "label": self.label,
+            "window_minutes": self.window_minutes,
+            "used_percent": self.used_percent,
+            "remaining_percent": self.remaining_percent,
+            "resets_at": self.resets_at,
+            "used": self.used,
+            "limit": self.limit,
+        }
+
+
+@dataclass(frozen=True)
+class ProviderUsage:
+    """Normalized subscription-usage snapshot for one provider (Claude or Codex).
+
+    ``available`` is the load-bearing flag: ``False`` means the hub has no usable
+    signal (never observed, unsupported CLI output, a read failure) and the UI
+    shows *unavailable* rather than zero usage — ``windows`` is empty and
+    ``detail`` says why. When ``True``, ``windows`` carries the parsed buckets,
+    ``plan`` the sanitized plan/tier name (never an account or credential id),
+    and ``credits`` the optional reset-credit balance. ``observed_ts`` is when the
+    underlying data was captured (ISO-8601 UTC) and ``stale`` marks an observation
+    older than the freshness threshold — still shown, but flagged as last-observed
+    rather than current. Everything here is display-only.
+    """
+
+    provider: str
+    available: bool
+    plan: str | None = None
+    windows: tuple[UsageWindow, ...] = ()
+    credits: UsageCredits | None = None
+    observed_ts: str | None = None
+    stale: bool = False
+    detail: str | None = None
+
+    @classmethod
+    def unavailable(cls, provider: str, detail: str | None = None) -> "ProviderUsage":
+        """A fail-soft snapshot: no usable signal, so the UI shows unavailable."""
+        return cls(provider=provider, available=False, detail=detail)
+
+    def to_dict(self) -> dict:
+        return {
+            "provider": self.provider,
+            "available": self.available,
+            "plan": self.plan,
+            "windows": [w.to_dict() for w in self.windows],
+            "credits": self.credits.to_dict() if self.credits is not None else None,
+            "observed_ts": self.observed_ts,
+            "stale": self.stale,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class SubscriptionUsage:
+    """The whole agent-subscription-usage payload: one entry per provider.
+
+    The single object the usage HTTP route returns and the Overview renders. Each
+    provider is independent — one being unavailable never suppresses the other,
+    and the presence of this payload never gates any operational decision.
+    """
+
+    providers: tuple[ProviderUsage, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {"providers": [p.to_dict() for p in self.providers]}

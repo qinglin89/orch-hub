@@ -21,6 +21,12 @@ DEFAULT_PORT = 8765
 DEFAULT_DATA_DIR = Path.home() / ".orch-hub"
 """Default data directory: run dirs live under ``<data_dir>/runs/``."""
 
+DEFAULT_CODEX_HOME = Path.home() / ".codex"
+"""Default Codex CLI home. The agent-subscription-usage feature reads Codex's
+own local rate-limit signal from its session rollouts under ``<codex_home>/
+sessions/`` — a read-only, no-network, no-credit-consuming source. Overridable so
+a non-default ``CODEX_HOME`` (or a test fixture dir) can be pointed at instead."""
+
 AI_NATIVE_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
 """Environment variable overriding the ai-native-development path."""
 
@@ -35,6 +41,13 @@ PORT_ENV = "ORCH_HUB_PORT"
 
 DATA_DIR_ENV = "ORCH_HUB_DATA_DIR"
 """Environment variable overriding the data directory."""
+
+CODEX_HOME_ENV = "ORCH_HUB_CODEX_HOME"
+"""Environment variable overriding the Codex CLI home (default ``~/.codex``).
+
+Points the agent-subscription-usage Codex adapter at the Codex home whose
+``sessions/`` rollouts carry the local rate-limit signal. Unset (or blank) means
+:data:`DEFAULT_CODEX_HOME`."""
 
 BARK_URL_ENV = "ORCH_HUB_BARK_URL"
 """Environment variable holding the Bark push endpoint (server + device key).
@@ -181,6 +194,14 @@ class Config:
     orchestrator's post-checks.
     """
 
+    codex_home: Path = DEFAULT_CODEX_HOME
+    """Codex CLI home (``ORCH_HUB_CODEX_HOME``), default ``~/.codex``.
+
+    The agent-subscription-usage Codex adapter reads Codex's local rate-limit
+    signal from ``<codex_home>/sessions/`` rollouts — read-only, no network, and
+    never the credit-spend path. Display-only; never gates any operation.
+    """
+
     bark_url: str | None = None
     """Bark push endpoint (``ORCH_HUB_BARK_URL``), or ``None`` when unset.
 
@@ -233,6 +254,7 @@ class Config:
         raw_token = env.get(TOKEN_ENV)
         token = raw_token.strip() if raw_token else None
         raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()
+        raw_codex_home = (env.get(CODEX_HOME_ENV) or "").strip()
         raw_bark_url = env.get(BARK_URL_ENV)
         bark_url = raw_bark_url.strip() if raw_bark_url else None
         return cls(
@@ -241,6 +263,9 @@ class Config:
             host=(env.get(HOST_ENV) or "").strip() or DEFAULT_HOST,
             port=_parse_port(env.get(PORT_ENV)),
             data_dir=Path(raw_data_dir).expanduser() if raw_data_dir else DEFAULT_DATA_DIR,
+            codex_home=(
+                Path(raw_codex_home).expanduser() if raw_codex_home else DEFAULT_CODEX_HOME
+            ),
             bark_url=bark_url or None,
             evaluation_enabled=_parse_bool(
                 env.get(EVAL_ENABLED_ENV),

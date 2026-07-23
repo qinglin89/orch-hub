@@ -96,6 +96,7 @@ from .task_store import (
     read_archived_task_content,
     read_task_content,
 )
+from .usage import UsageService
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 """Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
@@ -346,6 +347,7 @@ def create_app(
     static_evaluator: StaticEvaluator | None = None,
     semantic_evaluator: SemanticEvaluator | None = None,
     semantic_job_manager: SemanticJobManager | None = None,
+    usage_service: UsageService | None = None,
 ) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
 
@@ -444,6 +446,13 @@ def create_app(
         if semantic_job_manager is not None
         else SemanticJobManager(resolved, evaluator=semantic)
     )
+    # Read-only, display-only agent-subscription-usage sidecar (Claude + Codex).
+    # Built unconditionally — it starts no subprocess and no Claude turn; a read
+    # only ever touches Codex's local rollouts and the hub-owned Claude store, and
+    # every failure degrades to an *unavailable* card rather than erroring. It is
+    # not gated by evaluation and never participates in readiness/attention/run
+    # decisions. Tests inject one over a fake store / temp Codex home.
+    usage = usage_service if usage_service is not None else UsageService(resolved)
     monitor = RunMonitor(manager)
 
     @asynccontextmanager
@@ -626,6 +635,22 @@ def create_app(
             for repo in repos
         ]
         return repos_payload(entries)
+
+    @app.get("/api/usage")
+    def get_usage() -> dict:
+        """Report agent-subscription usage for Claude and Codex (display-only).
+
+        Best-effort and never gated: the service reads each provider's own local
+        signal (Codex's session rollouts, the hub-owned Claude observation store),
+        caches the combined snapshot briefly, and degrades a failing/absent source
+        to an ``available: false`` card rather than raising — so this route never
+        500s on a missing CLI and never suppresses the other provider. It exposes
+        only rate-limit windows, plan/tier, reset times, and optional credit
+        balance; account, credential, private-endpoint, and reset-credit
+        identifiers are never included. Purely informational: it feeds no
+        readiness, attention, or run/intake decision.
+        """
+        return usage.get_usage().to_dict()
 
     @app.get("/api/tasks")
     def get_tasks() -> dict:
