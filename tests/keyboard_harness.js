@@ -696,6 +696,26 @@ function flush() {
   return p;
 }
 
+// Fire every currently-scheduled timer once (a browser would fire them on
+// schedule), then flush so the awaited work in each callback settles. Used to
+// drive the chained-setTimeout polls (intake, semantic job). Snapshot first: a
+// fired callback may reschedule the next tick, and that reschedule must NOT fire
+// within the same drain (else a chained poll would spin forever) — it lands in a
+// new slot and only fires on the next runTimers(). Null out fired slots like
+// clearTimeout so setTimeout's 1-based ids stay stable.
+function runTimers() {
+  var snapshot = [];
+  for (var i = 0; i < TIMERS.length; i++)
+    if (TIMERS[i]) snapshot.push({ i: i, fn: TIMERS[i].fn });
+  snapshot.forEach(function (t) {
+    TIMERS[t.i] = null;
+  });
+  snapshot.forEach(function (t) {
+    t.fn();
+  });
+  return flush();
+}
+
 function navigate(hash) {
   location.hash = hash;
   dispatch(win, new Event("hashchange"));
@@ -760,6 +780,13 @@ function lastCall(method, path) {
   for (var i = CALLS.length - 1; i >= 0; i--)
     if (CALLS[i].method === method && CALLS[i].path === path) return CALLS[i];
   return null;
+}
+
+function countCalls(method, path) {
+  var n = 0;
+  for (var i = 0; i < CALLS.length; i++)
+    if (CALLS[i].method === method && CALLS[i].path === path) n++;
+  return n;
 }
 
 /* ------------------------------------------------------------ fixture data */
@@ -1104,9 +1131,27 @@ function installRoutes(opts) {
     evaluation_id: EVAL_ID,
     static_metrics: EVAL_REPORT,
   });
-  route("POST", "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic", {
-    evaluation_id: EVAL_ID,
-    semantic_report: SEM_REPORT,
+  // Async semantic-evaluation job: GET reads the current job (null by default =
+  // never evaluated → the idle trigger), POST starts one (returns a transient
+  // queued record). The eval scenario overrides these to drive the running,
+  // completed, and failed states and the poll.
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic/job", {
+    job: null,
+  });
+  route("POST", "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic/job", {
+    job: {
+      job_id: "job-1",
+      repo_name: REPO,
+      task_id: TASK,
+      status: "queued",
+      backend: "claude-cli",
+      model: "claude-opus-4-8",
+      schema_version: "1",
+      evaluation_id: null,
+      error: null,
+      created_ts: "2026-07-20T08:00:00Z",
+      updated_ts: "2026-07-20T08:00:00Z",
+    },
   });
 }
 
@@ -1623,7 +1668,7 @@ async function scenarioTaskEval() {
   installRoutes({ waiting: false });
   var evalPath = "#/evaluations/" + REPO + "/" + TASK;
   var metricsPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/metrics";
-  var semanticPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic";
+  var jobPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic/job";
 
   await navigate(evalPath);
   var heading = pageHeading();
@@ -1707,24 +1752,78 @@ async function scenarioTaskEval() {
     "no semantic-absent note"
   );
 
-  // Triggering shows the in-progress state (busy trigger + running note) while the
-  // model turn is in flight, then posts to /semantic once.
-  var releaseSem = defer("POST", semanticPath);
+  // Triggering starts an ASYNC job, not a blocking model call: POST .../semantic/job
+  // returns a transient queued record at once (the long model turn runs off-thread
+  // on the hub). The trigger goes busy with a running note synchronously; once the
+  // queued job returns, the view re-renders to the running panel.
+  var jobRecord = function (over) {
+    var base = {
+      job_id: "job-1", repo_name: REPO, task_id: TASK, status: "queued",
+      backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1",
+      evaluation_id: null, error: null,
+      created_ts: "2026-07-20T08:00:00Z", updated_ts: "2026-07-20T08:00:00Z",
+      started_ts: null, ended_ts: null,
+    };
+    for (var k in over) base[k] = over[k];
+    return base;
+  };
+  // The post-click re-render (and the poll) read a running job.
+  route("GET", jobPath, {
+    job: jobRecord({ status: "running", started_ts: "2026-07-20T08:00:01Z" }),
+  });
+  var releaseStart = defer("POST", jobPath);
   pressEnter(doc.querySelector(".eval-sem-btn"));
   check(
-    "eval: the semantic run disables its trigger while in flight",
+    "eval: the semantic trigger disables while the job starts",
     doc.querySelector(".eval-sem-btn").disabled === true,
-    "trigger not disabled during the run"
+    "trigger not disabled while starting the job"
   );
   check(
-    "eval: the semantic run shows an in-progress note",
+    "eval: starting the semantic job shows an in-progress note",
     (doc.querySelector(".eval-sem-status") || {}).textContent &&
       doc.querySelector(".eval-sem-status").textContent.indexOf("Running") !== -1,
     "no in-progress note"
   );
-  await releaseSem();
+  await releaseStart();
   await flush();
-  check("eval: the semantic run posts to /semantic", !!lastCall("POST", semanticPath), "no semantic POST");
+  check("eval: the click posts the async semantic-job route", !!lastCall("POST", jobPath), "no job POST");
+  // An in-flight job replaces the trigger entirely (no button) → a duplicate model
+  // call cannot be started from the page, and the running panel names the model.
+  check(
+    "eval: an in-flight job replaces the trigger with a running panel",
+    !!doc.querySelector(".eval-sem-running") && doc.querySelector(".eval-sem-btn") === null,
+    "no running panel, or a duplicate trigger survived"
+  );
+  check(
+    "eval: the running panel names the running model",
+    doc.querySelector(".eval-sem-running").textContent.indexOf("claude-opus-4-8") !== -1,
+    "running panel does not name the model"
+  );
+
+  // Poll resilience: a transient read failure (here a 404 from an unrouted GET)
+  // must NOT be mistaken for a settled/gone job — the turn is still running on the
+  // hub, so the running panel stays and the poll keeps trying.
+  route("GET", jobPath, undefined); // the next poll read 404s
+  await runTimers();
+  check(
+    "eval: a transient poll read failure keeps the running panel",
+    !!doc.querySelector(".eval-sem-running") && doc.querySelector(".eval-sem-btn") === null,
+    "a failed poll read wrongly settled the running state"
+  );
+  route("GET", jobPath, {
+    job: jobRecord({ status: "running", started_ts: "2026-07-20T08:00:01Z" }),
+  }); // restore the running job
+
+  // Reload/navigation survival: the running state is read from the persisted job on
+  // every load, so leaving the view and returning re-paints the running panel (not
+  // the idle trigger). Leaving also tears down the poll through router().
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  await navigate(evalPath);
+  check(
+    "eval: a running job's state survives navigation",
+    !!doc.querySelector(".eval-sem-running") && doc.querySelector(".eval-sem-btn") === null,
+    "the running state did not survive navigation"
+  );
 
   // A semantic-carrying evaluation paints the Layer 2 report: the model-judgment
   // block, its evaluator identity, findings ordered most-severe first, evidence
@@ -1748,7 +1847,24 @@ async function scenarioTaskEval() {
       },
     ],
   });
-  await navigate(evalPath + "/" + EVAL_ID);
+  // The job settles to completed, linking that fresh evaluation. Firing the
+  // scheduled poll tick observes the terminal status and re-renders to select the
+  // evaluation, so the Layer 2 report paints without a manual navigation.
+  route("GET", jobPath, {
+    job: jobRecord({
+      status: "completed",
+      evaluation_id: EVAL_ID,
+      started_ts: "2026-07-20T08:00:01Z",
+      ended_ts: "2026-07-20T08:02:00Z",
+    }),
+  });
+  await runTimers();
+  check(
+    "eval: a completed job selects its fresh semantic evaluation",
+    !!doc.querySelector(".sem-report") &&
+      doc.querySelector(".sem-report").className.indexOf("sem-absent") === -1,
+    "the completed job did not land on the semantic report"
+  );
   var sem = doc.querySelector(".sem-report");
   check("eval: the semantic report block renders", !!sem && sem.className.indexOf("sem-absent") === -1, "no .sem-report");
   check(
@@ -1793,8 +1909,61 @@ async function scenarioTaskEval() {
     pickOpt && pickOpt.textContent.indexOf("claude-opus-4-8") !== -1,
     "picker option text: " + (pickOpt && pickOpt.textContent)
   );
-  // Restore the default list + report-less detail so later scenarios (and the
-  // doctor-gating branch below) see the default fixtures.
+  // A FAILED job never silently returns to the idle view: the view shows a clear
+  // failed state with the bounded backend diagnostic and a Retry that re-posts the
+  // job. This state is read from the persisted job, so it survives a fresh load.
+  route("GET", jobPath, {
+    job: jobRecord({
+      status: "failed",
+      error: "semantic evaluation failed: claude backend exited 1",
+      started_ts: "2026-07-20T08:00:01Z",
+      ended_ts: "2026-07-20T08:00:30Z",
+    }),
+  });
+  await navigate(evalPath);
+  check(
+    "eval: a failed job shows a failed state, not the idle trigger",
+    !!doc.querySelector(".eval-sem-failed"),
+    "no failed panel"
+  );
+  check(
+    "eval: the failed state shows the bounded backend diagnostic",
+    (doc.querySelector(".eval-sem-error") || {}).textContent &&
+      doc.querySelector(".eval-sem-error").textContent.indexOf("exited 1") !== -1,
+    "no bounded diagnostic"
+  );
+  var retryBtn = doc.querySelector(".eval-sem-failed .eval-sem-btn");
+  check(
+    "eval: the failed state offers a Retry control",
+    !!retryBtn && retryBtn.textContent.indexOf("Retry") !== -1,
+    "no Retry control: " + (retryBtn && retryBtn.textContent)
+  );
+  // Retry re-posts the async job route (a fresh attempt, allowed once terminal) and
+  // re-renders to the running panel.
+  route("GET", jobPath, {
+    job: jobRecord({ status: "running", started_ts: "2026-07-20T08:01:00Z" }),
+  });
+  var postsBeforeRetry = countCalls("POST", jobPath);
+  var releaseRetry = defer("POST", jobPath);
+  pressEnter(retryBtn);
+  await releaseRetry();
+  await flush();
+  check(
+    "eval: Retry re-posts the async job route",
+    countCalls("POST", jobPath) === postsBeforeRetry + 1,
+    "Retry did not post a fresh job"
+  );
+  check(
+    "eval: Retry lands on the running panel",
+    !!doc.querySelector(".eval-sem-running"),
+    "Retry did not enter the running state"
+  );
+  // Leave the running view so its poll is torn down before the restore below.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+
+  // Restore the default list + report-less detail + idle (no) job so later
+  // scenarios (and the doctor-gating branch below) see the default fixtures.
+  route("GET", jobPath, { job: null });
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
     repo: REPO,
     task_id: TASK,

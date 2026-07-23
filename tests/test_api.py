@@ -2763,23 +2763,25 @@ def test_unknown_task_evaluates_as_absent_target(tmp_path, monkeypatch):
 # -- semantic (Layer 2) --------------------------------------------------------
 
 
-def test_generate_semantic_then_list_and_fetch(tmp_path, monkeypatch):
-    # A semantic evaluation over a fake backend persists the full chain and is
-    # listed and read back through the same sidecar routes as Layer 1.
+def test_completed_semantic_job_lists_and_reads_back_the_full_chain(tmp_path, monkeypatch):
+    # The list + detail routes read a persisted semantic evaluation back the same
+    # way regardless of how it was minted. The synchronous /semantic route is
+    # retired, so the evaluation is generated through the async job (the default
+    # test executor settles it before the POST returns); this pins the sidecar
+    # readback of the full evidence→static→semantic chain that route used to cover.
+    # Backend-failure, schema-violation, 404, and read-only coverage now live in the
+    # async-job tests below.
     client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
 
-    gen = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
-    assert gen.status_code == 201
-    eval_id = gen.json()["evaluation_id"]
-    report = gen.json()["semantic_report"]
-    assert report["evaluation_id"] == eval_id
-    assert report["task_id"] == RUN_TASK_ID
-    assert report["evaluator"]["backend"] == "fake"
-    assert report["scores"] and report["findings"]
-    # Static metrics were fed as input (the chain is evidence→static→semantic).
-    assert report["input_static_metrics"] is True
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    job = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]
+    assert job["status"] == "completed"
+    eval_id = job["evaluation_id"]
 
     listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listing["latest_evaluation_id"] == eval_id
     assert listing["evaluations"] == [
         {
             "evaluation_id": eval_id,
@@ -2799,63 +2801,18 @@ def test_generate_semantic_then_list_and_fetch(tmp_path, monkeypatch):
     detail = client.get(
         f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{eval_id}"
     ).json()
-    assert detail["semantic_report"] == report
+    report = detail["semantic_report"]
+    assert report["evaluation_id"] == eval_id
+    assert report["task_id"] == RUN_TASK_ID
+    assert report["evaluator"]["backend"] == "fake"
+    assert report["scores"] and report["findings"]
+    # The chain is evidence→static→semantic: static metrics were fed as input.
+    assert report["input_static_metrics"] is True
     # All three JSON layers plus the rendered Markdown export are readable.
     assert detail["evidence"]["evaluation_id"] == eval_id
     assert detail["static_metrics"]["evaluation_id"] == eval_id
     assert detail["report_md"].startswith("# Semantic Task Evaluation")
     assert "handoff_completeness" in detail["report_md"]
-
-
-def test_generate_semantic_backend_failure_is_502(tmp_path, monkeypatch):
-    # A backend/model failure is a 502 (upstream evaluator failed) and, because
-    # cleanup is atomic, leaves no persisted evaluation behind.
-    client, *_ , repo = make_eval_client(
-        tmp_path, monkeypatch, semantic_backend=RaisingSemanticBackend()
-    )
-
-    resp = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
-    assert resp.status_code == 502
-    assert "failed" in resp.json()["detail"]
-
-    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
-    assert listing["evaluations"] == []  # nothing half-written
-
-
-def test_generate_semantic_schema_violation_is_502(tmp_path, monkeypatch):
-    # A non-conforming model response (missing the required confidence) is also a
-    # 502 from the semantic layer's schema gate, with no artifact persisted.
-    bad = semantic_envelope({"scores": [], "findings": []})
-    client, *_ , repo = make_eval_client(
-        tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(bad)
-    )
-
-    resp = client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
-    assert resp.status_code == 502
-    # Atomic cleanup removed the reserved evaluation dir: nothing is listed.
-    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
-    assert listing["evaluations"] == []
-
-
-def test_generate_semantic_unknown_repo_is_404(tmp_path, monkeypatch):
-    client, *_ = make_eval_client(tmp_path, monkeypatch)
-    resp = client.post(f"/api/repos/ghost/evaluations/{RUN_TASK_ID}/semantic")
-    assert resp.status_code == 404
-
-
-def test_generate_semantic_is_read_only_over_the_target_repo(tmp_path, monkeypatch):
-    # The service boundary is read-only: a semantic run never touches the target
-    # task file or its .ai-tasks/ dir, only the hub-owned evaluations tree.
-    client, *_ , repo = make_eval_client(tmp_path, monkeypatch)
-    task_file = repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md"
-    before = task_file.read_text(encoding="utf-8")
-    before_listing = sorted(p.name for p in (repo.path / ".ai-tasks").iterdir())
-
-    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic")
-
-    assert task_file.read_text(encoding="utf-8") == before
-    assert sorted(p.name for p in (repo.path / ".ai-tasks").iterdir()) == before_listing
-    assert (tmp_path / "hub-data" / "evaluations" / repo.name / RUN_TASK_ID).is_dir()
 
 
 def test_list_surfaces_semantic_evaluator_for_picker_comparison(tmp_path, monkeypatch):
@@ -2864,9 +2821,12 @@ def test_list_surfaces_semantic_evaluator_for_picker_comparison(tmp_path, monkey
     client, service, _static, _sem, repo = make_eval_client(
         tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(available=True)
     )
-    eval_id = client.post(
-        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic"
-    ).json()["evaluation_id"]
+    # Generate via the async job (settled synchronously by the default test
+    # executor); the completed job carries the fresh evaluation_id.
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    eval_id = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]["evaluation_id"]
 
     entry = client.get(
         f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}"
@@ -2890,9 +2850,10 @@ def test_list_evaluator_degrades_to_none_when_semantic_report_unreadable(
     client, service, _static, _sem, repo = make_eval_client(
         tmp_path, monkeypatch, semantic_backend=FakeSemanticBackend(available=True)
     )
-    eval_id = client.post(
-        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic"
-    ).json()["evaluation_id"]
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+    eval_id = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]["evaluation_id"]
     report_path = (
         service.artifact_dir(repo, RUN_TASK_ID, eval_id) / SEMANTIC_REPORT_NAME
     )
@@ -3140,7 +3101,7 @@ def test_disabled_mode_action_routes_are_404(tmp_path, monkeypatch):
         client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/anything"),
         client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/evidence"),
         client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/metrics"),
-        client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic"),
+        client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"),
     ):
         assert resp.status_code == 404
         assert "disabled" in resp.json()["detail"]
@@ -3245,9 +3206,6 @@ def test_evaluation_routes_require_auth(tmp_path, monkeypatch):
     ).status_code == 401
     assert unauthed.post(
         f"/api/repos/r/evaluations/{RUN_TASK_ID}/metrics"
-    ).status_code == 401
-    assert unauthed.post(
-        f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic"
     ).status_code == 401
     assert unauthed.post(
         f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic/job"

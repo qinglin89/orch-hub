@@ -1537,6 +1537,40 @@ code {
   max-width: 56ch;
 }
 
+/* Layer 2 in-flight: the running panel that replaces the trigger while a semantic
+   job is queued/running (so no duplicate can be started from the page). A calm
+   accent-tinted status — not an alarm — reading as "working", with the elapsed
+   label ticking beside the verb. */
+.eval-sem-running {
+  color: var(--accent);
+  line-height: 1.5;
+  max-width: 60ch;
+}
+
+.eval-sem-running .eval-sem-status {
+  color: var(--accent);
+}
+
+#eval-sem-elapsed {
+  color: var(--muted);
+  font-family: var(--mono, monospace);
+}
+
+/* Layer 2 terminal-failed: the bounded backend diagnostic stacked above the Retry
+   control. The diagnostic is the alarm colour (a real failure, unlike the warn-tinted
+   unavailable state); the Retry button keeps the shared trigger shape below it. */
+.eval-sem-failed {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.eval-sem-error {
+  margin: 0;
+  line-height: 1.5;
+  max-width: 60ch;
+}
+
 /* Score axes: one row per axis, a colour-banded percentage and a meter beneath,
    with any evidence-pointing warnings listed under it. */
 .score-list {

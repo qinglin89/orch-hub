@@ -29,11 +29,13 @@
   const LIVE_STATES = new Set(["active", "waiting"]); // run states that badge a repo
   const DEFAULT_LOG_TAIL = 200; // initial log lines to request (matches the API default)
   const INTAKE_POLL_MS = 2000; // review-view poll cadence for an in-flight intake turn
+  const SEMANTIC_JOB_POLL_MS = 3000; // eval-view poll cadence for an in-flight semantic-eval job
   const OVERVIEW_REFRESH_MS = 15000; // Overview background auto-refresh cadence (passive dashboard)
   const OVERVIEW_HISTORY_LIMIT = 12; // recent-run window fetched for the outcomes panel
   const OVERVIEW_OUTCOME_COUNT = 5; // ended runs shown in the outcomes panel
   let activeStream = null; // AbortController for the in-flight SSE log stream, if any
   let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
+  let activeSemanticJobPoll = null; // { cancelled, timer } for the in-flight semantic-job poll, if any
   let activeOverviewRefresh = null; // { cancelled, timer } for the Overview auto-refresh, if any
   let routeGeneration = 0; // bumped by every router() entry; see routeGuard()
   let navByKeyboard = false; // last input was a key press → focusPageStart shows the heading ring
@@ -75,6 +77,12 @@
   // settles. Mirrors orch_hub.intake._TRANSIENT. (`confirming` is deliberately
   // not cancellable — see the working panel — so no cancel races the write.)
   const INTAKE_TRANSIENT = new Set(["drafting", "revising", "confirming"]);
+  // Async semantic-evaluation job lifecycle (mirror orch_hub.semantic_jobs). The
+  // transient pair brackets an in-flight model turn the eval view polls through;
+  // `completed`/`failed`/`error` are terminal. A `completed` job links the fresh
+  // evaluation the view then selects; `error` (a corrupt job record) is handled as
+  // terminal/idle-with-retry like `failed`.
+  const SEMANTIC_JOB_TRANSIENT = new Set(["queued", "running"]);
 
   // ---- token storage ----
   const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
@@ -2756,8 +2764,12 @@
     evalListPath(repo, taskId) + "/" + encodeURIComponent(id);
   const evalMetricsPath = (repo, taskId) =>
     evalListPath(repo, taskId) + "/metrics";
-  const evalSemanticPath = (repo, taskId) =>
-    evalListPath(repo, taskId) + "/semantic";
+  // The async semantic-evaluation job: POST starts (or reuses) it, GET reads its
+  // current state. Both return the same {"job": <record>|null} envelope. This
+  // replaced the retired synchronous /semantic route, which left the page looking
+  // idle for the whole model turn and offered no reload-survivable state.
+  const evalSemanticJobPath = (repo, taskId) =>
+    evalListPath(repo, taskId) + "/semantic/job";
 
   // Human labels for the five deterministic score axes (machine keys from the
   // report); an unknown key passes through so a new axis still renders.
@@ -3245,27 +3257,110 @@
       </div></section>`;
   }
 
-  // The Layer 2 trigger, deliberately separated from the free Layer 1 generate so
-  // the cost/read-only boundary is unmissable: a semantic evaluation runs a Claude
-  // model (a real cost, and slow) but is a read-only analysis bounded to the
-  // persisted evidence — not an orchestrator run, and it mutates nothing.
-  function evalSemanticSection(doctor) {
-    // The doctor gates the trigger: an enabled-but-unconfigured backend (no
-    // `claude` on PATH → doctor.available === false) disables Layer 2 with an
-    // explanation, so an operator is not left to discover it as a 502 on click,
-    // while the deterministic Layer 1 metrics stay usable. A null doctor (the probe
-    // failed, or an older hub has no doctor route) keeps the default enabled
-    // control — the sidecar never blocks on its own readiness check.
-    const unavailable = !!(doctor && doctor.available === false);
-    const actions = unavailable
-      ? `<button type="button" class="eval-sem-btn" disabled
-           aria-describedby="eval-sem-unavailable">Run semantic evaluation…</button>
+  // Elapsed since a running/queued job's clock started (started_ts once running,
+  // else created_ts) — a compact "obviously alive, not stuck" signal for the
+  // running panel. Mirrors intakeElapsed: degrades to "" on a null/unparseable/
+  // future stamp so the panel shows just the verb rather than "NaN".
+  function evalSemElapsed(job) {
+    const ts = (job && (job.started_ts || job.created_ts)) || null;
+    if (!ts) return "";
+    const then = new Date(ts);
+    if (isNaN(then.getTime())) return "";
+    const secs = Math.floor((Date.now() - then.getTime()) / 1000);
+    if (secs < 0) return "";
+    if (secs < 60) return secs + "s";
+    const mins = Math.floor(secs / 60);
+    if (mins < 60) return mins + "m " + (secs % 60) + "s";
+    const hrs = Math.floor(mins / 60);
+    return hrs + "h " + (mins % 60) + "m";
+  }
+  function evalSemElapsedPhrase(job) {
+    const e = evalSemElapsed(job);
+    return e ? " — running for " + e : "";
+  }
+  // Tick the running panel's elapsed span in place each poll, so a still-running
+  // job's label advances without a full re-render (mirrors updateIntakeElapsed).
+  function updateEvalSemElapsed(job) {
+    const el = document.getElementById("eval-sem-elapsed");
+    if (el) el.textContent = evalSemElapsedPhrase(job);
+  }
+
+  const evalSemModel = (job) => (job && job.model) || "the semantic evaluator";
+
+  // The idle/retry trigger button (and its live-region status span), or — when the
+  // doctor reports the backend unconfigured — a disabled trigger with the reason.
+  // The doctor gates the trigger so an operator is not left to discover an
+  // unconfigured backend as a failed job on click, while the free deterministic
+  // Layer 1 metrics stay usable. A null doctor (probe failed / older hub) keeps the
+  // default enabled control — the sidecar never blocks on its own readiness check.
+  function evalSemTrigger(label, unavailable, doctor) {
+    if (unavailable)
+      return `<button type="button" class="eval-sem-btn" disabled
+           aria-describedby="eval-sem-unavailable">${label}</button>
         <span class="control-status eval-sem-status eval-sem-unavailable"
            id="eval-sem-unavailable" role="status">Layer 2 is unavailable on this hub: ${escapeHtml(
              doctor.detail || "the semantic evaluator backend is not configured"
-           )}. The deterministic Layer 1 metrics above still work.</span>`
-      : `<button type="button" class="eval-sem-btn">Run semantic evaluation…</button>
+           )}. The deterministic Layer 1 metrics above still work.</span>`;
+    return `<button type="button" class="eval-sem-btn">${label}</button>
         <span class="control-status eval-sem-status" role="status"></span>`;
+  }
+
+  // The in-flight (queued/running) panel content: no trigger button at all, so a
+  // duplicate model call cannot be started from the page while one is running (the
+  // backend dedups regardless). A polite live-region status names the model and
+  // ticks the elapsed span; the state is read from the persisted job on every load,
+  // so it survives reload, navigation, and another browser session. The
+  // `.eval-sem-running` modifier is applied to the single wrapper by
+  // evalSemanticSection.
+  function evalSemRunning(job) {
+    return `<span class="control-status eval-sem-status" role="status" aria-live="polite">
+          Running the semantic evaluator with ${escapeHtml(evalSemModel(job))}…
+          this uses a model and can take a little while. You can leave this page —
+          the job keeps running.<span id="eval-sem-elapsed">${escapeHtml(
+            evalSemElapsedPhrase(job)
+          )}</span></span>`;
+  }
+
+  // The terminal-failed (or corrupt-record `error`) panel content: the bounded
+  // backend diagnostic — never full prompt text or unbounded model output, the
+  // manager caps it — plus a Retry that re-POSTs the job (a fresh attempt is
+  // allowed once the prior one is terminal). Retry respects the doctor: an
+  // unconfigured backend disables it with the same explanation as the idle trigger.
+  // The `.eval-sem-failed` modifier is applied to the single wrapper by
+  // evalSemanticSection.
+  function evalSemFailed(job, unavailable, doctor) {
+    const detail = (job && job.error) || "The semantic evaluation failed.";
+    return `<p class="eval-sem-error error-text" role="status">Semantic evaluation
+           failed: ${escapeHtml(detail)}</p>
+        ${evalSemTrigger("Retry semantic evaluation…", unavailable, doctor)}`;
+  }
+
+  // The Layer 2 section, deliberately separated from the free Layer 1 generate so
+  // the cost/read-only boundary is unmissable: a semantic evaluation runs a Claude
+  // model (a real cost, and slow) but is a read-only analysis bounded to the
+  // persisted evidence — not an orchestrator run, and it mutates nothing. Its
+  // action region is state-driven by the current async job: a transient job shows
+  // the running panel (survives reload); a failed/error job shows the bounded
+  // diagnostic + Retry; no job or a completed one shows the idle trigger. All three
+  // share one `.eval-actions` wrapper with a state modifier so the layout is a
+  // single (never nested) flex container.
+  function evalSemanticSection(doctor, job) {
+    const unavailable = !!(doctor && doctor.available === false);
+    const status = job ? job.status : null;
+    let modifier = "";
+    let actions;
+    if (status && SEMANTIC_JOB_TRANSIENT.has(status)) {
+      // A running job wins over the doctor gate: a turn is genuinely in flight, so
+      // show its live state rather than the (now moot) start control.
+      modifier = " eval-sem-running";
+      actions = evalSemRunning(job);
+    } else if (status === "failed" || status === "error") {
+      modifier = " eval-sem-failed";
+      actions = evalSemFailed(job, unavailable, doctor);
+    } else {
+      // No job yet, or a completed one (its report shows below): offer the trigger.
+      actions = evalSemTrigger("Run semantic evaluation…", unavailable, doctor);
+    }
     return `<section class="section eval-generate eval-semantic-generate"><h2>Layer 2 · Semantic evaluation</h2>
       <p class="muted">A model reads the bounded evidence and static metrics and
          judges what a deterministic check cannot — knowledge-signal density,
@@ -3279,7 +3374,7 @@
          repo files, does not start an orchestrator task run, and never modifies the
          task or run state. Each run creates a fresh evaluation (evidence + metrics +
          semantic report).</p>
-      <div class="eval-actions">
+      <div class="eval-actions${modifier}">
         ${actions}
       </div></section>`;
   }
@@ -3376,13 +3471,18 @@
     }
   }
 
-  // Run a Layer 2 semantic evaluation: POST /semantic drives the model turn (a
-  // read-only, evidence-bounded analysis — never a repo/task write), which mints a
-  // fresh evaluation dir, then re-render to that new latest so the report paints.
-  // The request is slow (a model turn), so the button stays busy with an
-  // in-progress note; a navigation during it drops the follow-up via the guard
-  // captured before the POST, and a backend/model failure (502) surfaces inline —
-  // none of which touches the run controls on other views.
+  // Start (or retry) a Layer 2 semantic evaluation: POST the async job route
+  // (returns the transient queued job at once; the long model turn runs off-thread
+  // on the hub and the record self-updates to completed/failed). This is the same
+  // handler for the idle trigger and the failed-state Retry — both re-POST. The
+  // button goes busy with a running note synchronously (before the re-render), then
+  // a re-render reads the queued/running job and paints the running panel + starts
+  // the poll. A navigation during the POST drops the follow-up via the guard
+  // captured before it. The POST itself only errors on a hard refusal (disabled →
+  // 404, unsafe id → 400); an unavailable backend is NOT a start error — it becomes
+  // a persisted failed job the poll then surfaces — so a backend/model failure
+  // never returns to the idle view. The duplicate guard is server-side: a POST while
+  // a job is transient returns that same job and starts no second model call.
   async function onEvalSemantic(repo, taskId, button) {
     const statusEl = document.querySelector(".eval-sem-status");
     const superseded = routeGuard();
@@ -3391,18 +3491,74 @@
       statusEl.textContent =
         "Running the semantic evaluator… this uses a model and can take a little while.";
     try {
-      await api(evalSemanticPath(repo, taskId), { method: "POST" });
+      await api(evalSemanticJobPath(repo, taskId), { method: "POST" });
       if (superseded()) return;
-      rerender(renderTaskEval(repo, taskId, null)); // land on the fresh latest
+      // Read the now-transient job → the running panel, and start the poll.
+      rerender(renderTaskEval(repo, taskId, null));
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
       if (superseded()) return; // the button and its status line are gone
       setControlBusy(button, statusEl, false);
       if (statusEl) {
         statusEl.classList.add("error-text");
-        statusEl.textContent = controlErrorText(err, "Semantic evaluation failed.");
+        statusEl.textContent = controlErrorText(
+          err,
+          "Failed to start the semantic evaluation."
+        );
       }
     }
+  }
+
+  // Teardown for the semantic-job poll, mirroring stopIntakePoll: one module-level
+  // handle, cleared by router() on navigation and at the top of renderTaskEval so a
+  // poll that outlived its view can neither read, paint, nor reschedule.
+  function stopSemanticJobPoll() {
+    if (activeSemanticJobPoll) {
+      activeSemanticJobPoll.cancelled = true;
+      if (activeSemanticJobPoll.timer) clearTimeout(activeSemanticJobPoll.timer);
+      activeSemanticJobPoll = null;
+    }
+  }
+
+  // Poll one in-flight semantic job (started only for a transient status) until it
+  // settles. A chained setTimeout — never setInterval — so a slow response can't
+  // overlap the next fetch; while the status stays transient it just ticks the
+  // elapsed label in place; on settle it re-renders: a completed job selects its
+  // freshly written evaluation (so the report paints), while failed/error/gone
+  // lands on the idle+retry view via a plain re-render. A transient read failure
+  // is swallowed and retried — the turn is still running on the hub.
+  function startSemanticJobPoll(repo, taskId) {
+    stopSemanticJobPoll();
+    const poll = { cancelled: false, timer: null };
+    activeSemanticJobPoll = poll;
+    const tick = async () => {
+      if (poll.cancelled) return;
+      let job = null;
+      let read = false;
+      try {
+        const res = await api(evalSemanticJobPath(repo, taskId));
+        job = res ? res.job : null;
+        read = true;
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) return; // login shown
+        // Transient read failure — the turn is still running on the hub, so keep
+        // polling rather than mistaking the failed read for a settled/gone job.
+      }
+      if (poll.cancelled || activeSemanticJobPoll !== poll) return; // view left / superseded
+      if (!read || (job && SEMANTIC_JOB_TRANSIENT.has(job.status))) {
+        // Read failed (retry), or still queued/running (advance the elapsed label).
+        if (read) updateEvalSemElapsed(job);
+        poll.timer = setTimeout(tick, SEMANTIC_JOB_POLL_MS);
+        return;
+      }
+      // Read succeeded and the job is terminal or gone → repaint the whole view.
+      if (job && job.status === "completed" && job.evaluation_id) {
+        rerender(renderTaskEval(repo, taskId, job.evaluation_id)); // select the new eval
+      } else {
+        rerender(renderTaskEval(repo, taskId, null)); // failed/error/gone → idle + retry
+      }
+    };
+    poll.timer = setTimeout(tick, SEMANTIC_JOB_POLL_MS);
   }
 
   function wireEvalControls(repo, taskId, strings) {
@@ -3425,6 +3581,10 @@
 
   async function renderTaskEval(repoName, taskId, evaluationId) {
     const superseded = routeGuard();
+    // A fresh render supersedes any in-flight semantic-job poll (this may BE the
+    // poll's own settle re-render); it restarts below only if the current job is
+    // still transient. router() also stops it on navigation.
+    stopSemanticJobPoll();
     view().innerHTML = loadingView(taskId, "Loading evaluation…");
 
     // Availability first: it is the one evaluation route that answers while the
@@ -3461,6 +3621,22 @@
       if (err instanceof ApiError && err.status === 401) throw err; // re-gate
       if (superseded()) return;
       semanticDoctor = null; // probe failed → keep Layer 2 available (session-1)
+    }
+
+    // The current async semantic-evaluation job (queued/running/completed/failed/
+    // error), or null when the task never had one. Read on every load so a running
+    // or recently-failed job renders its state across reload/navigation/another
+    // session. Best-effort like the doctor probe — a job-read failure degrades to
+    // no job (the idle trigger) rather than blanking the whole sidecar; 401 re-gates.
+    let semanticJob = null;
+    try {
+      const jobRes = await api(evalSemanticJobPath(repoName, taskId));
+      if (superseded()) return;
+      semanticJob = jobRes ? jobRes.job : null;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err; // re-gate
+      if (superseded()) return;
+      semanticJob = null;
     }
 
     // The task's evaluation history + resolved target (active/archived/absent).
@@ -3506,11 +3682,17 @@
          model-judged semantic evaluation (Layer 2). Layer 2 scores and findings are a
          model's judgment, kept visually distinct from the deterministic ones.</p>
       ${evalGenerateSection()}
-      ${evalSemanticSection(semanticDoctor)}
+      ${evalSemanticSection(semanticDoctor, semanticJob)}
       ${evalPickerSection(repoName, taskId, evals, selectedId)}
       ${evalDetailHtml(taskId, detail, reportJson, evidenceJson, semanticJson, reportMd)}`;
 
     wireEvalControls(repoName, taskId, strings);
+
+    // A transient job means a model turn is in flight (started here or from another
+    // session): poll it to its terminal state. On settle the poll re-renders — a
+    // completed job selects its fresh evaluation, a failed one lands on retry.
+    if (semanticJob && SEMANTIC_JOB_TRANSIENT.has(semanticJob.status))
+      startSemanticJobPoll(repoName, taskId);
   }
 
   // ---- remote intake (draft → review → confirm / cancel) ----
@@ -4763,13 +4945,15 @@
     // guards its own paint against the same counter through routeGuard(); this
     // one guards the landing/error work the router itself owns.
     const generation = ++routeGeneration;
-    // Leaving any view aborts an in-flight log stream and stops the intake poll
-    // and the Overview refresh so none keep reading/painting after navigation.
+    // Leaving any view aborts an in-flight log stream and stops the intake poll,
+    // the semantic-job poll, and the Overview refresh so none keep reading/painting
+    // after navigation.
     if (activeStream) {
       activeStream.abort();
       activeStream = null;
     }
     stopIntakePoll();
+    stopSemanticJobPoll();
     stopOverviewRefresh();
     if (!getToken()) {
       renderLogin();

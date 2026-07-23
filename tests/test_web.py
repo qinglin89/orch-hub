@@ -1037,8 +1037,12 @@ def test_overview_bounded_refresh_lifecycle():
     # overlap the next fetch.
     assert "setTimeout(" in body
     assert "setInterval(" not in body
-    # The refresh is torn down on navigation, right beside the intake poll.
-    assert "stopIntakePoll();\n    stopOverviewRefresh();" in body
+    # The refresh is torn down on navigation, right beside the intake and
+    # semantic-job polls.
+    assert (
+        "stopIntakePoll();\n    stopSemanticJobPoll();\n    stopOverviewRefresh();"
+        in body
+    )
     # render is split so a refresh tick repaints without the initial loader flash.
     assert "function loadOverview" in body
     assert "function paintOverview" in body
@@ -1679,22 +1683,23 @@ def test_evaluation_offers_copy_download_and_never_inlines_raw_logs():
 
 # ---- semantic (Layer 2) dashboard, session-1 -------------------------------
 #
-# The backend `/semantic` route + detail readback (`semantic_report`/`report_md`)
+# The async semantic-job routes + detail readback (`semantic_report`/`report_md`)
 # and the `has_semantic_report` list flag are already API-tested (test_api.py);
 # these served-asset checks pin the dashboard wiring the JSC harness then drives
 # end-to-end (scenarioTaskEval): the trigger + its cost/read-only copy, the
-# in-progress/success/failure states, the model-judgment report render, and the
+# running/failed/completed job states, the model-judgment report render, and the
 # static-vs-semantic distinction.
 
 
-def test_evaluation_semantic_trigger_posts_with_cost_and_readonly_copy():
+def test_evaluation_semantic_trigger_posts_the_async_job_with_cost_copy():
     body = app_js()
     # A distinct Layer 2 section carries the cost + read-only-analysis boundary and
-    # a trigger that POSTs /semantic, mirroring the metrics trigger's guarded
-    # re-render to the fresh latest so the produced report paints.
-    assert "const evalSemanticPath = (repo, taskId) =>" in body
-    assert 'evalListPath(repo, taskId) + "/semantic"' in body
-    assert "function evalSemanticSection(doctor)" in body
+    # a trigger that POSTs the async job route (not the retired synchronous
+    # /semantic route), mirroring the metrics trigger's guarded re-render so the
+    # transient job's running panel paints.
+    assert "const evalSemanticJobPath = (repo, taskId) =>" in body
+    assert 'evalListPath(repo, taskId) + "/semantic/job"' in body
+    assert "function evalSemanticSection(doctor, job)" in body
     assert "eval-semantic-generate" in body
     assert 'class="eval-sem-btn"' in body
     assert 'class="eval-cost"' in body
@@ -1703,12 +1708,87 @@ def test_evaluation_semantic_trigger_posts_with_cost_and_readonly_copy():
     assert "read-only analysis" in body
     assert "does not start an orchestrator task run" in body
     assert "never modifies the" in body
-    # Trigger handler: busy/in-progress note, POST, guarded re-render, error text.
+    # Trigger handler: busy/in-progress note, POST the job, guarded re-render, error.
     assert "async function onEvalSemantic(repo, taskId, button)" in body
-    assert 'await api(evalSemanticPath(repo, taskId), { method: "POST" });' in body
+    assert 'await api(evalSemanticJobPath(repo, taskId), { method: "POST" });' in body
     assert "Running the semantic evaluator" in body
     assert "rerender(renderTaskEval(repo, taskId, null))" in body
-    assert 'controlErrorText(err, "Semantic evaluation failed.")' in body
+    assert "controlErrorText(" in body
+    assert '"Failed to start the semantic evaluation."' in body
+
+
+# ---- semantic (Layer 2) async job states, session-2 ------------------------
+#
+# The async job routes (start/read) + persistence/dedup/failure/reconcile are
+# API- and manager-tested (test_api.py, test_semantic_jobs.py); the JSC harness
+# (scenarioTaskEval) drives the running/reload/completed/failed/retry states and
+# the poll end-to-end. These served-asset checks pin the wiring those rest on.
+
+
+def test_evaluation_reads_the_semantic_job_on_load():
+    body = app_js()
+    # renderTaskEval reads the current async job on every load and passes it to the
+    # section, so a running or recently-failed job renders its state across reload,
+    # navigation, and another browser session.
+    assert "const jobRes = await api(evalSemanticJobPath(repoName, taskId));" in body
+    assert "semanticJob = jobRes ? jobRes.job : null;" in body
+    assert "evalSemanticSection(semanticDoctor, semanticJob)" in body
+    # The transient set (the poll trigger) mirrors the backend lifecycle.
+    assert 'const SEMANTIC_JOB_TRANSIENT = new Set(["queued", "running"]);' in body
+    assert "SEMANTIC_JOB_TRANSIENT.has(semanticJob.status)" in body
+
+
+def test_evaluation_semantic_running_state_replaces_the_trigger():
+    body = app_js()
+    # A queued/running job renders a running panel with NO trigger button, so a
+    # duplicate model call cannot be started from the page (the backend also dedups).
+    # The state modifier rides the single shared .eval-actions wrapper.
+    assert "function evalSemRunning(job)" in body
+    assert '<div class="eval-actions${modifier}">' in body
+    assert 'modifier = " eval-sem-running";' in body
+    assert "SEMANTIC_JOB_TRANSIENT.has(status)" in body
+    assert "actions = evalSemRunning(job);" in body
+    # The panel names the model and ticks an elapsed label in place while running.
+    assert "function updateEvalSemElapsed(job)" in body
+    assert 'id="eval-sem-elapsed"' in body
+
+
+def test_evaluation_semantic_failed_state_shows_diagnostic_and_retry():
+    body = app_js()
+    # A failed/error job shows the bounded backend diagnostic and a Retry that
+    # re-posts the job — never a silent return to the idle view. `error` (a corrupt
+    # job record) is handled as terminal/idle-with-retry like `failed`.
+    assert "function evalSemFailed(job, unavailable, doctor)" in body
+    assert 'status === "failed" || status === "error"' in body
+    assert "actions = evalSemFailed(job, unavailable, doctor);" in body
+    assert 'modifier = " eval-sem-failed";' in body
+    assert 'class="eval-sem-error error-text"' in body
+    # The Retry reuses the shared trigger (same .eval-sem-btn class, so
+    # wireEvalControls binds it to onEvalSemantic → a re-POST), and respects the
+    # doctor gate.
+    assert 'evalSemTrigger("Retry semantic evaluation…", unavailable, doctor)' in body
+
+
+def test_evaluation_semantic_completed_job_selects_its_evaluation():
+    body = app_js()
+    # On completion the poll re-renders to the job's evaluation_id, selecting the
+    # fresh evaluation so the Layer 2 report paints; a failed/gone job lands idle.
+    assert 'job.status === "completed" && job.evaluation_id' in body
+    assert "rerender(renderTaskEval(repo, taskId, job.evaluation_id))" in body
+
+
+def test_evaluation_semantic_job_poll_is_chained_and_torn_down():
+    body = app_js()
+    # The poll mirrors the intake poll: one module-level handle, a chained
+    # setTimeout (never setInterval) so responses can't overlap, torn down by
+    # router() and at the top of renderTaskEval so it can't outlive its view.
+    assert "let activeSemanticJobPoll = null;" in body
+    assert "function stopSemanticJobPoll()" in body
+    assert "function startSemanticJobPoll(repo, taskId)" in body
+    assert "const SEMANTIC_JOB_POLL_MS = " in body
+    assert "poll.timer = setTimeout(tick, SEMANTIC_JOB_POLL_MS);" in body
+    # router() and renderTaskEval both tear it down (plus start's own reset).
+    assert body.count("stopSemanticJobPoll();") >= 2
 
 
 def test_evaluation_semantic_report_renders_scores_findings_and_provenance():
@@ -1776,7 +1856,7 @@ def test_evaluation_semantic_control_gated_by_doctor_probe():
     # explanation while Layer 1 stays usable.
     assert 'const health = await api("/api/evaluation/doctor");' in body
     assert "semanticDoctor = health && health.semantic ? health.semantic : null;" in body
-    assert "${evalSemanticSection(semanticDoctor)}" in body
+    assert "${evalSemanticSection(semanticDoctor, semanticJob)}" in body
     assert "const unavailable = !!(doctor && doctor.available === false);" in body
     assert 'class="eval-sem-btn" disabled' in body
     assert "eval-sem-unavailable" in body
@@ -1860,6 +1940,10 @@ def test_semantic_layer_styles_are_present():
         ".eval-sem-btn",
         ".eval-sem-btn:disabled",
         ".eval-sem-unavailable",
+        # The async-job running/failed states.
+        ".eval-sem-running",
+        ".eval-sem-failed",
+        ".eval-sem-error",
         ".eval-cost",
         ".sem-report",
         ".sem-layer-tag",

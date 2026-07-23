@@ -86,7 +86,6 @@ from .semantic import (
     SEMANTIC_REPORT_MD_NAME,
     SEMANTIC_REPORT_NAME,
     ClaudeSemanticBackend,
-    SemanticEvaluationError,
     SemanticEvaluator,
 )
 from .semantic_jobs import SemanticJobManager
@@ -419,9 +418,11 @@ def create_app(
     # backend is the concrete Claude CLI driver (:class:`ClaudeSemanticBackend`,
     # read-only under ``--permission-mode plan``, model from ``ORCH_HUB_EVAL_MODEL``);
     # constructing it launches nothing, so building the app spawns no subprocess —
-    # a semantic evaluation only reaches ``claude`` when the ``/semantic`` route is
-    # hit. If ``claude`` is unavailable the turn fails cleanly as a 502. Tests inject
-    # one wired with a fake backend so the read-only boundary is exercised over HTTP.
+    # a semantic evaluation only reaches ``claude`` when a semantic job runs it. If
+    # ``claude`` is unavailable the turn fails cleanly as a persisted ``failed`` job
+    # (not a route 5xx). Tests inject one wired with a fake backend so the read-only
+    # boundary is exercised over HTTP. The evaluator is not exposed by a route of its
+    # own; the async job manager below is its only HTTP entry point.
     semantic = (
         semantic_evaluator
         if semantic_evaluator is not None
@@ -1379,48 +1380,20 @@ def create_app(
             "static_metrics": report.to_dict(),
         }
 
-    @app.post(
-        "/api/repos/{repo_id}/evaluations/{task_id}/semantic", status_code=201
-    )
-    def generate_task_semantic(repo_id: str, task_id: str) -> dict:
-        """Generate a fresh Layer 2 semantic evaluation for ``(repo, task)``.
-
-        Delegates to :meth:`SemanticEvaluator.evaluate`, which mints one
-        self-contained evaluation dir holding ``evidence.json`` +
-        ``static_metrics.json`` + ``semantic_report.json`` + ``report.md``, driving
-        the configured read-only Claude CLI backend. Hub-owned artifacts only; the
-        target task/run state and ``.ai/``/``.ai-tasks/`` are never touched, and the
-        cleanup is atomic so a failed turn leaves nothing behind. ``repo_id`` unknown
-        → 404; an unsafe id → 400; disabled → 404; a backend/model failure or a
-        non-conforming model response → 502 (the upstream evaluator failed), with no
-        persisted artifact. Returns the new ``evaluation_id`` and the report (201);
-        its paired evidence/static/report.md are then readable through the detail
-        route.
-        """
-        require_evaluation_enabled()
-        repo = resolve_repo(repo_id)
-        try:
-            report = semantic.evaluate(repo, task_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except SemanticEvaluationError as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
-        return {
-            "evaluation_id": report.evaluation_id,
-            "semantic_report": report.to_dict(),
-        }
-
     # -- async semantic-evaluation jobs ---------------------------------------
     #
-    # The async counterpart of the synchronous ``/semantic`` route above: instead
-    # of blocking one long request on the model turn (which leaves the dashboard
-    # looking idle and offers no reload-survivable state), these start/observe an
-    # explicit persisted job (queued/running/completed/failed). The manager owns
-    # only job status; the evaluation itself is the same read-only
-    # ``SemanticEvaluator.evaluate`` — so no target repo/run mutation is added, and
-    # a backend/model failure is a persisted ``failed`` job with a bounded
-    # diagnostic, not a transport 5xx. Both routes gate on evaluation-enabled (else
-    # 404) exactly like the rest of the sidecar.
+    # Layer 2 semantic evaluation is one long model turn. Rather than block a single
+    # request on it (which left the dashboard looking idle for the whole turn and
+    # offered no reload-survivable state — the retired synchronous ``/semantic``
+    # route), these start/observe an explicit persisted job
+    # (queued/running/completed/failed). The manager owns only job status; the
+    # evaluation itself is the read-only :meth:`SemanticEvaluator.evaluate` (driving
+    # the configured Claude CLI backend, hub-owned artifacts only, target task/run
+    # state and ``.ai/``/``.ai-tasks/`` never touched, atomic cleanup on failure) —
+    # so no target repo/run mutation is added, and a backend/model failure is a
+    # persisted ``failed`` job with a bounded diagnostic, not a transport 5xx. Both
+    # routes gate on evaluation-enabled (else 404) exactly like the rest of the
+    # sidecar.
 
     @app.post(
         "/api/repos/{repo_id}/evaluations/{task_id}/semantic/job", status_code=201
