@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Features
@@ -11,7 +11,7 @@ verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
 | Task evaluation foundation | implemented | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | internal `EvaluationService` evidence build/generate/list/read/prune; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET/POST /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | implemented | static_metrics, evaluation, config, models, api, web | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; persists and displays `static_metrics.json` beside `evidence.json`; no model call |
-| Task semantic evaluator | implemented | semantic, static_metrics, evaluation, config, models, api, cli, web | internal `SemanticEvaluator.evaluate/doctor`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `ClaudeSemanticBackend`; `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`; `GET /api/evaluation/doctor`; `orch-hub eval doctor`; dashboard Layer 2 trigger/report/history rendering; persists `semantic_report.json` and `report.md` beside evidence/static artifacts |
+| Task semantic evaluator | implemented | semantic_jobs, semantic, static_metrics, evaluation, config, models, api, cli, web | internal `SemanticEvaluator.evaluate/doctor`, `SemanticJobManager`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `ClaudeSemanticBackend`; `POST`/`GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `orch-hub eval doctor`; dashboard Layer 2 running/failed/completed job states plus report/history rendering; persists `semantic_report.json` and `report.md` beside evidence/static artifacts |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history/intake/evaluation APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, orch_config, sessions, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `GET /api/repos/{repo_id}/orchestrator-config`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/sessions`, `GET /api/runs/{id}/effective-config`, `POST /api/runs/{id}/stop` |

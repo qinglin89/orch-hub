@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Modules
@@ -10,7 +10,7 @@ verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 | CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output, launchd operations dispatch, notification delivery checks, and semantic evaluator doctor checks |
 | Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token/Bark URL/evaluation gate/model/retention loading, data-dir setting, and derived `aii-2`/registry paths |
 | Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing and lookup |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, evaluation target/run-link, static-metrics report, semantic-report, and semantic-doctor models plus payload helpers and run-record repo reconstruction |
+| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, evaluation target/run-link, static-metrics report, semantic-report, semantic-doctor, and semantic-job models plus payload helpers and run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
 | Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent/windowed commit reads for dashboard/API display and evaluation evidence |
@@ -20,6 +20,7 @@ verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 | Evaluation | `orch_hub/evaluation.py` | Implemented optional read-only task evidence target resolution, related-run aggregation, bounded evidence-pack assembly, contained artifact persistence, durable-post-generation retention pruning, and persisted evaluation listing/artifact reads |
 | Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` with retention after durable writes |
 | Semantic evaluator | `orch_hub/semantic.py` | Implemented optional evidence-bounded model evaluation over evidence/static artifacts, Claude CLI backend isolation, semantic doctor readiness, `semantic_report.json`, and `report.md` persistence |
+| Semantic jobs | `orch_hub/semantic_jobs.py` | Implemented persisted async semantic-evaluation job status, duplicate in-flight prevention, startup orphan reconciliation, bounded failure diagnostics, and completed-job `evaluation_id` linkage |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |

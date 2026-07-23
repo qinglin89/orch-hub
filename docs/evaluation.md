@@ -42,8 +42,8 @@ subsystem is off:
 - `GET /api/evaluation` still answers `200 {"enabled": false}` so the dashboard
   can hide its controls with a concise explanation instead of probing a dead
   route;
-- every other evaluation route — list, detail, evidence/metrics/semantic
-  generation, and the doctor — fails closed with `404`;
+- every other evaluation route — list, detail, evidence/metrics/semantic-job
+  generation/status, and the doctor — fails closed with `404`;
 - no `<data_dir>/evaluations` tree is created;
 - the dashboard hides the "Task evaluation" entry links on task detail and in
   run history, and the evaluation route itself renders a short disabled note.
@@ -147,9 +147,10 @@ The view:
 - resolves the task active-then-archive, so a completed/archived task stays
   evaluable;
 - **Generate metrics** runs the free deterministic Layer 1 refresh;
-- **Run semantic evaluation** runs Layer 2 (shown with an up-front cost/read-only
-  callout; disabled with an explanation when the doctor reports the backend is
-  unavailable);
+- **Run semantic evaluation** starts or reuses the async Layer 2 job (shown with
+  an up-front cost/read-only callout; disabled with an explanation when the
+  doctor reports the backend is unavailable), then shows reload-survivable
+  running, failed/retry, or completed-selected-report state;
 - renders Layer 1 and Layer 2 as visually and semantically distinct sections, so
   you can tell deterministic metrics from model judgments;
 - offers an evaluation-history picker (newest-first) that names each semantic
@@ -169,7 +170,8 @@ All routes are protected by the bearer token like every non-health route.
 | `GET /api/repos/{repo}/evaluations/{task}/{id}` | Read one evaluation's evidence/static/semantic/`report.md`. |
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |
 | `POST /api/repos/{repo}/evaluations/{task}/metrics` | Generate evidence + Layer 1 static metrics. |
-| `POST /api/repos/{repo}/evaluations/{task}/semantic` | Generate the full Layer 2 chain (evidence + static + semantic + `report.md`). |
+| `POST /api/repos/{repo}/evaluations/{task}/semantic/job` | Start or reuse the current async Layer 2 job; duplicate in-flight starts return the same job. |
+| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`queued`/`running`/`completed`/`failed`; `null` when none exists). |
 
 When disabled, every route except `GET /api/evaluation` answers `404` with the
 fail-closed reason.

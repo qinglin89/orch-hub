@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Modules: Core
@@ -255,8 +255,17 @@ fresh empty cwd outside the target repo. Its `doctor()` is a no-cost
 can disable Layer 2 without affecting Layer 1 or run control. That structural
 boundary is load-bearing: the semantic model must judge only the persisted
 prompt/evidence and cannot read live repo files, `.ai/`, raw logs, or secrets.
-API exposes generation as `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`,
-detail readback, and a gated `GET /api/evaluation/doctor` readiness route.
+API exposes generation through `SemanticJobManager` at protected `POST`/`GET`
+`/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, detail readback, and
+a gated `GET /api/evaluation/doctor` readiness route.
+
+`SemanticJobManager` in `orch_hub/semantic_jobs.py` persists one current
+`job.json` per `(repo, task)` under
+`<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`, returns existing
+`queued`/`running` jobs to prevent duplicate model calls, runs
+`SemanticEvaluator.evaluate` off-lock/off-thread, reconciles orphaned transient
+jobs to failed on startup, and links completed jobs to the fresh
+`evaluation_id`. The old synchronous `POST /semantic` route is retired.
 
 ## Intake Manager
 

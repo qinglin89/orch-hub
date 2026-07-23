@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 506e8867fd47221bc27ba394686fc70c75e5e00e
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Modules: Web and Operations
@@ -12,7 +12,8 @@ Location: `orch_hub/api.py`
 Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None, intake_manager=None, evaluation_service=None,
-static_evaluator=None, semantic_evaluator=None)` builds an app with a
+static_evaluator=None, semantic_evaluator=None, semantic_job_manager=None)`
+builds an app with a
 default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
@@ -46,12 +47,14 @@ The evaluation routes are `GET /api/evaluation`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`,
 `GET /api/evaluation/doctor`,
 `POST /api/repos/{repo_id}/evaluations/{task_id}/evidence`,
-`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`, and
-`POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`; they resolve exact
+`POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`,
+`POST /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, and
+`GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`; they resolve exact
 active-or-archived task ids outside the active task index, write/read only
 hub-owned evaluation artifacts, map disabled mode to 404 except for the
-availability route, and map semantic backend/model/schema failures to 502 with
-no partial artifact. Evaluation detail returns `evidence`, `static_metrics`,
+availability route, and persist semantic backend/model/schema failures as
+terminal failed jobs with bounded diagnostics and no partial artifact.
+Evaluation detail returns `evidence`, `static_metrics`,
 `semantic_report`, and `report_md`; evaluation list summaries include
 best-effort semantic evaluator identity for history comparison, and the doctor
 route reports Layer 2 backend availability without a model call.
@@ -60,7 +63,7 @@ Mutating intake routes return transient records
 `GET /api/intakes/{intake_id}` for the settled outcome.
 The default intake backend is `ClaudeIntakeAgent`; the default semantic backend
 is `ClaudeSemanticBackend`, constructed at app startup but only launched by the
-semantic evaluation route. Default run and intake managers are both built with
+semantic job manager. Default run and intake managers are both built with
 `build_notifier(config)`; run-ended /
 pending-question and intake-ready delivery failures stay isolated in the owning
 manager and never become route errors. The recent-log route adds a nested
@@ -208,13 +211,16 @@ run-history inline rollup links appear only when availability reports enabled;
 run-history links stay outside collapse toggles so activation navigates without
 toggling. Generate posts `/metrics` and re-renders to the latest deterministic
 Layer 1 report without mutating target task or run state. Run semantic
-evaluation posts `/semantic` with explicit cost/read-only/not-an-orchestrator
-copy, shows busy/failure states inline, re-renders to the fresh latest report,
-and renders evaluator provenance, per-axis rationales, severity/confidence/
-evidence-ref findings, and suggested improvements. A best-effort
-`GET /api/evaluation/doctor` probe disables only the Layer 2 trigger when the
-semantic backend is unavailable while keeping Layer 1 usable; a failed probe
-degrades to the default enabled trigger.
+evaluation posts `/semantic/job`, reads the persisted current job on every view
+load, replaces the trigger with a running panel for `queued`/`running`, polls via
+a single chained timeout torn down on navigation, shows `failed`/`error`
+diagnostics with Retry, and selects the completed job's `evaluation_id` so the
+fresh semantic report paints. A best-effort `GET /api/evaluation/doctor` probe
+disables only the Layer 2 start/retry trigger when the semantic backend is
+unavailable while keeping Layer 1 usable; a failed probe degrades to the default
+enabled trigger. Semantic reports render evaluator provenance, per-axis
+rationales, severity/confidence/evidence-ref findings, and suggested
+improvements.
 
 Remote intake stays separate from run controls: repo detail posts a natural
 language request to `POST /api/intakes`, the review view displays the complete

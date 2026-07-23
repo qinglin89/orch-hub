@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Features: Core
@@ -185,13 +185,15 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: semantic, static_metrics, evaluation, config, models, api, cli, web.
+Modules: semantic_jobs, semantic, static_metrics, evaluation, config, models,
+api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
-`build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`;
-protected `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`,
+`build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`,
+`SemanticJobManager`; protected `POST`/`GET`
+`/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`,
 `GET /api/evaluation/doctor`, CLI `orch-hub eval doctor`, dashboard Layer 2
-controls, and evaluation detail readback of `semantic_report` and `report_md`.
+controls, and evaluation detail readback of `semantic_report` and `report.md`.
 
 Implemented behavior:
 
@@ -216,9 +218,13 @@ Implemented behavior:
 - Reruns preserve history by minting a fresh evaluation dir each time; evaluator
   backend/model/schema identity distinguishes comparable reports and is surfaced
   in dashboard history picker labels.
-- Backend/model failures or non-conforming output remove the reserved dir and
-  surface as 502 over HTTP; disabled mode still fails closed at service/API
-  boundaries.
+- `SemanticJobManager` persists one current job per `(repo, task)` under
+  `<data_dir>/semantic-jobs/`, prevents duplicate in-flight model calls, marks
+  restart-orphaned transient jobs failed, and links completed jobs to the fresh
+  `evaluation_id`.
+- Backend/model failures or non-conforming output remove the reserved evaluation
+  dir and surface as persisted failed jobs with bounded diagnostics; disabled
+  mode still fails closed at service/API boundaries.
 
 ## HTTP API Foundation
 

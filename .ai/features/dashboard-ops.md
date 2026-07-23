@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 506e8867fd47221bc27ba394686fc70c75e5e00e
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Features: Dashboard Ops
@@ -153,8 +153,10 @@ Implemented behavior:
 - The evaluation view renders two visually distinct layers over the same
   evidence: deterministic Layer 1 static metrics and optional Layer 2 semantic
   model judgments. Generate posts `/metrics`; Run semantic evaluation posts
-  `/semantic`, shows model-cost/read-only/not-an-orchestrator-run copy, handles
-  in-progress/success/failure inline, and lands on the fresh latest evaluation.
+  `/semantic/job`, reads persisted job state on every load, replaces the trigger
+  with a running panel while `queued`/`running`, polls with navigation teardown,
+  shows bounded failed/error diagnostics with Retry, and selects the completed
+  job's `evaluation_id` so the fresh semantic report paints.
   The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
   semantic backend disables only the Layer 2 trigger with an explanation while
   Layer 1 stays usable. Semantic reports render evaluator provenance, per-axis

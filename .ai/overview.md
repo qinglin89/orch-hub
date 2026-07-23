@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Project Overview
@@ -31,12 +31,14 @@ writing it to the target repo, generate bounded read-only task evidence packs
 under the hub data dir for active or archived tasks, compute deterministic
 protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
 `static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
-CLI semantic evaluator that persists `semantic_report.json` plus `report.md`,
-and expose evaluation evidence/static/semantic artifacts through protected HTTP
-routes. The dashboard renders the task-evaluation sidecar with Layer 1 static
-metrics, doctor-gated Layer 2 semantic evaluation controls/report rendering,
-history model/version comparison, and artifact copy/download affordances; later
-slices add IM bot control.
+CLI semantic evaluator through persisted async job records that prevent
+duplicate in-flight model calls and link completed jobs to `semantic_report.json`
+plus `report.md`, and expose evaluation evidence/static/semantic artifacts
+through protected HTTP routes. The dashboard renders the task-evaluation sidecar
+with Layer 1 static metrics, doctor-gated Layer 2 semantic job
+running/failed/completed controls/report rendering, history model/version
+comparison, and artifact copy/download affordances; later slices add IM bot
+control.
 
 ## Users
 

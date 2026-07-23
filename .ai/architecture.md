@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # Architecture
@@ -152,12 +152,16 @@ persists `semantic_report.json` plus `report.md` in the same evaluation dir.
 Its default Claude CLI backend runs from an empty non-repo cwd with built-in
 tools disabled, safe mode, no session persistence, and plan-mode writes blocked,
 so the model cannot read live target-repo state outside the prompt. Protected
-HTTP routes expose availability, evidence/static/semantic generation,
-semantic doctor readiness, evaluation history, and artifact readback. The
-dashboard renders Layer 1 static metrics and Layer 2 semantic reports as
-distinct sections, gates the semantic trigger with the doctor when the backend
-is unavailable, and keeps raw evidence/report artifacts behind Copy/Download
-affordances.
+HTTP routes expose availability, evidence/static generation, async semantic job
+start/status, semantic doctor readiness, evaluation history, and artifact
+readback. `SemanticJobManager` stores one current job per `(repo, task)` under
+`<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns an existing transient job instead
+of starting a duplicate model call, and reconciles restart-orphaned transient
+jobs to failed. The dashboard renders Layer 1 static metrics and Layer 2
+semantic reports as distinct sections, gates the semantic start/retry trigger
+with the doctor when the backend is unavailable, reads/polls persisted semantic
+job state for running/failed/completed UI, and keeps raw evidence/report
+artifacts behind Copy/Download affordances.
 
 ## Component Boundaries
 
@@ -177,10 +181,14 @@ affordances.
   evidence plus static metrics, persists `semantic_report.json`/`report.md`
   beside the pack, and enforces read isolation in the backend rather than by
   prompt instruction alone.
+- Semantic jobs own observable Layer 2 job state, duplicate in-flight
+  prevention, failed/retryable terminal diagnostics, and completed
+  `evaluation_id` linkage without owning evaluation evidence or target state.
 - Evaluation API/dashboard presentation owns sidecar routing, active/archive
   target display, deterministic/semantic artifact readback, semantic doctor
-  gating, history model/version comparison, and local-inspection affordances; it
-  does not gate run control or expose raw logs inline.
+  gating, async semantic job polling, history model/version comparison, and
+  local-inspection affordances; it does not gate run control or expose raw logs
+  inline.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end-state classification.
 - Control-dir handling owns only the file-channel mechanics for questions,

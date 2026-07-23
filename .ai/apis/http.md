@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+verified-against: 6cf6ebe2dcdca6b126f7cf4c0ee54edf0775f0c6
 ---
 
 # APIs: HTTP
@@ -140,22 +140,6 @@ verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
 - Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
   404.
 
-## `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic`
-
-- Purpose: generate a fresh Layer 2 semantic evaluation: evidence plus
-  `static_metrics.json`, `semantic_report.json`, and `report.md` in one
-  hub-owned evaluation dir.
-- Source: delegates to `SemanticEvaluator.evaluate`; the default Claude CLI
-  backend runs from an isolated empty cwd with tools disabled, safe mode, no
-  session persistence, and plan-mode writes blocked, so the model is bounded to
-  the persisted prompt/evidence and cannot read the target repo.
-- Shape: HTTP 201 `{"evaluation_id","semantic_report"}`. The paired evidence,
-  static metrics, and Markdown report are read through the evaluation detail
-  route.
-- Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
-  404; backend/model failures or non-conforming semantic output return 502 and
-  leave no persisted artifact.
-
 ## `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`
 
 - Purpose: generate a fresh deterministic Layer 1 evaluation: evidence plus
@@ -166,6 +150,32 @@ verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
   read through the evaluation detail route.
 - Errors: unknown repo returns 404; unsafe task id returns 400; disabled returns
   404.
+
+## `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`
+
+- Purpose: start or reuse the current async Layer 2 semantic-evaluation job for
+  an exact active or archived task id.
+- Source: delegates to `SemanticJobManager.start_job`, which persists
+  `semantic-jobs/<repo-slug>/<task-id>/job.json` and runs
+  `SemanticEvaluator.evaluate` off-thread. The evaluator writes only hub-owned
+  evidence/static/semantic/Markdown artifacts; backend/schema failures settle the
+  job to `failed` with a bounded diagnostic and leave no partial evaluation.
+- Shape: HTTP 201 `{"job": SemanticJob}`. `queued`/`running` jobs carry
+  evaluator identity; `completed` carries `evaluation_id`; `failed` carries
+  bounded `error`. A duplicate start while the job is in flight returns the
+  existing job and starts no second model call.
+- Errors: unknown repo returns 404; unsafe repo/task segments return 400;
+  disabled returns 404.
+
+## `GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`
+
+- Purpose: read the current semantic-evaluation job state for page load and
+  polling.
+- Shape: HTTP 200 `{"job": SemanticJob|null}`; `null` means the task has never
+  had a semantic job.
+- Errors: unknown repo returns 404; unsafe repo/task segments return 400;
+  disabled returns 404. Corrupt job records surface as terminal `error` jobs
+  rather than hiding broken state.
 
 ## `POST /api/runs`
 
