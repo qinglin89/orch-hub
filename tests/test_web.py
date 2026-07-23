@@ -1810,12 +1810,20 @@ def test_task_detail_links_to_evaluation_only_when_enabled():
 def test_run_history_links_to_evaluation_only_when_enabled():
     body = app_js()
     # Run-history task groups (where archived/completed tasks appear) get a
-    # per-task Evaluation link, gated on the same availability probe, sitting
-    # outside the collapse <button> so it is a real navigable link.
+    # per-task Evaluation link, gated on the same availability probe. It is handed
+    # to taskRollup so it rides the est-vs-actual summary row inline (compact,
+    # right-aligned) rather than a standalone vertical row, and stays outside the
+    # collapse <button> so it is a real navigable link that does not toggle.
     assert "let historyEvalEnabled = false;" in body
     assert "historyEvalEnabled && group.repo_name && group.task_id" in body
     assert 'class="text-link tg-eval"' in body
     assert "Evaluation " in body
+    # Placement contract: the action goes into the rollup (a `.roll-top` flex row
+    # with the metrics), not a separate `.tg-actions` row between button and
+    # rollup.
+    assert "taskRollup(group, evalAction)" in body
+    assert '<div class="roll-top">' in body
+    assert "tg-actions" not in body
 
 
 def test_evaluation_styles_are_present():
@@ -1836,7 +1844,9 @@ def test_evaluation_styles_are_present():
         ".eval-warnings",
         ".eval-flags",
         ".eval-entry",
-        ".tg-actions",
+        # The run-history Evaluation link now rides the rollup summary row,
+        # right-aligned inline, instead of a standalone `.tg-actions` row.
+        ".roll-top .tg-eval",
     ):
         assert selector in css, selector
 

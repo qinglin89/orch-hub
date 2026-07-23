@@ -2362,8 +2362,10 @@
   // The est-vs-actual rollup for one task group: dev sessions used against the
   // frontmatter session-est total (a clamped meter, over-estimate flagged),
   // peak per-session context, and summed wall-clock. Est unknown -> the count
-  // shows with an "est unknown" note and no meter.
-  function taskRollup(group) {
+  // shows with an "est unknown" note and no meter. `action` is optional trailing
+  // HTML (the per-task Evaluation link) that rides the summary row, right-aligned
+  // and visually tied to the metrics; omit/empty leaves just the metrics.
+  function taskRollup(group, action) {
     const runs = group.runs;
     const est = firstEst(runs);
     const actual = countDevSessions(runs);
@@ -2395,9 +2397,16 @@
         )} wall-clock</span>`
       );
     const meter = total !== null ? ctxMeter(actual, total) : "";
+    // The metrics and the optional action share one row (`.roll-top`): the
+    // metrics grow on the left, the action is pinned right and wraps below only
+    // when the width can't hold both. The meter spans the full width beneath. An
+    // absent action collapses the row to just the metrics — no empty spacing.
     return (
       `<div class="task-rollup">` +
+      `<div class="roll-top">` +
       `<div class="roll-line">${bits.join(" · ")}</div>` +
+      (action || "") +
+      `</div>` +
       meter +
       `</div>`
     );
@@ -2481,17 +2490,20 @@
     const key = groupKey(group.runs[0]); // group is non-empty; all runs share it
     const collapsed = collapsedGroups.has(key);
     const cards = group.runs.map(historyRunCard).join("");
-    // A per-task Evaluation link (eval-enabled hubs only). It sits OUTSIDE the
-    // collapse-toggle <button> — nesting an <a> in a <button> is invalid and its
-    // click would fight the toggle — and stays visible when the group collapses,
-    // giving archived/completed tasks a reachable evaluation entry point. The
-    // delegated group-header click ignores it (it only matches .task-group-head).
-    const evalLink =
+    // A per-task Evaluation link (eval-enabled hubs only), handed to taskRollup
+    // so it rides the rollup summary row inline and right-aligned instead of a
+    // standalone vertical row. It stays OUTSIDE the collapse-toggle <button> —
+    // nesting an <a> in a <button> is invalid, and keeping it clear of
+    // `.task-group-head` means the delegated toggle (which matches only that
+    // header) never fires on an Evaluation click, so activating it navigates
+    // without collapsing the group. It stays visible when the group collapses,
+    // giving archived/completed tasks a reachable evaluation entry point.
+    const evalAction =
       historyEvalEnabled && group.repo_name && group.task_id
-        ? `<div class="tg-actions"><a class="text-link tg-eval" href="${evalHash(
+        ? `<a class="text-link tg-eval" href="${evalHash(
             group.repo_name,
             group.task_id
-          )}">Evaluation →</a></div>`
+          )}">Evaluation →</a>`
         : "";
     return (
       `<section class="task-group${collapsed ? " collapsed" : ""}" ` +
@@ -2507,8 +2519,7 @@
         group.repo_name || ""
       )} · ${runCount} run${runCount === 1 ? "" : "s"}</span>` +
       `</button>` +
-      evalLink +
-      taskRollup(group) +
+      taskRollup(group, evalAction) +
       `<ul class="list">${cards}</ul>` +
       `</section>`
     );

@@ -2118,6 +2118,137 @@ async function scenarioStaleRoute() {
   );
 }
 
+// Run history: the per-task Evaluation action rides the est-vs-actual rollup row
+// inline (compact, right-aligned) rather than a standalone vertical row, and
+// activating it navigates WITHOUT collapsing the group — while the group header
+// still toggles. Also the eval-disabled branch: no action, no leftover row. The
+// default /api/history/runs stub is empty, so this scenario supplies one run to
+// get a real (repo, task) group with a rollup to place the action against.
+async function scenarioRunHistory() {
+  installRoutes({ waiting: false });
+  var histRun = {
+    run_id: RUN,
+    repo_name: REPO,
+    repo_path: "/repos/" + REPO,
+    task_id: TASK,
+    state: "completed",
+    started_ts: "2026-07-20T08:00:00Z",
+    ended_ts: "2026-07-20T08:30:00Z",
+    exit_code: 0,
+    sessions: [
+      {
+        role: "dev",
+        kind: "session",
+        sid: "sess0001",
+        turns: 3,
+        context_tokens: 50000,
+        start_hms: "08:00:00",
+        open: "",
+      },
+    ],
+    context_budget: 200000,
+    session_est: { current: 1, total: 2 },
+    effective_config: null,
+  };
+  route("GET", "/api/history/runs", { runs: [histRun] });
+
+  await navigate("#/runs");
+  checkOutline("run history");
+
+  // Inline placement: the action lives inside the rollup (`.task-rollup`), on the
+  // same `.roll-top` flex row as the summary metrics — not a standalone
+  // `.tg-actions` row, and not nested in the collapse-toggle header.
+  var evalLink = doc.querySelector(".task-rollup .tg-eval");
+  check("run history: the eval action rides the rollup", !!evalLink, "no .task-rollup .tg-eval");
+  check(
+    "run history: the action shares the rollup top row with the metrics",
+    !!doc.querySelector(".roll-top .roll-line") && !!doc.querySelector(".roll-top .tg-eval"),
+    "metrics and action are not in the same .roll-top row"
+  );
+  check(
+    "run history: the summary metrics render alongside the action",
+    doc.querySelector(".roll-top .roll-line").textContent.indexOf("dev session") !== -1,
+    doc.querySelector(".roll-top .roll-line").textContent
+  );
+  check(
+    "run history: no standalone tg-actions row remains",
+    doc.querySelector(".tg-actions") === null,
+    "a .tg-actions row is still rendered"
+  );
+  check(
+    "run history: the eval action is not inside the collapse header",
+    evalLink.closest(".task-group-head") === null,
+    "the eval link is nested in the toggle button"
+  );
+  eq(
+    "run history: the eval action targets the evaluation view",
+    evalLink.getAttribute("href"),
+    "#/evaluations/" + REPO + "/" + TASK
+  );
+
+  // Non-toggle contract: activating the Evaluation link must NOT collapse the
+  // group (the delegated header toggle matches only `.task-group-head`).
+  check(
+    "run history: the group starts expanded",
+    !doc.querySelector(".task-group").classList.contains("collapsed"),
+    doc.querySelector(".task-group").className
+  );
+  pressEnter(evalLink);
+  await flush();
+  check(
+    "run history: activating Evaluation does not collapse the group",
+    !doc.querySelector(".task-group").classList.contains("collapsed"),
+    "the group collapsed on an Evaluation click"
+  );
+  eq(
+    "run history: the header stays expanded after an Evaluation click",
+    doc.querySelector(".task-group-head").getAttribute("aria-expanded"),
+    "true"
+  );
+
+  // The header itself still toggles the group (collapse contract preserved), and
+  // a collapsed group keeps its rollup + inline action visible (only the card
+  // list hides, via CSS).
+  pressEnter(doc.querySelector(".task-group-head"));
+  await flush();
+  check(
+    "run history: the header still collapses the group",
+    doc.querySelector(".task-group").classList.contains("collapsed"),
+    "the header no longer toggles"
+  );
+  eq(
+    "run history: the collapsed header reports it",
+    doc.querySelector(".task-group-head").getAttribute("aria-expanded"),
+    "false"
+  );
+  check(
+    "run history: the eval action stays visible when collapsed",
+    !!doc.querySelector(".task-rollup .tg-eval"),
+    "the eval action vanished on collapse"
+  );
+
+  // Eval-disabled hub: the availability probe says off, so no action renders and
+  // no empty row is left behind — the rollup still paints its metrics.
+  route("GET", "/api/evaluation", { enabled: false });
+  await navigate("#/overview");
+  await navigate("#/runs");
+  check(
+    "run history: a disabled hub renders no eval action",
+    doc.querySelector(".tg-eval") === null,
+    "an eval action rendered on a disabled hub"
+  );
+  check(
+    "run history: a disabled hub leaves no standalone action row",
+    doc.querySelector(".tg-actions") === null,
+    "a leftover action row rendered on a disabled hub"
+  );
+  check(
+    "run history: the rollup still renders without the action",
+    !!doc.querySelector(".task-rollup .roll-line"),
+    "the rollup vanished when eval is disabled"
+  );
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -2132,6 +2263,7 @@ async function scenarioStaleRoute() {
     await scenarioViewLayout();
     await scenarioTaskEval();
     await scenarioStaleRoute();
+    await scenarioRunHistory();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

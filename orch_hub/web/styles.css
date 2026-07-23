@@ -1433,11 +1433,33 @@ code {
   background: var(--surface);
 }
 
+/* The summary metrics + the per-task Evaluation action share one row: the
+   metrics grow and wrap their own text (min-width:0 lets them shrink instead of
+   shoving the action off-box), the action is pinned right and drops below only
+   when even the wrapped metrics leave it no room — never a separate empty row. */
+.roll-top {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+}
+
 .roll-line {
+  flex: 1 1 auto;
+  min-width: 0;
   font-family: var(--mono);
   font-size: 12px;
   color: var(--text);
   word-break: break-word;
+}
+
+/* The run-history Evaluation link inline in the rollup row: pinned to the right
+   edge, and the shared .text-link top margin reset so it sits on the summary
+   baseline rather than dropping a row. */
+.roll-top .tg-eval {
+  flex: 0 0 auto;
+  margin-top: 0;
+  margin-left: auto;
 }
 
 /* Used more dev sessions than estimated: flag it, matching the over-budget cue. */
@@ -1448,12 +1470,9 @@ code {
 
 /* ---- task evaluation (deterministic Layer 1 sidecar) ---- */
 
-/* The per-task Evaluation link on run-history groups, and the entry line on task
-   detail: a plain secondary link, spaced clear of the surrounding controls. */
-.tg-actions {
-  margin: 0 0 8px 18px;
-}
-
+/* The task-detail entry line: a plain secondary link, spaced clear of the
+   surrounding controls. (The run-history per-task Evaluation link is styled
+   inline in the rollup row above, via `.roll-top .tg-eval`.) */
 .eval-entry {
   margin: 14px 0 0;
 }
