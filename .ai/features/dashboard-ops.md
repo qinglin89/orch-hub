@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+verified-against: 506e8867fd47221bc27ba394686fc70c75e5e00e
 ---
 
 # Features: Dashboard Ops
@@ -147,8 +147,9 @@ Implemented behavior:
   first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts
   for exact active-or-archived task ids. Task detail shows a gated "Task
   evaluation" entry link for active tasks; run-history task groups show gated
-  "Evaluation" links for archived/completed tasks. Disabled hubs hide entry
-  links and the evaluation route shows a concise disabled explanation.
+  "Evaluation" links inline in the rollup summary, outside the collapse toggle,
+  for archived/completed tasks. Disabled hubs hide entry links and the
+  evaluation route shows a concise disabled explanation.
 - The evaluation view renders two visually distinct layers over the same
   evidence: deterministic Layer 1 static metrics and optional Layer 2 semantic
   model judgments. Generate posts `/metrics`; Run semantic evaluation posts

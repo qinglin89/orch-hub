@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+verified-against: 506e8867fd47221bc27ba394686fc70c75e5e00e
 ---
 
 # Modules: Web and Operations
@@ -203,9 +203,10 @@ Tasks tab active. It probes availability first, distinguishes disabled,
 never-generated, evidence-only, static-metrics, and semantic-report states,
 renders target active/archive state plus deterministic score/run/protocol/
 evidence-warning rollups, and offers raw evidence/static/semantic JSON plus
-semantic `report.md` only as Copy/Download artifacts. Task detail and
-run-history groups show evaluation entry links only when availability reports
-enabled; Generate posts `/metrics` and re-renders to the latest deterministic
+semantic `report.md` only as Copy/Download artifacts. Task detail links and
+run-history inline rollup links appear only when availability reports enabled;
+run-history links stay outside collapse toggles so activation navigates without
+toggling. Generate posts `/metrics` and re-renders to the latest deterministic
 Layer 1 report without mutating target task or run state. Run semantic
 evaluation posts `/semantic` with explicit cost/read-only/not-an-orchestrator
 copy, shows busy/failure states inline, re-renders to the fresh latest report,
