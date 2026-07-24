@@ -2920,6 +2920,74 @@ async function scenarioSubscriptionUsage() {
   eq("usage: it does not disturb the repos-ready metric", reposReady(), "1/1");
   eq("usage: it creates no Needs attention row", doc.querySelectorAll("#view .attn").length, 0);
 
+  // ---- 1b) reset time is an absolute viewer-local instant, not a floored age ----
+  // A relative "resets in 4d" floored away up to a day of lead time (a reset
+  // nearly five days out read as merely four); the card now shows the exact
+  // local wall-clock instant. A no-offset ISO value is a wall-clock time in the
+  // viewer's own zone, so `getHours()/getDate()/getMonth()` return its literal
+  // components regardless of the harness timezone — deterministic. The far-future
+  // year keeps it non-past (the format carries no year), a far-past window pins
+  // the "reset due" fallback, and an unparseable window pins the never-"NaN" one.
+  route("GET", "/api/usage", {
+    providers: [
+      {
+        provider: "claude",
+        available: true,
+        plan: "max",
+        windows: [
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: "2099-07-29T09:06:00", used: null, limit: null },
+          { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: "2000-01-01T00:00:00", used: null, limit: null },
+          { key: "primary", label: "raw", window_minutes: 300, used_percent: 5, remaining_percent: 95, resets_at: "not-a-date", used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: "2026-07-20T08:00:00Z",
+        stale: false,
+        detail: null,
+      },
+      {
+        provider: "codex",
+        available: true,
+        plan: "pro",
+        windows: [
+          { key: "primary", label: "5h", window_minutes: 300, used_percent: 73, remaining_percent: 27, resets_at: "2099-07-29T09:06:00", used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: "2026-07-20T07:00:00Z",
+        stale: false,
+        detail: null,
+      },
+    ],
+  });
+  await navigate("#/repos"); // leave + return so the panel repaints from the new route
+  await navigate("#/overview");
+  var resetClaude = cards()[0];
+  var resetCodex = cards()[1];
+  check(
+    "usage: a future reset renders as an absolute viewer-local time (resets HH:mm on D Mon)",
+    resetClaude.textContent.indexOf("resets 09:06 on 29 Jul") !== -1,
+    resetClaude.textContent
+  );
+  check(
+    "usage: Codex uses the same absolute reset-time format as Claude",
+    resetCodex.textContent.indexOf("resets 09:06 on 29 Jul") !== -1,
+    resetCodex.textContent
+  );
+  check(
+    "usage: no window renders a floored \"resets in\" duration anymore",
+    doc.querySelector("#view .overview-usage").textContent.indexOf("resets in ") === -1,
+    doc.querySelector("#view .overview-usage").textContent
+  );
+  check(
+    "usage: a past reset still reads \"reset due\"",
+    resetClaude.textContent.indexOf("reset due") !== -1,
+    resetClaude.textContent
+  );
+  check(
+    "usage: an unparseable reset never renders \"NaN\"",
+    resetClaude.textContent.indexOf("NaN") === -1,
+    resetClaude.textContent
+  );
+
   // ---- 2) high usage flags amber (neutral→warn capacity idiom, not an alarm) ----
   route("GET", "/api/usage", {
     providers: [

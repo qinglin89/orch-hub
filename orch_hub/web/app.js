@@ -4995,22 +4995,27 @@
     return USAGE_WINDOW_KEYS[w.key] || w.key || "window";
   }
 
-  // Forward-looking reset time: "resets in 2h" / "resets in 3d", falling back to
-  // the raw value for anything unparseable and to "reset due" once it is past.
-  // Mirrors formatCommitTime's trust-the-hub-value stance (never renders "NaN").
+  // Absolute reset time in the viewer's local zone: "resets 09:06 on 29 Jul".
+  // A relative "resets in 4d" floors away up to a day of lead time — a reset
+  // nearly five days out reads as merely four — so show the exact local
+  // wall-clock instant instead. Past timestamps read "reset due"; an
+  // unparseable value falls back to the raw string (never "NaN"), mirroring
+  // formatCommitTime's trust-the-hub-value stance.
+  const RESET_MONTHS = [
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+  ];
   function formatResetTime(iso) {
     if (!iso) return "";
     const then = new Date(iso);
     if (isNaN(then.getTime())) return "resets " + iso;
-    const secs = Math.floor((then.getTime() - Date.now()) / 1000);
-    if (secs <= 0) return "reset due";
-    if (secs < 60) return "resets in <1m";
-    const mins = Math.floor(secs / 60);
-    if (mins < 60) return "resets in " + mins + "m";
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return "resets in " + hrs + "h";
-    const days = Math.floor(hrs / 24);
-    return "resets in " + days + "d";
+    if (then.getTime() <= Date.now()) return "reset due";
+    const hh = String(then.getHours()).padStart(2, "0");
+    const mm = String(then.getMinutes()).padStart(2, "0");
+    return (
+      "resets " + hh + ":" + mm + " on " +
+      then.getDate() + " " + RESET_MONTHS[then.getMonth()]
+    );
   }
 
   // The primary readout for a window. Percent-first: an exact count is shown ONLY
