@@ -216,12 +216,13 @@ def test_codex_staleness(tmp_path: Path) -> None:
 
 
 # -- Claude stream-json rate-limit parser -------------------------------------
-# The exact stream-json field shape for Claude's 5h/7d windows is unverified (see
-# the task session log / the module's mapping note), so these fixtures build the
-# best-effort *candidate* shape the parser targets; correcting the parser against a
-# real turn is a matched edit to these fixtures. The key contract asserted here is
-# the graceful one: recognized fields -> observation, everything else -> None (no
-# observation, so Claude reads unavailable), never a raise.
+# The window shape below is the installed CLI's real subscription shape (verified
+# against Claude Code 2.1.218 — see the module's section note): a ``rate_limits``
+# container keyed ``five_hour``/``seven_day``, each window carrying a 0-100
+# ``used_percentage`` and an epoch-seconds ``resets_at``. The CLI does not put that
+# container on ``claude -p`` stream-json stdout, so the contract these tests pin is
+# mostly the graceful one: that shape -> observation, everything else (including the
+# one rate-limit field the stream really does carry) -> None, never a raise.
 
 OBS_TS = "2026-07-24T01:00:00Z"
 SYSTEM_EVENT = {"type": "system", "subtype": "init"}
@@ -237,13 +238,10 @@ def claude_rate_limits(
     *,
     five_hour: dict | None = None,
     seven_day: dict | None = None,
-    plan: str | None = "max",
     **extra: object,
 ) -> dict:
-    """A candidate Claude ``rate_limits`` container (named-window shape)."""
+    """A Claude ``rate_limits`` container: named windows, each one optional."""
     container: dict = {}
-    if plan is not None:
-        container["plan"] = plan
     if five_hour is not None:
         container["five_hour"] = five_hour
     if seven_day is not None:
@@ -252,10 +250,19 @@ def claude_rate_limits(
     return container
 
 
-def claude_result(rate_limits: object = None, *, wrapper: str | None = None) -> dict:
+def claude_result(
+    rate_limits: object = None,
+    *,
+    wrapper: str | None = None,
+    plan: str | None = "max",
+) -> dict:
     """A ``result`` event, optionally carrying a rate-limit container top-level or
-    nested one level under ``wrapper`` (``usage``/``payload``/...)."""
+    nested one level under ``wrapper`` (``usage``/``payload``/...). ``plan`` rides
+    on the event as ``subscription_type``, a sibling of the container as in the
+    CLI's own payload."""
     event: dict = {"type": "result", "subtype": "success", "is_error": False, "result": "done"}
+    if plan is not None:
+        event["subscription_type"] = plan
     if rate_limits is not None:
         if wrapper is None:
             event["rate_limits"] = rate_limits
@@ -271,8 +278,8 @@ def supported_claude_stdout(*, five: float = 33.0) -> str:
         ASSISTANT_EVENT,
         claude_result(
             claude_rate_limits(
-                five_hour={"used_percent": five, "window_minutes": 300, "resets_at": 1785290400},
-                seven_day={"used_percent": 8.5, "window_minutes": 10080, "resets_at": 1785790400},
+                five_hour={"used_percentage": five, "resets_at": 1785290400},
+                seven_day={"used_percentage": 8.5, "resets_at": 1785790400},
             )
         ),
     )
@@ -288,6 +295,7 @@ def test_parse_claude_stream_extracts_5h_and_7d() -> None:
     five = by_key["five_hour"]
     assert five.used_percent == 42.0
     assert five.remaining_percent == 58.0
+    # The CLI's shape carries no duration field — the window's key supplies it.
     assert five.window_minutes == 300 and five.label == "5h"
     assert five.resets_at is not None and five.resets_at.endswith("+00:00")
     assert by_key["seven_day"].label == "7d"
@@ -300,9 +308,7 @@ def test_parse_claude_stream_reads_container_under_wrapper() -> None:
     # The container may sit one level down under a wrapper key rather than top-level.
     stdout = claude_stream(
         claude_result(
-            claude_rate_limits(
-                five_hour={"used_percent": 10.0, "window_minutes": 300, "resets_at": 1785290400}
-            ),
+            claude_rate_limits(five_hour={"used_percentage": 10.0, "resets_at": 1785290400}),
             wrapper="usage",
         )
     )
@@ -311,45 +317,12 @@ def test_parse_claude_stream_reads_container_under_wrapper() -> None:
     assert [w.key for w in obs.windows] == ["five_hour"]
 
 
-def test_parse_claude_stream_duration_classifies_unnamed_windows() -> None:
-    # A container that lists windows without naming them is classified by duration.
-    stdout = claude_stream(
-        claude_result(
-            {
-                "windows": [
-                    {"used_percent": 30.0, "window_minutes": 300, "resets_at": 1785290400},
-                    {"used_percent": 60.0, "window_minutes": 10080, "resets_at": 1785790400},
-                ]
-            }
-        )
-    )
-    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
-    assert obs is not None
-    by_key = {w.key: w for w in obs.windows}
-    assert by_key["five_hour"].used_percent == 30.0
-    assert by_key["seven_day"].used_percent == 60.0
-
-
-def test_parse_claude_stream_container_may_be_a_list() -> None:
-    stdout = claude_stream(
-        claude_result(
-            [
-                {"used_percent": 15.0, "window_minutes": 300},
-                {"used_percent": 25.0, "window_minutes": 10080},
-            ]
-        )
-    )
-    obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
-    assert obs is not None
-    assert {w.key for w in obs.windows} == {"five_hour", "seven_day"}
-
-
 def test_parse_claude_stream_reset_accepts_epoch_and_iso() -> None:
     stdout = claude_stream(
         claude_result(
             claude_rate_limits(
-                five_hour={"used_percent": 5.0, "window_minutes": 300, "resets_at": 1785290400},
-                seven_day={"used_percent": 5.0, "window_minutes": 10080, "resets_at": "2026-07-31T00:00:00Z"},
+                five_hour={"used_percentage": 5.0, "resets_at": 1785290400},
+                seven_day={"used_percentage": 5.0, "resets_at": "2026-07-31T00:00:00Z"},
             )
         )
     )
@@ -360,10 +333,11 @@ def test_parse_claude_stream_reset_accepts_epoch_and_iso() -> None:
 
 
 def test_parse_claude_stream_partial_single_window() -> None:
+    # Each window is optional; one present window is a usable observation.
     stdout = claude_stream(
         claude_result(
             claude_rate_limits(
-                five_hour={"used_percent": 12.0, "window_minutes": 300, "resets_at": 1785290400},
+                five_hour={"used_percentage": 12.0, "resets_at": 1785290400},
                 seven_day=None,
             )
         )
@@ -376,16 +350,17 @@ def test_parse_claude_stream_partial_single_window() -> None:
 def test_parse_claude_stream_latest_container_wins() -> None:
     # Two rate-limit events in one turn: the freshest (last) wins.
     stdout = claude_stream(
-        claude_result(claude_rate_limits(five_hour={"used_percent": 10.0, "window_minutes": 300})),
-        claude_result(claude_rate_limits(five_hour={"used_percent": 90.0, "window_minutes": 300})),
+        claude_result(claude_rate_limits(five_hour={"used_percentage": 10.0})),
+        claude_result(claude_rate_limits(five_hour={"used_percentage": 90.0})),
     )
     obs = parse_claude_stream_usage(stdout, observed_ts=OBS_TS)
     assert obs is not None and obs.windows[0].used_percent == 90.0
 
 
 def test_parse_claude_stream_absent_returns_none() -> None:
-    # Ordinary stream-json with no rate-limit fields (the common case until the shape
-    # is confirmed) -> no observation, so the store stays unfed and Claude is unavailable.
+    # Ordinary stream-json carries no rate-limit fields at all — every turn of the
+    # installed CLI -> no observation, so the store stays unfed and Claude reads
+    # unavailable.
     stdout = claude_stream(SYSTEM_EVENT, ASSISTANT_EVENT, claude_result())
     assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
 
@@ -393,7 +368,40 @@ def test_parse_claude_stream_absent_returns_none() -> None:
 def test_parse_claude_stream_empty_container_returns_none() -> None:
     # A container whose windows carry no usable signal contributes nothing (never a
     # 0%-used stub) -> no observation.
-    stdout = claude_stream(claude_result(claude_rate_limits(five_hour={"window_minutes": 300})))
+    stdout = claude_stream(claude_result(claude_rate_limits(five_hour={})))
+    assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
+
+
+def test_parse_claude_stream_quota_429_error_frame_records_nothing() -> None:
+    # The ONE rate-limit field the stream really carries: a quota-429 `api_error`
+    # frame naming the window and its reset, with no percentage. That is not a usage
+    # observation — recording it would publish an "available" Claude card with no
+    # figures — so it must leave the store unfed.
+    stdout = claude_stream(
+        {
+            "type": "system",
+            "subtype": "api_error",
+            "error": {
+                "message": "rate limit",
+                "status": 429,
+                "is_network_down": False,
+                "rate_limits": {"resets_at": 1785290400, "rate_limit_type": "five_hour"},
+            },
+            "retry_in_ms": 500,
+            "retry_attempt": 1,
+            "max_retries": 10,
+        }
+    )
+    assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
+
+
+def test_parse_claude_stream_ignores_ambiguous_utilization() -> None:
+    # `utilization` is a 0..1 fraction in the CLI's header-derived cache but an
+    # already-0-100 number in its /usage payload. Reading it would risk showing 0.42
+    # as "0.42% used"; degrading to unavailable is the mandated graceful state.
+    stdout = claude_stream(
+        claude_result(claude_rate_limits(five_hour={"utilization": 0.42, "resets_at": 1785290400}))
+    )
     assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
 
 
@@ -409,8 +417,7 @@ def test_parse_claude_stream_excludes_account_and_credentials() -> None:
     stdout = claude_stream(
         claude_result(
             claude_rate_limits(
-                five_hour={"used_percent": 7.0, "window_minutes": 300, "resets_at": 1785290400},
-                plan="max",
+                five_hour={"used_percentage": 7.0, "resets_at": 1785290400},
                 account_id="acct_SECRET",
                 access_token="tok_SECRET",
                 oauth_token="oauth_SECRET",

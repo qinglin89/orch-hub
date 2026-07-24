@@ -30,11 +30,12 @@ differently:
   :func:`parse_claude_stream_usage` turns one turn's ``stream-json`` stdout into an
   observation, and :meth:`UsageService.claude_observer` is the best-effort seam the
   hub-driven ``claude -p`` backends (intake agent, semantic backend) feed each turn
-  into. The exact ``stream-json`` field names for the 5h/7d windows are the one
-  piece not yet confirmed against a real turn (see the task session log), so the
-  parser targets documented best-effort candidates and degrades to *no observation*
-  — the store stays unfed and Claude reads *unavailable* — on anything it does not
-  recognize, exactly the graceful state the scope mandates.
+  into. Verified against Claude Code 2.1.218: that stdout does **not** carry the
+  5h/7d windows on any event (the section note below records the evidence), so the
+  parser — now aimed at the CLI's real subscription shape rather than at a guess —
+  recognizes nothing in an ordinary turn and degrades to *no observation*: the
+  store stays unfed and Claude reads *unavailable*, exactly the graceful state the
+  scope mandates.
 
 :class:`UsageService` aggregates both behind a small bounded cache so a burst of
 Overview refreshes does not re-scan rollout files every time, and degrades each
@@ -466,43 +467,67 @@ def claude_usage(store: ClaudeUsageStore, *, now: dt.datetime | None = None) -> 
 
 # -- Claude: parse a hub-driven ``claude -p`` turn's stream-json for usage -----
 #
-# THE ONE UNVERIFIED MAPPING. The hub never starts a probe turn (the scope bars it),
-# so Claude usage can only be read from the stream-json of turns the hub already
-# drives (intake, semantic eval). The exact field names ``claude -p`` emits for the
-# five-hour / seven-day subscription windows are not yet confirmed against a real
-# turn — no stored stream-json ``result`` event carries them, and running a turn
-# just to learn the shape is barred. So the parser targets these best-effort
-# *candidates* and, on anything it does not recognize, returns ``None`` (no
-# observation) — the store stays unfed and Claude reads *unavailable*, the scope's
-# mandated graceful state. When a real turn is captured, correcting these constants
-# (and the matching fixture in ``tests/test_usage.py``) is the whole fix: the store,
-# the read side, the wiring, and the UI do not change. Everything below is tolerant
-# and never raises — a malformed line is skipped like the orchestrator/intake
-# readers do, and the freshest usable container in the stream wins.
+# VERIFIED — AND THE ANSWER IS "NOT ON THIS CHANNEL" (Claude Code 2.1.218). The hub
+# never starts a probe turn (the scope bars it), so Claude usage can only come from
+# the stream-json of turns the hub already drives (intake, semantic eval). That
+# stdout does not carry the subscription windows. In the CLI's own emitted-message
+# schema, neither ``result`` (success and error subtypes) nor ``system/init`` has a
+# rate-limit field at all; the single event that does, ``system/api_error``, carries
+# only ``error.rate_limits = {resets_at, rate_limit_type} | null``, described there
+# as the quota-429 retry-banner headers — a reset time and a window name, never a
+# percentage, and only when a turn is actually rejected. Corroborated empirically:
+# no local Claude session record carries a rate-limit *field* at all.
+#
+# So on absence this parser stays exactly what the scope mandates: it recognizes
+# nothing in an ordinary turn and returns no observation, leaving the store unfed
+# and Claude reading *unavailable*. What verification changed is the target — the
+# keys below are no longer guesses but the CLI's real subscription shape, the one it
+# publishes to a statusLine command's stdin:
+#
+#     "rate_limits": {"five_hour": {"used_percentage": <0-100>, "resets_at": <epoch s>},
+#                     "seven_day": {"used_percentage": <0-100>, "resets_at": <epoch s>}}
+#
+# "Only present for subscribers after first API response", each window optional.
+# Reading *that* channel needs a feed the hub does not have today (a statusLine hook
+# is operator-configured, and it is fed by the operator's own interactive sessions
+# rather than by hub-driven ones) — its own task. Until such a feed exists this path
+# is correctly inert, but aligned: a carrier appearing on the stream is parsed, not
+# missed. Everything below is tolerant and never raises — a malformed line is skipped
+# like the orchestrator/intake readers do, and the last usable container wins.
 
-_CLAUDE_CONTAINER_KEYS = (
-    "rate_limits", "rateLimits", "usage_limits", "usageLimits",
-    "subscription", "subscription_usage", "limits",
-)
-"""Candidate keys under which a stream event may carry the rate-limit container."""
+_CLAUDE_CONTAINER_KEYS = ("rate_limits",)
+"""The key the rate-limit container arrives under. Snake-case ``rate_limits`` is the
+only spelling the CLI writes — statusLine payload, ``/usage`` payload, and the
+``system/api_error`` wire schema alike."""
 
-_CLAUDE_WINDOW_KEYS = {
-    "five_hour": ("five_hour", "fiveHour", "five_hourly", "5h", "hourly"),
-    "seven_day": ("seven_day", "sevenDay", "weekly", "7d"),
-}
-"""Candidate keys for each named window, mapped to the stable machine key the UI
-targets (``five_hour`` / ``seven_day``). A window that arrives unnamed (in a list)
-is classified by duration instead (:func:`_classify_claude_window`)."""
+_CLAUDE_WINDOW_KEYS = ("five_hour", "seven_day")
+"""The two subscription windows the CLI publishes, keyed by its own names — which
+double as the stable machine keys the store and the UI target. Its internal record
+also holds ``seven_day_overage_included`` / ``overage`` (the header-derived cache)
+and ``seven_day_opus`` / ``seven_day_sonnet`` (the ``/usage`` payload), but no public
+surface emits those, so they are deliberately not read."""
 
-_CLAUDE_USED_KEYS = ("used_percent", "usedPercent", "utilization", "percent_used", "used_pct")
-_CLAUDE_RESET_KEYS = ("resets_at", "resetsAt", "reset_at", "resetAt", "reset")
-_CLAUDE_WINDOW_MINUTES_KEYS = ("window_minutes", "windowMinutes", "window_size_minutes", "duration_minutes")
-_CLAUDE_PLAN_KEYS = ("plan", "plan_type", "planType", "subscription_type", "subscriptionType", "tier")
-_CLAUDE_WINDOW_LIST_KEYS = ("windows", "buckets", "rate_limits", "limits")
+_CLAUDE_USED_KEYS = ("used_percentage",)
+"""The used figure, as a 0-100 percentage.
 
-_CLAUDE_DEFAULT_MINUTES = {"five_hour": 300, "seven_day": 10080}
-"""Fallback duration for a named window that omits its own — the 5h / 7d its key
-already implies, so a window label still renders when only the percent/reset came."""
+Deliberately *only* ``used_percentage``. The CLI also carries ``utilization``, whose
+unit is source-dependent: a 0..1 fraction in the header-derived cache (the statusLine
+payload builds ``used_percentage`` as ``utilization * 100``) but an already-0-100
+number in the ``/usage`` payload. Accepting it would risk rendering ``0.42`` as
+"0.42% used" — and an unrecognized shape degrading to unavailable is the mandated
+graceful state, whereas a percentage wrong by 100x is not."""
+
+_CLAUDE_RESET_KEYS = ("resets_at",)
+"""Window reset time, as Unix epoch seconds (:func:`_claude_reset` also takes ISO)."""
+
+_CLAUDE_PLAN_KEYS = ("subscription_type",)
+"""The subscription tier (``"pro"`` / ``"max"`` / ``"team"`` / ``"enterprise"``,
+null for API-key sessions) — a sibling of the container rather than a field inside
+it, and never an account or credential identifier."""
+
+_CLAUDE_WINDOW_MINUTES = {"five_hour": 300, "seven_day": 10080}
+"""Each window's duration. The CLI's shape carries no duration field — the window's
+key *is* its duration — so these supply the minutes and label the UI renders."""
 
 
 def _first(data: dict, keys: Iterable[str]) -> object:
@@ -514,8 +539,8 @@ def _first(data: dict, keys: Iterable[str]) -> object:
 
 
 def _claude_reset(value: object) -> str | None:
-    """A window reset time as ISO-8601 UTC, from either epoch seconds or an ISO
-    string (both plausible in the unverified shape). ``None`` when absent/unusable."""
+    """A window reset time as ISO-8601 UTC. The CLI emits Unix epoch seconds; an ISO
+    string is also accepted as tolerance. ``None`` when absent/unusable."""
     if _is_number(value):
         return _iso_from_epoch(value)
     if isinstance(value, str):
@@ -527,19 +552,22 @@ def _claude_reset(value: object) -> str | None:
 def _claude_window(key: str, raw: object) -> UsageWindow | None:
     """Normalize one Claude window dict into a :class:`UsageWindow`.
 
-    ``None`` when the window carries no usable signal (neither a used-percent nor a
-    reset time), so an empty stub never renders as "0% used". Percent-first like
-    Codex: ``used``/``limit`` stay ``None`` — Claude reports percentages, so no
-    numeric message total is invented (the scope's unavailable-not-zero /
+    The used-percentage is what makes a window an observation: without it there is
+    nothing to show but a reset time, and publishing that would render an
+    *available* Claude card carrying no figures. So a window missing it yields
+    ``None`` — an empty stub never becomes "0% used", and the stream's one real
+    rate-limit frame (a quota-429 ``api_error``, which names a window and its reset
+    but no percentage) cannot masquerade as usage. Percent-first like Codex:
+    ``used``/``limit`` stay ``None`` — Claude reports percentages, so no numeric
+    message total is invented (the scope's unavailable-not-zero /
     no-invented-total rules)."""
     if not isinstance(raw, dict):
         return None
     used = _percent(_first(raw, _CLAUDE_USED_KEYS))
     resets = _claude_reset(_first(raw, _CLAUDE_RESET_KEYS))
-    if used is None and resets is None:
+    if used is None:
         return None
-    minutes_raw = _first(raw, _CLAUDE_WINDOW_MINUTES_KEYS)
-    minutes = int(minutes_raw) if _is_number(minutes_raw) else _CLAUDE_DEFAULT_MINUTES.get(key)
+    minutes = _CLAUDE_WINDOW_MINUTES.get(key)
     return UsageWindow(
         key=key,
         label=_window_label(minutes),
@@ -550,61 +578,32 @@ def _claude_window(key: str, raw: object) -> UsageWindow | None:
     )
 
 
-def _classify_claude_window(raw: object) -> str | None:
-    """Classify an unnamed window dict as ``five_hour``/``seven_day`` by duration.
-
-    For a container that lists windows without naming them, the duration separates
-    them: under a day is the five-hour window, a day or more the seven-day. ``None``
-    when no duration is present to classify on."""
-    if not isinstance(raw, dict):
-        return None
-    minutes = _first(raw, _CLAUDE_WINDOW_MINUTES_KEYS)
-    if not _is_number(minutes):
-        return None
-    return "five_hour" if int(minutes) < 1440 else "seven_day"
-
-
 def _claude_windows(container: object) -> list[UsageWindow]:
-    """Extract the 5h/7d windows from a rate-limit container (freshest-first order).
+    """Extract the 5h/7d windows from a rate-limit container.
 
-    Handles both plausible shapes: a dict keyed by window name
-    (``{"five_hour": {...}, "seven_day": {...}}``) and a list of unnamed window
-    dicts classified by duration. Windows are keyed by the stable machine key and
-    de-duplicated (first per key wins)."""
+    The shape is a dict keyed by window name
+    (``{"five_hour": {...}, "seven_day": {...}}``), each window optional — the CLI
+    omits one it has no figure for, and an omitted or unusable window simply
+    contributes nothing rather than blocking the other."""
+    if not isinstance(container, dict):
+        return []
     windows: list[UsageWindow] = []
-    seen: set[str] = set()
-
-    def _add(key: str, raw: object) -> None:
-        if key in seen:
-            return
-        window = _claude_window(key, raw)
+    for key in _CLAUDE_WINDOW_KEYS:
+        window = _claude_window(key, container.get(key))
         if window is not None:
             windows.append(window)
-            seen.add(key)
-
-    if isinstance(container, dict):
-        for key, candidates in _CLAUDE_WINDOW_KEYS.items():
-            _add(key, _first(container, candidates))
-        listish = _first(container, _CLAUDE_WINDOW_LIST_KEYS)
-        if isinstance(listish, list):
-            for raw in listish:
-                key = _classify_claude_window(raw)
-                if key is not None:
-                    _add(key, raw)
-    elif isinstance(container, list):
-        for raw in container:
-            key = _classify_claude_window(raw)
-            if key is not None:
-                _add(key, raw)
     return windows
 
 
 def _claude_container(event: dict) -> object | None:
     """Locate a rate-limit container on one stream-json event, if any.
 
-    Looks under the candidate container keys at the event top level and one level
-    down under the common wrappers (``result``/``usage``/``message``/``payload``),
-    since the shape is unverified. Returns the first container found, else ``None``."""
+    Looks under the container key at the event top level and one level down under
+    the wrappers a session payload would plausibly nest in
+    (``result``/``usage``/``message``/``payload``). That descent is tolerance, not
+    guesswork: no event of the installed CLI carries the container at all, so this
+    is what would find it if a future CLI attached the statusLine-shaped payload to
+    the stream. Returns the first container found, else ``None``."""
     container = _first(event, _CLAUDE_CONTAINER_KEYS)
     if container is not None:
         return container
@@ -631,16 +630,15 @@ def _claude_plan(event: dict, container: object) -> str | None:
 def parse_claude_stream_usage(stdout: str, *, observed_ts: str) -> ClaudeObservation | None:
     """Parse a hub-driven ``claude -p`` turn's stream-json stdout for usage.
 
-    Tolerant and best-effort (see the module-level mapping note above): scans the
-    JSONL events for a rate-limit container in the candidate shape, extracts the
-    five-hour / seven-day windows, and returns a :class:`ClaudeObservation` stamped
-    with ``observed_ts`` (when the hub saw the turn — the honest observation time,
-    since the hub is watching this turn live). Returns ``None`` — meaning *no
-    supported usage was seen*, so the store stays unfed and Claude reads unavailable
-    — when the stdout carries no recognizable rate-limit fields (the common case
-    until the shape is confirmed against a real turn), is empty, or is unparseable.
-    Never raises: a malformed line is skipped, and the last usable container in the
-    stream wins (freshest)."""
+    Tolerant (see the section note above): scans the JSONL events for a rate-limit
+    container in the CLI's subscription shape, extracts the five-hour / seven-day
+    windows, and returns a :class:`ClaudeObservation` stamped with ``observed_ts``
+    (when the hub saw the turn — the honest observation time, since the hub is
+    watching this turn live). Returns ``None`` — meaning *no supported usage was
+    seen*, so the store stays unfed and Claude reads unavailable — when the stdout
+    carries no such fields (which, on the installed CLI, is every ordinary turn), is
+    empty, or is unparseable. Never raises: a malformed line is skipped, and the
+    last usable container in the stream wins (freshest)."""
     latest: tuple[list[UsageWindow], str | None] | None = None
     for line in stdout.splitlines():
         line = line.strip()
@@ -683,9 +681,12 @@ Claude usage observation when the supported rate-limit fields are present.
 The hub-driven ``claude -p`` backends (the intake agent and the semantic backend)
 call it once per turn, so a turn the hub already runs updates Claude usage without a
 probe turn — and without those modules importing usage internals (they take a plain
-``Callable[[str], None]``). It MUST never raise: usage bookkeeping can never affect a
-turn. :meth:`UsageService.claude_observer` is the production implementation; the
-backends default to a no-op when no observer is wired."""
+``Callable[[str], None]``). The seam stays wired although the installed CLI puts no
+subscription windows on that stdout (see the section note): it costs one no-op call
+per turn, and it is the placement a carrier would arrive on. It MUST never raise:
+usage bookkeeping can never affect a turn. :meth:`UsageService.claude_observer` is
+the production implementation; the backends default to a no-op when no observer is
+wired."""
 
 
 class UsageService:
