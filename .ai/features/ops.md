@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+verified-against: 5b9035236a5c892c44f182f178d8e101a49c800d
 ---
 
 # Features: Operations Surfaces
@@ -42,6 +42,12 @@ Implemented behavior:
 - The statusLine writer is opt-in and pass-through: the hub never writes
   `~/.claude/**`, the sink stores only `rate_limits` plus `subscription_type`,
   and wrapped operator statusline argv/stdin/stdout/stderr/exit code are relayed.
+- After successful `launchd deploy|update`, the CLI inspects
+  `~/.claude/settings.local.json` then `settings.json` read-only and prints
+  copy-ready statusLine setup guidance when the effective command lacks
+  `orch-hub-statusline`; guidance uses the deployed wrapper path, adds
+  `--data-dir` for non-default data dirs, preserves an existing command after
+  `-- /bin/sh -c`, is silent when already configured, and never fails deploy.
 - The Overview renders separate Claude/Codex cards with percent-first bars,
   reset timing, freshness/stale flags, explicit unknown/unavailable states, and
   aggregate reset-credit availability. Source failures degrade only this
@@ -123,6 +129,10 @@ Implemented behavior:
   `launchctl print` stops reporting the label, then retry transient bootstrap
   exit-5/input-output failures with bounded backoff. The template is parsed
   before venv/pip work.
+- After the deploy summary, deploy/update may print advisory Claude usage setup
+  guidance; this read-only `~/.claude` check is outside the system-mutation path,
+  fail-soft, and suppressed when the statusLine already routes through
+  `orch-hub-statusline`.
 - Token resolution is explicit `--token`, then `ORCH_HUB_TOKEN`, then an
   existing installed plist token, then a generated token printed once. The
   installed plist is written mode `600` because it embeds the bearer token.

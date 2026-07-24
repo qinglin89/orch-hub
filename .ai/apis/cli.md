@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 5b9035236a5c892c44f182f178d8e101a49c800d
 ---
 
 # APIs: CLI
@@ -60,6 +60,13 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   failures. Rendering still happens before install/write; required leftovers
   fail before side effects, while unknown optional placeholders render empty for
   old-CLI/new-template compatibility.
+- Post-success output: deploy/update print the launchd summary and then, when
+  `~/.claude/settings.local.json` / `settings.json` do not effectively route
+  `statusLine.command` through `orch-hub-statusline`, advisory Claude usage
+  setup guidance with the deployed wrapper path, `--data-dir` for non-default
+  hub data dirs, and any existing command preserved after `-- /bin/sh -c`.
+  The check is read-only, silent when already configured, and swallowed on
+  settings/parsing/guidance failures so deployment remains successful.
 - Configuration precedence: CLI flag, environment, default for paths/host/port;
   bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
   installed plist token, then generated token printed once. Bark URL resolves

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
+verified-against: 5b9035236a5c892c44f182f178d8e101a49c800d
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -144,3 +144,7 @@ stdout/stderr/exit code. It deliberately avoids `Config.from_env()` validation,
 never edits `~/.claude/**`, never starts Claude or calls provider endpoints, and
 drops session id, transcript path, cwd, model, workspace, and cost fields before
 writing the sink.
+The same module owns read-only setup detection/guidance helpers for
+`~/.claude/settings.local.json` then `settings.json`; the CLI uses them after
+successful `launchd deploy|update` to print fail-soft wrapper setup guidance
+without moving settings reads into the launchd mutation path.
