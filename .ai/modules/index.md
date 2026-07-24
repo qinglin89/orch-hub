@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
+verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
 ---
 
 # Modules
@@ -43,7 +43,9 @@ verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 
 | File | Contains |
 |---|---|
-| core.md | CLI, statusLine writer, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, static metrics, semantic evaluator, usage, intake manager, intake agent |
+| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
+| sidecar.md | Evaluation, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
+| intake.md | Intake manager, intake agent |
 | runtime.md | Run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
 | web.md | API, web UI, and launchd operations |
 
