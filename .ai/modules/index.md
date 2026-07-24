@@ -47,7 +47,8 @@ verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
 | sidecar.md | Evaluation, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
 | intake.md | Intake manager, intake agent |
 | runtime.md | Run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
-| web.md | API, web UI, and launchd operations |
+| service.md | API app, launchd operations |
+| web.md | Web UI |
 
 ## Boundary Rules
 
