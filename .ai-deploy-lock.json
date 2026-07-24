@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "319ea7c07c814c9df4bafdd732718a90d6311360a7bbc0f980804a0961d9576b",
+  "canonical_payload_sha256": "ae6fdc9da109b2425a6de1ef630a9640e8230762f55a222e98a861690e8fd838",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -159,9 +159,15 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-config-profiles.md",
-      "canonical_sha256": "6bc0ae1f7f59e5085d3711651b81562261d3e3329bdccf2542a737ff231f3369",
-      "canonical_size_bytes": 8017,
+      "canonical_sha256": "48918b54dd82dee8434c2950b53cb7ddb6902b437203db1152e99e52c9063dd3",
+      "canonical_size_bytes": 8214,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub-config-profiles.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-split-role-profiles.md",
+      "canonical_sha256": "39abeea7aa1f0eb82f573b16dc3decdf69fa772f58c0c66b425ba7c68e4f9b99",
+      "canonical_size_bytes": 3473,
+      "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub-split-role-profiles.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub.md",
@@ -171,14 +177,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "5ea73a53f5b238a4f802e1d4411efe00202c4148d575dc44345e8bbc4ebe66ef",
-      "canonical_size_bytes": 35090,
+      "canonical_sha256": "0bfaf6c92bdca8b8797a16b6a66b38da974cb1998f653c21f7a331c06bf99a1f",
+      "canonical_size_bytes": 36150,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "37ceb50e1529b301f25a676a61a6bb3800b354e9b5b3417d3b2e18be4fc0f3aa",
-      "canonical_size_bytes": 141328,
+      "canonical_sha256": "e9b5077862fa7a7213d4e83575274739a31b36164c1d8b6869eba06cd4ae83a9",
+      "canonical_size_bytes": 144543,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -657,6 +663,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "ff09666a9deccc5138bc67b2a8225dc1293948d6",
+  "source_git_commit": "32206f66e99e09a588153eb5c3a656b06505425c",
   "source_repo": "ai-native-deployment"
 }
