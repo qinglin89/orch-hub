@@ -19,6 +19,9 @@ dev = ["pytest>=7", "httpx>=0.24"]
 [project.scripts]
 orch-hub = "orch_hub.cli:main"
 orch-hub-api = "orch_hub.api:run"
+# Operator-installed Claude Code statusLine wrapper: captures the CLI's own
+# subscription usage for the Overview and passes the wrapped status line through.
+orch-hub-statusline = "orch_hub.statusline:main"
 
 [tool.setuptools]
 packages = ["orch_hub"]

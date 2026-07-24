@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -20,12 +21,14 @@ from orch_hub import api
 from orch_hub.config import Config
 from orch_hub.models import PROVIDER_CLAUDE, PROVIDER_CODEX, UsageWindow
 from orch_hub.usage import (
+    MAX_STATUSLINE_BYTES,
     USAGE_CACHE_TTL_SECONDS,
     ClaudeObservation,
     ClaudeUsageStore,
     UsageService,
     claude_usage,
     parse_claude_stream_usage,
+    read_claude_statusline,
     read_codex_usage,
 )
 
@@ -516,6 +519,152 @@ def test_claude_usage_available_with_staleness(tmp_path: Path) -> None:
     assert fresh.plan == "max"
     store.record(make_observation(observed_ts="2026-07-23T20:00:00Z"))
     assert claude_usage(store, now=NOW).stale is True
+
+
+# -- Claude statusLine sink (the carrier that actually works) -----------------
+#
+# The operator-installed writer (orch_hub.statusline) publishes the CLI's own
+# rate-limit payload here; the hub ingests it into the same store, so an
+# uninstalled/broken hook is indistinguishable from today's unavailable card.
+
+
+def write_sink(path: Path, *, five: float = 41.0, observed_ts: str | None = "2026-07-24T00:59:00Z", plan: str | None = "max") -> Path:
+    """Write a statusLine sink file in the shape the writer persists."""
+    record: dict = {
+        "schema": 1,
+        "source": "claude-statusline",
+        "rate_limits": {
+            "five_hour": {"used_percentage": five, "resets_at": 1785290400},
+            "seven_day": {"used_percentage": 9.5, "resets_at": 1785790400},
+        },
+    }
+    if observed_ts is not None:
+        record["observed_ts"] = observed_ts
+    if plan is not None:
+        record["subscription_type"] = plan
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(record), encoding="utf-8")
+    return path
+
+
+def test_statusline_sink_parses_with_the_verified_stream_mapping(tmp_path: Path) -> None:
+    # Same mapping as the stream carrier: 0-100 used_percentage, epoch resets_at,
+    # plan as a sibling of the container.
+    obs = read_claude_statusline(write_sink(tmp_path / "claude-statusline.json", five=41.0))
+    assert obs is not None
+    assert obs.plan == "max" and obs.observed_ts == "2026-07-24T00:59:00+00:00"
+    by_key = {w.key: w for w in obs.windows}
+    assert by_key["five_hour"].used_percent == 41.0 and by_key["five_hour"].window_minutes == 300
+    assert by_key["seven_day"].remaining_percent == 90.5
+    assert by_key["five_hour"].resets_at.endswith("+00:00")
+
+
+def test_statusline_sink_falls_back_to_mtime(tmp_path: Path) -> None:
+    # No stamp (or an unparseable one) -> the file's mtime is the observation time,
+    # so staleness is still computable rather than silently absent.
+    path = write_sink(tmp_path / "claude-statusline.json", observed_ts=None)
+    os.utime(path, (1785290000, 1785290000))
+    obs = read_claude_statusline(path)
+    assert obs is not None
+    assert obs.observed_ts == dt.datetime.fromtimestamp(1785290000, tz=UTC).isoformat()
+    bad = write_sink(tmp_path / "bad.json", observed_ts="not a timestamp")
+    os.utime(bad, (1785290000, 1785290000))
+    assert read_claude_statusline(bad).observed_ts.startswith("2026-")
+
+
+def test_statusline_sink_absent_or_malformed_yields_nothing(tmp_path: Path) -> None:
+    # Hook not installed, unreadable, or an unrecognized shape: all identical to
+    # the caller — no observation, hence the pre-existing unavailable card.
+    assert read_claude_statusline(tmp_path / "missing.json") is None
+    assert read_claude_statusline(tmp_path) is None  # a directory
+    for name, text in {
+        "empty.json": "",
+        "notjson.json": "{ not json",
+        "array.json": "[1, 2, 3]",
+        "nocontainer.json": json.dumps({"observed_ts": OBS_TS, "cwd": "/x"}),
+        "emptywindows.json": json.dumps({"rate_limits": {"five_hour": {}}}),
+        "utilization.json": json.dumps({"rate_limits": {"five_hour": {"utilization": 0.42}}}),
+    }.items():
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        assert read_claude_statusline(path) is None, name
+
+
+def test_statusline_sink_oversized_is_skipped(tmp_path: Path) -> None:
+    path = write_sink(tmp_path / "claude-statusline.json")
+    path.write_text(path.read_text(encoding="utf-8") + " " * (MAX_STATUSLINE_BYTES + 1), encoding="utf-8")
+    assert read_claude_statusline(path) is None
+
+
+def test_service_ingests_statusline_sink(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    service = UsageService(config, clock=lambda: NOW)
+    assert service.get_usage().providers[0].available is False  # no hook installed yet
+    write_sink(service.statusline_sink, five=41.0)
+    service = UsageService(config, clock=lambda: NOW)  # fresh service = no cached snapshot
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    assert claude.available is True and claude.plan == "max"
+    assert claude.windows[0].used_percent == 41.0
+    assert claude.stale is False
+    # Ingestion goes *through the store*, so the read path/cache/payload are unchanged
+    # and the figures survive the sink disappearing (shown stale, never lost).
+    assert service.store.latest() is not None
+    service.statusline_sink.unlink()
+    assert UsageService(config, clock=lambda: NOW).get_usage().providers[0].windows[0].used_percent == 41.0
+
+
+def test_service_statusline_stale_is_the_resting_state(tmp_path: Path) -> None:
+    # An idle Mac renders no status line, so nothing is written: the card must read
+    # as last-observed figures, never as zero usage.
+    config = make_config(tmp_path)
+    service = UsageService(config, clock=lambda: NOW)
+    write_sink(service.statusline_sink, five=41.0, observed_ts="2026-07-23T20:00:00Z")
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    assert claude.available is True and claude.stale is True
+    assert claude.windows[0].used_percent == 41.0  # last observed, not zeroed
+
+
+def test_service_statusline_never_regresses_a_fresher_observation(tmp_path: Path) -> None:
+    config = make_config(tmp_path)
+    store = ClaudeUsageStore(config.data_dir)
+    store.record(make_observation(observed_ts="2026-07-24T00:59:00Z", used=20.0))
+    service = UsageService(config, claude_store=store, clock=lambda: NOW)
+    write_sink(service.statusline_sink, five=41.0, observed_ts="2026-07-24T00:00:00Z")  # older
+    assert service.get_usage().providers[0].windows[0].used_percent == 20.0
+    write_sink(service.statusline_sink, five=55.0, observed_ts="2026-07-24T00:59:30Z")  # newer
+    assert UsageService(config, claude_store=store, clock=lambda: NOW).get_usage().providers[0].windows[
+        0
+    ].used_percent == 55.0
+
+
+def test_service_statusline_ingest_failure_keeps_stored_observation(tmp_path: Path) -> None:
+    class BoomStore(ClaudeUsageStore):
+        def record(self, observation):  # noqa: ANN001 - test stub
+            raise RuntimeError("disk full")
+
+    config = make_config(tmp_path)
+    store = BoomStore(config.data_dir)
+    ClaudeUsageStore(config.data_dir).record(make_observation(used=20.0))
+    service = UsageService(config, claude_store=store, clock=lambda: NOW)
+    write_sink(service.statusline_sink, five=41.0, observed_ts="2026-07-24T00:59:30Z")
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    # An ingest that cannot persist degrades to the previous observation — stale at
+    # worst — rather than dropping Claude to unavailable.
+    assert claude.available is True and claude.windows[0].used_percent == 20.0
+
+
+def test_statusline_sink_never_gates_anything(tmp_path: Path) -> None:
+    # Display-only: a corrupt sink returns 200 with an unavailable Claude card and
+    # leaves every other route (readiness, runs, intake) untouched.
+    config = make_config(tmp_path)
+    sink = config.data_dir / "usage" / "claude-statusline.json"
+    sink.parent.mkdir(parents=True, exist_ok=True)
+    sink.write_text("{ not json", encoding="utf-8")
+    client = build_client(config)
+    resp = client.get("/api/usage")
+    assert resp.status_code == 200
+    assert {p["provider"]: p for p in resp.json()["providers"]}[PROVIDER_CLAUDE]["available"] is False
+    assert client.get("/api/health").status_code == 200
 
 
 # -- UsageService: aggregation, caching, fail-soft ----------------------------

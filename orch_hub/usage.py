@@ -22,20 +22,30 @@ differently:
   reset-credit identifiers are never touched (they live in ``auth.json``, which
   this module never opens).
 
-- **Claude** — the hub *does* drive Claude (intake, semantic eval), so Claude's
-  five-hour / seven-day usage is captured by *observing the hub's own*
-  ``claude -p`` sessions and retaining the latest observation in a hub-owned store
-  (:class:`ClaudeUsageStore`). No Claude turn is ever started just to refresh
-  usage, and no interactive UI or private OAuth endpoint is scraped.
-  :func:`parse_claude_stream_usage` turns one turn's ``stream-json`` stdout into an
-  observation, and :meth:`UsageService.claude_observer` is the best-effort seam the
-  hub-driven ``claude -p`` backends (intake agent, semantic backend) feed each turn
-  into. Verified against Claude Code 2.1.218: that stdout does **not** carry the
-  5h/7d windows on any event (the section note below records the evidence), so the
-  parser — now aimed at the CLI's real subscription shape rather than at a guess —
-  recognizes nothing in an ordinary turn and degrades to *no observation*: the
-  store stays unfed and Claude reads *unavailable*, exactly the graceful state the
-  scope mandates.
+- **Claude** — the latest observation is retained in a hub-owned store
+  (:class:`ClaudeUsageStore`), fed by two carriers, newest wins:
+
+  1. *The statusLine sink* — the one local channel that actually carries the
+     five-hour / seven-day windows. Claude Code pipes them to a configured
+     statusLine command's stdin, so the operator-installed writer
+     (:mod:`orch_hub.statusline`) persists that payload to
+     :data:`CLAUDE_STATUSLINE_NAME` and :func:`read_claude_statusline` ingests it
+     into the same store on read. This is the Codex pattern applied to Claude:
+     read what the operator's own sessions already wrote. Uninstalled, the sink is
+     simply absent and Claude reads *unavailable* exactly as before.
+  2. *Hub-driven turns* — the hub also drives Claude (intake, semantic eval), and
+     :meth:`UsageService.claude_observer` is the best-effort seam those backends
+     feed each turn's ``stream-json`` stdout into
+     (:func:`parse_claude_stream_usage`). Verified against Claude Code 2.1.218,
+     that stdout carries no 5h/7d windows on any event (the section note below
+     records the evidence), so on the installed CLI this carrier is structurally
+     inert — it recognizes nothing and records nothing. It stays wired because it
+     costs one no-op call per turn and is where a future carrier would arrive.
+
+  Both share one parser, one store, and one read path. No Claude turn is ever
+  started just to refresh usage, and no interactive UI or private OAuth endpoint
+  is scraped — including the CLI's own ``/usage`` command, which fetches from a
+  private endpoint and spends a ``quota_check`` API call.
 
 :class:`UsageService` aggregates both behind a small bounded cache so a burst of
 Overview refreshes does not re-scan rollout files every time, and degrades each
@@ -68,6 +78,20 @@ USAGE_DIR_NAME = "usage"
 
 CLAUDE_USAGE_NAME = "claude.json"
 """The latest observed Claude usage snapshot, under ``<data_dir>/usage/``."""
+
+CLAUDE_STATUSLINE_NAME = "claude-statusline.json"
+"""Sink the operator-installed statusLine writer (:mod:`orch_hub.statusline`)
+publishes the CLI's own ``rate_limits`` payload to, under ``<data_dir>/usage/``.
+
+Separate from :data:`CLAUDE_USAGE_NAME` on purpose: that one is the hub's own
+normalized observation store, while this is raw carrier output written by an
+external process — untrusted display input, read tolerantly and bounded."""
+
+MAX_STATUSLINE_BYTES = 256 * 1024
+"""Skip a statusLine sink larger than this. The writer bounds what it persists,
+but the sink is an external file: refusing to slurp an implausibly large one
+keeps a corrupted/hand-edited file off the Overview read path (it degrades to
+*unavailable*, like any other unreadable source)."""
 
 USAGE_STALE_AFTER_SECONDS = 3600
 """How old an observation may be before it is flagged ``stale``.
@@ -560,7 +584,15 @@ def _claude_window(key: str, raw: object) -> UsageWindow | None:
     but no percentage) cannot masquerade as usage. Percent-first like Codex:
     ``used``/``limit`` stay ``None`` — Claude reports percentages, so no numeric
     message total is invented (the scope's unavailable-not-zero /
-    no-invented-total rules)."""
+    no-invented-total rules).
+
+    Decided explicitly when the statusLine carrier landed: that quota-429 frame is
+    *not* promoted to a distinct "rate limited" display state either. It would need
+    a new provider state threaded through models, the route, and the cards to say
+    less than the sink now says (no percentage, a window naming scheme of its own),
+    about a condition that is transient and only observable while a hub-driven turn
+    is being rejected. Rejecting it here keeps one rule: an available Claude card
+    carries figures."""
     if not isinstance(raw, dict):
         return None
     used = _percent(_first(raw, _CLAUDE_USED_KEYS))
@@ -662,6 +694,89 @@ def parse_claude_stream_usage(stdout: str, *, observed_ts: str) -> ClaudeObserva
     return ClaudeObservation(observed_ts=observed_ts, plan=plan, windows=tuple(windows))
 
 
+# -- Claude: read the operator-installed statusLine sink ----------------------
+#
+# THE CARRIER THAT ACTUALLY WORKS. Everything above establishes that no hub-driven
+# turn can observe Claude's subscription windows; the CLI publishes them only to a
+# statusLine command's stdin. :mod:`orch_hub.statusline` is the operator-installed
+# writer that persists that payload; this is the read half.
+#
+# The sink is deliberately shaped so the *verified* mapping above parses it
+# unchanged — ``rate_limits`` at the top level, ``subscription_type`` beside it —
+# so there is exactly one place that decides what a window means. What differs
+# from the stream is only the envelope (one JSON object, not JSONL) and the
+# observation time: the writer stamps when the CLI published the figures, which is
+# the honest observation moment and the basis for staleness. Stale is the *normal
+# resting state* here — an idle Mac renders no status line, so nothing is written
+# — and it must read as last-observed figures, never as zero usage.
+
+
+def parse_claude_statusline(text: str, *, observed_ts: str) -> ClaudeObservation | None:
+    """Parse the statusLine sink's contents into an observation.
+
+    Reuses the verified stream mapping (:func:`_claude_container` /
+    :func:`_claude_windows` / :func:`_claude_plan`), so both carriers agree by
+    construction on what a window is. ``observed_ts`` is the fallback observation
+    time (the sink's mtime); the record's own stamp wins when it parses, since it
+    marks when the CLI published the figures rather than when the file last moved.
+
+    Returns ``None`` — no observation, so the store keeps whatever it had — for
+    anything unusable: not JSON, not an object, no rate-limit container, or a
+    container whose windows carry no used-percentage. Never raises: this is
+    untrusted external input on a display read path."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    container = _claude_container(data)
+    if container is None:
+        return None
+    windows = _claude_windows(container)
+    if not windows:
+        return None
+    stamped = _parse_iso(data.get("observed_ts"))
+    return ClaudeObservation(
+        observed_ts=stamped.isoformat() if stamped is not None else observed_ts,
+        plan=_claude_plan(data, container),
+        windows=tuple(windows),
+    )
+
+
+def read_claude_statusline(path: Path) -> ClaudeObservation | None:
+    """Read the statusLine sink at ``path``, or ``None`` when it yields nothing.
+
+    ``None`` covers every "no feed" case identically — the writer is not installed,
+    no subscriber session has rendered a status line yet, the file is unreadable,
+    oversized (:data:`MAX_STATUSLINE_BYTES`), or malformed — so an uninstalled hook
+    and a broken one both degrade to the pre-existing *unavailable* card rather
+    than to an error or to fabricated figures."""
+    try:
+        stat = path.stat()
+        if stat.st_size > MAX_STATUSLINE_BYTES:
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+        mtime = dt.datetime.fromtimestamp(stat.st_mtime, tz=dt.timezone.utc).isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+    return parse_claude_statusline(text, observed_ts=mtime)
+
+
+def _is_newer(candidate: str | None, current: str | None) -> bool:
+    """Whether ``candidate`` is a strictly later observation time than ``current``.
+
+    Gates sink ingestion so it never regresses the store: equal timestamps (the
+    common case — repeated reads of an unchanged sink) write nothing, and an older
+    sink cannot overwrite a fresher observation. An unparseable stored timestamp
+    yields to the candidate; an unparseable candidate never wins."""
+    new = _parse_iso(candidate)
+    if new is None:
+        return False
+    old = _parse_iso(current)
+    return old is None or new > old
+
+
 # -- aggregation service ------------------------------------------------------
 
 
@@ -715,6 +830,11 @@ class UsageService:
     def store(self) -> ClaudeUsageStore:
         return self._store
 
+    @property
+    def statusline_sink(self) -> Path:
+        """Where the operator-installed statusLine writer publishes (read-only here)."""
+        return self._config.data_dir / USAGE_DIR_NAME / CLAUDE_STATUSLINE_NAME
+
     def record_claude_observation(self, observation: ClaudeObservation) -> None:
         """Persist a fresh Claude observation and drop the cached snapshot."""
         self._store.record(observation)
@@ -757,5 +877,37 @@ class UsageService:
 
     def _read_providers(self, now: dt.datetime) -> Iterable[ProviderUsage]:
         """Read every provider, each fail-soft and independent (Claude, then Codex)."""
-        yield _safe(PROVIDER_CLAUDE, lambda: claude_usage(self._store, now=now))
+        yield _safe(PROVIDER_CLAUDE, lambda: self._read_claude(now))
         yield _safe(PROVIDER_CODEX, lambda: read_codex_usage(self._config.codex_home, now=now))
+
+    def _read_claude(self, now: dt.datetime) -> ProviderUsage:
+        """Ingest the statusLine sink, then read the store — the single Claude path.
+
+        Ingestion is a read-path step rather than a background watcher: the sink is
+        written by the operator's own sessions at their own cadence, so there is
+        nothing to subscribe to, and the aggregate cache already bounds how often
+        this runs. It is also isolated — an unreadable sink or a failing store write
+        must still yield whatever was observed before, so the card degrades to
+        *stale*, never to *unavailable*, on an ingest problem."""
+        try:
+            self._ingest_statusline()
+        except Exception:  # noqa: BLE001 — display-only; the stored observation still reads
+            pass
+        return claude_usage(self._store, now=now)
+
+    def _ingest_statusline(self) -> None:
+        """Record the statusLine sink's observation when it is newer than the stored one.
+
+        Routing the sink *through the store* (rather than reading it as a parallel
+        source) keeps one read path, one payload shape, and one staleness rule for
+        both carriers, and persists the last-known figures so a rotated, deleted, or
+        newly-uninstalled sink still shows them as stale rather than losing them.
+        The newness gate makes repeated reads of an unchanged sink a no-op and stops
+        a sink from regressing a fresher hub-driven observation."""
+        observation = read_claude_statusline(self.statusline_sink)
+        if observation is None:
+            return
+        current = self._store.latest()
+        if current is not None and not _is_newer(observation.observed_ts, current.observed_ts):
+            return
+        self._store.record(observation)
