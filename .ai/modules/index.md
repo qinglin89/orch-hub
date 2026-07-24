@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # Modules
@@ -21,7 +21,7 @@ verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 | Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` with retention after durable writes |
 | Semantic evaluator | `orch_hub/semantic.py` | Implemented optional evidence-bounded model evaluation over evidence/static artifacts, Claude CLI backend isolation, semantic doctor readiness, `semantic_report.json`, and `report.md` persistence |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | Implemented persisted async semantic-evaluation job status, duplicate in-flight prevention, startup orphan reconciliation, bounded failure diagnostics, and completed-job `evaluation_id` linkage |
-| Usage | `orch_hub/usage.py` | Implemented read-only Claude/Codex subscription-usage normalization, Codex rollout scanning, Claude observation storage/parser, bounded aggregation cache, and fail-soft provider snapshots for display |
+| Usage | `orch_hub/usage.py` | Implemented read-only Claude/Codex subscription-usage normalization, Codex rollout scanning, Claude observation storage/parser (current Claude stream-json has no 5h/7d windows; parser accepts only verified statusLine-shaped containers if supplied), bounded aggregation cache, and fail-soft provider snapshots for display |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |

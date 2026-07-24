@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # APIs: HTTP
@@ -75,10 +75,11 @@ verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 - Purpose: report display-only Claude and Codex subscription capacity for the
   Overview without affecting readiness, attention, run state, launch, or intake.
 - Source: delegates to `UsageService`, which reads Claude from the latest
-  hub-driven `claude -p` stream-json observation in the hub data dir and Codex
-  from local Codex rollout `rate_limits` snapshots under `ORCH_HUB_CODEX_HOME`.
-  It never starts probe turns, calls provider endpoints, opens credential files,
-  or consumes reset credits.
+  hub-owned observation store and Codex from local Codex rollout `rate_limits`
+  snapshots under `ORCH_HUB_CODEX_HOME`. The wired Claude stream-json observer
+  records nothing for Claude Code 2.1.218 because that stream has no 5h/7d
+  subscription windows. It never starts probe turns, calls provider endpoints,
+  opens credential files, or consumes reset credits.
 - Shape: `{"providers": [ProviderUsage...]}`. Each provider is
   `{provider, available, plan, windows, credits, observed_ts, stale, detail}`;
   windows carry `key`, optional `label`/`window_minutes`, `used_percent`,

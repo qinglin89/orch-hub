@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # Architecture
@@ -92,7 +92,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
 | Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
 | Evaluation artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated evidence packs and static/semantic reports are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
-| Agent subscription usage | Codex local session rollouts plus hub-owned `<ORCH_HUB_DATA_DIR>/usage/claude.json` | display-only capacity signal; reads provider data, never starts probe turns, spends reset credits, or gates readiness/runs/intake |
+| Agent subscription usage | Codex local session rollouts plus hub-owned `<ORCH_HUB_DATA_DIR>/usage/claude.json` | display-only capacity signal; reads provider data, never starts probe turns, spends reset credits, or gates readiness/runs/intake; Claude Code 2.1.218 stream-json exposes no 5h/7d windows, so the Claude store remains unfed until a separate verified carrier writes observations |
 | Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
@@ -166,14 +166,18 @@ job state for running/failed/completed UI, and keeps raw evidence/report
 artifacts behind Copy/Download affordances.
 
 Agent subscription usage is a sidecar display flow. `UsageService` reads Claude
-from the latest hub-driven `claude -p` stream-json observation stored in
-`<data_dir>/usage/claude.json` and Codex from recent local rollout
-`rate_limits` snapshots under the configured Codex home. The protected
-`GET /api/usage` route returns both providers fail-soft with normalized windows,
-percentages, reset times, freshness/staleness, plan, and aggregate credit data.
-The Overview renders this below the operational panels; missing, stale, or
-failed sources are explicit card states and never feed attention, readiness,
-run state, or launch/intake gates.
+from the latest hub-owned observation in `<data_dir>/usage/claude.json` and
+Codex from recent local rollout `rate_limits` snapshots under the configured
+Codex home. The Claude observer remains wired to hub-driven
+`claude -p --output-format stream-json` turns, but Claude Code 2.1.218 does not
+emit 5h/7d subscription windows on that stream; absence records no observation
+and the Claude provider stays unavailable until another verified local carrier
+feeds the store. The protected `GET /api/usage` route returns both providers
+fail-soft with normalized windows, percentages, reset times,
+freshness/staleness, plan, and aggregate credit data. The Overview renders this
+below the operational panels; missing, stale, or failed sources are explicit
+card states and never feed attention, readiness, run state, or launch/intake
+gates.
 
 ## Component Boundaries
 

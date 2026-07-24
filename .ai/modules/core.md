@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # Modules: Core
@@ -272,12 +272,17 @@ Responsibility: produce provider-normalized, read-only Claude/Codex
 subscription usage for display. Codex usage is read from the newest local
 `rate_limits` snapshots in `<codex_home>/sessions/**/rollout-*.jsonl`, bounded
 by file count and size, with optional primary/secondary windows and aggregate
-credits sanitized by whitelist. Claude usage is retained in
-`<data_dir>/usage/claude.json` from hub-driven `claude -p --output-format
-stream-json` turns; `parse_claude_stream_usage` is tolerant, returns no
-observation on unknown field shapes, and never raises into the driving turn.
-`ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
-so concurrent intake/semantic observations cannot collide. `UsageService`
+credits sanitized by whitelist. Claude usage is read from
+`<data_dir>/usage/claude.json`; the hub-driven `claude -p --output-format
+stream-json` observer is still wired, but Claude Code 2.1.218 exposes no
+subscription windows on that channel, so unsupported/absent output records no
+observation and Claude stays unavailable. `parse_claude_stream_usage` only
+accepts the verified statusLine-shaped `rate_limits.five_hour/seven_day`
+windows with `used_percentage` and optional `resets_at`, rejects reset-only
+quota frames and ambiguous `utilization`, and never raises into the driving
+turn. `ClaudeUsageStore.record()` writes via per-writer temp files plus
+`os.replace` so concurrent intake/semantic observations cannot collide.
+`UsageService`
 aggregates Claude then Codex behind a 30s cache and returns fail-soft
 `ProviderUsage.unavailable(...)` snapshots on missing/failed sources. It never
 starts a model turn, calls provider endpoints, opens credential files, spends

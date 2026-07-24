@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # Features: Dashboard Ops
@@ -206,10 +206,11 @@ Implemented behavior:
 - Codex usage is read only from local session rollout `rate_limits` under the
   configured Codex home; orch-hub never invokes Codex, opens credentials, or
   consumes reset credits.
-- Claude usage is retained from hub-driven `claude -p` stream-json turns via a
-  best-effort observer wired into intake and semantic backends; no turn is
-  started solely to refresh usage, and unsupported field shapes degrade to
-  unavailable until a real supported observation is seen.
+- Claude usage is read from the hub-owned observation store. The best-effort
+  observer remains wired into intake and semantic `claude -p` stream-json
+  backends, but Claude Code 2.1.218 exposes no 5h/7d subscription windows on
+  that stream; unsupported/absent output records nothing, and Claude remains
+  unavailable until a separate verified local carrier feeds the store.
 - The Overview renders separate Claude/Codex cards with percent-first bars,
   reset timing, freshness/stale flags, explicit unknown/unavailable states, and
   aggregate reset-credit availability. Source failures degrade only this

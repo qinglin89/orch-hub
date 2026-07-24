@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # Modules: Web and Operations
@@ -69,9 +69,11 @@ Mutating intake routes return transient records
 The default intake backend is `ClaudeIntakeAgent`; the default semantic backend
 is `ClaudeSemanticBackend`, constructed at app startup but only launched by the
 semantic job manager. The default `UsageService` is constructed before those
-Claude backends so one shared best-effort observer records hub-driven
-`claude -p` stream-json usage without probe turns. Default run and intake
-managers are both built with
+Claude backends so one shared best-effort observer can record a supported
+Claude usage observation without probe turns. Current Claude Code stream-json
+does not carry the 5h/7d windows, so unsupported output leaves the Claude
+store unfed and the provider unavailable. Default run and intake managers are
+both built with
 `build_notifier(config)`; run-ended /
 pending-question and intake-ready delivery failures stay isolated in the owning
 manager and never become route errors. The recent-log route adds a nested

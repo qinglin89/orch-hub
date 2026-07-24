@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # APIs: Internal Interfaces
@@ -144,9 +144,12 @@ primary/secondary windows and aggregate credits, and never invokes Codex or
 opens credential/reset-credit identifiers. `ClaudeUsageStore` persists the
 latest hub-observed Claude usage under `<data_dir>/usage/claude.json` with
 per-writer temp files plus `os.replace` so concurrent intake/semantic observers
-do not race. `parse_claude_stream_usage(stdout, observed_ts=...)` tolerantly
-extracts supported five-hour/seven-day windows from `claude -p` stream-json and
-returns no observation on absent/unknown/malformed shapes. `UsageService`
+do not race. `parse_claude_stream_usage(stdout, observed_ts=...)` is wired to
+hub-driven `claude -p --output-format stream-json` stdout, but Claude Code
+2.1.218 emits no 5h/7d subscription windows there; the parser returns no
+observation on absent/unknown/malformed shapes and only accepts verified
+statusLine-shaped `rate_limits.five_hour/seven_day.used_percentage` windows if
+such a carrier appears. `UsageService`
 aggregates Claude then Codex behind a 30s cache and returns fail-soft
 unavailable provider snapshots on missing or failed sources. All usage data is
 display-only and must not affect readiness, attention, run state, launch, or

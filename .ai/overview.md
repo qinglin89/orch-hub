@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 ---
 
 # Project Overview
@@ -37,10 +37,13 @@ duplicate in-flight model calls and link completed jobs to `semantic_report.json
 plus `report.md`, and expose evaluation evidence/static/semantic artifacts
 through protected HTTP routes. The dashboard renders Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
-Codex is read from local session rollout `rate_limits`, Claude is retained from
-hub-driven `claude -p` stream-json observations, and missing/stale/failing data
-is explicit display state that never affects readiness, attention, run state, or
-launch/intake gates. The dashboard renders the task-evaluation sidecar with
+Codex is read from local session rollout `rate_limits`; Claude reads a
+hub-owned observation store whose stream-json observer is wired but, as of
+Claude Code 2.1.218, sees no local 5h/7d subscription windows, so Claude stays
+unavailable until another verified local carrier feeds the store. Missing,
+stale, or failing data is explicit display state that never affects readiness,
+attention, run state, or launch/intake gates. The dashboard renders the
+task-evaluation sidecar with
 Layer 1 static metrics, doctor-gated Layer 2 semantic job
 running/failed/completed controls/report rendering, history model/version
 comparison, and artifact copy/download affordances; later slices add IM bot
@@ -81,6 +84,8 @@ control.
   provider windows, used/remaining percentages, reset time, freshness, and
   unavailable/stale reasons, without starting probe turns, consuming reset
   credits, scraping private endpoints/UI, or influencing operational gates.
+  Current Claude Code stream-json output does not expose the 5h/7d windows; the
+  only verified local Claude carrier is statusLine stdin and is not yet ingested.
 - Expose task evaluation as a sidecar HTTP workflow: availability, evidence
   generation/readback, static metrics generation/readback, semantic generation/
   readback, semantic doctor readiness, active or archived task targeting,
