@@ -114,6 +114,12 @@ class Deployment:
         return self.venv_dir / "bin" / "orch-hub-api"
 
     @property
+    def statusline_bin(self) -> Path:
+        """Deployed ``orch-hub-statusline`` wrapper; the path the deploy nudge
+        suggests for the operator's Claude Code ``statusLine.command``."""
+        return self.venv_dir / "bin" / "orch-hub-statusline"
+
+    @property
     def dashboard_url(self) -> str:
         return f"http://{self.host}:{self.port}/"
 

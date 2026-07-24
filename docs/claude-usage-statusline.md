@@ -10,6 +10,14 @@ five-hour / seven-day figures. Skip this guide and the Claude card reads
 **unavailable** — which is exactly what it does today. Nothing else changes
 either way.
 
+> `orch-hub launchd deploy` (and `update`) point you here automatically: when no
+> Claude Code statusLine routes through the wrapper, they print a copy-ready
+> `statusLine.command` line built from your deployed wrapper path — with your
+> current statusLine command preserved after `--`, and a `--data-dir` flag when
+> the hub uses a non-default data dir. The check is read-only and advisory:
+> orch-hub never edits `~/.claude`, and an already-configured wrapper prints no
+> nag. Missing or malformed Claude settings never fail the deploy.
+
 ## Why a statusLine hook
 
 Claude Code publishes the subscription windows to exactly one local channel: the

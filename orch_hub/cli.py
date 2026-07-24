@@ -32,6 +32,7 @@ from .models import ManagedRepo, ReadinessReport, repos_payload
 from .notifications import build_notifier, probe_notification
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
+from .statusline import detect_statusline_setup, setup_guidance_lines
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -260,7 +261,33 @@ def _cmd_launchd_deploy(args: argparse.Namespace) -> int:
         "stop semantics: launchd stop unloads the hub service only; detached "
         "orchestrator runs are not signaled."
     )
+    _print_claude_usage_guidance(deployment)
     return 0
+
+
+def _print_claude_usage_guidance(deployment) -> None:
+    """Advisory, fail-soft nudge to wire Claude subscription usage after deploy.
+
+    Claude's Overview card stays "unavailable" until a Claude Code statusLine is
+    routed through the deployed ``orch-hub-statusline`` wrapper, and the hub may
+    not edit ``~/.claude`` for the operator. So after a successful deploy/update
+    we inspect the Claude settings read-only and, when the wrapper is absent,
+    print copy-ready setup guidance (suppressed when already configured, so a
+    routine ``update`` does not nag). This is display-only: the deploy has
+    already mutated the system, so any failure here is swallowed rather than
+    surfaced as a traceback, and the lines carry no hub secret.
+    """
+    try:
+        setup = detect_statusline_setup()
+        lines = setup_guidance_lines(
+            setup,
+            wrapper_path=deployment.statusline_bin,
+            data_dir=deployment.data_dir,
+        )
+    except Exception:  # noqa: BLE001 — advisory guidance never fails a done deploy
+        return
+    for line in lines:
+        print(line)
 
 
 def _cmd_launchd_stop(args: argparse.Namespace) -> int:
