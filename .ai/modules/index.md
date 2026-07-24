@@ -1,43 +1,45 @@
 ---
 last-updated: 2026-07-24
-verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
+verified-against: b4a5a4d1d391452acbe66a37978e9dcb1d1cba9c
 ---
 
 # Modules
 
+Full responsibilities live in the detail files below.
+
 | Module | Location | Description |
 |---|---|---|
-| CLI | `orch_hub/cli.py` | Implemented `repos` discovery/readiness output, launchd operations dispatch, notification delivery checks, and semantic evaluator doctor checks |
-| Config | `orch_hub/config.py` | Implemented defaults, service env overrides, bearer token/Bark URL/evaluation gate/model/retention loading, data-dir setting, Codex home for usage, and derived `aii-2`/registry paths |
-| Launchd operations | `orch_hub/launchd.py` | Implemented macOS launchd deploy/update/start/stop/restart/status helpers, including optional Bark URL plist surfacing and lookup |
-| Models | `orch_hub/models.py` | Implemented repo, readiness, commit, task inventory, question, run, session/context, history, intake, evaluation target/run-link, static-metrics report, semantic-report, semantic-doctor, semantic-job, and subscription-usage models plus payload helpers and run-record repo reconstruction |
-| Registry | `orch_hub/registry.py` | Implemented managed repo discovery from `aii-2` or registry file |
-| Readiness | `orch_hub/readiness.py` | Implemented fail-closed per-repo launch readiness checks |
-| Git metadata | `orch_hub/git_meta.py` | Implemented best-effort latest/recent/windowed commit reads for dashboard/API display and evaluation evidence |
-| Housekeeping | `orch_hub/housekeeping.py` | Implemented display-only `.ai/.housekeeping-pending` marker detection |
-| Subprocess utilities | `orch_hub/subprocess_utils.py` | Implemented shared subprocess execution wrappers |
-| Task inventory | `orch_hub/task_store.py` | Implemented local parser for `.ai-tasks/index.md`, including Markdown-link Task cells, task frontmatter, typed `session-est`, and contained active/archive task reads |
-| Evaluation | `orch_hub/evaluation.py` | Implemented optional read-only task evidence target resolution, related-run aggregation, bounded evidence-pack assembly, contained artifact persistence, durable-post-generation retention pruning, and persisted evaluation listing/artifact reads |
-| Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` with retention after durable writes |
-| Semantic evaluator | `orch_hub/semantic.py` | Implemented optional evidence-bounded model evaluation over evidence/static artifacts, Claude CLI backend isolation, semantic doctor readiness, `semantic_report.json`, and `report.md` persistence |
-| Semantic jobs | `orch_hub/semantic_jobs.py` | Implemented persisted async semantic-evaluation job status, duplicate in-flight prevention, startup orphan reconciliation, bounded failure diagnostics, and completed-job `evaluation_id` linkage |
-| Usage | `orch_hub/usage.py` | Implemented read-only Claude/Codex subscription-usage normalization, Codex rollout scanning, Claude statusLine sink ingestion, Claude observation storage/parser, bounded aggregation cache, and fail-soft provider snapshots for display |
-| StatusLine writer | `orch_hub/statusline.py` | Implemented operator-installed `orch-hub-statusline` wrapper that captures Claude Code statusLine `rate_limits` into the hub data dir while passing the operator's own statusline command through unchanged |
-| Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
-| Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
-| Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |
-| Orchestrator launch config | `orch_hub/orch_config.py` | Implemented deployed-orchestrator `--print-config` split-role query/strict parsing with legacy capability detection, split/legacy structured argv construction, and tolerant `effective-config:` snapshot helpers |
-| Run monitor | `orch_hub/monitor.py` | Implemented resident daemon-thread status scanner for proactive notification delivery |
-| History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
-| Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |
-| Logs | `orch_hub/logs.py` | Implemented log location, bounded recent tails, and SSE tail frames |
-| Sessions | `orch_hub/sessions.py` | Implemented tolerant parsing and persistence of per-protocol-session context usage from orchestrator logs |
-| API | `orch_hub/api.py` | Implemented FastAPI app factory, fail-closed pure-ASGI bearer middleware, lifespan-owned monitor, public dashboard shell, health/repo/commit/task/run/run-task/escalation/log/history/intake/evaluation/usage routes, and uvicorn entry point |
-| Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/intake/probe notification formatters |
-| Web UI | `orch_hub/web/` | Implemented vanilla mobile-first dashboard SPA assets, including responsive phone/tablet/desktop shell, CSS-only neon-wasteland industrial control-console theme with independent persisted Mode (Dark/Light/System) and Palette (Neon Cyan/Wasteland Orange) selection, Operations Overview aggregation/refresh plus Subscription usage cards, route-level accessibility/focus infrastructure, status layout, searchable/counted all-tasks inventory, recent commits, task-detail run controls/session strips, filterable/counted grouped run-history rollups, run-scoped task-file view, task-evaluation Layer 1/Layer 2 sidecar view with doctor-gated semantic controls, and polled remote intake review loop |
-| Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
-| Operator docs | `docs/` | Implemented launchd install/start/stop/log guidance, optional task-evaluation boundary/retention/doctor documentation, and Claude statusLine usage hook documentation |
-| Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
+| CLI | `orch_hub/cli.py` | `repos` readiness output; launchd/notify/eval-doctor dispatch |
+| Config | `orch_hub/config.py` | env defaults/overrides; token/Bark/eval/Codex settings; derived paths |
+| Launchd operations | `orch_hub/launchd.py` | deploy/update/lifecycle/status; Bark URL surfacing |
+| Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
+| Registry | `orch_hub/registry.py` | managed repo discovery from `aii-2` or registry file |
+| Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch readiness checks |
+| Git metadata | `orch_hub/git_meta.py` | best-effort commit reads for display/evidence |
+| Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |
+| Subprocess utilities | `orch_hub/subprocess_utils.py` | shared subprocess wrappers |
+| Task inventory | `orch_hub/task_store.py` | `.ai-tasks` index/frontmatter parsing; contained active/archive reads |
+| Evaluation | `orch_hub/evaluation.py` | evidence targets/packs; artifact persistence/retention/reads |
+| Static metrics | `orch_hub/static_metrics.py` | deterministic metrics over evidence packs; `static_metrics.json` |
+| Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation; backend isolation; doctor |
+| Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
+| Usage | `orch_hub/usage.py` | read-only Claude/Codex usage normalization; sink ingestion; fail-soft |
+| StatusLine writer | `orch_hub/statusline.py` | operator statusLine wrapper feeding the usage sink |
+| Intake manager | `orch_hub/intake.py` | remote intake lifecycle/audit; off-lock turns; verified confirm |
+| Intake agent | `orch_hub/intake_agent.py` | Claude CLI `/intake-task` backend with envelopes/resume |
+| Run manager | `orch_hub/runs.py` | subprocess lifecycle/state/stop; per-repo serialization |
+| Orchestrator launch config | `orch_hub/orch_config.py` | `--print-config` query/parse; split/legacy argv; config snapshots |
+| Run monitor | `orch_hub/monitor.py` | resident status scanner for proactive notifications |
+| History | `orch_hub/history.py` | per-run JSONL event storage/readback |
+| Control dir | `orch_hub/control_dir.py` | question/answer/stop file-channel handling |
+| Logs | `orch_hub/logs.py` | log location, bounded tails, SSE frames |
+| Sessions | `orch_hub/sessions.py` | per-session context parsing; `sessions.json` persistence |
+| API | `orch_hub/api.py` | FastAPI app factory; bearer middleware; route wiring; uvicorn entry |
+| Notifications | `orch_hub/notifications.py` | notifier interface; Bark backend; formatters |
+| Web UI | `orch_hub/web/` | mobile-first dashboard SPA assets |
+| Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | launchd user-agent template |
+| Operator docs | `docs/` | launchd/evaluation/statusLine operator docs |
+| Tests | `tests/` | pytest coverage with fake repos and mocked subprocesses |
 
 ## Detail Files
 
@@ -54,39 +56,40 @@ verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
 
 - Registry code does not perform readiness checks.
 - Readiness code does not launch orchestrators.
-- Git metadata is best-effort display/evaluation evidence and never gates
-  readiness, run launch, or evidence generation.
-- Housekeeping marker state is display-only and never gates readiness or run launch.
-- Task inventory reads task files but does not decide orchestrator state-machine turns.
-- Evaluation reads target tasks and run artifacts through existing stores and
-  writes only contained artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`.
-- Static metrics read evidence packs and write only contained
-  `static_metrics.json` artifacts under the same evaluation dir; they do not
-  mutate target repos, run records, or protocol state.
-- Semantic evaluation reads only the bounded prompt built from evidence/static
-  artifacts and writes only `semantic_report.json` plus `report.md` under the
-  evaluation dir; concrete backends must enforce read isolation structurally.
+- Git metadata is best-effort display/evidence; never gates readiness, launch,
+  or evidence.
+- Housekeeping marker state is display-only; never gates readiness or launch.
+- Task inventory reads task files; it does not decide orchestrator turns.
+- Evaluation reads target tasks/run artifacts via existing stores; writes only
+  contained artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`.
+- Static metrics read evidence packs; write only contained
+  `static_metrics.json` in the same evaluation dir; no target/run/protocol
+  mutation.
+- Semantic evaluation reads only the bounded evidence/static prompt; writes
+  only `semantic_report.json` + `report.md` under the evaluation dir; backends
+  enforce read isolation structurally.
 - Usage reads only provider-owned local signals plus the hub-owned Claude
-  observation store; the statusLine writer captures only whitelisted Claude
-  capacity fields and passes through the operator command. Neither path starts
-  probe turns, spends reset credits, or gates readiness, attention, run state,
-  launch, or intake.
-- Intake manager owns intake state, intake-ready notification trigger timing,
-  and the confirmation postcondition; API/web layers do not treat drafts as
-  active tasks or decide whether a confirm landed.
-- Run manager launches subprocesses but does not parse task protocol beyond pre-start checks.
-- Orchestrator launch config asks deployed orchestrators for effective launch
-  policy and builds argv from structured selections; it never imports deployed
-  orchestrator code or reads target `orchestrator.toml` directly.
-- History serializes run/audit metadata only; `RunManager` decides when events
-  are written.
-- Control dir handles file-channel mechanics only; API/UI/run-manager layers own identity, audit storage, notifications, and subprocess state.
-- Logs locate/read/stream files only from run records; API/UI callers never pass log paths.
-- Run monitor schedules `RunManager.list_runs()` only; it must not own run
-  state, notification policy, or de-duplication.
-- API and CLI should be thin adapters over application functions.
-- Launchd operations manage only the fixed hub service label; run stop
-  semantics stay in the run API/control-dir flow.
-- Web UI callers should consume protected HTTP APIs and must not parse managed
-  repo files directly.
+  store; the statusLine writer captures only whitelisted capacity fields and
+  passes the operator command through; neither starts probe turns, spends
+  reset credits, or gates readiness/attention/run/launch/intake.
+- Intake manager owns intake state, intake-ready trigger timing, and the
+  confirmation postcondition; API/web neither treat drafts as tasks nor decide
+  confirm outcomes.
+- Run manager launches subprocesses; no task-protocol parsing beyond pre-start
+  checks.
+- Orchestrator launch config queries deployed `--print-config` and builds argv
+  from structured selections; never imports orchestrator code or reads
+  `orchestrator.toml`.
+- History serializes run/audit metadata only; `RunManager` decides event
+  timing.
+- Control dir handles file-channel mechanics only; API/UI/run-manager own
+  identity, audit storage, notifications, subprocess state.
+- Logs locate/read/stream only from run records; callers never pass log paths.
+- Run monitor schedules `RunManager.list_runs()` only; it owns no run state,
+  notification policy, or de-duplication.
+- API and CLI stay thin adapters over application functions.
+- Launchd operations manage only the fixed hub service label; run stop stays
+  in the run API/control-dir flow.
+- Web UI consumes protected HTTP APIs; it never parses managed repo files
+  directly.
 - No module imports deployed orchestrator code.
