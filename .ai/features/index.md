@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
+verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
 ---
 
 # Features
@@ -32,4 +32,6 @@ verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 |---|---|
 | core.md | Repo discovery/readiness, task inventory, task evaluation foundation, task static metrics, task semantic evaluator, HTTP foundation, auth/private access |
 | run-control.md | Run lifecycle, control-dir channel, question relay, log viewing, run history/audit |
-| dashboard-ops.md | Mobile dashboard, agent subscription usage, notifications, launchd service, future remote intake and IM bot surfaces |
+| dashboard.md | Mobile dashboard shell, theme, responsiveness, accessibility, Overview, route infrastructure |
+| dashboard-views.md | Mobile dashboard routed view catalog: repo/task/start/history/log/evaluation/intake |
+| ops.md | Agent subscription usage, notifications, launchd service, remote intake, future IM bot surface |

@@ -1,0 +1,115 @@
+---
+last-updated: 2026-07-24
+verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+---
+
+# Features: Mobile Dashboard — Routed Views
+
+Catalog of routed view behavior. Feature status/description/modules/APIs and
+shell/theme/accessibility/Overview infrastructure are in `dashboard.md`.
+
+Implemented behavior:
+
+- Repo list, repo detail, Overview `REPOS READY`, and readiness-derived
+  Attention rows share one display-readiness rule over raw `/api/repos`
+  readiness plus `/api/runs`: display READY when raw-ready, or when an
+  active/waiting live run exists and `git_clean` is the sole raw failure.
+  Missing run data, ended/idle runs, and any additional failure fall back to raw
+  readiness; Start controls, intake, backend gates, and `check_readiness` still
+  consume raw readiness, and waiting runs keep their pending-answer Attention
+  item. Repo cards also render a tri-state run signal as a bare leading dot
+  before the repo name: yellow waiting, green active non-waiting, gray idle; the
+  state word exists only in title/aria text. Display-ready cards add latest
+  commit time from the shared repo `commit` field plus active task count from
+  `/api/tasks` task-inventory rows; not-ready cards keep readiness failure
+  reasons. Cards render a compact yellow "Housekeeping pending" warning when
+  `/api/repos` reports `housekeeping_pending`.
+- All-task and repo-detail views render task inventory from `/api/tasks` and
+  `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
+  `index_present`, and `missing`/`unknown` sentinel semantics. The all-tasks
+  view filters the fetched payload client-side by repo/status plus
+  case-insensitive text over task id, summary, repo, status, and blockers;
+  it shows visible-of-total counts, has one Clear action, distinguishes empty
+  inventory from no matches, and keeps missing-index cards visible by default.
+- Task cards show live run state only as a left-border accent (yellow waiting,
+  green active), with no separate dot/word row, kept distinct from the
+  frontmatter status badge so protocol `blocked` is not confused with runtime
+  `waiting`.
+- Repo detail renders a recent-commits section from
+  `GET /api/repos/{repo_id}/commits`; unreadable git shows "Commit history
+  unavailable" and readable empty history shows "No commits found". It also
+  renders the full housekeeping warning near the top when the marker is pending.
+- Task detail fetches `GET /api/repos/{repo_id}/tasks/{task_id}` for raw task
+  content, shows current/most-recent run state, links to logs, renders live
+  per-session context strips from `GET /api/runs/{run_id}/sessions` for active
+  runs, and renders answer forms for waiting questions from `/api/escalations`.
+  Waiting-question forms send explicit answer modes: ordinary questions show
+  Discuss/Answer, plan gates show Feedback/Confirm, Confirm allows empty input
+  for one-tap approval, and guard 400 details appear inline.
+- Task detail Start keeps one shared Backend selector and gives DEV and REVIEW
+  independent Default/Standard/Excellent/Custom selectors. Presets are
+  read-only; only a selected Custom role exposes editable fields. The first
+  config query omits role parameters to probe split capability; later coherent
+  queries include each named role profile, cache by backend plus both role
+  selections, and discard stale generations. Custom seeds from an inherited
+  role while retaining the other role's named selection, and its edits stay
+  local across unrelated queries. Query failure or `split_profiles=false`
+  disables Launch; unavailable named profiles remain visibly disabled. Submit
+  posts split `dev_mode`/`review_mode` launch data, while shared backend and
+  plan-gate remain orthogonal. Stop posts to
+  `POST /api/runs/{run_id}/stop`. `blocked` tasks require explicit
+  acknowledgement; stale/raced starts render the backend 409 response.
+- Start is hidden or replaced with an explanation when the dashboard already
+  sees a live run for the repo, the task file is missing/unknown or otherwise
+  non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
+- Run history uses `GET /api/history/runs` newest-first, grouped client-side by
+  `(repo, task)`. Repo/state/task-id filters compose client-side over the
+  fetched payload before grouping; the view shows filtered group/run counts,
+  distinguishes empty history from no matches, and lets task groups collapse
+  while keeping each group's header and rollup visible. Each task group shows
+  per-run session strips from persisted snapshots plus a rollup of observed dev
+  sessions vs frontmatter `session-est`, peak per-session context, summed run
+  wall-clock from `started_ts`/`ended_ts`, and each run's embedded
+  `effective_config` launch snapshot as an out-of-link disclosure. Snapshot
+  rows use authoritative `profiles.dev`/`profiles.review`, identify Custom from
+  CLI model provenance, and derive both roles from legacy top-level `profile`
+  when the additive fields are absent.
+- Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
+  live runs. It renders the `spawn.out` diagnostic when the recent-log route has
+  no orchestrator log, and a live stream that ends before any log line falls
+  back to that recent-log diagnostic. SSE heartbeats are skipped, blank data log
+  lines are preserved, `event: end` closes the stream, navigation/reload/pause
+  aborts the active stream, and untrusted log content is appended as text nodes.
+- A run-scoped task view at `#/runs/{run_id}/task` fetches
+  `GET /api/runs/{run_id}/task` and shows the active/archived source. The log
+  view's task back-link is liveness-aware: live `active`/`waiting` runs with
+  repo+task attribution open the full task detail route for controls,
+  questions, and session strips; ended or attribution-incomplete runs keep the
+  run-scoped fallback so task files still open after close-out archival. The
+  Tasks page remains active-task-only.
+- A task-evaluation sidecar view at
+  `#/evaluations/{repo}/{task}[/{evaluation_id}]` probes `GET /api/evaluation`
+  first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts
+  for exact active-or-archived task ids. Task detail shows a gated "Task
+  evaluation" entry link for active tasks; run-history task groups show gated
+  "Evaluation" links inline in the rollup summary, outside the collapse toggle,
+  for archived/completed tasks. Disabled hubs hide entry links and the
+  evaluation route shows a concise disabled explanation.
+- The evaluation view renders two visually distinct layers over the same
+  evidence: deterministic Layer 1 static metrics and optional Layer 2 semantic
+  model judgments. Generate posts `/metrics`; Run semantic evaluation posts
+  `/semantic/job`, reads persisted job state on every load, replaces the trigger
+  with a running panel while `queued`/`running`, polls with navigation teardown,
+  shows bounded failed/error diagnostics with Retry, and selects the completed
+  job's `evaluation_id` so the fresh semantic report paints.
+  The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
+  semantic backend disables only the Layer 2 trigger with an explanation while
+  Layer 1 stays usable. Semantic reports render evaluator provenance, per-axis
+  rationales, severity/confidence/evidence-ref findings, suggested improvements,
+  JSON and `report.md` downloads, and history-picker model/schema labels. Raw
+  evidence/static/semantic JSON and Markdown are offered only through
+  Copy/Download affordances, never inline raw logs.
+- The remote-intake review view polls `GET /api/intakes/{id}` while an intake
+  status is `drafting`, `revising`, or `confirming`; it shows live status,
+  elapsed time, and a safe-to-navigate-away note, stops polling on resting
+  statuses, and tears down the single poll handle on navigation like live logs.
