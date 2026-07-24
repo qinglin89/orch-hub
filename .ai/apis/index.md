@@ -12,4 +12,5 @@ verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
 | http-runs.md | Run lifecycle, history, session/effective-config, log, and escalation routes |
 | http-evaluation.md | Evaluation availability, doctor, evidence/metrics, and semantic-job routes |
 | http-intake.md | Remote intake lifecycle routes |
-| internal.md | Internal interfaces and API conventions |
+| internal-core.md | Registry/readiness/task-store/evaluation/static/semantic/usage interfaces, API conventions |
+| internal-runtime.md | Intake, run, control-dir, log, history, notifier, launchd-template interfaces |
