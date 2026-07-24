@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # Modules
@@ -21,7 +21,8 @@ verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 | Static metrics | `orch_hub/static_metrics.py` | Implemented optional deterministic task-quality metrics over evidence packs, score components, and `static_metrics.json` persistence beside `evidence.json` with retention after durable writes |
 | Semantic evaluator | `orch_hub/semantic.py` | Implemented optional evidence-bounded model evaluation over evidence/static artifacts, Claude CLI backend isolation, semantic doctor readiness, `semantic_report.json`, and `report.md` persistence |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | Implemented persisted async semantic-evaluation job status, duplicate in-flight prevention, startup orphan reconciliation, bounded failure diagnostics, and completed-job `evaluation_id` linkage |
-| Usage | `orch_hub/usage.py` | Implemented read-only Claude/Codex subscription-usage normalization, Codex rollout scanning, Claude observation storage/parser (current Claude stream-json has no 5h/7d windows; parser accepts only verified statusLine-shaped containers if supplied), bounded aggregation cache, and fail-soft provider snapshots for display |
+| Usage | `orch_hub/usage.py` | Implemented read-only Claude/Codex subscription-usage normalization, Codex rollout scanning, Claude statusLine sink ingestion, Claude observation storage/parser, bounded aggregation cache, and fail-soft provider snapshots for display |
+| StatusLine writer | `orch_hub/statusline.py` | Implemented operator-installed `orch-hub-statusline` wrapper that captures Claude Code statusLine `rate_limits` into the hub data dir while passing the operator's own statusline command through unchanged |
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |
@@ -35,14 +36,14 @@ verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 | Notifications | `orch_hub/notifications.py` | Implemented notifier interface, Bark backend, and run/question/intake/probe notification formatters |
 | Web UI | `orch_hub/web/` | Implemented vanilla mobile-first dashboard SPA assets, including responsive phone/tablet/desktop shell, CSS-only neon-wasteland industrial control-console theme with independent persisted Mode (Dark/Light/System) and Palette (Neon Cyan/Wasteland Orange) selection, Operations Overview aggregation/refresh plus Subscription usage cards, route-level accessibility/focus infrastructure, status layout, searchable/counted all-tasks inventory, recent commits, task-detail run controls/session strips, filterable/counted grouped run-history rollups, run-scoped task-file view, task-evaluation Layer 1/Layer 2 sidecar view with doctor-gated semantic controls, and polled remote intake review loop |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | Implemented launchd user-agent template for resident service operation |
-| Operator docs | `docs/` | Implemented launchd install/start/stop/log guidance plus optional task-evaluation boundary/retention/doctor documentation |
+| Operator docs | `docs/` | Implemented launchd install/start/stop/log guidance, optional task-evaluation boundary/retention/doctor documentation, and Claude statusLine usage hook documentation |
 | Tests | `tests/` | Pytest coverage using fake repos and mocked subprocesses |
 
 ## Detail Files
 
 | File | Contains |
 |---|---|
-| core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, static metrics, semantic evaluator, usage, intake manager, intake agent |
+| core.md | CLI, statusLine writer, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory, evaluation, static metrics, semantic evaluator, usage, intake manager, intake agent |
 | runtime.md | Run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
 | web.md | API, web UI, and launchd operations |
 
@@ -63,8 +64,10 @@ verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
   artifacts and writes only `semantic_report.json` plus `report.md` under the
   evaluation dir; concrete backends must enforce read isolation structurally.
 - Usage reads only provider-owned local signals plus the hub-owned Claude
-  observation store; it never starts probe turns, spends reset credits, or gates
-  readiness, attention, run state, launch, or intake.
+  observation store; the statusLine writer captures only whitelisted Claude
+  capacity fields and passes through the operator command. Neither path starts
+  probe turns, spends reset credits, or gates readiness, attention, run state,
+  launch, or intake.
 - Intake manager owns intake state, intake-ready notification trigger timing,
   and the confirmation postcondition; API/web layers do not treat drafts as
   active tasks or decide whether a confirm landed.

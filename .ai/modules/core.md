@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # Modules: Core
@@ -48,6 +48,20 @@ exits 0 only when evaluation is enabled and the backend is available.
 
 Dependencies: config, registry, readiness, housekeeping, models, launchd,
 notifications, semantic.
+
+## StatusLine Writer
+
+Location: `orch_hub/statusline.py`
+
+Responsibility: expose console script `orch-hub-statusline` for operator-owned
+Claude Code `statusLine.command` installation. It reads the CLI's stdin payload,
+persists only the `rate_limits` container plus `subscription_type` to
+`<data_dir>/usage/claude-statusline.json`, then runs everything after `--` as
+the operator's wrapped statusline argv with the same stdin and inherited
+stdout/stderr/exit code. It deliberately avoids `Config.from_env()` validation,
+never edits `~/.claude/**`, never starts Claude or calls provider endpoints, and
+drops session id, transcript path, cwd, model, workspace, and cost fields before
+writing the sink.
 
 ## Config
 
@@ -273,17 +287,19 @@ subscription usage for display. Codex usage is read from the newest local
 `rate_limits` snapshots in `<codex_home>/sessions/**/rollout-*.jsonl`, bounded
 by file count and size, with optional primary/secondary windows and aggregate
 credits sanitized by whitelist. Claude usage is read from
-`<data_dir>/usage/claude.json`; the hub-driven `claude -p --output-format
-stream-json` observer is still wired, but Claude Code 2.1.218 exposes no
-subscription windows on that channel, so unsupported/absent output records no
-observation and Claude stays unavailable. `parse_claude_stream_usage` only
-accepts the verified statusLine-shaped `rate_limits.five_hour/seven_day`
-windows with `used_percentage` and optional `resets_at`, rejects reset-only
-quota frames and ambiguous `utilization`, and never raises into the driving
-turn. `ClaudeUsageStore.record()` writes via per-writer temp files plus
-`os.replace` so concurrent intake/semantic observations cannot collide.
-`UsageService`
-aggregates Claude then Codex behind a 30s cache and returns fail-soft
+`<data_dir>/usage/claude.json`; `UsageService` first ingests a newer
+`<data_dir>/usage/claude-statusline.json` record from the operator-installed
+writer, then reads the same store so the HTTP payload and staleness rules stay
+unchanged. The hub-driven `claude -p --output-format stream-json` observer is
+still wired, but Claude Code 2.1.218 exposes no subscription windows on that
+channel, so unsupported/absent output records no observation. Both
+`parse_claude_stream_usage` and `parse_claude_statusline` accept only verified
+statusLine-shaped `rate_limits.five_hour/seven_day` windows with
+`used_percentage` and optional `resets_at`, reject reset-only quota frames and
+ambiguous `utilization`, and never raise into driving/read paths.
+`ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
+so concurrent observations cannot collide. `UsageService` aggregates Claude then
+Codex behind a 30s cache and returns fail-soft
 `ProviderUsage.unavailable(...)` snapshots on missing/failed sources. It never
 starts a model turn, calls provider endpoints, opens credential files, spends
 Codex reset credits, or participates in readiness/attention/run/intake gates.

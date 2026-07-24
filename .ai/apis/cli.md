@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+last-updated: 2026-07-24
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # APIs: CLI
@@ -116,3 +116,19 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   available; disabled, unavailable, or malformed config exits non-zero.
 - Non-goal: does not generate evaluation artifacts, call the model, inspect
   repos, start/stop runs, or gate run-control flows.
+
+## `orch-hub-statusline`
+
+- Purpose: operator-installed Claude Code `statusLine.command` wrapper that
+  captures the CLI's local subscription `rate_limits` payload for the Overview.
+- Options: `--sink <path>` overrides the sink file; `--data-dir <dir>` writes
+  under `<dir>/usage/claude-statusline.json`; `--print-sink` prints the resolved
+  sink and reads no stdin. Everything after `--` is the operator's own statusline
+  command argv.
+- Behavior: reads stdin bytes once, best-effort writes only `rate_limits` plus
+  `subscription_type` to the bounded hub sink, then passes the same stdin to the
+  wrapped command with inherited stdout/stderr and the wrapped exit code. No
+  wrapped command prints nothing and exits 0; an unrunnable wrapped command exits
+  127 without a partial status line.
+- Non-goal: does not edit `~/.claude/**`, start Claude turns, call provider
+  endpoints, read credentials/accounts, or gate any hub operation.

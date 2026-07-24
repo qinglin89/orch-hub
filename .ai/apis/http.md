@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # APIs: HTTP
@@ -74,12 +74,13 @@ verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
 
 - Purpose: report display-only Claude and Codex subscription capacity for the
   Overview without affecting readiness, attention, run state, launch, or intake.
-- Source: delegates to `UsageService`, which reads Claude from the latest
-  hub-owned observation store and Codex from local Codex rollout `rate_limits`
-  snapshots under `ORCH_HUB_CODEX_HOME`. The wired Claude stream-json observer
-  records nothing for Claude Code 2.1.218 because that stream has no 5h/7d
-  subscription windows. It never starts probe turns, calls provider endpoints,
-  opens credential files, or consumes reset credits.
+- Source: delegates to `UsageService`, which ingests the opt-in Claude
+  statusLine sink into the latest hub-owned observation store, then reads Claude
+  from that store and Codex from local Codex rollout `rate_limits` snapshots
+  under `ORCH_HUB_CODEX_HOME`. The wired Claude stream-json observer records
+  nothing for Claude Code 2.1.218 because that stream has no 5h/7d subscription
+  windows. It never starts probe turns, calls provider endpoints, opens
+  credential files, edits `~/.claude/**`, or consumes reset credits.
 - Shape: `{"providers": [ProviderUsage...]}`. Each provider is
   `{provider, available, plan, windows, credits, observed_ts, stale, detail}`;
   windows carry `key`, optional `label`/`window_minutes`, `used_percent`,
@@ -410,7 +411,8 @@ verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
   captures `Config.from_env()` by default, is testable with explicit/injected
   services, and holds one `RunManager` for run, run-task, escalation, log, and
   background-monitor scans plus one `IntakeManager` for remote intake routes and
-  one `UsageService` for the protected usage route and Claude observation feed.
+  one `UsageService` for the protected usage route, Claude statusLine sink
+  ingestion, and Claude stream observation feed.
   Default managers are built with `build_notifier(config)`: run-ended/
   pending-question and intake-ready notifications share the configured Bark
   path, and `None` keeps delivery disabled. The default intake backend is

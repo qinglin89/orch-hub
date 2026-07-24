@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # Features
@@ -12,7 +12,7 @@ verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 | Task evaluation foundation | implemented | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | internal `EvaluationService` evidence build/generate/list/read/prune; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET/POST /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | implemented | static_metrics, evaluation, config, models, api, web | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; persists and displays `static_metrics.json` beside `evidence.json`; no model call |
 | Task semantic evaluator | implemented | semantic_jobs, semantic, static_metrics, evaluation, config, models, api, cli, web | internal `SemanticEvaluator.evaluate/doctor`, `SemanticJobManager`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `ClaudeSemanticBackend`; `POST`/`GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `orch-hub eval doctor`; dashboard Layer 2 running/failed/completed job states plus report/history rendering; persists `semantic_report.json` and `report.md` beside evidence/static artifacts |
-| Agent subscription usage | implemented | usage, models, config, api, intake_agent, semantic, web | internal `UsageService`, `ClaudeUsageStore`, `parse_claude_stream_usage`, `read_codex_usage`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage`; Overview Subscription usage section; display-only, fail-soft, no probe turns or gates |
+| Agent subscription usage | implemented | usage, statusline, models, config, api, intake_agent, semantic, web | console script `orch-hub-statusline`; internal `UsageService`, `ClaudeUsageStore`, `parse_claude_stream_usage`, `parse_claude_statusline`, `read_claude_statusline`, `read_codex_usage`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage`; Overview Subscription usage section; display-only, fail-soft, no probe turns or gates |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history/intake/evaluation/usage APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | runs, orch_config, sessions, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `GET /api/repos/{repo_id}/orchestrator-config`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/sessions`, `GET /api/runs/{id}/effective-config`, `POST /api/runs/{id}/stop` |

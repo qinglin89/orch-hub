@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # APIs: Internal Interfaces
@@ -142,14 +142,16 @@ Behavior: `read_codex_usage(codex_home)` scans the newest bounded Codex session
 rollout files for `rate_limits`, normalizes dynamic buckets plus optional
 primary/secondary windows and aggregate credits, and never invokes Codex or
 opens credential/reset-credit identifiers. `ClaudeUsageStore` persists the
-latest hub-observed Claude usage under `<data_dir>/usage/claude.json` with
-per-writer temp files plus `os.replace` so concurrent intake/semantic observers
-do not race. `parse_claude_stream_usage(stdout, observed_ts=...)` is wired to
+latest Claude observation under `<data_dir>/usage/claude.json` with per-writer
+temp files plus `os.replace`; `read_claude_statusline(path)` reads the bounded
+operator-installed sink `<data_dir>/usage/claude-statusline.json` and
+`UsageService` records it only when its observation timestamp is newer than the
+store. `parse_claude_stream_usage(stdout, observed_ts=...)` remains wired to
 hub-driven `claude -p --output-format stream-json` stdout, but Claude Code
 2.1.218 emits no 5h/7d subscription windows there; the parser returns no
-observation on absent/unknown/malformed shapes and only accepts verified
-statusLine-shaped `rate_limits.five_hour/seven_day.used_percentage` windows if
-such a carrier appears. `UsageService`
+observation on absent/unknown/malformed shapes. Claude parsers accept only
+verified statusLine-shaped
+`rate_limits.five_hour/seven_day.used_percentage` windows. `UsageService`
 aggregates Claude then Codex behind a 30s cache and returns fail-soft
 unavailable provider snapshots on missing or failed sources. All usage data is
 display-only and must not affect readiness, attention, run state, launch, or

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # Features: Dashboard Ops
@@ -192,11 +192,12 @@ Status: implemented
 Description: Display provider-aware Claude and Codex subscription capacity on
 the Operations Overview without conflating quota with repo health or run state.
 
-Modules: usage, models, config, api, intake_agent, semantic, web.
+Modules: usage, statusline, models, config, api, intake_agent, semantic, web.
 
 APIs: protected `GET /api/usage`; internal `UsageService`,
-`ClaudeUsageStore`, `parse_claude_stream_usage`, `read_codex_usage`;
-`ORCH_HUB_CODEX_HOME`.
+`ClaudeUsageStore`, `parse_claude_stream_usage`, `parse_claude_statusline`,
+`read_claude_statusline`, `read_codex_usage`; console script
+`orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`.
 
 Implemented behavior:
 
@@ -206,11 +207,17 @@ Implemented behavior:
 - Codex usage is read only from local session rollout `rate_limits` under the
   configured Codex home; orch-hub never invokes Codex, opens credentials, or
   consumes reset credits.
-- Claude usage is read from the hub-owned observation store. The best-effort
-  observer remains wired into intake and semantic `claude -p` stream-json
-  backends, but Claude Code 2.1.218 exposes no 5h/7d subscription windows on
-  that stream; unsupported/absent output records nothing, and Claude remains
-  unavailable until a separate verified local carrier feeds the store.
+- Claude usage is read from the hub-owned observation store. The
+  operator-installed `orch-hub-statusline` wrapper persists the CLI's statusLine
+  `rate_limits` payload to `<data_dir>/usage/claude-statusline.json`; the read
+  path ingests it into `ClaudeUsageStore` when newer, so stale last-observed
+  figures survive sink deletion/rotation instead of becoming zero usage.
+- The best-effort observer remains wired into intake and semantic `claude -p`
+  stream-json backends, but Claude Code 2.1.218 exposes no 5h/7d subscription
+  windows on that stream; unsupported/absent output records nothing.
+- The statusLine writer is opt-in and pass-through: the hub never writes
+  `~/.claude/**`, the sink stores only `rate_limits` plus `subscription_type`,
+  and wrapped operator statusline argv/stdin/stdout/stderr/exit code are relayed.
 - The Overview renders separate Claude/Codex cards with percent-first bars,
   reset timing, freshness/stale flags, explicit unknown/unavailable states, and
   aggregate reset-credit availability. Source failures degrade only this

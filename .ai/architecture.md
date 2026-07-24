@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: abb248083f494cb9e4f3b1e2403664ac6ad4a4f8
+verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 ---
 
 # Architecture
@@ -92,7 +92,7 @@ tokens and Bark endpoints, must not be logged or displayed.
 | Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
 | Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
 | Evaluation artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated evidence packs and static/semantic reports are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
-| Agent subscription usage | Codex local session rollouts plus hub-owned `<ORCH_HUB_DATA_DIR>/usage/claude.json` | display-only capacity signal; reads provider data, never starts probe turns, spends reset credits, or gates readiness/runs/intake; Claude Code 2.1.218 stream-json exposes no 5h/7d windows, so the Claude store remains unfed until a separate verified carrier writes observations |
+| Agent subscription usage | Codex local session rollouts plus Claude statusLine sink and hub-owned `<ORCH_HUB_DATA_DIR>/usage/claude.json` | display-only capacity signal; reads provider data, never starts probe turns, spends reset credits, or gates readiness/runs/intake; Claude Code 2.1.218 stream-json exposes no 5h/7d windows, so the operator-installed statusLine sink is the primary Claude carrier |
 | Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
 | Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
 | Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
@@ -166,13 +166,14 @@ job state for running/failed/completed UI, and keeps raw evidence/report
 artifacts behind Copy/Download affordances.
 
 Agent subscription usage is a sidecar display flow. `UsageService` reads Claude
-from the latest hub-owned observation in `<data_dir>/usage/claude.json` and
+from the latest hub-owned observation in `<data_dir>/usage/claude.json`, ingesting
+newer observations from the operator-installed
+`<data_dir>/usage/claude-statusline.json` sink before the store read, and reads
 Codex from recent local rollout `rate_limits` snapshots under the configured
 Codex home. The Claude observer remains wired to hub-driven
 `claude -p --output-format stream-json` turns, but Claude Code 2.1.218 does not
-emit 5h/7d subscription windows on that stream; absence records no observation
-and the Claude provider stays unavailable until another verified local carrier
-feeds the store. The protected `GET /api/usage` route returns both providers
+emit 5h/7d subscription windows on that stream; absence records no observation.
+The protected `GET /api/usage` route returns both providers
 fail-soft with normalized windows, percentages, reset times,
 freshness/staleness, plan, and aggregate credit data. The Overview renders this
 below the operational panels; missing, stale, or failed sources are explicit
@@ -232,6 +233,9 @@ gates.
 - launchd for resident macOS service operation.
 - Optional Bark push endpoint when configured.
 - Claude CLI for the concrete remote intake backend and semantic evaluator.
+- Claude Code statusLine stdin as an opt-in local usage carrier when the
+  operator installs `orch-hub-statusline`; the hub service never writes
+  `~/.claude/**`.
 - Codex local session rollout files for read-only rate-limit display; orch-hub
   does not invoke Codex to refresh usage.
 - Tailscale or an equivalent private network for remote access.
@@ -257,6 +261,9 @@ gates.
 - Bark URLs embed device-key secrets and must not be logged.
 - Subscription usage is display-only: unavailable/stale data is shown as such,
   never as zero usage and never as a launch or health gate.
+- The Claude statusLine usage hook is operator-installed; orch-hub must not edit
+  `~/.claude/**`, and the wrapper must preserve the operator's visible statusline
+  behavior.
 
 ## Related Memory
 
