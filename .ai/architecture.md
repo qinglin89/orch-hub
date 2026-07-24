@@ -1,19 +1,17 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 2076fc9c1071c439cf2dfa3f21c60a49bfbe552f
 ---
 
 # Architecture
 
-orch-hub is a local control plane for remotely inspecting managed repos,
-starting deployed orchestrator runs, answering human-input prompts, reading run
-state, showing display-only agent subscription capacity, drafting new tasks
-through a confirmed intake loop, and building plus viewing read-only
-task-evaluation evidence/static/semantic artifacts. It coordinates existing systems
-rather than replacing them:
-ai-native-development remains the managed-repo registry, target repos own their
-task files and deployed orchestrator payloads, and orch-hub owns only its
-service surface plus external run state.
+orch-hub is a local control plane: inspect managed repos, start orchestrator
+runs, answer human prompts, read run state, show display-only subscription
+capacity, draft tasks via confirmed intake, and build/view read-only
+task-evaluation artifacts. It coordinates existing
+systems rather than replacing them: ai-native-development remains the
+registry, target repos own their task files and deployed orchestrator
+payloads, and orch-hub owns only its service surface plus external run state.
 
 ## System Shape
 
@@ -43,9 +41,9 @@ Orchestrator run
   orchestrator logs
 ```
 
-The hub never imports deployed orchestrator code. It starts the deployed script
-as a subprocess and communicates through file contracts: task files in the
-target repo, hub-owned run records, control-dir files, and log files.
+The hub never imports deployed orchestrator code: it launches the deployed
+script as a subprocess and communicates only through file contracts (task
+files, run records, control-dir files, logs).
 
 ## Layers
 
@@ -60,185 +58,150 @@ Adapters: aii-2 command, registry file, git subprocess, orchestrator subprocess,
 Managed repos, local service state, and external operator tools
 ```
 
-Application services are independent from FastAPI so CLI, HTTP, dashboard, and
-future bot surfaces can share the same behavior. API and UI layers adapt those
-services; they should not duplicate registry parsing, readiness checks,
-control-dir writes, or log path resolution.
+Application services are FastAPI-independent so CLI, HTTP, dashboard, and
+future bot surfaces share behavior; API/UI adapters must not duplicate
+registry parsing, readiness checks, control-dir writes, or log path
+resolution.
 
 ## Trust And Deployment Boundaries
 
-v1 runs as a macOS user service on the user's Mac. Private exposure is expected
-to stay behind Tailscale or another private network boundary. Bearer-token auth
-is still required for every protected HTTP route because tailnet membership is
-not treated as sufficient application authorization.
-
-The dashboard shell can be public because ordinary browser navigation cannot
-attach an `Authorization` header and the shell assets contain no secrets. Every
-data route, documentation route, unknown route, and future protected route must
-fail closed without a configured valid token.
-
-launchd owns resident service operation. It should manage only the fixed
-orch-hub service label; graceful run stop semantics stay in the run-control and
-control-dir path. Secrets embedded in service configuration, especially bearer
-tokens and Bark endpoints, must not be logged or displayed.
+v1 runs as a macOS user service behind Tailscale or an equivalent private
+boundary. Bearer auth is still required on every protected route — tailnet
+membership is not application authorization. The dashboard shell may be public
+(browser navigation cannot attach `Authorization`; shell assets hold no
+secrets); every other route fails closed without a valid token. launchd owns
+resident operation and manages only the fixed orch-hub service label; graceful
+run stop stays in the run-control/control-dir path. Configured secrets (bearer
+tokens, Bark endpoints) must not be logged or displayed.
 
 ## Data Ownership
 
 | Data | Source Of Truth | Architecture Rule |
 |---|---|---|
-| Managed repos | ai-native-development registry / `aii-2` | orch-hub reads and normalizes; it does not invent repo membership |
-| Launch readiness | Computed from target repo files, git state, and `aii-2 status` | readiness fails closed and gates run launch |
-| Task ids, summaries, status, blockers | Target repo `.ai-tasks/index.md` plus task frontmatter | task inventory is read-only; runtime overlays do not replace task status |
-| Run records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target repo working trees and are fresh per run |
-| Intake records and audit history | Hub data dir under `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned state, not active tasks, and do not modify target repos |
-| Evaluation artifacts | Hub data dir under `<ORCH_HUB_DATA_DIR>/evaluations/` | generated evidence packs and static/semantic reports are sidecar analysis state and must not mutate target tasks, run records, `.ai/`, or `.ai-tasks/` |
-| Agent subscription usage | Codex local session rollouts plus Claude statusLine sink and hub-owned `<ORCH_HUB_DATA_DIR>/usage/claude.json` | display-only capacity signal; reads provider data, never starts probe turns, spends reset credits, or gates readiness/runs/intake; Claude Code 2.1.218 stream-json exposes no 5h/7d windows, so the operator-installed statusLine sink is the primary Claude carrier |
-| Human questions and answers | Per-run control dir files | answer text belongs in answer files; history stores metadata only |
-| Orchestrator logs | Deployed orchestrator log directory, resolved from run records | clients never supply log paths |
-| Startup diagnostics | Hub-owned run dir capture | diagnostic output is scoped to the persisted run record |
-| Commit metadata | Target repo git history | display/evaluation evidence only; never gates readiness, launch, or evidence generation |
-| Housekeeping marker | Target repo `.ai/.housekeeping-pending` | display-only dashboard/API warning; never gates readiness or launch |
-| Notifications | Derived from run state, pending questions, and intake draft/revision state | delivery is best-effort and must not affect state writes |
+| Managed repos | ai-native-development registry / `aii-2` | hub reads/normalizes; never invents membership |
+| Launch readiness | computed from repo files, git state, `aii-2 status` | fails closed; gates run launch |
+| Task ids, summaries, status, blockers | target repo `.ai-tasks/index.md` + task frontmatter | read-only inventory; runtime overlays never replace task status |
+| Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run |
+| Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
+| Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
+| Agent subscription usage | Codex local rollouts + Claude statusLine sink + hub `<data_dir>/usage/claude.json` | display-only; never probes, spends credits, or gates; statusLine sink = primary Claude carrier |
+| Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
+| Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
+| Startup diagnostics | hub-owned run dir capture | scoped to the persisted run record |
+| Commit metadata | target repo git history | display/evidence only; never gates |
+| Housekeeping marker | target repo `.ai/.housekeeping-pending` | display-only; never gates |
+| Notifications | derived from run/question/intake state | best-effort delivery; must not affect state writes |
 
 ## Core Flows
 
-Discovery starts from the managed-repo registry, then overlays readiness for
-each repo. Readiness results are returned as data for operators and dashboards;
-ordinary readiness failures stay in payloads rather than becoming route-level
-transport errors.
+Discovery reads the registry, then overlays per-repo readiness; ordinary
+readiness failures stay payload data, not route errors.
 
-Run launch starts from an operator-selected repo and task. The hub serializes
-live runs per target repo, validates task existence and task status from the
-task store, verifies readiness, creates an external run dir, then starts the
-deployed orchestrator with a control dir in that run dir. Cross-repo runs may
-overlap.
+Run launch: operator-selected repo/task → per-repo live-run serialization,
+task existence/status validation via the task store, readiness verification,
+external run dir creation, then deployed-orchestrator launch with a control
+dir inside it. Cross-repo runs may overlap.
 
-Human input flows through the control dir. The orchestrator writes question
-files; the hub lists pending questions, can notify the user, writes answer
-files atomically, and records metadata-only audit events. The hub does not copy
-answer text into history.
+Human input flows through the control dir: the orchestrator writes question
+files; the hub lists them, can notify, writes answer files atomically, and
+records metadata-only audit events — answer text never enters history.
 
-Stop and completion are observed through run state and file evidence. A
-graceful stop request writes `stop.flag`; end classification uses task
-completion evidence, stop evidence, and process exit information. History is
-append-only per run and read failures are surfaced as history data rather than
-silently hidden.
+Stop/completion are observed from run state and file evidence: graceful stop
+writes `stop.flag`; end classification combines task-completion, stop, and
+process-exit evidence. History is append-only per run; read failures surface
+as history data.
 
-Log access is scoped through known run records. The API resolves a run first,
-then locates recent or streamed logs from that record's task and timestamp
-context. Browser streaming uses bearer-authenticated fetch streams instead of a
-credential-bearing query string.
+Log access resolves a known run record first, then locates recent/streamed
+logs from its task/timestamp context; browser streaming uses
+bearer-authenticated fetch streams, never query tokens.
 
-Remote intake starts from a natural-language request for a ready repo. The hub
-persists hub-owned intake state, drives a conversational `/intake-task` session
-through draft/revise turns that are treated as read-only proposals, and shows the
-full proposed task file plus index row for human review. Only explicit confirm
-calls the agent write turn. The manager records `confirmed` only after the
-created task round-trips through the frontmatter-authoritative task inventory as
-`pending` or `blocked`; failed, cancelled, unverified, or interrupted intakes
-stay outside active task inventory and roll back the task file/index paths they
-were authorized to touch when the process is still alive. When a draft or
-revision settles to `awaiting_review`, the manager emits one metadata-only
-intake-ready notification off the state-critical path when Bark is configured.
+Remote intake: a natural-language request for a ready repo creates hub-owned
+intake state; `/intake-task` runs read-only draft/revise turns showing the
+full proposed task file plus index row, and only explicit confirm runs the
+write turn. `confirmed` requires the created task to round-trip through
+frontmatter-authoritative inventory as `pending`/`blocked`; every other
+outcome stays outside inventory and rolls back the paths it was authorized to
+touch while the process is alive. `awaiting_review` settlement emits one
+metadata-only intake-ready notification off the state-critical path when Bark
+is configured.
 
-Task evaluation resolves an exact active or archived task id, aggregates every
-hub run matching `(repo_path, task_id)` through read-only run-record loading,
-adds bounded per-run history/session/log/spawn diagnostics plus a best-effort
-git commit window, and persists `evidence.json` under the hub data dir. The
-static metrics layer computes deterministic, non-semantic run/session,
-taskfile/session-log, score, confidence, and warning rollups from that evidence
-and persists `static_metrics.json` beside `evidence.json`. The semantic layer
-builds a model prompt from the persisted evidence/static chain, records omitted
-inputs such as `.ai/` snippets/diffs and raw logs as confidence degradation, and
-persists `semantic_report.json` plus `report.md` in the same evaluation dir.
-Its default Claude CLI backend runs from an empty non-repo cwd with built-in
-tools disabled, safe mode, no session persistence, and plan-mode writes blocked,
-so the model cannot read live target-repo state outside the prompt. Protected
-HTTP routes expose availability, evidence/static generation, async semantic job
-start/status, semantic doctor readiness, evaluation history, and artifact
-readback. `SemanticJobManager` stores one current job per `(repo, task)` under
-`<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns an existing transient job instead
-of starting a duplicate model call, and reconciles restart-orphaned transient
-jobs to failed. The dashboard renders Layer 1 static metrics and Layer 2
-semantic reports as distinct sections, gates the semantic start/retry trigger
-with the doctor when the backend is unavailable, reads/polls persisted semantic
-job state for running/failed/completed UI, and keeps raw evidence/report
-artifacts behind Copy/Download affordances.
+Task evaluation: exact active/archive id → read-only aggregation of every
+`(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics
+plus a best-effort git window → `evidence.json` under the hub data dir.
+Static metrics adds deterministic run/session, taskfile/session-log, score,
+confidence, and warning rollups as `static_metrics.json` beside it. The
+semantic layer builds a model prompt from the persisted evidence/static
+chain, records omitted inputs (`.ai/` snippets/diffs, raw logs) as confidence
+degradation, and persists `semantic_report.json` + `report.md` in the same
+dir. The default Claude CLI backend runs from an empty non-repo cwd with
+tools disabled, safe mode, no session persistence, and plan-mode writes
+blocked — the model cannot read live target-repo state outside the prompt. Protected routes expose availability, generation, async
+semantic job start/status, doctor readiness, history, and artifact readback.
+`SemanticJobManager` stores one current job per `(repo, task)` under
+`<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job
+instead of starting a duplicate model call, and reconciles restart-orphaned
+transient jobs to failed. The dashboard doctor-gates the semantic trigger,
+polls persisted job state, and keeps raw artifacts behind Copy/Download.
 
-Agent subscription usage is a sidecar display flow. `UsageService` reads Claude
-from the latest hub-owned observation in `<data_dir>/usage/claude.json`, ingesting
-newer observations from the operator-installed
-`<data_dir>/usage/claude-statusline.json` sink before the store read, and reads
-Codex from recent local rollout `rate_limits` snapshots under the configured
-Codex home. The Claude observer remains wired to hub-driven
-`claude -p --output-format stream-json` turns, but Claude Code 2.1.218 does not
-emit 5h/7d subscription windows on that stream; absence records no observation.
-The protected `GET /api/usage` route returns both providers
-fail-soft with normalized windows, percentages, reset times,
-freshness/staleness, plan, and aggregate credit data. The Overview renders this
-below the operational panels; missing, stale, or failed sources are explicit
-card states and never feed attention, readiness, run state, or launch/intake
-gates.
+Subscription usage is a sidecar display flow: `UsageService` reads Claude from
+the hub-owned observation store (ingesting newer statusLine sink records
+first) and Codex from recent local rollout `rate_limits` under the Codex
+home. The Claude stream-json observer stays wired but
+records nothing on Claude Code 2.1.218. Protected `GET /api/usage` returns
+both providers fail-soft with normalized windows/percentages/resets/freshness/
+plan/credits; missing/stale/failed sources are explicit display states that
+never feed attention, readiness, run state, or launch/intake gates.
 
 ## Component Boundaries
 
-- Registry discovery does not perform readiness checks.
-- Readiness does not launch orchestrators.
-- Git metadata is display-only and never gates launch.
-- Housekeeping marker state is display-only and never gates launch.
+- Registry discovery performs no readiness checks; readiness launches no
+  orchestrators.
+- Git metadata and housekeeping marker state are display-only; never gate
+  launch.
 - Task inventory reads task files but does not decide orchestrator turn state.
-- Intake owns draft/revise/confirm/cancel lifecycle, intake audit state, and the
-  read-only-until-confirm safety contract.
-- Evaluation owns task evidence assembly and persistence; it reads target
-  tasks/run artifacts and writes only hub-owned evaluation artifacts.
-- Static metrics owns deterministic scoring over evidence packs and persists
-  `static_metrics.json` beside the pack; it does not perform semantic model
-  calls or mutate target tasks/run state.
-- Semantic evaluation owns model-judged task/process reports over bounded
-  evidence plus static metrics, persists `semantic_report.json`/`report.md`
-  beside the pack, and enforces read isolation in the backend rather than by
-  prompt instruction alone.
-- Semantic jobs own observable Layer 2 job state, duplicate in-flight
-  prevention, failed/retryable terminal diagnostics, and completed
-  `evaluation_id` linkage without owning evaluation evidence or target state.
-- Evaluation API/dashboard presentation owns sidecar routing, active/archive
-  target display, deterministic/semantic artifact readback, semantic doctor
-  gating, async semantic job polling, history model/version comparison, and
-  local-inspection affordances; it does not gate run control or expose raw logs
-  inline.
+- Intake owns the draft/revise/confirm/cancel lifecycle, audit state, and
+  read-only-until-confirm contract.
+- Evaluation owns evidence assembly/persistence; it reads target tasks/run
+  artifacts and writes only hub-owned artifacts.
+- Static metrics owns deterministic scoring over evidence packs; no model
+  calls, no target/run mutation.
+- Semantic evaluation owns model-judged reports over bounded evidence plus
+  static metrics; read isolation is enforced in the backend, not by prompt
+  alone.
+- Semantic jobs own Layer 2 job state, duplicate in-flight prevention,
+  failed/retryable diagnostics, and completed `evaluation_id` linkage — not
+  evaluation evidence or target state.
+- Evaluation API/dashboard presentation owns sidecar routing, readback, doctor
+  gating, job polling, history comparison; never gates run control or inlines
+  raw logs.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
-  and live/end-state classification.
-- Control-dir handling owns only the file-channel mechanics for questions,
+  and live/end classification.
+- Control-dir handling owns only file-channel mechanics for questions,
   answers, and stop requests.
-- History stores run and answer-audit metadata; it does not decide event timing.
-- Logs are located from run records only; API and UI callers never pass local
-  paths.
+- History stores run/answer-audit metadata; it does not decide event timing.
+- Logs are located from run records only; callers never pass local paths.
 - Notification delivery is isolated from run/intake state persistence.
-- Usage collection owns only display capacity data; it must not start agent
-  turns, call private provider endpoints, scrape UI, spend reset credits, or
-  influence readiness/attention/run/intake decisions.
-- API, CLI, dashboard, launchd, and future bot surfaces stay as adapters over
-  shared application services.
+- Usage collection owns only display capacity data; it never starts agent
+  turns, calls private endpoints or UI scraping, spends reset credits, or
+  influences readiness/attention/run/intake decisions.
+- API, CLI, dashboard, launchd, and future bot surfaces stay adapters over
+  shared services.
 
 ## External Dependencies
 
 - ai-native-development repository and its `aii-2` CLI.
 - Managed target repos with deployed `.cursor/orchestrator/` payloads.
-- Git CLI for target-repo state, display metadata, and best-effort evaluation
-  commit windows.
+- Git CLI for repo state, display metadata, and evaluation commit windows.
 - `/usr/bin/caffeinate` on macOS for long-running orchestrator subprocesses.
-- Python virtual environment inside each target repo's deployed orchestrator
-  directory.
-- FastAPI and uvicorn for the HTTP service.
-- launchd for resident macOS service operation.
-- Optional Bark push endpoint when configured.
-- Claude CLI for the concrete remote intake backend and semantic evaluator.
-- Claude Code statusLine stdin as an opt-in local usage carrier when the
-  operator installs `orch-hub-statusline`; the hub service never writes
-  `~/.claude/**`.
-- Codex local session rollout files for read-only rate-limit display; orch-hub
-  does not invoke Codex to refresh usage.
-- Tailscale or an equivalent private network for remote access.
+- Python venv inside each target repo's deployed orchestrator directory.
+- FastAPI and uvicorn; launchd for resident operation.
+- Optional Bark push endpoint.
+- Claude CLI for the intake and semantic evaluator backends.
+- Claude Code statusLine stdin as the opt-in usage carrier via
+  `orch-hub-statusline`.
+- Codex local session rollouts for read-only rate-limit display; Codex is
+  never invoked for usage.
+- Tailscale or an equivalent private network.
 
 ## Invariants
 
@@ -248,26 +211,25 @@ gates.
 - Control-dir adapter code stays file-channel only.
 - The same target repo cannot have two active orchestrator runs.
 - Hub-owned run dirs stay outside target repo working trees.
-- Hub-owned evaluation artifacts stay outside target repo working trees and do
-  not mutate task/run/protocol state.
+- Hub-owned evaluation artifacts stay outside target trees and do not mutate
+  task/run/protocol state.
 - Hub-owned unconfirmed intake drafts are not tasks and cannot be launched.
-- A confirmed intake must land through task inventory as `pending` or `blocked`;
+- A confirmed intake must land through task inventory as `pending`/`blocked`;
   every other confirm outcome is failed/unverified.
 - Human answers are auditable, but history must not duplicate answer text.
 - Log access is scoped to known run records.
 - Readiness must fail closed before launch.
-- Notification delivery must never corrupt run, intake, history, or control-dir
-  state.
+- Notification delivery must never corrupt run, intake, history, or
+  control-dir state.
 - Bark URLs embed device-key secrets and must not be logged.
 - Subscription usage is display-only: unavailable/stale data is shown as such,
-  never as zero usage and never as a launch or health gate.
-- The Claude statusLine usage hook is operator-installed; orch-hub must not edit
-  `~/.claude/**`, and the wrapper must preserve the operator's visible statusline
-  behavior.
+  never as zero usage, never as a launch or health gate.
+- The Claude statusLine usage hook is operator-installed; orch-hub never
+  edits `~/.claude/**`, and the wrapper preserves the operator's visible
+  statusline behavior.
 
 ## Related Memory
 
-- `features/index.md` owns user-facing capabilities and implemented behavior.
-- `modules/index.md` owns code-module responsibilities and boundaries.
-- `apis/index.md` owns CLI, HTTP, and internal API contracts.
-- `design/index.md` owns rationale, tradeoffs, and architectural patterns.
+Related: `features/index.md` (capabilities), `modules/index.md` (boundaries),
+`apis/index.md` (CLI/HTTP/internal contracts), `design/index.md` (rationale,
+tradeoffs, patterns).
