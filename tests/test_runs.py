@@ -1474,7 +1474,10 @@ EFFECTIVE_CONFIG = {
     "schema_version": 1,
     "config_revision": "cfg-sha",
     "effective_revision": "eff-sha",
-    "profile": "standard",
+    # A split launch leaves the run-wide `profile` at its default and reports the
+    # authoritative per-role selections; the snapshot keeps both verbatim.
+    "profile": "default",
+    "profiles": {"dev": "standard", "review": "excellent"},
     "available_profiles": ["excellent", "standard"],
     "backend": "cc-codex",
     "dev": {"agent": "claude", "model": "claude-opus-4-8", "effort": "max"},

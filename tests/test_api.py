@@ -960,6 +960,102 @@ def test_launch_absent_keeps_extra_args_compatible(tmp_path, monkeypatch):
     assert launch_args_of(spawner) == ("--backend", "cc-codex", "--plan-gate")
 
 
+# -- start run: independent dev/review role selection --------------------------
+
+
+def test_launch_split_roles_default_inherits_everything(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client, repo, {"dev_mode": "default", "review_mode": "default"}
+    )
+    assert resp.status_code == 201, resp.text
+    assert launch_args_of(spawner) == ()
+
+
+def test_launch_split_roles_mixed_named_profiles(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {"dev_mode": "standard", "review_mode": "excellent", "backend": "cc-codex"},
+    )
+    assert resp.status_code == 201, resp.text
+    assert launch_args_of(spawner) == (
+        "--backend", "cc-codex",
+        "--dev-profile", "standard",
+        "--review-profile", "excellent",
+    )
+
+
+def test_launch_split_custom_dev_with_named_review(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "dev_mode": "custom",
+            "review_mode": "excellent",
+            "backend": "cc-codex",
+            "dev_agent": "claude",
+            "dev_model": "claude-opus-4-8",
+            "dev_effort": "max",
+            "plan_gate": True,
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert launch_args_of(spawner) == (
+        "--backend", "cc-codex",
+        "--dev-agent", "claude",
+        "--dev-model", "claude-opus-4-8",
+        "--dev-effort", "max",
+        "--review-profile", "excellent",
+        "--plan-gate",
+    )
+
+
+def test_launch_split_custom_dev_without_agent_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "dev_mode": "custom",
+            "review_mode": "default",
+            "backend": "cc-codex",
+            "dev_model": "claude-opus-4-8",
+            "dev_effort": "max",
+        },
+    )
+    assert resp.status_code == 400
+    assert spawner.calls == []  # never launched
+
+
+def test_launch_mixing_mode_and_role_modes_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {"mode": "standard", "dev_mode": "excellent", "backend": "cc-codex"},
+    )
+    assert resp.status_code == 400
+    assert "not both" in resp.json()["detail"]
+    assert spawner.calls == []
+
+
+def test_launch_empty_selection_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(client, repo, {"backend": "cc-codex"})
+    assert resp.status_code == 400
+    assert spawner.calls == []
+
+
+def test_launch_bad_role_mode_is_422(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(client, repo, {"dev_mode": "turbo"})
+    assert resp.status_code == 422
+    assert spawner.calls == []
+
+
 # -- orchestrator-config query route ------------------------------------------
 
 
@@ -968,6 +1064,7 @@ SAMPLE_CONFIG = {
     "config_revision": "cfg-sha",
     "effective_revision": "eff-sha",
     "profile": "standard",
+    "profiles": {"dev": "standard", "review": "excellent"},
     "available_profiles": ["excellent", "standard"],
     "backend": "cc-codex",
     "dev": {"agent": "claude", "model": "claude-opus-4-8", "effort": "max"},
@@ -983,23 +1080,70 @@ SAMPLE_CONFIG = {
 }
 
 
-def test_orchestrator_config_returns_effective_config(tmp_path, monkeypatch):
-    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
-    captured = {}
+def capture_config_query(monkeypatch, config: dict = SAMPLE_CONFIG) -> dict:
+    """Replace the orchestrator query with a recorder; returns the captured kwargs."""
+    captured: dict = {"calls": 0}
 
-    def fake_query(target, *, backend=None, profile=None):
+    def fake_query(target, *, backend=None, profile=None, dev_profile=None, review_profile=None):
+        captured["calls"] += 1
         captured["repo"] = target.name
         captured["backend"] = backend
         captured["profile"] = profile
-        return parse_effective_config(SAMPLE_CONFIG)
+        captured["dev_profile"] = dev_profile
+        captured["review_profile"] = review_profile
+        return parse_effective_config(config)
 
     monkeypatch.setattr(api, "query_effective_config", fake_query)
+    return captured
+
+
+def test_orchestrator_config_returns_effective_config(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    captured = capture_config_query(monkeypatch)
+
     resp = client.get(
         f"/api/repos/{repo.name}/orchestrator-config?backend=cc-codex&profile=standard"
     )
     assert resp.status_code == 200
-    assert resp.json() == SAMPLE_CONFIG
-    assert captured == {"repo": repo.name, "backend": "cc-codex", "profile": "standard"}
+    # The hub-owned capability marker rides along with the orchestrator's fields.
+    assert resp.json() == {**SAMPLE_CONFIG, "split_profiles": True}
+    assert captured["repo"] == repo.name
+    assert captured["backend"] == "cc-codex"
+    assert captured["profile"] == "standard"
+    assert captured["dev_profile"] is None and captured["review_profile"] is None
+
+
+def test_orchestrator_config_forwards_both_role_profiles_in_one_query(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    captured = capture_config_query(monkeypatch)
+
+    resp = client.get(
+        f"/api/repos/{repo.name}/orchestrator-config"
+        "?backend=cc-codex&dev_profile=standard&review_profile=excellent"
+    )
+    assert resp.status_code == 200
+    assert captured["calls"] == 1  # one coherent resolution, not one per role
+    assert captured["backend"] == "cc-codex"
+    assert captured["dev_profile"] == "standard"
+    assert captured["review_profile"] == "excellent"
+    assert captured["profile"] is None  # the split path never sends the run-wide one
+    assert resp.json()["profiles"] == {"dev": "standard", "review": "excellent"}
+
+
+def test_orchestrator_config_reports_legacy_deployment_without_split_support(
+    tmp_path, monkeypatch
+):
+    """An older deployment answers the flag-free probe with no `profiles`; the
+    response stays readable but tells the dialog it cannot offer split selection."""
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    legacy = {k: v for k, v in SAMPLE_CONFIG.items() if k != "profiles"}
+    capture_config_query(monkeypatch, legacy)
+
+    body = client.get(f"/api/repos/{repo.name}/orchestrator-config").json()
+
+    assert body["split_profiles"] is False
+    assert body["profiles"] == {"dev": "standard", "review": "standard"}
+    assert body["profile"] == "standard"
 
 
 def test_orchestrator_config_unknown_repo_is_404(tmp_path, monkeypatch):
@@ -1017,7 +1161,7 @@ def test_orchestrator_config_bad_backend_is_400(tmp_path, monkeypatch):
 def test_orchestrator_config_query_failure_is_502(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
 
-    def failing_query(target, *, backend=None, profile=None):
+    def failing_query(target, *, backend=None, profile=None, dev_profile=None, review_profile=None):
         raise OrchestratorConfigError(
             "orchestrator --print-config failed: unrecognized arguments"
         )

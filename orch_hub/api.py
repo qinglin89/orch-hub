@@ -201,23 +201,35 @@ class BearerAuthMiddleware:
 
 
 class LaunchRequest(BaseModel):
-    """A dashboard launch-mode selection for ``POST /api/runs`` (``launch`` field).
+    """A dashboard launch selection for ``POST /api/runs`` (``launch`` field).
 
     The structured alternative to raw ``extra_args``: the server turns it into the
     exact orchestrator flags through :func:`orch_hub.orch_config.build_launch_args`,
-    so the four-mode command construction is one tested function rather than logic
-    duplicated in the browser. ``mode`` is ``default``/``standard``/``excellent``/
-    ``custom``; ``backend`` is ``null`` to inherit the orchestrator's configured
-    backend (legal only for ``default``) or an explicit ``cursor``/``cc-codex``.
-    The ``dev_*``/``review_*`` fields apply only to ``custom`` (preset modes take
-    those from the orchestrator); ``dev_agent`` is cc-codex-only. The orthogonal
-    ``plan_gate``/``once``/``max_sessions`` toggles keep their existing per-flag
-    UI semantics in every mode. Enum values are validated here (422); the
-    cross-field/required rules (e.g. custom needs models, no ``--dev-agent`` on
-    Cursor) are enforced by ``build_launch_args`` and surface as 400.
+    so command construction is one tested function rather than logic duplicated in
+    the browser. The selection comes in exactly one of two mutually exclusive
+    shapes, each using the four modes ``default``/``standard``/``excellent``/
+    ``custom``:
+
+    - ``dev_mode``/``review_mode`` — independent per-role selection (the split
+      Start dialog). An omitted role is ``default``. Named roles become
+      ``--dev-profile``/``--review-profile``; only a ``custom`` role sends
+      explicit values, and a custom cc-codex DEV must send its complete
+      ``dev_agent``/``dev_model``/``dev_effort`` tuple.
+    - ``mode`` — the legacy run-wide selection, preserved verbatim for pre-split
+      callers: it maps one selection to both roles through ``--profile``.
+
+    ``backend`` is shared: ``null`` inherits the orchestrator's configured backend
+    (legal only when every role is ``default``) or is an explicit
+    ``cursor``/``cc-codex``. The orthogonal ``plan_gate``/``once``/
+    ``max_sessions`` toggles keep their existing per-flag UI semantics in every
+    mode. Enum values are validated here (422); the cross-field/required rules
+    (mixing both shapes, sending neither, custom missing a model, ``--dev-agent``
+    on Cursor) are enforced by ``build_launch_args`` and surface as 400.
     """
 
-    mode: Literal["default", "standard", "excellent", "custom"]
+    mode: Literal["default", "standard", "excellent", "custom"] | None = None
+    dev_mode: Literal["default", "standard", "excellent", "custom"] | None = None
+    review_mode: Literal["default", "standard", "excellent", "custom"] | None = None
     backend: Literal["cursor", "cc-codex"] | None = None
     dev_agent: Literal["claude", "codex"] | None = None
     dev_model: str | None = None
@@ -231,6 +243,8 @@ class LaunchRequest(BaseModel):
     def to_spec(self) -> LaunchSpec:
         return LaunchSpec(
             mode=self.mode,
+            dev_mode=self.dev_mode,
+            review_mode=self.review_mode,
             backend=self.backend,
             dev_agent=self.dev_agent,
             dev_model=self.dev_model,
@@ -731,23 +745,35 @@ def create_app(
 
     @app.get("/api/repos/{repo_id}/orchestrator-config")
     def get_orchestrator_config(
-        repo_id: str, backend: str | None = None, profile: str | None = None
+        repo_id: str,
+        backend: str | None = None,
+        profile: str | None = None,
+        dev_profile: str | None = None,
+        review_profile: str | None = None,
     ) -> dict:
         """Query the repo's deployed orchestrator for its effective launch config.
 
         Backs the Start-run dialog: runs the repo-local orchestrator with
         ``--print-config`` (``cwd=<repo>``, no task id/credentials/clean-tree) for
-        the given ``backend``/``profile`` and returns its resolved values,
-        provenance, and revisions verbatim as an :class:`EffectiveConfig` — the
-        orchestrator owns model/effort/profile policy, so the hub never
+        the given ``backend`` plus profile selection and returns its resolved
+        values, provenance, and revisions verbatim as an :class:`EffectiveConfig`
+        — the orchestrator owns model/effort/profile policy, so the hub never
         substitutes its own defaults. ``repo_id`` unknown → 404; an unrecognized
         ``backend`` query value → 400. A query failure (an older deployment
         without the flag, a nonzero exit, malformed output, or an unsupported
         schema) → 502 with the orchestrator's reason, so the caller disables Start
-        and surfaces the error rather than silently falling back. ``backend`` may
-        be omitted to inherit the configured backend; ``profile`` selects
-        ``standard``/``excellent`` (an unknown profile fails in the orchestrator
-        and surfaces as 502).
+        and surfaces the error rather than silently falling back.
+
+        ``backend`` may be omitted to inherit the configured backend.
+        ``dev_profile``/``review_profile`` select each role independently
+        (``default``/``standard``/``excellent``) and are forwarded to one
+        subprocess, so the preview is a single coherent configuration rather than
+        two half-resolved ones. Legacy ``profile`` remains the run-wide selector.
+        Profile values are passed through rather than pre-validated here: the
+        orchestrator owns the profile set (an unknown one, like a deployment
+        predating the role flags, surfaces as 502). A caller that must detect that
+        older deployment queries *without* the role parameters and reads
+        ``split_profiles`` in the response.
         """
         repos = discover_repos(resolved)
         repo = next((r for r in repos if r.name == repo_id), None)
@@ -759,7 +785,13 @@ def create_app(
                 detail=f"unknown backend {backend!r} (expected one of {', '.join(BACKENDS)})",
             )
         try:
-            config = query_effective_config(repo, backend=backend, profile=profile)
+            config = query_effective_config(
+                repo,
+                backend=backend,
+                profile=profile,
+                dev_profile=dev_profile,
+                review_profile=review_profile,
+            )
         except OrchestratorConfigError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         return config.to_dict()
@@ -768,16 +800,18 @@ def create_app(
     def start_run(req: StartRunRequest) -> dict:
         """Start an orchestrator run, resolving ``repo_id`` by managed-repo name.
 
-        Launch arguments come from the structured ``launch`` mode selector
-        (server-built via :func:`build_launch_args`) or, for legacy callers, the
-        raw ``extra_args`` list — mutually exclusive (both non-empty → 400). The
-        run manager then applies the fail-closed launch gates (per-repo single
-        run, task inventory/status, readiness) and spawns the deployed
-        orchestrator subprocess; gate refusals surface as the mapped 4xx
-        responses above. An unknown ``repo_id`` is a 404; an invalid launch
-        selection (custom missing a model, ``--dev-agent`` on Cursor, ...) is a
-        400. The response is the new run's :class:`RunStatus` (``active`` with no
-        pending questions), the same shape as ``GET /api/runs/{run_id}``.
+        Launch arguments come from the structured ``launch`` selector
+        (server-built via :func:`build_launch_args`, either the independent
+        ``dev_mode``/``review_mode`` roles or the legacy run-wide ``mode``) or,
+        for legacy callers, the raw ``extra_args`` list — mutually exclusive (both
+        non-empty → 400). The run manager then applies the fail-closed launch
+        gates (per-repo single run, task inventory/status, readiness) and spawns
+        the deployed orchestrator subprocess; gate refusals surface as the mapped
+        4xx responses above. An unknown ``repo_id`` is a 404; an invalid launch
+        selection (both selection shapes at once, neither, custom missing a model,
+        ``--dev-agent`` on Cursor, ...) is a 400. The response is the new run's
+        :class:`RunStatus` (``active`` with no pending questions), the same shape
+        as ``GET /api/runs/{run_id}``.
         """
         repos = discover_repos(resolved)
         repo = next((r for r in repos if r.name == req.repo_id), None)

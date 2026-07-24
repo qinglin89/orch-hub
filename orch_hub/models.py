@@ -592,12 +592,21 @@ class EffectiveConfig:
     ``config_revision`` is the sha256 of ``orchestrator.toml`` alone;
     ``effective_revision`` also changes when an environment override or the
     selected resolution changes, so it is the correct preview cache key.
-    ``profile`` is the resolved named profile or ``"default"``;
+    ``profile`` is the *run-wide* ``--profile`` selection or ``"default"``;
     ``available_profiles`` is the set a UI may offer (``standard``/``excellent``).
     ``sources`` is diagnostic provenance per field (``cli``/``profile:<name>``/
     ``env:<NAME>``/``config``). ``codex_sandbox`` is ``None`` for the Cursor
     backend. Built strictly (fail-closed) by
     :func:`orch_hub.orch_config.parse_effective_config`.
+
+    ``dev_profile``/``review_profile`` are the per-role selections the run
+    actually resolved with, from the orchestrator's authoritative ``profiles``
+    object. ``split_profiles`` records whether that object was really observed:
+    an older deployment omits it, and both role values are then *derived* from
+    the run-wide ``profile`` so legacy configs stay readable. A UI must gate
+    independent role selection on ``split_profiles`` — deriving a value is not
+    evidence that the deployment understands ``--dev-profile``/
+    ``--review-profile``.
     """
 
     schema_version: int
@@ -605,6 +614,9 @@ class EffectiveConfig:
     effective_revision: str | None
     profile: str
     available_profiles: tuple[str, ...]
+    dev_profile: str
+    review_profile: str
+    split_profiles: bool
     backend: str
     dev: RoleConfig
     review: RoleConfig
@@ -623,6 +635,8 @@ class EffectiveConfig:
             "config_revision": self.config_revision,
             "effective_revision": self.effective_revision,
             "profile": self.profile,
+            "profiles": {"dev": self.dev_profile, "review": self.review_profile},
+            "split_profiles": self.split_profiles,
             "available_profiles": list(self.available_profiles),
             "backend": self.backend,
             "dev": self.dev.to_dict(),
@@ -644,19 +658,32 @@ class LaunchSpec:
 
     The input to :func:`orch_hub.orch_config.build_launch_args`, kept as typed
     data (not raw arg strings) so command construction is one tested function
-    rather than logic duplicated across the API and the browser. ``mode`` is one
-    of the four UI modes (``default``/``standard``/``excellent``/``custom``);
-    each mode emits only the flags applicable to it. ``backend`` is ``None`` to
-    *inherit* the orchestrator's configured backend (legal only for ``default``,
-    which then omits ``--backend``) or an explicit ``cursor``/``cc-codex``. The
-    ``dev_*``/``review_*`` fields are used only by ``custom`` (the preset modes
-    take those values from the orchestrator, never from the user), and
+    rather than logic duplicated across the API and the browser.
+
+    The selection comes in exactly one of two mutually exclusive shapes, each
+    using the same four UI modes (``default``/``standard``/``excellent``/
+    ``custom``):
+
+    - ``dev_mode``/``review_mode`` — the independent per-role selection the
+      split Start dialog sends. Named roles emit ``--dev-profile``/
+      ``--review-profile``; an omitted role is ``default`` and emits nothing.
+    - ``mode`` — the legacy run-wide selection, kept verbatim for pre-split API
+      callers: named modes emit the ``--profile`` shorthand for both roles.
+
+    Setting both shapes is a :class:`~orch_hub.orch_config.LaunchError`, as is
+    setting neither. ``backend`` is ``None`` to *inherit* the orchestrator's
+    configured backend (legal only when every role is ``default``, which then
+    omits ``--backend``) or an explicit ``cursor``/``cc-codex``. The
+    ``dev_*``/``review_*`` value fields are used only by a ``custom`` role (a
+    preset takes those values from the orchestrator, never from the user), and
     ``dev_agent`` applies only to cc-codex — it is never sent to Cursor. The
     orthogonal launch flags ``plan_gate``/``once``/``max_sessions`` keep their
     existing per-flag UI semantics and are honored in every mode.
     """
 
-    mode: str
+    mode: str | None = None
+    dev_mode: str | None = None
+    review_mode: str | None = None
     backend: str | None = None
     dev_agent: str | None = None
     dev_model: str | None = None

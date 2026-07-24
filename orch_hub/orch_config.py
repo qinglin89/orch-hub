@@ -7,15 +7,17 @@ UI mode selection. Three responsibilities live here, all read-only w.r.t. the
 target repo:
 
 - :func:`query_effective_config` runs ``<python> orchestrator.py --print-config
-  [--backend B] [--profile P]`` with ``cwd=<repo>`` and parses one JSON object
-  (:func:`parse_effective_config`, strict/fail-closed). A missing flag (an older
-  deployment predating ``--print-config``), a nonzero exit, malformed output, or
-  an unsupported schema all raise :class:`OrchestratorConfigError` — the caller
-  disables launch and surfaces the orchestrator error rather than substituting
-  hub-owned defaults.
-- :func:`build_launch_args` maps a :class:`~orch_hub.models.LaunchSpec` (the
-  four dashboard modes) to the exact orchestrator flags, so command construction
-  is one tested function instead of logic duplicated in the API and the browser.
+  [--backend B] [--profile P] [--dev-profile P] [--review-profile P]`` with
+  ``cwd=<repo>`` and parses one JSON object (:func:`parse_effective_config`,
+  strict/fail-closed). A missing flag (an older deployment predating
+  ``--print-config`` or the role-profile flags), a nonzero exit, malformed
+  output, or an unsupported schema all raise :class:`OrchestratorConfigError` —
+  the caller disables launch and surfaces the orchestrator error rather than
+  substituting hub-owned defaults.
+- :func:`build_launch_args` maps a :class:`~orch_hub.models.LaunchSpec` (an
+  independent per-role selection, or the legacy run-wide one) to the exact
+  orchestrator flags, so command construction is one tested function instead of
+  logic duplicated in the API and the browser.
 - The ``effective-config:`` snapshot helpers read/persist the authoritative launch
   configuration every real run logs at startup, so run history retains what
   actually launched (it is authoritative if it differs from the preview).
@@ -65,9 +67,15 @@ MODE_STANDARD = "standard"
 MODE_EXCELLENT = "excellent"
 MODE_CUSTOM = "custom"
 LAUNCH_MODES = (MODE_DEFAULT, MODE_STANDARD, MODE_EXCELLENT, MODE_CUSTOM)
-"""The four dashboard launch modes. ``standard``/``excellent`` double as the
-``--profile`` value; ``default``/``custom`` are UI-only and never passed as a
-profile."""
+"""The four dashboard launch modes, offered per role (DEV/REVIEW) and by the
+legacy run-wide selector. ``standard``/``excellent`` double as the profile value
+(``--dev-profile``/``--review-profile``, or legacy ``--profile``);
+``default``/``custom`` are UI-only and never passed as a profile — an explicit
+``--dev-profile default`` is only needed to *clear* a run-wide ``--profile``,
+which the split path never sends."""
+
+NAMED_PROFILE_MODES = (MODE_STANDARD, MODE_EXCELLENT)
+"""The launch modes that name an orchestrator profile."""
 
 EFFECTIVE_CONFIG_NAME = "effective_config.json"
 """Hub-owned run-dir file holding the parsed ``effective-config:`` snapshot,
@@ -106,18 +114,28 @@ def query_effective_config(
     *,
     backend: str | None = None,
     profile: str | None = None,
+    dev_profile: str | None = None,
+    review_profile: str | None = None,
     runner: Runner = run_command,
     timeout: float = DEFAULT_QUERY_TIMEOUT,
 ) -> EffectiveConfig:
     """Query the repo's deployed orchestrator for its effective launch config.
 
     Runs ``<repo>/.cursor/orchestrator/.venv/bin/python orchestrator.py
-    --print-config [--backend B] [--profile P]`` with ``cwd=<repo>`` — the same
-    resolution a real run uses, but no task id, credentials, clean tree, or
-    model-catalog call. Returns the parsed :class:`EffectiveConfig`; a missing
-    executable, timeout, nonzero exit (an older deployment without the flag, or an
-    unknown ``--profile``), non-JSON output, or an unsupported schema all raise
-    :class:`OrchestratorConfigError` with the orchestrator's own reason.
+    --print-config [--backend B] [--profile P] [--dev-profile P]
+    [--review-profile P]`` with ``cwd=<repo>`` — the same resolution a real run
+    uses, but no task id, credentials, clean tree, or model-catalog call. Both
+    role selections are asked for in this one subprocess, so the preview a caller
+    paints is internally coherent (a role queried on its own would resolve
+    against the *other* role's inherited values).
+
+    Returns the parsed :class:`EffectiveConfig`; a missing executable, timeout,
+    nonzero exit (an unknown profile, or a deployment predating ``--print-config``
+    or the role-profile flags), non-JSON output, or an unsupported schema all
+    raise :class:`OrchestratorConfigError` with the orchestrator's own reason.
+    Passing the role flags is therefore also a capability probe that *fails* on an
+    old deployment: a caller that must stay compatible queries without them first
+    and reads :attr:`EffectiveConfig.split_profiles`.
     """
     argv = [
         repo.path / ORCHESTRATOR_PYTHON,
@@ -128,6 +146,10 @@ def query_effective_config(
         argv += ["--backend", backend]
     if profile is not None:
         argv += ["--profile", profile]
+    if dev_profile is not None:
+        argv += ["--dev-profile", dev_profile]
+    if review_profile is not None:
+        argv += ["--review-profile", review_profile]
     try:
         result = runner(argv, cwd=repo.path, timeout=timeout)
     except CommandNotFoundError as exc:
@@ -169,6 +191,13 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     orchestrator never resolved, which would leave the Start dialog previewing
     null/default values instead of disabling launch (the acceptance requires the
     config query to fail closed on malformed responses).
+
+    The ``profiles`` object is *additive*: absent means an older deployment that
+    predates split role profiles, and both role selections are derived from the
+    run-wide ``profile`` with ``split_profiles=False`` so legacy configs and old
+    run snapshots stay readable. Present but not an object of two non-empty
+    strings is malformed and fails closed like every other field — a deployment
+    that emits ``profiles`` at all emits both roles.
     """
     if not isinstance(data, dict):
         raise OrchestratorConfigError(
@@ -181,12 +210,19 @@ def parse_effective_config(data: object) -> EffectiveConfig:
             f" (this hub supports {SUPPORTED_SCHEMA_VERSION}); redeploy the"
             " orchestrator payload"
         )
+    profile = _req_str(data, "profile")
+    dev_profile, review_profile, split_profiles = _role_profiles(
+        data.get("profiles"), profile
+    )
     return EffectiveConfig(
         schema_version=version,
         config_revision=_req_str(data, "config_revision"),
         effective_revision=_req_str(data, "effective_revision"),
-        profile=_req_str(data, "profile"),
+        profile=profile,
         available_profiles=_req_str_tuple(data, "available_profiles"),
+        dev_profile=dev_profile,
+        review_profile=review_profile,
+        split_profiles=split_profiles,
         backend=_req_str(data, "backend"),
         dev=_role(data.get("dev"), "dev"),
         review=_role(data.get("review"), "review"),
@@ -198,6 +234,26 @@ def parse_effective_config(data: object) -> EffectiveConfig:
         once=_req_bool(data, "once"),
         plan_gate=_req_bool(data, "plan_gate"),
         control_dir=_opt_str(data.get("control_dir")),
+    )
+
+
+def _role_profiles(value: object, profile: str) -> tuple[str, str, bool]:
+    """Resolve ``(dev_profile, review_profile, split_profiles)`` from ``profiles``.
+
+    Absent (or null) is the older deployment: derive both roles from the run-wide
+    ``profile`` and report ``split_profiles=False``, so a caller can render the
+    config without being able to mistake derivation for capability.
+    """
+    if value is None:
+        return profile, profile, False
+    if not isinstance(value, dict):
+        raise OrchestratorConfigError(
+            "orchestrator --print-config field 'profiles' must be an object"
+        )
+    return (
+        _req_str(value, "dev", label="profiles.dev"),
+        _req_str(value, "review", label="profiles.review"),
+        True,
     )
 
 
@@ -283,69 +339,50 @@ def _req_str_map(data: dict, key: str) -> dict[str, str]:
 
 
 def build_launch_args(spec: LaunchSpec) -> tuple[str, ...]:
-    """Construct the orchestrator flags for a dashboard launch-mode selection.
+    """Construct the orchestrator flags for a dashboard launch selection.
 
-    Returns only the mode-derived flags (the caller appends them after
+    Returns only the selection-derived flags (the caller appends them after
     ``<task-id> --control-dir <dir>``), so the run manager's base command is
-    unchanged. Per the deployed contract:
+    unchanged. The spec carries exactly one of two mutually exclusive selection
+    shapes — sending both, or neither, raises :class:`LaunchError` before any
+    launch, because the two map to *different* orchestrator flags and there is no
+    safe way to guess which the caller meant:
 
-    - ``default`` — inherit the orchestrator's configuration; pass no
-      profile/model/effort flags. Append ``--backend`` only when a backend was
-      explicitly selected (``spec.backend`` set); a fully inherited backend
-      (``None``) is omitted too.
-    - ``standard``/``excellent`` — require an explicit backend and pass only
-      ``--backend <b> --profile <mode>``; the resolved role flags are never
-      repeated.
-    - ``custom`` — require an explicit backend and complete role values; pass
-      explicit ``--dev-model``/``--dev-effort``/``--review-model``/
-      ``--review-effort``. ``--dev-agent`` is cc-codex-only and never sent to
-      Cursor.
+    - ``dev_mode``/``review_mode`` — the independent per-role selection
+      (:func:`_split_role_args`), emitting ``--dev-profile``/``--review-profile``
+      and only the selected role's explicit flags.
+    - ``mode`` — the legacy run-wide selection (:func:`_legacy_mode_args`),
+      emitting the ``--profile`` shorthand, kept verbatim for pre-split callers.
+
+    Both shapes share the backend policy: ``--backend`` is appended whenever a
+    backend was explicitly selected, and inheriting it (``None``) is legal only
+    when nothing but ``default`` was selected — a named/custom role resolves
+    against a backend, so the operator must pin the one they previewed.
 
     The orthogonal launch flags ``--plan-gate``/``--once``/``--max-sessions`` are
     appended in every mode from their own toggles, independent of the profile /
     model selection. Raises :class:`LaunchError` on an unknown mode, a missing
     required field, or a backend-illegal flag.
     """
-    mode = spec.mode
-    if mode not in LAUNCH_MODES:
-        raise LaunchError(f"unknown launch mode {mode!r}")
+    split = spec.dev_mode is not None or spec.review_mode is not None
+    if spec.mode is not None and split:
+        raise LaunchError(
+            "send either the legacy 'mode' or 'dev_mode'/'review_mode', not both"
+        )
     backend = _clean(spec.backend)
     if backend is not None and backend not in BACKENDS:
         raise LaunchError(
             f"unknown backend {backend!r} (expected one of {', '.join(BACKENDS)})"
         )
 
-    args: list[str] = []
-    if mode == MODE_DEFAULT:
-        # Inherit everything. Append --backend only when explicitly selected.
-        if backend is not None:
-            args += ["--backend", backend]
-    elif mode in (MODE_STANDARD, MODE_EXCELLENT):
-        if backend is None:
-            raise LaunchError(f"{mode} launch requires an explicit backend")
-        args += ["--backend", backend, "--profile", mode]
-    else:  # MODE_CUSTOM
-        if backend is None:
-            raise LaunchError("custom launch requires an explicit backend")
-        args += ["--backend", backend]
-        dev_agent = _clean(spec.dev_agent)
-        if dev_agent is not None:
-            if dev_agent not in DEV_AGENTS:
-                raise LaunchError(
-                    f"unknown dev agent {dev_agent!r}"
-                    f" (expected one of {', '.join(DEV_AGENTS)})"
-                )
-            if backend != "cc-codex":
-                raise LaunchError(
-                    "--dev-agent applies only to the cc-codex backend"
-                )
-            args += ["--dev-agent", dev_agent]
-        args += [
-            "--dev-model", _require(spec.dev_model, "dev model"),
-            "--dev-effort", _require(spec.dev_effort, "dev effort"),
-            "--review-model", _require(spec.review_model, "review model"),
-            "--review-effort", _require(spec.review_effort, "review effort"),
-        ]
+    if split:
+        args = _split_role_args(spec, backend)
+    elif spec.mode is not None:
+        args = _legacy_mode_args(spec, backend)
+    else:
+        raise LaunchError(
+            "launch selection requires 'dev_mode'/'review_mode' or legacy 'mode'"
+        )
 
     # Orthogonal launch flags, honored in every mode from their own toggles.
     if spec.plan_gate:
@@ -357,6 +394,106 @@ def build_launch_args(spec: LaunchSpec) -> tuple[str, ...]:
             raise LaunchError("max sessions must be a positive integer")
         args += ["--max-sessions", str(spec.max_sessions)]
     return tuple(args)
+
+
+def _split_role_args(spec: LaunchSpec, backend: str | None) -> list[str]:
+    """Flags for an independent DEV/REVIEW selection (the split Start dialog).
+
+    Each role contributes only its own flags, so every combination composes:
+    ``default`` emits nothing (the orchestrator inherits — and since the split
+    path never sends the run-wide ``--profile``, there is nothing to clear with
+    an explicit ``--dev-profile default``), ``standard``/``excellent`` emit that
+    role's profile flag, and ``custom`` emits that role's explicit values.
+
+    A custom cc-codex DEV must carry its complete ``agent``/``model``/``effort``
+    tuple: the orchestrator resolves an omitted ``--dev-agent`` from
+    profile/env/config, which would silently pair the operator's model and effort
+    with a *different* agent than the preview showed. Cursor has no separate dev
+    agent and rejects the flag outright. A custom REVIEW is model/effort only.
+    """
+    dev_mode = spec.dev_mode or MODE_DEFAULT
+    review_mode = spec.review_mode or MODE_DEFAULT
+    for role, mode in (("dev", dev_mode), ("review", review_mode)):
+        if mode not in LAUNCH_MODES:
+            raise LaunchError(f"unknown {role} launch mode {mode!r}")
+    if backend is None and (dev_mode != MODE_DEFAULT or review_mode != MODE_DEFAULT):
+        raise LaunchError(
+            "a named or custom role profile requires an explicit backend"
+        )
+
+    args: list[str] = []
+    if backend is not None:
+        args += ["--backend", backend]
+
+    if dev_mode in NAMED_PROFILE_MODES:
+        args += ["--dev-profile", dev_mode]
+    elif dev_mode == MODE_CUSTOM:
+        dev_agent = _clean(spec.dev_agent)
+        if backend == "cc-codex":
+            args += ["--dev-agent", _dev_agent(_require(dev_agent, "dev agent"))]
+        elif dev_agent is not None:
+            raise LaunchError("--dev-agent applies only to the cc-codex backend")
+        args += [
+            "--dev-model", _require(spec.dev_model, "dev model"),
+            "--dev-effort", _require(spec.dev_effort, "dev effort"),
+        ]
+
+    if review_mode in NAMED_PROFILE_MODES:
+        args += ["--review-profile", review_mode]
+    elif review_mode == MODE_CUSTOM:
+        args += [
+            "--review-model", _require(spec.review_model, "review model"),
+            "--review-effort", _require(spec.review_effort, "review effort"),
+        ]
+    return args
+
+
+def _legacy_mode_args(spec: LaunchSpec, backend: str | None) -> list[str]:
+    """Flags for the legacy run-wide ``mode`` selection, unchanged since split.
+
+    Kept exactly as pre-split API callers rely on it: ``standard``/``excellent``
+    stay the ``--profile`` shorthand (which the orchestrator still applies to
+    both roles), and ``custom`` keeps its optional ``--dev-agent`` — the stricter
+    complete-tuple rule applies only to the new split shape, which is the one the
+    dialog previews per role.
+    """
+    mode = spec.mode
+    if mode not in LAUNCH_MODES:
+        raise LaunchError(f"unknown launch mode {mode!r}")
+
+    args: list[str] = []
+    if mode == MODE_DEFAULT:
+        # Inherit everything. Append --backend only when explicitly selected.
+        if backend is not None:
+            args += ["--backend", backend]
+        return args
+    if backend is None:
+        raise LaunchError(f"{mode} launch requires an explicit backend")
+    args += ["--backend", backend]
+    if mode in NAMED_PROFILE_MODES:
+        args += ["--profile", mode]
+        return args
+
+    dev_agent = _clean(spec.dev_agent)
+    if dev_agent is not None:
+        if backend != "cc-codex":
+            raise LaunchError("--dev-agent applies only to the cc-codex backend")
+        args += ["--dev-agent", _dev_agent(dev_agent)]
+    args += [
+        "--dev-model", _require(spec.dev_model, "dev model"),
+        "--dev-effort", _require(spec.dev_effort, "dev effort"),
+        "--review-model", _require(spec.review_model, "review model"),
+        "--review-effort", _require(spec.review_effort, "review effort"),
+    ]
+    return args
+
+
+def _dev_agent(value: str) -> str:
+    if value not in DEV_AGENTS:
+        raise LaunchError(
+            f"unknown dev agent {value!r} (expected one of {', '.join(DEV_AGENTS)})"
+        )
+    return value
 
 
 def _clean(value: str | None) -> str | None:
