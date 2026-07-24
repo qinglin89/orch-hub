@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-07-24
+verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
 ---
 
 # APIs and Interfaces
@@ -8,5 +8,8 @@ verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
 | File | Contains |
 |---|---|
 | cli.md | Public CLI commands and operational behavior |
-| http.md | HTTP routes, auth behavior, dashboard contracts, and current app behavior |
+| http-core.md | Health, shell, repo/task/usage/orchestrator-config routes, auth and current app behavior |
+| http-runs.md | Run lifecycle, history, session/effective-config, log, and escalation routes |
+| http-evaluation.md | Evaluation availability, doctor, evidence/metrics, and semantic-job routes |
+| http-intake.md | Remote intake lifecycle routes |
 | internal.md | Internal interfaces and API conventions |
