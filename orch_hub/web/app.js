@@ -1638,14 +1638,17 @@
     // Start opens a launch-options dialog rather than launching immediately. The
     // dialog is driven by the repo's OWN deployed orchestrator: on open it queries
     // GET /api/repos/{repo}/orchestrator-config (`--print-config`) and shows the
-    // resolved model/effort values for the selected Mode + Backend, so orch-hub
-    // never hardcodes model policy. Four modes: Default (inherit the orchestrator
-    // config), Standard / Excellent (named profiles), and Custom (explicit
-    // overrides). Preset modes are read-only; only Custom exposes editable role
-    // fields. The launch payload is the structured `launch` object — the server
-    // turns it into argv via build_launch_args, so the four-mode/backend rules
-    // live in one tested place. The plan-gate toggle is orthogonal to mode and
-    // stays available in every mode. The blocked-task acknowledgement moves inside
+    // resolved model/effort values for the selected Backend + role profiles, so
+    // orch-hub never hardcodes model policy. DEV and REVIEW select independently
+    // from the same four modes: Default (inherit the orchestrator config),
+    // Standard / Excellent (named profiles), and Custom (explicit overrides). A
+    // preset role is read-only; only a Custom role exposes editable fields, and
+    // only for that role. Backend stays shared — one run has one backend. The
+    // launch payload is the structured `launch` object carrying
+    // `dev_mode`/`review_mode`; the server turns it into argv via
+    // build_launch_args, so the per-role/backend rules live in one tested place.
+    // The plan-gate toggle is orthogonal to the role selections and stays
+    // available in every mode. The blocked-task acknowledgement moves inside
     // the dialog, so it is confirmed together with the launch. Only one options
     // dialog is on the page at a time, so fixed field ids are safe; the modal is
     // named by its own heading through aria-labelledby.
@@ -1660,16 +1663,9 @@
       }">
           <h3 id="run-options-title">Start run</h3>
           <p class="muted opts-note">Values come from this repo's deployed
-            orchestrator. Preset modes are read-only; Custom overrides applicable
+            orchestrator. DEV and REVIEW pick their profile independently; preset
+            profiles are read-only and Custom overrides that role's applicable
             fields.</p>
-          <label for="opt-mode">Mode
-            <select id="opt-mode" class="opt-mode">
-              <option value="default">Default</option>
-              <option value="standard">Standard</option>
-              <option value="excellent">Excellent</option>
-              <option value="custom">Custom</option>
-            </select>
-          </label>
           <label for="opt-backend">Backend
             <select id="opt-backend" class="opt-backend">
               <option value="">Inherit (orchestrator default)</option>
@@ -1677,6 +1673,10 @@
               <option value="cc-codex">cc-codex</option>
             </select>
           </label>
+          <div class="role-modes">
+            ${roleModeField("dev", "DEV")}
+            ${roleModeField("review", "REVIEW")}
+          </div>
           <p class="muted profiles-note" role="status"></p>
           <div class="config-panel" data-state="idle"></div>
           <label class="opt-toggle"><input type="checkbox" class="opt-plan-gate" />
@@ -1715,10 +1715,12 @@
     const startForm = document.querySelector(".start-form");
     if (startForm) {
       startForm.addEventListener("submit", onStartSubmit);
-      // Mode / backend changes re-query the orchestrator and repaint the panel.
-      const modeSel = startForm.querySelector(".opt-mode");
+      // A role or backend change re-queries the orchestrator and repaints the
+      // panel; the Custom fields inside the panel deliberately do not (below).
+      startForm.querySelectorAll(".opt-role-mode").forEach((sel) => {
+        sel.addEventListener("change", onLaunchRoleChange);
+      });
       const backendSel = startForm.querySelector(".opt-backend");
-      if (modeSel) modeSel.addEventListener("change", onLaunchModeChange);
       if (backendSel)
         backendSel.addEventListener("change", onLaunchBackendChange);
     }
@@ -1730,24 +1732,48 @@
   // back instead of dropping the keyboard user at the top of the document.
   let dialogOpener = null;
 
-  // Live launch-dialog state, reset on each open. `mode`/`backend` mirror the two
-  // selects (backend "" = inherit); `config` is the last EffectiveConfig the
-  // orchestrator returned for the current selection; `available` is its
-  // available_profiles; `resolved` is the orchestrator's own configured backend
-  // (learned from the inherit query), used to seed an explicit backend when a
-  // preset/custom mode needs one. `gen` guards against a slow earlier query
-  // painting over a newer selection; `cache` avoids re-querying an already-seen
-  // (backend, profile) within one dialog session.
+  // Live launch-dialog state, reset on each open. `dev`/`review`/`backend` mirror
+  // the three selects (backend "" = inherit); `config` is the last EffectiveConfig
+  // the orchestrator returned for the current selection; `available` is its
+  // available_profiles; `split` is the deployment's per-role-profile capability
+  // as reported by the query (`false` gates the whole split dialog); `resolved` is
+  // the orchestrator's own configured backend (learned from the inherit query),
+  // used to seed an explicit backend when a role stops being Default; `custom`
+  // holds the operator's local per-role edits so a repaint cannot wipe them.
+  // `gen` guards against a slow earlier query painting over a newer selection;
+  // `cache` avoids re-querying an already-seen (backend, dev, review) within one
+  // dialog session.
   let launchCfg = null;
 
+  // The four launch modes, offered per role. Mirrors orch_config.LAUNCH_MODES.
+  const LAUNCH_MODES = ["default", "standard", "excellent", "custom"];
+
+  // The two modes that name an orchestrator profile; the other two are UI-only
+  // and are never sent as --dev-profile/--review-profile.
+  const NAMED_PROFILES = ["standard", "excellent"];
+
   // The committed orchestrator default backend (per the deployed handoff), used
-  // only to seed a preset/custom mode before the first query resolves a real one.
+  // only to seed a non-Default role before the first query resolves a real one.
   const DEFAULT_BACKEND = "cc-codex";
+
+  // One role's profile selector. Both roles offer the same four modes and are
+  // independent; `data-role` carries which role a change belongs to.
+  function roleModeField(key, name) {
+    const options = LAUNCH_MODES.map(
+      (m) =>
+        `<option value="${m}">${m.charAt(0).toUpperCase()}${m.slice(1)}</option>`
+    ).join("");
+    return (
+      `<label for="opt-${key}-mode">${name} profile` +
+      `<select id="opt-${key}-mode" class="opt-role-mode" data-role="${key}">` +
+      `${options}</select></label>`
+    );
+  }
 
   const orchConfigPath = (repo) =>
     "/api/repos/" + encodeURIComponent(repo) + "/orchestrator-config";
 
-  // Open the options dialog. Reset the two selects + state, kick the initial
+  // Open the options dialog. Reset the three selects + state, kick the initial
   // Default query (fire-and-forget — the panel paints when it resolves), then
   // prefer the native modal (which scopes focus and handles Escape); fall back to
   // a plain open attribute on the rare browser without <dialog>.showModal,
@@ -1756,23 +1782,31 @@
     dialogOpener = opener || null;
     const form = dialog.querySelector(".start-form");
     if (form) {
-      const modeSel = form.querySelector(".opt-mode");
+      form.querySelectorAll(".opt-role-mode").forEach((sel) => {
+        sel.value = "default";
+        sel.disabled = false;
+      });
       const backendSel = form.querySelector(".opt-backend");
-      if (modeSel) modeSel.value = "default";
       if (backendSel) backendSel.value = "";
       launchCfg = {
         repo: form.dataset.repo,
-        mode: "default",
+        dev: "default",
+        review: "default",
         backend: "",
         config: null,
         available: [],
+        split: null, // unknown until the first query answers
         resolved: DEFAULT_BACKEND,
         loading: false,
         error: null,
         gen: 0,
         cache: {},
+        custom: { dev: {}, review: {} },
       };
       syncInheritOption();
+      // Both roles start Default, so this first query sends no role parameters:
+      // an older deployment that cannot take --dev-profile/--review-profile can
+      // still answer it, and its response is what reveals the capability.
       refreshLaunchConfig();
     }
     if (typeof dialog.showModal === "function") {
@@ -1794,73 +1828,97 @@
     }
   }
 
-  // Mode changed: a preset/custom mode needs an explicit backend, so seed one
-  // from the resolved default when the user is still on Inherit, then re-query.
-  function onLaunchModeChange() {
+  // One role's profile changed. Roles are independent, so only this role's
+  // selection moves; leaving Custom drops that role's local edits so re-entering
+  // Custom re-seeds from the orchestrator instead of resurrecting stale text.
+  // Then re-query for the whole (backend, dev, review) selection at once.
+  function onLaunchRoleChange(ev) {
     if (!launchCfg) return;
-    const modeSel = document.querySelector(".opt-mode");
-    const backendSel = document.querySelector(".opt-backend");
-    launchCfg.mode = modeSel ? modeSel.value : "default";
-    if (launchCfg.mode !== "default" && !launchCfg.backend) {
-      launchCfg.backend = launchCfg.resolved || DEFAULT_BACKEND;
-      if (backendSel) backendSel.value = launchCfg.backend;
-    }
+    const select = ev.currentTarget;
+    const role = select.dataset.role;
+    if (role !== "dev" && role !== "review") return;
+    launchCfg[role] = select.value;
+    if (select.value !== "custom") launchCfg.custom[role] = {};
+    seedBackend();
     syncInheritOption();
     refreshLaunchConfig();
   }
 
-  // Backend changed: re-query for the new backend. Inherit is only valid for
-  // Default, so a manual pick of it in a preset/custom mode reverts to an
+  // Backend changed: re-query for the new backend. Inherit is only valid when
+  // both roles are Default, so a manual pick of it otherwise reverts to an
   // explicit backend (belt-and-suspenders with the disabled Inherit option).
   function onLaunchBackendChange() {
     if (!launchCfg) return;
     const backendSel = document.querySelector(".opt-backend");
     launchCfg.backend = backendSel ? backendSel.value : "";
-    if (launchCfg.mode !== "default" && !launchCfg.backend) {
-      launchCfg.backend = launchCfg.resolved || DEFAULT_BACKEND;
-      if (backendSel) backendSel.value = launchCfg.backend;
-    }
+    seedBackend();
     refreshLaunchConfig();
   }
 
-  // The Inherit backend option applies only to Default (a preset/custom launch
-  // needs an explicit backend — build_launch_args rejects an inherited one).
-  // Disable it elsewhere so it cannot be picked.
-  function syncInheritOption() {
-    const opt = document.querySelector('.opt-backend option[value=""]');
-    if (opt) opt.disabled = !!launchCfg && launchCfg.mode !== "default";
+  // Both roles Default is the only selection that may inherit the backend
+  // (build_launch_args rejects an inherited backend once any role is named or
+  // custom, since that role resolves against one). Pin the resolved backend the
+  // moment a role leaves Default.
+  function allRolesDefault() {
+    return (
+      !!launchCfg && launchCfg.dev === "default" && launchCfg.review === "default"
+    );
   }
 
-  // Query the orchestrator for the current (mode, backend) and repaint the panel.
-  // Default/Custom omit --profile; Standard/Excellent pass it. A newer selection
-  // (bumped gen) makes a slower earlier response inert. A query failure disables
-  // Launch and surfaces the orchestrator's own error — never a hub default.
+  function seedBackend() {
+    if (!launchCfg || allRolesDefault() || launchCfg.backend) return;
+    launchCfg.backend = launchCfg.resolved || DEFAULT_BACKEND;
+    const backendSel = document.querySelector(".opt-backend");
+    if (backendSel) backendSel.value = launchCfg.backend;
+  }
+
+  function syncInheritOption() {
+    const opt = document.querySelector('.opt-backend option[value=""]');
+    if (opt) opt.disabled = !!launchCfg && !allRolesDefault();
+  }
+
+  // The profile flag a role selection sends, or "" for the two UI-only modes:
+  // Default inherits and Custom overrides after resolving against the inherited
+  // role, so neither names a profile.
+  function namedProfile(mode) {
+    return NAMED_PROFILES.indexOf(mode) === -1 ? "" : mode;
+  }
+
+  // Query the orchestrator for the current (backend, dev, review) and repaint the
+  // panel. Both role selections go into ONE query, so the preview is a single
+  // coherent configuration: a Custom role is asked for as inherited while the
+  // other role's named profile still applies, which is exactly what its editable
+  // fields are seeded from. A newer selection (bumped gen) makes a slower earlier
+  // response inert. A query failure disables Launch and surfaces the
+  // orchestrator's own error — never a hub default.
   async function refreshLaunchConfig() {
     const st = launchCfg;
     if (!st) return;
     const gen = ++st.gen;
     const backend = st.backend; // "" = inherit
-    const profile =
-      st.mode === "standard" || st.mode === "excellent" ? st.mode : "";
+    const devProfile = namedProfile(st.dev);
+    const reviewProfile = namedProfile(st.review);
     st.loading = true;
     st.error = null;
     renderConfigPanel();
-    const key = backend + "|" + profile;
+    const key = backend + "|" + devProfile + "|" + reviewProfile;
     if (st.cache[key]) {
-      applyConfig(st, st.cache[key], backend, profile);
+      applyConfig(st, st.cache[key], backend, devProfile, reviewProfile);
       renderConfigPanel();
       return;
     }
     let url = orchConfigPath(st.repo);
     const qs = [];
     if (backend) qs.push("backend=" + encodeURIComponent(backend));
-    if (profile) qs.push("profile=" + encodeURIComponent(profile));
+    if (devProfile) qs.push("dev_profile=" + encodeURIComponent(devProfile));
+    if (reviewProfile)
+      qs.push("review_profile=" + encodeURIComponent(reviewProfile));
     if (qs.length) url += "?" + qs.join("&");
     try {
       const config = await api(url);
       if (gen !== st.gen) return; // a newer selection owns the panel now
       st.cache[key] = config;
-      applyConfig(st, config, backend, profile);
+      applyConfig(st, config, backend, devProfile, reviewProfile);
       renderConfigPanel();
     } catch (err) {
       if (gen !== st.gen) return;
@@ -1876,16 +1934,22 @@
   }
 
   // Fold a successful query into state: store the config + available profiles,
-  // remember the resolved backend from the inherit query (to seed preset modes),
-  // and refresh the mode-option availability.
-  function applyConfig(st, config, backend, profile) {
+  // record the per-role-profile capability, remember the resolved backend from
+  // the inherit query (to seed a role leaving Default), and refresh the role
+  // selectors. `split_profiles` is a capability, not a value: an older
+  // deployment omits the orchestrator's `profiles` object entirely and the
+  // server reports false after DERIVING both roles from the run-wide profile, so
+  // anything but an explicit true keeps split selection closed.
+  function applyConfig(st, config, backend, devProfile, reviewProfile) {
     st.loading = false;
     st.error = null;
     st.config = config;
     st.available = Array.isArray(config.available_profiles)
       ? config.available_profiles
       : [];
-    if (!backend && !profile && config.backend) st.resolved = config.backend;
+    st.split = config.split_profiles === true;
+    if (!backend && !devProfile && !reviewProfile && config.backend)
+      st.resolved = config.backend;
     syncModeAvailability();
   }
 
@@ -1899,11 +1963,30 @@
     return agent + (role.model || "—") + " @ " + (role.effort || "—");
   }
 
-  // One role as a single compact row. Read-only modes show static
-  // `model @ effort` text; Custom shares the row between individually-labelled
-  // model and effort inputs (a dev-agent select leads the row for cc-codex), with
-  // a decorative `@` between them. The labels are visually hidden but real, so
-  // each control is named for assistive tech without stacking the row.
+  // The values a Custom role's fields show: the orchestrator's resolved config
+  // for that role, overlaid with whatever the operator has already typed. The
+  // overlay is what survives a repaint triggered by an unrelated selection
+  // change; leaving Custom clears it, so re-entering re-seeds from the query.
+  function customRoleValues(key, role) {
+    return Object.assign({}, role || {}, launchCfg.custom[key] || {});
+  }
+
+  // Remember a Custom field edit as local state. Deliberately does NOT re-query:
+  // the orchestrator resolves profiles, not the operator's explicit overrides.
+  function onCustomFieldInput(ev) {
+    const el = ev.currentTarget;
+    if (!launchCfg || !el.dataset.role || !el.dataset.field) return;
+    const edits = launchCfg.custom[el.dataset.role];
+    if (edits) edits[el.dataset.field] = el.value;
+  }
+
+  // One role as a single compact row. A preset role shows static
+  // `model @ effort` text; a Custom role shares the row between individually-
+  // labelled model and effort inputs (a dev-agent select leads the row for
+  // cc-codex), with a decorative `@` between them. The labels are visually
+  // hidden but real, so each control is named for assistive tech without
+  // stacking the row. Only the role whose own selector says Custom becomes
+  // editable — the other role stays read-only in the same panel.
   function roleRow(name, key, role, custom) {
     role = role || {};
     if (!custom) {
@@ -1912,32 +1995,39 @@
         `<span class="role-val">${escapeHtml(roleValueText(role))}</span></div>`
       );
     }
+    const values = customRoleValues(key, role);
     const backend = launchCfg.backend || launchCfg.resolved;
+    // A split-mode custom cc-codex DEV must send its complete agent/model/effort
+    // tuple (build_launch_args requires it), so there is no "inherit" choice
+    // here: an unshown agent resolved from profile/env/config would silently
+    // pair with the typed model. Cursor has no separate dev agent at all.
     const agentSel =
       key === "dev" && backend === "cc-codex"
         ? `<label class="visually-hidden" for="opt-dev-agent">Dev agent</label>` +
-          `<select id="opt-dev-agent" class="opt-dev-agent role-agent">` +
-          `<option value="">inherit</option>` +
-          `<option value="claude"${
-            role.agent === "claude" ? " selected" : ""
-          }>claude</option>` +
-          `<option value="codex"${
-            role.agent === "codex" ? " selected" : ""
-          }>codex</option>` +
+          `<select id="opt-dev-agent" class="opt-dev-agent role-agent role-edit"` +
+          ` data-role="dev" data-field="agent">` +
+          ["claude", "codex"]
+            .map(
+              (a) =>
+                `<option value="${a}"${
+                  values.agent === a ? " selected" : ""
+                }>${a}</option>`
+            )
+            .join("") +
           `</select>`
         : "";
+    const field = (suffix, label, value, placeholder) =>
+      `<label class="visually-hidden" for="opt-${key}-${suffix}">${name} ${label}</label>` +
+      `<input id="opt-${key}-${suffix}" class="opt-${key}-${suffix} role-${suffix} role-edit"` +
+      ` data-role="${key}" data-field="${suffix}" type="text"` +
+      ` autocapitalize="off" autocomplete="off" spellcheck="false"` +
+      ` value="${escapeHtml(value || "")}" placeholder="${placeholder}" />`;
     return (
       `<div class="role-row role-row-custom"><span class="role-name">${name}</span>` +
       agentSel +
-      `<label class="visually-hidden" for="opt-${key}-model">${name} model</label>` +
-      `<input id="opt-${key}-model" class="opt-${key}-model role-model" type="text"` +
-      ` autocapitalize="off" autocomplete="off" spellcheck="false"` +
-      ` value="${escapeHtml(role.model || "")}" placeholder="model id" />` +
+      field("model", "model", values.model, "model id") +
       `<span class="at" aria-hidden="true">@</span>` +
-      `<label class="visually-hidden" for="opt-${key}-effort">${name} effort</label>` +
-      `<input id="opt-${key}-effort" class="opt-${key}-effort role-effort" type="text"` +
-      ` autocapitalize="off" autocomplete="off" spellcheck="false"` +
-      ` value="${escapeHtml(role.effort || "")}" placeholder="effort" />` +
+      field("effort", "effort", values.effort, "effort") +
       `</div>`
     );
   }
@@ -1991,46 +2081,79 @@
       setLaunchEnabled(false);
       return;
     }
-    panel.dataset.state = "ready";
-    const custom = st.mode === "custom";
+    // An orchestrator that does not report per-role `profiles` cannot take
+    // --dev-profile/--review-profile at all, so the split dialog stays closed:
+    // its legacy configuration still renders (and run history stays readable),
+    // but Launch is disabled rather than guessing at unsupported flags.
+    const unsupported = st.split === false;
+    panel.dataset.state = unsupported ? "unsupported" : "ready";
     const budget =
       `<p class="muted cfg-meta">max sessions ${
         cfg.max_sessions == null ? "—" : escapeHtml(String(cfg.max_sessions))
       } · context budget ${escapeHtml(fmtTokensK(cfg.context_budget) || "—")}</p>`;
     panel.innerHTML =
       '<div class="role-rows">' +
-      roleRow("DEV", "dev", cfg.dev, custom) +
-      roleRow("REVIEW", "review", cfg.review, custom) +
+      roleRow("DEV", "dev", cfg.dev, !unsupported && st.dev === "custom") +
+      roleRow(
+        "REVIEW",
+        "review",
+        cfg.review,
+        !unsupported && st.review === "custom"
+      ) +
       "</div>" +
       budget +
-      sourcesDetails(cfg.sources);
-    setLaunchEnabled(true);
+      sourcesDetails(cfg.sources) +
+      (unsupported
+        ? `<p class="error-text cfg-status" role="status">Launch is disabled:
+           redeploy this repo's orchestrator payload to start runs from the
+           dashboard.</p>`
+        : "");
+    // Custom fields are local state: keep typed values in the dialog state so an
+    // unrelated re-query's repaint cannot wipe them, without re-querying on input.
+    panel.querySelectorAll(".role-edit").forEach((el) => {
+      el.addEventListener("input", onCustomFieldInput);
+      el.addEventListener("change", onCustomFieldInput);
+    });
+    setLaunchEnabled(!unsupported);
   }
 
-  // Reflect available_profiles onto the Mode options: disable Standard/Excellent
-  // the orchestrator does not offer (never silently falling back to Default) and
-  // spell out what is available in the note line.
+  // Reflect the query onto the two role selectors. A deployment without per-role
+  // profile capability disables both outright (with redeploy guidance); otherwise
+  // Standard/Excellent the orchestrator does not offer are disabled per role,
+  // never silently falling back to Default, and the note spells out what is
+  // available.
   function syncModeAvailability() {
     const st = launchCfg;
     if (!st) return;
-    const modeSel = document.querySelector(".opt-mode");
-    if (modeSel) {
-      for (const m of ["standard", "excellent"]) {
-        const opt = modeSel.querySelector('option[value="' + m + '"]');
+    const selects = document.querySelectorAll(".opt-role-mode");
+    const note = document.querySelector(".profiles-note");
+    if (st.split === false) {
+      selects.forEach((sel) => {
+        sel.disabled = true;
+      });
+      if (note)
+        note.textContent =
+          "This repo's deployed orchestrator does not report per-role profiles;" +
+          " redeploy it to select DEV and REVIEW independently.";
+      return;
+    }
+    selects.forEach((sel) => {
+      sel.disabled = false;
+      for (const m of NAMED_PROFILES) {
+        const opt = sel.querySelector('option[value="' + m + '"]');
         if (!opt) continue;
         const ok = st.available.indexOf(m) !== -1;
         opt.disabled = !ok;
         opt.textContent =
           m.charAt(0).toUpperCase() + m.slice(1) + (ok ? "" : " (unavailable)");
       }
-    }
-    const note = document.querySelector(".profiles-note");
+    });
     if (note) {
-      const offered = ["standard", "excellent"].filter(
+      const offered = NAMED_PROFILES.filter(
         (m) => st.available.indexOf(m) !== -1
       );
       note.textContent = offered.length
-        ? "Named profiles available: " + offered.join(", ") + "."
+        ? "Named profiles available per role: " + offered.join(", ") + "."
         : "This orchestrator exposes no named profiles; Standard and Excellent are unavailable.";
     }
   }
@@ -2041,45 +2164,55 @@
   }
 
   // Build the structured `launch` payload for POST /api/runs from the dialog
-  // state. The server turns it into orchestrator argv (build_launch_args), so the
-  // four-mode/backend rules live in one tested place, not here. Default omits the
-  // backend when inheriting; preset modes pass the explicit backend + profile;
-  // Custom passes the explicit backend, applicable dev-agent, and the four role
-  // model/effort values. Plan-gate is orthogonal and honored in every mode.
-  // Returns null (after writing an inline message) when a required Custom field is
-  // blank, so a run is never posted with an incomplete override set.
+  // state. The dialog is a split-shape caller: it always sends the independent
+  // `dev_mode`/`review_mode` (never the legacy run-wide `mode`, which stays for
+  // pre-split API callers), and the server turns the selection into orchestrator
+  // argv through build_launch_args, so the per-role/backend rules live in one
+  // tested place, not here. Backend is shared and omitted only while both roles
+  // inherit; each Custom role contributes its own explicit values. Plan-gate is
+  // orthogonal and honored in every mode. Returns null (after writing an inline
+  // message) when a required Custom field is blank, so a run is never posted with
+  // an incomplete override set.
   function buildLaunchPayload(form, statusEl) {
     const st = launchCfg;
-    const launch = { mode: st.mode };
-    if (st.mode === "default") {
-      if (st.backend) launch.backend = st.backend;
-    } else {
+    const launch = { dev_mode: st.dev, review_mode: st.review };
+    if (!allRolesDefault()) {
       launch.backend = st.backend || st.resolved || DEFAULT_BACKEND;
+    } else if (st.backend) {
+      launch.backend = st.backend;
     }
-    if (st.mode === "custom") {
-      const val = (cls) => {
-        const el = form.querySelector("." + cls);
-        return el ? el.value.trim() : "";
-      };
-      const devAgentEl = form.querySelector(".opt-dev-agent");
-      const devAgent = devAgentEl ? devAgentEl.value : "";
-      if (devAgent) launch.dev_agent = devAgent;
-      const devModel = val("opt-dev-model");
-      const devEffort = val("opt-dev-effort");
-      const reviewModel = val("opt-review-model");
-      const reviewEffort = val("opt-review-effort");
-      if (!devModel || !devEffort || !reviewModel || !reviewEffort) {
-        if (statusEl) {
-          statusEl.classList.add("error-text");
-          statusEl.textContent =
-            "Custom needs a model and effort for both dev and review.";
-        }
-        return null;
+    const refuse = (text) => {
+      if (statusEl) {
+        statusEl.classList.add("error-text");
+        statusEl.textContent = text;
       }
-      launch.dev_model = devModel;
-      launch.dev_effort = devEffort;
-      launch.review_model = reviewModel;
-      launch.review_effort = reviewEffort;
+      return null;
+    };
+    const val = (cls) => {
+      const el = form.querySelector("." + cls);
+      return el ? el.value.trim() : "";
+    };
+    if (st.dev === "custom") {
+      // The agent select is rendered only for cc-codex, and it always resolves to
+      // one of its two options — that is how a custom cc-codex DEV carries the
+      // complete tuple build_launch_args requires. Cursor renders no select and
+      // never receives --dev-agent.
+      const devAgent = val("opt-dev-agent");
+      if (devAgent) launch.dev_agent = devAgent;
+      const model = val("opt-dev-model");
+      const effort = val("opt-dev-effort");
+      if (!model || !effort)
+        return refuse("Custom DEV needs a model and an effort.");
+      launch.dev_model = model;
+      launch.dev_effort = effort;
+    }
+    if (st.review === "custom") {
+      const model = val("opt-review-model");
+      const effort = val("opt-review-effort");
+      if (!model || !effort)
+        return refuse("Custom REVIEW needs a model and an effort.");
+      launch.review_model = model;
+      launch.review_effort = effort;
     }
     const planGate = form.querySelector(".opt-plan-gate");
     if (planGate && planGate.checked) launch.plan_gate = true;
@@ -2464,20 +2597,49 @@
     return s.length > 12 ? s.slice(0, 12) + "…" : s;
   }
 
+  // The profile each role actually launched with, as a display label. The
+  // orchestrator's `profiles` object is authoritative when present; an older
+  // snapshot carries only the run-wide `profile`, so both roles derive from it
+  // (a legacy run applied one selection to both roles, so that reads correctly).
+  // The new top-level `profile` is NOT reinterpreted — it stays the run-wide
+  // selector and is normally "default" for a split launch.
+  //
+  // Custom is an orch-hub UI mode, not an orchestrator profile: a custom role
+  // reports `profiles.<role>: "default"` and is distinguishable only by
+  // provenance, where its model came from the command line. Without that check a
+  // Custom run would render as Default.
+  function roleProfileLabels(cfg) {
+    const profiles =
+      cfg.profiles && typeof cfg.profiles === "object" ? cfg.profiles : null;
+    const sources = cfg.sources && typeof cfg.sources === "object" ? cfg.sources : {};
+    const label = (role) => {
+      if (sources[role + ".model"] === "cli") return "custom";
+      const own = profiles ? profiles[role] : null;
+      return (typeof own === "string" && own) || cfg.profile || "—";
+    };
+    return { dev: label("dev"), review: label("review") };
+  }
+
   // The run's authoritative `effective-config:` snapshot — the startup line every
   // real run logs, embedded per-run in the history payload and treated as
   // authoritative if it differs from the Start-dialog preview. Rendered as a
-  // disclosure so a card stays scannable: profile · backend in the summary, then
-  // the resolved DEV/REVIEW roles, config/effective revisions, and provenance
-  // when opened. An absent snapshot (a pre-field or unparsed run) renders nothing.
+  // disclosure so a card stays scannable: the role profiles · backend in the
+  // summary (collapsed to one label when both roles match, which is every legacy
+  // run), then each role's profile + resolved values, config/effective revisions,
+  // and provenance when opened. An absent snapshot (a pre-field or unparsed run)
+  // renders nothing.
   function effectiveConfigBlock(cfg) {
     if (!cfg || typeof cfg !== "object") return "";
-    const summary = escapeHtml((cfg.profile || "?") + " · " + (cfg.backend || "?"));
+    const profiles = roleProfileLabels(cfg);
+    const roleSummary =
+      profiles.dev === profiles.review
+        ? profiles.dev
+        : "dev " + profiles.dev + " · review " + profiles.review;
+    const summary = escapeHtml(roleSummary + " · " + (cfg.backend || "?"));
     const rows = [
-      ["profile", cfg.profile || "—"],
       ["backend", cfg.backend || "—"],
-      ["dev", roleValueText(cfg.dev)],
-      ["review", roleValueText(cfg.review)],
+      ["dev", profiles.dev + " · " + roleValueText(cfg.dev)],
+      ["review", profiles.review + " · " + roleValueText(cfg.review)],
       ["config rev", shortRev(cfg.config_revision)],
       ["effective rev", shortRev(cfg.effective_revision)],
     ];

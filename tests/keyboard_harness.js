@@ -796,14 +796,17 @@ var TASK = "2026-07-17-demo";
 var RUN = "run-1";
 
 // A representative --print-config response for the launch-dialog query. The
-// harness fetch strips the query string, so every (backend, profile) variation
-// resolves to this same object; the recorded request `url` carries the params
-// the dialog actually asked for.
+// harness fetch strips the query string, so every (backend, dev, review)
+// variation resolves to this same object; the recorded request `url` carries the
+// params the dialog actually asked for. `profiles` + `split_profiles: true` is a
+// deployment that understands --dev-profile/--review-profile.
 var ORCH_CONFIG = {
   schema_version: 1,
   config_revision: "cfg00000000aaaa1111",
   effective_revision: "eff00000000bbbb2222",
   profile: "default",
+  profiles: { dev: "default", review: "default" },
+  split_profiles: true,
   available_profiles: ["standard", "excellent"],
   backend: "cc-codex",
   dev: { agent: "claude", model: "claude-opus-4-8", effort: "max" },
@@ -817,6 +820,14 @@ var ORCH_CONFIG = {
   plan_gate: false,
   control_dir: null,
 };
+
+// The same query answered by an orchestrator deployment that predates split role
+// profiles: no `profiles` object, so the server derives both roles from the
+// run-wide `profile` and reports the capability as absent.
+var ORCH_CONFIG_LEGACY = Object.assign({}, ORCH_CONFIG, {
+  profiles: { dev: "default", review: "default" },
+  split_profiles: false,
+});
 
 var REPOS = {
   repos: [
@@ -1404,15 +1415,32 @@ async function scenarioRunOptions() {
     !!lastCall("GET", "/api/repos/" + REPO + "/orchestrator-config"),
     "no orchestrator-config GET recorded"
   );
-  var mode = doc.getElementById("opt-mode");
+  // The capability probe: the dialog opens with both roles Default, so its FIRST
+  // query carries no role parameters — an older deployment that cannot take
+  // --dev-profile/--review-profile can still answer it.
+  eq(
+    "dialog: the opening query sends no role profile parameters",
+    lastConfigUrl(),
+    "/api/repos/" + REPO + "/orchestrator-config"
+  );
+  var devMode = doc.getElementById("opt-dev-mode");
+  var reviewMode = doc.getElementById("opt-review-mode");
   var backend = doc.getElementById("opt-backend");
-  check("dialog: a Mode selector is offered", !!mode, "no #opt-mode");
+  check("dialog: a DEV profile selector is offered", !!devMode, "no #opt-dev-mode");
+  check("dialog: a REVIEW profile selector is offered", !!reviewMode, "no #opt-review-mode");
+  check("dialog: no combined Mode selector remains", doc.getElementById("opt-mode") === null, "#opt-mode still rendered");
   check("dialog: a Backend selector is offered", !!backend, "no #opt-backend");
   eq(
-    "dialog: Mode offers exactly the four launch modes",
-    mode.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
+    "dialog: DEV offers exactly the four launch modes",
+    devMode.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
     "default,standard,excellent,custom"
   );
+  eq(
+    "dialog: REVIEW offers exactly the four launch modes",
+    reviewMode.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
+    "default,standard,excellent,custom"
+  );
+  eq("dialog: Backend stays shared (one select)", doc.querySelectorAll(".opt-backend").length, 1);
   check("dialog: every field has a label", dialogFieldsAreLabelled(dialog), "an option field has no label[for]");
   // Default is read-only: the resolved DEV value is static text from the query,
   // never a hardcoded model id.
@@ -1423,20 +1451,52 @@ async function scenarioRunOptions() {
     devVal ? describe(devVal) : "no .role-val"
   );
 
-  // Switching to a named profile re-queries the orchestrator for that profile
-  // plus an explicit backend (seeded from the resolved default) — never a
-  // hardcoded value, and never a silent fall back to Default.
-  mode.value = "standard";
-  dispatch(mode, new Event("change"));
+  // One role switching to a named profile queries THAT role's profile only, plus
+  // an explicit backend (seeded from the resolved default) — the other role stays
+  // inherited, never silently dragged along.
+  devMode.value = "excellent";
+  dispatch(devMode, new Event("change"));
   await flush();
   var cfgUrl = lastConfigUrl();
   check(
-    "dialog: a profile mode queries --profile with an explicit backend",
+    "dialog: a named DEV profile queries --dev-profile alone",
     !!cfgUrl &&
-      cfgUrl.indexOf("profile=standard") !== -1 &&
+      cfgUrl.indexOf("dev_profile=excellent") !== -1 &&
+      cfgUrl.indexOf("review_profile") === -1 &&
       cfgUrl.indexOf("backend=cc-codex") !== -1,
     cfgUrl
   );
+  // The second role selects independently; one coherent query carries both.
+  reviewMode.value = "standard";
+  dispatch(reviewMode, new Event("change"));
+  await flush();
+  cfgUrl = lastConfigUrl();
+  check(
+    "dialog: mixed roles query both role profiles at once",
+    !!cfgUrl &&
+      cfgUrl.indexOf("dev_profile=excellent") !== -1 &&
+      cfgUrl.indexOf("review_profile=standard") !== -1,
+    cfgUrl
+  );
+  var launchMixed = dialog.querySelector('button[type="submit"]');
+  pressEnter(launchMixed);
+  await flush();
+  var callMixed = lastCall("POST", "/api/runs");
+  eq(
+    "dialog: a mixed launch posts independent role modes",
+    callMixed && JSON.stringify(callMixed.body.launch),
+    JSON.stringify({
+      dev_mode: "excellent",
+      review_mode: "standard",
+      backend: "cc-codex",
+    })
+  );
+
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  open = doc.querySelector(".open-run-options");
+  dialog = doc.querySelector(".run-options");
+  pressEnter(open);
+  await flush();
 
   pressEscape();
   eq("dialog: Escape closes it", dialog.open, false);
@@ -1448,8 +1508,9 @@ async function scenarioRunOptions() {
   eq("dialog: Cancel closes it", dialog.open, false);
   activeIs("dialog: Cancel restores focus to the opener", open);
 
-  // A Default launch with plan-gate posts the structured selection: mode only
-  // (the backend is inherited, so omitted) plus the orthogonal plan-gate flag.
+  // A Default/Default launch with plan-gate posts the structured selection: both
+  // role modes (the backend is inherited, so omitted) plus the orthogonal
+  // plan-gate flag.
   await navigate("#/tasks/" + REPO + "/" + TASK);
   var openD = doc.querySelector(".open-run-options");
   var dialogD = doc.querySelector(".run-options");
@@ -1470,47 +1531,114 @@ async function scenarioRunOptions() {
     callD ? JSON.stringify(callD.body) : "no call"
   );
   eq(
-    "dialog: Default inherits the backend (mode only + plan-gate)",
+    "dialog: Default/Default inherits the backend (role modes + plan-gate)",
     callD && JSON.stringify(callD.body.launch),
-    JSON.stringify({ mode: "default", plan_gate: true })
+    JSON.stringify({
+      dev_mode: "default",
+      review_mode: "default",
+      plan_gate: true,
+    })
   );
   eq("dialog: a successful launch closes it", dialogD.open, false);
 
-  // Custom exposes editable role fields and posts explicit values with an
-  // explicit backend (seeded from the resolved default, cc-codex).
+  // Custom is per role: only the Custom role becomes editable, the other keeps
+  // its read-only preset value, and the query asks for the OTHER role's profile
+  // while the custom one resolves inherited — which is what its fields seed from.
   await navigate("#/tasks/" + REPO + "/" + TASK);
   var openC = doc.querySelector(".open-run-options");
   var dialogC = doc.querySelector(".run-options");
   pressEnter(openC);
   await flush();
-  var modeC = doc.getElementById("opt-mode");
-  modeC.value = "custom";
-  dispatch(modeC, new Event("change"));
+  var devModeC = doc.getElementById("opt-dev-mode");
+  var reviewModeC = doc.getElementById("opt-review-mode");
+  devModeC.value = "custom";
+  dispatch(devModeC, new Event("change"));
+  reviewModeC.value = "standard";
+  dispatch(reviewModeC, new Event("change"));
   await flush();
+  cfgUrl = lastConfigUrl();
+  check(
+    "dialog: a Custom role is queried as inherited under the other role's profile",
+    !!cfgUrl &&
+      cfgUrl.indexOf("dev_profile") === -1 &&
+      cfgUrl.indexOf("review_profile=standard") !== -1,
+    cfgUrl
+  );
   var devModel = doc.getElementById("opt-dev-model");
-  check("dialog: Custom exposes an editable dev model", !!devModel, "no #opt-dev-model in Custom");
+  check("dialog: Custom DEV exposes an editable model", !!devModel, "no #opt-dev-model in Custom DEV");
+  check(
+    "dialog: a preset REVIEW stays read-only beside it",
+    doc.getElementById("opt-review-model") === null &&
+      dialogC.querySelectorAll(".role-val").length === 1,
+    "the REVIEW role rendered editable fields"
+  );
+  eq(
+    "dialog: the Custom DEV model seeds from the query",
+    devModel.value,
+    "claude-opus-4-8"
+  );
   check("dialog: Custom controls are labelled", dialogFieldsAreLabelled(dialogC), "a Custom field has no label[for]");
   type(devModel, "opus");
   type(doc.getElementById("opt-dev-effort"), "high");
-  type(doc.getElementById("opt-review-model"), "gpt");
-  type(doc.getElementById("opt-review-effort"), "xhigh");
+  // Editing is local state: changing the OTHER role re-queries and repaints the
+  // panel, and the typed DEV values must survive that repaint.
+  reviewModeC.value = "excellent";
+  dispatch(reviewModeC, new Event("change"));
+  await flush();
+  eq(
+    "dialog: typed Custom values survive the other role's re-query",
+    doc.getElementById("opt-dev-model").value,
+    "opus"
+  );
   var launchC = dialogC.querySelector('button[type="submit"]');
   pressEnter(launchC);
   await flush();
   var callC = lastCall("POST", "/api/runs");
   eq(
-    "dialog: Custom posts explicit backend + role overrides",
+    "dialog: Custom DEV posts its complete tuple beside a named REVIEW",
     callC && JSON.stringify(callC.body.launch),
     JSON.stringify({
-      mode: "custom",
+      dev_mode: "custom",
+      review_mode: "excellent",
       backend: "cc-codex",
       dev_agent: "claude",
       dev_model: "opus",
       dev_effort: "high",
-      review_model: "gpt",
-      review_effort: "xhigh",
     })
   );
+
+  // An orchestrator deployment that predates split role profiles: it answers the
+  // no-parameter probe, but reports no per-role capability. The dialog must not
+  // attempt --dev-profile/--review-profile — it disables role selection AND
+  // Launch with redeploy guidance, while the legacy config itself still renders.
+  route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG_LEGACY);
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var openL = doc.querySelector(".open-run-options");
+  var dialogL = doc.querySelector(".run-options");
+  pressEnter(openL);
+  await flush();
+  check(
+    "dialog (legacy): both role selectors are disabled",
+    doc.getElementById("opt-dev-mode").disabled === true &&
+      doc.getElementById("opt-review-mode").disabled === true,
+    "a role selector stayed enabled"
+  );
+  check(
+    "dialog (legacy): Launch is disabled",
+    dialogL.querySelector('button[type="submit"]').disabled === true,
+    "Launch stayed enabled on a deployment without role profiles"
+  );
+  check(
+    "dialog (legacy): the note explains the redeploy",
+    doc.querySelector(".profiles-note").textContent.indexOf("redeploy") !== -1,
+    doc.querySelector(".profiles-note").textContent
+  );
+  check(
+    "dialog (legacy): the orchestrator's own config still renders",
+    dialogL.querySelector(".role-val").textContent.indexOf("claude-opus-4-8") !== -1,
+    describe(dialogL.querySelector(".role-val"))
+  );
+  route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG);
 
   // The no-<dialog>.showModal fallback branch: app.js must still open it, focus
   // into it, close on Escape, and hand focus back without the native API.
@@ -2353,12 +2481,66 @@ async function scenarioRunHistory() {
     ],
     context_budget: 200000,
     session_est: { current: 1, total: 2 },
-    effective_config: null,
+    // A split launch: the orchestrator's authoritative `profiles` object plus
+    // the provenance that marks DEV as a Custom (cli-sourced) selection. Its
+    // run-wide `profile` stays "default" and must NOT be reinterpreted.
+    effective_config: {
+      profile: "default",
+      profiles: { dev: "default", review: "standard" },
+      backend: "cc-codex",
+      dev: { agent: "claude", model: "claude-opus-4-8", effort: "max" },
+      review: { agent: "codex", model: "gpt-5.5", effort: "xhigh" },
+      config_revision: "cfg00000000aaaa1111",
+      effective_revision: "eff00000000bbbb2222",
+      sources: { "dev.model": "cli", "review.model": "profile:standard" },
+    },
   };
-  route("GET", "/api/history/runs", { runs: [histRun] });
+  // An older run whose snapshot predates split role profiles: only the run-wide
+  // `profile`, which applied to both roles, so both display from it.
+  var legacyRun = Object.assign({}, histRun, {
+    run_id: RUN + "-legacy",
+    effective_config: {
+      profile: "standard",
+      backend: "cursor",
+      dev: { agent: null, model: "auto", effort: "high" },
+      review: { agent: null, model: "auto", effort: "high" },
+      config_revision: "cfg00000000cccc3333",
+      effective_revision: "eff00000000dddd4444",
+      sources: { "dev.model": "profile:standard" },
+    },
+  });
+  route("GET", "/api/history/runs", { runs: [histRun, legacyRun] });
 
   await navigate("#/runs");
   checkOutline("run history");
+
+  // Both role selections are retained and summarized independently; a legacy
+  // snapshot collapses to the one label its run-wide profile carried.
+  // Each disclosure's OWN summary is its first one in document order; the nested
+  // Provenance disclosure carries the other.
+  var configs = doc.querySelectorAll(".run-config").map(function (d) {
+    return d.querySelectorAll("summary")[0].textContent.trim();
+  });
+  eq("run history: each run keeps its launch-config disclosure", configs.length, 2);
+  eq(
+    "run history: a split run summarizes both roles (Custom read from provenance)",
+    configs[0],
+    "Launch config: dev custom · review standard · cc-codex"
+  );
+  eq(
+    "run history: a legacy snapshot renders both roles from the run-wide profile",
+    configs[1],
+    "Launch config: standard · cursor"
+  );
+  var splitRows = doc.querySelectorAll(".run-config .kv dd").map(function (d) {
+    return d.textContent;
+  });
+  check(
+    "run history: each role row carries its own profile plus resolved values",
+    splitRows.indexOf("custom · claude:claude-opus-4-8 @ max") !== -1 &&
+      splitRows.indexOf("standard · codex:gpt-5.5 @ xhigh") !== -1,
+    splitRows.join(" | ")
+  );
 
   // Inline placement: the action lives inside the rollup (`.task-rollup`), on the
   // same `.roll-top` flex row as the summary metrics — not a standalone

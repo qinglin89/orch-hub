@@ -2197,6 +2197,20 @@ code {
   text-transform: uppercase;
 }
 
+/* DEV and REVIEW pick their profile independently. Two columns when the dialog
+   has the room, one stacked column on a phone; each label keeps its own
+   flex-column label/select shape either way. */
+.run-options .role-modes {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr));
+  gap: 0 12px;
+}
+
+.run-options .role-modes select {
+  width: 100%;
+  min-width: 0;
+}
+
 .run-options input,
 .run-options select {
   font-size: 16px; /* >=16px keeps iOS Safari from zooming on focus */
@@ -2215,15 +2229,15 @@ code {
   margin-top: 4px;
 }
 
-/* Mode/backend availability note under the two selects. */
+/* Per-role profile availability (or the redeploy notice) under the selectors. */
 .run-options .profiles-note {
   margin: -4px 0 12px;
   font-size: 12px;
 }
 
 /* The orchestrator-driven launch-config panel: DEV/REVIEW rows, budget,
-   provenance. Read-only preset modes show static values; Custom makes the role
-   model/effort into inputs sharing one row around a decorative `@`. */
+   provenance. A preset role shows static values; a Custom role makes only its
+   own model/effort into inputs sharing one row around a decorative `@`. */
 .config-panel {
   margin: 2px 0 14px;
 }

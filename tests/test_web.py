@@ -182,22 +182,28 @@ def test_start_reflects_non_runnable_and_not_ready_states():
     assert "not ready to launch" in body
 
 
-# ---- orchestrator-backed launch options (four-mode dialog) ------------------
+# ---- orchestrator-backed launch options (split DEV/REVIEW dialog) -----------
 #
-# Session-2 of the launch-profiles task: the Start dialog no longer hardcodes a
-# cc-codex backend or client-built override flags. It queries the repo's own
-# deployed orchestrator (GET /api/repos/{repo}/orchestrator-config) and POSTs a
-# structured `launch` mode selection; the server turns that into argv through
-# build_launch_args. The wiring is asserted at the served-asset boundary (no JS
-# runtime here); the JavaScriptCore keyboard harness covers the behaviour.
+# The Start dialog does not hardcode a cc-codex backend or client-built override
+# flags. It queries the repo's own deployed orchestrator
+# (GET /api/repos/{repo}/orchestrator-config) and POSTs a structured `launch`
+# selection; the server turns that into argv through build_launch_args. DEV and
+# REVIEW select their profile independently over one shared backend. The wiring
+# is asserted at the served-asset boundary (no JS runtime here); the
+# JavaScriptCore keyboard harness covers the behaviour.
 
 
-def test_launch_dialog_offers_the_four_modes():
-    # Exactly Default / Standard / Excellent / Custom, as a Mode <select>.
+def test_launch_dialog_offers_independent_role_profile_selectors():
+    # One selector per role over exactly Default / Standard / Excellent / Custom;
+    # the former single combined Mode select is gone.
     body = app_js()
-    assert 'class="opt-mode"' in body
-    for value in ("default", "standard", "excellent", "custom"):
-        assert f'<option value="{value}">' in body
+    assert 'class="opt-mode"' not in body
+    assert 'class="opt-role-mode"' in body
+    assert 'roleModeField("dev", "DEV")' in body
+    assert 'roleModeField("review", "REVIEW")' in body
+    assert (
+        'const LAUNCH_MODES = ["default", "standard", "excellent", "custom"];' in body
+    )
 
 
 def test_launch_dialog_exposes_a_backend_selector():
@@ -214,40 +220,62 @@ def test_launch_dialog_exposes_a_backend_selector():
 def test_launch_dialog_reads_values_from_the_orchestrator():
     # Displayed model/effort come from the orchestrator query, never hardcoded
     # model ids: the dialog fetches the protected config route and repaints on a
-    # mode/backend change. A query failure fails closed — Launch disabled, the
+    # role/backend change, asking for both role profiles in ONE query so the
+    # preview is coherent. A query failure fails closed — Launch disabled, the
     # orchestrator's own error shown — instead of falling back to a hub default.
     body = app_js()
     assert "orchestrator-config" in body
     assert "refreshLaunchConfig" in body
     assert "setLaunchEnabled(false)" in body
+    assert 'qs.push("dev_profile=" + encodeURIComponent(devProfile));' in body
+    assert 'qs.push("review_profile=" + encodeURIComponent(reviewProfile));' in body
     # The old client-side extra-args builder and the pinned backend list are gone.
     assert "buildExtraArgs" not in body
     assert "RUN_OPTION_FIELDS" not in body
 
 
+def test_launch_dialog_gates_on_split_profile_capability():
+    # A deployment that does not report the orchestrator's per-role `profiles`
+    # cannot take --dev-profile/--review-profile at all. The dialog reads that
+    # capability off the query (an explicit true — never a value the server
+    # derived from the run-wide profile) and otherwise closes split selection
+    # with redeploy guidance instead of attempting unsupported flags.
+    body = app_js()
+    assert "config.split_profiles === true" in body
+    assert "st.split === false" in body
+    assert "redeploy" in body
+
+
 def test_launch_posts_the_structured_launch_selection():
-    # Start POSTs a structured `launch` object (mode + optional backend/role
-    # overrides); the server builds the argv. No client-assembled `extra_args`.
+    # Start POSTs a structured `launch` object carrying the independent
+    # `dev_mode`/`review_mode` (never the legacy run-wide `mode`, which stays for
+    # pre-split API callers); the server builds the argv. No client `extra_args`.
     body = app_js()
     assert "buildLaunchPayload" in body
     assert "launch: launch," in body
+    assert "const launch = { dev_mode: st.dev, review_mode: st.review };" in body
 
 
-def test_custom_mode_exposes_editable_role_fields():
-    # Only Custom makes the role fields editable (preset modes are read-only);
-    # the dev-agent select is cc-codex-only, gated on the backend inside roleRow.
+def test_custom_role_exposes_only_its_own_editable_fields():
+    # A role becomes editable only when ITS selector says Custom; the other role
+    # stays a read-only preset in the same panel. The dev-agent select is
+    # cc-codex-only (gated on the backend inside roleRow) and offers no inherit
+    # choice, because a split-mode custom cc-codex DEV must send its complete
+    # agent/model/effort tuple.
     body = app_js()
-    assert 'class="opt-mode"' in body
-    for cls in (
-        "opt-dev-agent",
-        "role-model",
-        "role-effort",
-    ):
-        assert cls in body
-    # The role ids are templated per role, so the two role model/effort ids come
-    # from one `opt-${key}-model`/`-effort` template rather than five literals.
-    assert 'id="opt-${key}-model"' in body
-    assert 'id="opt-${key}-effort"' in body
+    assert "opt-dev-agent" in body
+    assert 'st.dev === "custom"' in body
+    assert 'st.review === "custom"' in body
+    assert '<option value="">inherit</option>' not in body
+    # The role fields are templated per role and per field, so the four ids and
+    # their styling hooks (.role-model / .role-effort) come from one
+    # `opt-${key}-${suffix}` template rather than four literal blocks.
+    assert 'id="opt-${key}-${suffix}"' in body
+    assert 'class="opt-${key}-${suffix} role-${suffix} role-edit"' in body
+    # Custom edits are local state: kept in the dialog state so an unrelated
+    # re-query's repaint cannot wipe them, and never a reason to re-query.
+    assert "onCustomFieldInput" in body
+    assert "customRoleValues" in body
 
 
 def test_plan_gate_toggle_stays_available_and_orthogonal():
@@ -260,7 +288,8 @@ def test_plan_gate_toggle_stays_available_and_orthogonal():
 
 def test_standard_excellent_gate_on_available_profiles():
     # Standard/Excellent are disabled with a visible reason when the orchestrator
-    # does not offer them; selection never silently falls back to Default.
+    # does not offer them, per role; selection never silently falls back to
+    # Default.
     body = app_js()
     assert "available_profiles" in body
     assert "syncModeAvailability" in body
@@ -269,13 +298,24 @@ def test_standard_excellent_gate_on_available_profiles():
 
 def test_run_history_renders_the_effective_config_snapshot():
     # Run detail/history retains the authoritative effective-config: snapshot
-    # (profile, backend, resolved models/efforts, config/effective revisions,
-    # sources) from the embedded per-run history payload.
+    # (per-role profiles, backend, resolved models/efforts, config/effective
+    # revisions, sources) from the embedded per-run history payload.
     body = app_js()
     assert "effectiveConfigBlock" in body
     assert "run.effective_config" in body
     assert "config rev" in body
     assert "effective rev" in body
+
+
+def test_run_history_summarizes_both_role_profiles():
+    # `profiles.dev`/`profiles.review` are authoritative; an older snapshot
+    # without them derives both roles from the run-wide `profile`. A Custom role
+    # reports profile "default", so only `sources` provenance distinguishes it —
+    # without that check a Custom run would render as Default.
+    body = app_js()
+    assert "roleProfileLabels" in body
+    assert 'sources[role + ".model"] === "cli"' in body
+    assert "cfg.profiles" in body
 
 
 def test_launch_dialog_submit_sends_launch_and_keeps_ack():
@@ -1276,14 +1316,14 @@ def test_form_controls_carry_accessible_names():
     assert 'for="intake-feedback"' in body
     for field in ("f-repo", "f-status", "f-search", "rf-repo", "rf-state", "rf-task"):
         assert f'<label for="{field}"' in body
-    # The launch dialog's Mode/Backend selects carry visible labels; the Custom
-    # role controls carry visually-hidden-but-real labels, templated per role
-    # (the harness verifies every dialog control resolves a label[for]).
-    for field in ("opt-mode", "opt-backend"):
-        assert f'<label for="{field}"' in body
+    # The launch dialog's Backend select carries a visible label and the two role
+    # selectors carry templated ones; the Custom role controls carry
+    # visually-hidden-but-real labels, templated per role and field (the harness
+    # verifies every dialog control resolves a label[for]).
+    assert '<label for="opt-backend"' in body
+    assert '`<label for="opt-${key}-mode">${name} profile`' in body
     assert 'for="opt-dev-agent">Dev agent</label>' in body
-    assert 'for="opt-${key}-model">${name} model</label>' in body
-    assert 'for="opt-${key}-effort">${name} effort</label>' in body
+    assert 'for="opt-${key}-${suffix}">${name} ${label}</label>' in body
 
 
 def test_scrollable_regions_are_keyboard_reachable():
