@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # Features: Dashboard Ops
@@ -122,17 +122,19 @@ Implemented behavior:
   Waiting-question forms send explicit answer modes: ordinary questions show
   Discuss/Answer, plan gates show Feedback/Confirm, Confirm allows empty input
   for one-tap approval, and guard 400 details appear inline.
-- Task detail Start opens a four-mode launch dialog driven by the repo's
-  deployed orchestrator: Default inherits, Standard/Excellent select named
-  profiles, and Custom exposes explicit role model/effort inputs plus a
-  cc-codex-only dev-agent select. It queries
-  `GET /api/repos/{repo_id}/orchestrator-config` for each backend/profile
-  selection, disables Launch on query failure, disables unavailable named
-  profiles from `available_profiles`, and posts structured `launch` to
-  `POST /api/runs`; the plan-gate checkbox sets `launch.plan_gate=true`
-  independently of mode. Stop posts to `POST /api/runs/{run_id}/stop`.
-  `blocked` tasks require an explicit acknowledgement checkbox; stale/raced
-  starts render the backend 409 response instead of trusting frontend state.
+- Task detail Start keeps one shared Backend selector and gives DEV and REVIEW
+  independent Default/Standard/Excellent/Custom selectors. Presets are
+  read-only; only a selected Custom role exposes editable fields. The first
+  config query omits role parameters to probe split capability; later coherent
+  queries include each named role profile, cache by backend plus both role
+  selections, and discard stale generations. Custom seeds from an inherited
+  role while retaining the other role's named selection, and its edits stay
+  local across unrelated queries. Query failure or `split_profiles=false`
+  disables Launch; unavailable named profiles remain visibly disabled. Submit
+  posts split `dev_mode`/`review_mode` launch data, while shared backend and
+  plan-gate remain orthogonal. Stop posts to
+  `POST /api/runs/{run_id}/stop`. `blocked` tasks require explicit
+  acknowledgement; stale/raced starts render the backend 409 response.
 - Start is hidden or replaced with an explanation when the dashboard already
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
@@ -144,7 +146,10 @@ Implemented behavior:
   per-run session strips from persisted snapshots plus a rollup of observed dev
   sessions vs frontmatter `session-est`, peak per-session context, summed run
   wall-clock from `started_ts`/`ended_ts`, and each run's embedded
-  `effective_config` launch snapshot as an out-of-link disclosure.
+  `effective_config` launch snapshot as an out-of-link disclosure. Snapshot
+  rows use authoritative `profiles.dev`/`profiles.review`, identify Custom from
+  CLI model provenance, and derive both roles from legacy top-level `profile`
+  when the additive fields are absent.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls

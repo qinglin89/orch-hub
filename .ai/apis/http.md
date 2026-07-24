@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # APIs: HTTP
@@ -96,12 +96,14 @@ verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 - Purpose: query the target repo's deployed orchestrator for the Start dialog's
   resolved launch configuration via `orchestrator.py --print-config`.
 - Source: resolves `repo_id` through registry discovery, then runs the
-  repo-local orchestrator with `cwd=<repo>` and optional `backend`/`profile`
-  query params. It does not read `orchestrator.toml` directly and is not
-  readiness-gated.
+  repo-local orchestrator with `cwd=<repo>` and optional `backend`, legacy
+  `profile`, `dev_profile`, and `review_profile` query params. It does not read
+  `orchestrator.toml` directly and is not readiness-gated.
 - Shape: `EffectiveConfig.to_dict()` with schema/revisions/profile list,
-  backend, `dev`/`review` role agent/model/effort, budgets, sandbox,
-  provenance `sources`, and preview launch fields.
+  authoritative-or-derived `profiles.dev`/`profiles.review`, hub-owned
+  `split_profiles`, backend, resolved role values, budgets, sandbox, provenance
+  `sources`, and preview launch fields. Missing legacy `profiles` derives both
+  roles from top-level `profile` but leaves `split_profiles=false`.
 - Errors: unknown repo returns 404; unrecognized backend returns 400; missing
   old deployments, nonzero `--print-config`, malformed output, or unsupported
   schema return 502 with the orchestrator/parser reason so launch fails closed.
@@ -205,8 +207,10 @@ verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 - Source: resolves `repo_id` through registry discovery, then delegates launch
   gates and subprocess start to the app's single `RunManager`.
 - Dashboard caller: the task-detail Start dialog sends structured `launch`
-  selection (`mode`, optional `backend`, Custom role overrides, and orthogonal
-  `plan_gate`); the server maps it through `build_launch_args`. Legacy
+  selection (`dev_mode`, `review_mode`, optional shared `backend`, role-local
+  Custom fields, and orthogonal flags); the server maps it through
+  `build_launch_args`. Legacy structured `mode` remains a mutually exclusive
+  compatibility shape that applies one selection to both roles. Raw
   `extra_args` callers remain supported verbatim, but `launch` plus non-empty
   `extra_args` is 400.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # Modules
@@ -26,7 +26,7 @@ verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 | Intake manager | `orch_hub/intake.py` | Implemented remote intake lifecycle/state/audit service with off-lock draft/revise/confirm turns, cancel/reconcile safeguards, intake-ready notification triggers, and inventory-verified confirmation |
 | Intake agent | `orch_hub/intake_agent.py` | Implemented Claude CLI `/intake-task` backend with structured envelopes, session resume, read-only draft/revise turns, and write-permitted confirm |
 | Run manager | `orch_hub/runs.py` | Implemented orchestrator subprocess lifecycle, run state, stop requests, per-session/effective-config snapshot handling, and per-repo serialization |
-| Orchestrator launch config | `orch_hub/orch_config.py` | Implemented deployed-orchestrator `--print-config` query/strict parsing, structured launch-mode argv construction, and tolerant `effective-config:` snapshot helpers |
+| Orchestrator launch config | `orch_hub/orch_config.py` | Implemented deployed-orchestrator `--print-config` split-role query/strict parsing with legacy capability detection, split/legacy structured argv construction, and tolerant `effective-config:` snapshot helpers |
 | Run monitor | `orch_hub/monitor.py` | Implemented resident daemon-thread status scanner for proactive notification delivery |
 | History | `orch_hub/history.py` | Implemented per-run JSONL event storage and readback |
 | Control dir | `orch_hub/control_dir.py` | Implemented question/answer/stop file-channel handling |

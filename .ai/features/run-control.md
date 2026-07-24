@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+last-updated: 2026-07-24
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # Features: Run Control
@@ -39,16 +39,20 @@ Implemented behavior:
   explicit `PATH` that includes common user-installed agent CLI directories
   before the inherited and baseline macOS paths.
 - `orch_config.query_effective_config` asks the repo-local deployed
-  orchestrator for `--print-config` with `cwd=<repo>` and optional
-  `--backend`/`--profile`; missing old deployments, nonzero exits, malformed
-  schema-v1 payloads, or unsupported schema versions fail closed instead of
-  substituting hub launch defaults.
+  orchestrator for `--print-config` with `cwd=<repo>` and optional shared
+  backend, legacy profile, and independent DEV/REVIEW profile flags. Observed
+  `profiles.dev`/`profiles.review` values are authoritative; older responses
+  derive both roles from top-level `profile` for display but carry
+  `split_profiles=false`. Missing deployments, nonzero exits, malformed
+  schema-v1 payloads, or unsupported schema versions fail closed.
 - Structured dashboard launches use `LaunchSpec`/`build_launch_args` before
-  reaching `RunManager.start_run`: Default inherits all orchestrator settings
-  and omits flags unless a backend was explicitly selected; Standard/Excellent
-  emit only `--backend <b> --profile <mode>`; Custom emits complete applicable
-  role overrides and never sends `--dev-agent` to Cursor. Legacy `extra_args`
-  callers remain verbatim and mutually exclusive with structured `launch`.
+  reaching `RunManager.start_run`: independent `dev_mode`/`review_mode`
+  selections emit named `--dev-profile`/`--review-profile` flags or role-local
+  Custom overrides. Backend may inherit only for Default/Default; split Custom
+  cc-codex DEV requires agent/model/effort and Cursor rejects `--dev-agent`.
+  Legacy structured `mode` still maps one selection to both roles but cannot be
+  mixed with the split shape; raw `extra_args` remains verbatim and mutually
+  exclusive with structured `launch`.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
   it persists the internal `spawn_out` path so reattached runs and pre-field
   records can still surface startup diagnostics. In-memory `Popen` handles only

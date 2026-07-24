@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # Features
@@ -18,7 +18,7 @@ verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
 | Run lifecycle | implemented | runs, orch_config, sessions, api, config, control_dir, models, readiness, task_store | internal `RunManager`; `GET /api/repos/{repo_id}/orchestrator-config`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/sessions`, `GET /api/runs/{id}/effective-config`, `POST /api/runs/{id}/stop` |
 | Human question relay | implemented | control_dir, runs, api, notifications, web | `GET /api/escalations`, `POST /api/runs/{id}/escalations/{seq}/answer` |
 | Log viewing | implemented | logs, runs, api | `GET /api/runs/{id}/logs`, `GET /api/runs/{id}/logs/stream` |
-| Mobile dashboard | implemented | api, web | responsive public shell routes with CSS-only neon-wasteland industrial control-console theme and independent persisted Mode (Dark/Light/System) plus Palette (Neon Cyan/Wasteland Orange) selection, plus protected repo/task/run/escalation/log/history/commit/evaluation/usage APIs, including Operations Overview, Subscription usage cards, searchable/counted all-tasks inventory, orchestrator-config-driven four-mode run start dialog, session context strips, filterable/collapsible grouped run history with effective-config snapshots, run-scoped task-file view, and task-evaluation Layer 1/Layer 2 sidecar view with doctor-gated semantic controls |
+| Mobile dashboard | implemented | api, web | responsive public shell routes with CSS-only neon-wasteland industrial control-console theme and independent persisted Mode (Dark/Light/System) plus Palette (Neon Cyan/Wasteland Orange) selection, plus protected repo/task/run/escalation/log/history/commit/evaluation/usage APIs, including Operations Overview, Subscription usage cards, searchable/counted all-tasks inventory, orchestrator-config-driven split DEV/REVIEW run start dialog, session context strips, filterable/collapsible grouped run history with per-role effective-config snapshots, run-scoped task-file view, and task-evaluation Layer 1/Layer 2 sidecar view with doctor-gated semantic controls |
 | Auth and private access | implemented | api, config | default-deny bearer middleware on HTTP routes |
 | Notifications | implemented | notifications, config, runs, intake, monitor, launchd, api, cli | Bark delivery backend; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | implemented | launchd, cli, config, api, docs, deploy | CLI `orch-hub launchd ...`, `orch-hub-api`, launchd plist/docs |

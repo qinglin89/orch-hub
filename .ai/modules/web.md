@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # Modules: Web and Operations
@@ -189,16 +189,18 @@ repo, status, blockers). It keeps missing-index cards outside status/search
 filters, shows visible-of-total task counts, distinguishes empty inventory from
 no matches, and has one Clear action for all task filters.
 
-Run controls stay frontend-only over protected HTTP APIs: Start opens a
-four-mode launch dialog (Default, Standard, Excellent, Custom) that queries
-`GET /api/repos/{repo_id}/orchestrator-config` for the selected backend/profile.
-Preset modes render read-only DEV/REVIEW `agent:model @ effort` rows from the
-orchestrator; Custom renders editable model/effort inputs in the same row and a
-cc-codex-only dev-agent select. Query failures disable Launch and surface the
-orchestrator/parser error; Standard/Excellent mode options are disabled with a
-visible reason when `available_profiles` omits them. Submit posts
-`{repo_id, task_id, acknowledge_blocked, launch}` to `POST /api/runs`, and the
-plan-gate checkbox sets `launch.plan_gate=true` independently of mode/backend.
+Run controls stay frontend-only over protected HTTP APIs: Start keeps one shared
+Backend selector and independent DEV/REVIEW Default/Standard/Excellent/Custom
+selectors. Presets render read-only role values; a selected Custom role alone
+renders editable fields, including the cc-codex DEV agent select. The initial
+config query omits role parameters to detect split capability; later queries
+apply both named selections coherently, cache by backend and both roles, and
+drop stale generations. Custom queries that role as inherited while retaining
+the other role's named profile, then keeps edits in local dialog state. Query
+failure, `split_profiles=false`, or an unavailable named profile fails closed
+with a visible reason. Submit posts split `dev_mode`/`review_mode` launch data
+inside `{repo_id, task_id, acknowledge_blocked, launch}`; backend and plan-gate
+remain orthogonal.
 Stop posts to `POST /api/runs/{run_id}/stop`; while a live run record carries
 `stop_requested`, the Stop control renders disabled as "Stop requested" from
 server state so reloads and other devices do not re-enable it. Launch refusal UI
@@ -223,8 +225,11 @@ list by repo, run state, and task-id text before grouping by `(repo, task)`,
 shows filtered group/run counts plus distinct empty/no-match states, preserves
 log links on visible run cards, renders each run's embedded `effective_config`
 snapshot as a disclosure outside the log-link card, and lets each task group
-collapse without hiding its rollup. Rollups show observed dev-session count vs
-estimate, peak context, and summed wall-clock from run-record ISO timestamps.
+collapse without hiding its rollup. Effective-config rows prefer
+`profiles.dev`/`profiles.review`, derive both from legacy top-level `profile`,
+and label Custom from CLI model provenance. Rollups show observed dev-session
+count vs estimate, peak context, and summed wall-clock from run-record ISO
+timestamps.
 
 Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
 Tasks tab active. It probes availability first, distinguishes disabled,

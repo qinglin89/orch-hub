@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 5f11bbf080b3c83dc1e7110a44f626759851e235
+last-updated: 2026-07-24
+verified-against: 3c0a2c192a6f495ad83c0a71bc2ccbce526f33da
 ---
 
 # Modules: Runtime
@@ -78,19 +78,22 @@ backend exceptions so notification failures cannot corrupt run state.
 Location: `orch_hub/orch_config.py`
 
 Responsibility: keep orch-hub read-only with respect to orchestrator launch
-policy. `query_effective_config(repo, backend=None, profile=None)` runs the
-repo-local deployed orchestrator Python with `orchestrator.py --print-config`
-and optional `--backend`/`--profile`, using `cwd=<repo>` and strict parsing.
-It fails closed on missing deployment binaries, timeouts, nonzero exits,
-non-JSON, unsupported schema versions, or malformed schema-v1 fields the
-orchestrator always emits (revisions, profile/profile list, backend, role
-model/effort, budgets, provenance, booleans). `build_launch_args(LaunchSpec)`
-is the single argv builder for structured dashboard launches: Default inherits,
-Standard/Excellent pass only backend plus profile, Custom passes complete
-applicable role overrides, and `--dev-agent` is cc-codex-only. Snapshot helpers
-parse `effective-config:` log lines, persist/load `effective_config.json`, and
-are deliberately tolerant/raw because snapshots are display/history data, not
-launch-preview validation.
+policy. `query_effective_config` runs the repo-local deployed orchestrator
+Python with `orchestrator.py --print-config`, `cwd=<repo>`, and optional shared
+backend, legacy run-wide profile, and independent DEV/REVIEW profile flags. It
+fails closed on missing deployment binaries, timeouts, nonzero exits, non-JSON,
+unsupported schema versions, or malformed schema-v1 fields. An observed
+`profiles.dev`/`profiles.review` pair sets the hub-owned split capability
+marker; an older response without `profiles` derives both display selections
+from top-level `profile` but remains incapable of split launch.
+`build_launch_args(LaunchSpec)` owns mutually exclusive split
+`dev_mode`/`review_mode` and legacy `mode` request shapes. Split named modes
+emit only their role-profile flag; any non-Default role requires an explicit
+shared backend; Custom emits only that role's explicit fields, with a complete
+cc-codex DEV agent/model/effort tuple and no Cursor `--dev-agent`. Snapshot
+helpers parse `effective-config:` log lines, persist/load
+`effective_config.json`, and remain tolerant/raw because snapshots are
+display/history data, not launch-preview validation.
 
 ## Run Monitor
 
