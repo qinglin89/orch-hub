@@ -10,13 +10,20 @@ from __future__ import annotations
 import datetime as dt
 import itertools
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from orch_hub import api
-from orch_hub.config import HOST_ENV, PORT_ENV, Config
+from orch_hub.config import (
+    DEFAULT_EVAL_EFFORT,
+    DEFAULT_EVAL_MODEL,
+    HOST_ENV,
+    PORT_ENV,
+    Config,
+)
 from orch_hub.git_meta import CommitLog
 from orch_hub.history import KIND_ANSWER_RECORDED, KIND_RUN_STARTED, read_events
 from orch_hub.intake import (
@@ -2726,6 +2733,31 @@ def test_evaluation_availability_reports_disabled(tmp_path, monkeypatch):
     resp = client.get("/api/evaluation")
     assert resp.status_code == 200
     assert resp.json() == {"enabled": False}
+
+
+# -- default backend wiring ----------------------------------------------------
+
+
+def test_default_semantic_backend_gets_configured_model_and_effort(tmp_path, monkeypatch):
+    # Every other evaluation test injects a fake evaluator, so this is the one place
+    # the app's OWN Layer 2 backend is built: the configured tier
+    # (ORCH_HUB_EVAL_MODEL / ORCH_HUB_EVAL_EFFORT, already resolved into Config) has
+    # to reach it, or an operator's setting silently applies to nothing. Building the
+    # app still launches no ``claude`` — only a semantic job would.
+    seen: list[dict] = []
+
+    class RecordingBackend(FakeSemanticBackend):
+        def __init__(self, **kwargs):
+            super().__init__()
+            seen.append(kwargs)
+
+    monkeypatch.setattr(api, "ClaudeSemanticBackend", RecordingBackend)
+
+    api.create_app(eval_config(tmp_path))
+    assert (seen[-1]["model"], seen[-1]["effort"]) == (DEFAULT_EVAL_MODEL, DEFAULT_EVAL_EFFORT)
+
+    api.create_app(replace(eval_config(tmp_path), eval_model="claude-x", eval_effort="low"))
+    assert (seen[-1]["model"], seen[-1]["effort"]) == ("claude-x", "low")
 
 
 # -- doctor (Layer 2 readiness probe) ------------------------------------------

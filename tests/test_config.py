@@ -20,8 +20,10 @@ from orch_hub.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
     DEFAULT_PORT,
+    DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
     DEFAULT_EVAL_RETENTION,
+    EVAL_EFFORT_ENV,
     EVAL_ENABLED_ENV,
     EVAL_MODEL_ENV,
     EVAL_RETENTION_ENV,
@@ -203,6 +205,23 @@ def test_eval_model_defaults_and_overrides():
     # Empty/whitespace-only counts as unset and falls back to the default.
     assert Config.from_env({EVAL_MODEL_ENV: "  "}).eval_model == DEFAULT_EVAL_MODEL
     assert Config.from_env({EVAL_MODEL_ENV: " claude-x "}).eval_model == "claude-x"
+
+
+def test_eval_effort_defaults_and_overrides():
+    # The model's companion knob on the same Layer 2 turn, same unset rules.
+    assert Config.from_env({}).eval_effort == DEFAULT_EVAL_EFFORT
+    assert Config.from_env({EVAL_EFFORT_ENV: "low"}).eval_effort == "low"
+    # Empty/whitespace-only counts as unset and falls back to the default.
+    assert Config.from_env({EVAL_EFFORT_ENV: ""}).eval_effort == DEFAULT_EVAL_EFFORT
+    assert Config.from_env({EVAL_EFFORT_ENV: "   "}).eval_effort == DEFAULT_EVAL_EFFORT
+    assert Config.from_env({EVAL_EFFORT_ENV: " high "}).eval_effort == "high"
+
+
+def test_eval_default_tier_matches_dev_session_tier():
+    # The Layer 2 defaults are a deliberate tier decision (judge task process at
+    # the tier that produced it), not incidental constants — pin the literals so a
+    # silent downgrade is a test failure rather than a quieter, cheaper evaluation.
+    assert (DEFAULT_EVAL_MODEL, DEFAULT_EVAL_EFFORT) == ("claude-opus-5", "max")
 
 
 def test_eval_retention_defaults_to_bounded_cap():

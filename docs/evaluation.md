@@ -62,7 +62,8 @@ of the hub — for the launchd service they live in the plist's
 | Variable | Default | Purpose |
 |---|---|---|
 | `ORCH_HUB_EVAL_ENABLED` | `true` (enabled) | Master switch. A falsy token (`0`/`false`/`no`/`off`, case-insensitive) disables the whole subsystem. Unset/blank means the default; an unrecognized value fails startup rather than guessing. |
-| `ORCH_HUB_EVAL_MODEL` | `claude-opus-4-8` | Model the **Layer 2** semantic evaluator drives through the Claude CLI. Only matters when evaluation is enabled and a semantic evaluation is requested; Layer 1 makes no model call. |
+| `ORCH_HUB_EVAL_MODEL` | `claude-opus-5` | Model the **Layer 2** semantic evaluator drives through the Claude CLI. Only matters when evaluation is enabled and a semantic evaluation is requested; Layer 1 makes no model call. |
+| `ORCH_HUB_EVAL_EFFORT` | `max` | Reasoning effort for that same Layer 2 turn (`--effort`). Unset/blank means the default. Not validated at startup — an effort the installed `claude` rejects fails that one semantic job, not the service. |
 | `ORCH_HUB_EVAL_RETENTION` | `20` | Per-task cap on retained evaluations (see [Retention](#retention)). `0` disables retention (keep everything); a positive integer is the cap. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
@@ -127,7 +128,7 @@ subsystem or an unresolved CLI exits non-zero.
 
 ```json
 { "enabled": true,
-  "semantic": { "backend": "claude-cli", "model": "claude-opus-4-8",
+  "semantic": { "backend": "claude-cli", "model": "claude-opus-5",
                 "schema_version": "1", "available": true,
                 "detail": "claude resolved at /usr/local/bin/claude" } }
 ```

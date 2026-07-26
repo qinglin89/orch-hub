@@ -444,7 +444,8 @@ def create_app(
     # The semantic (Layer 2) evaluator shares the same evaluation service + static
     # evaluator, so an injected fake service flows to all three layers. Its default
     # backend is the concrete Claude CLI driver (:class:`ClaudeSemanticBackend`,
-    # read-only under ``--permission-mode plan``, model from ``ORCH_HUB_EVAL_MODEL``);
+    # read-only under ``--permission-mode plan``, model/effort from
+    # ``ORCH_HUB_EVAL_MODEL``/``ORCH_HUB_EVAL_EFFORT``);
     # constructing it launches nothing, so building the app spawns no subprocess —
     # a semantic evaluation only reaches ``claude`` when a semantic job runs it. If
     # ``claude`` is unavailable the turn fails cleanly as a persisted ``failed`` job
@@ -459,7 +460,9 @@ def create_app(
             evaluation_service=evaluation,
             static_evaluator=static_metrics,
             backend=ClaudeSemanticBackend(
-                model=resolved.eval_model, usage_observer=claude_usage_observer
+                model=resolved.eval_model,
+                effort=resolved.eval_effort,
+                usage_observer=claude_usage_observer,
             ),
         )
     )

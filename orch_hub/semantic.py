@@ -44,9 +44,9 @@ The evaluation is built from four composable, independently-tested pieces:
   Read/Bash/Grep, so it cannot open ``.ai/``, raw logs, secrets, or any repo file),
   with project customizations disabled (``--safe-mode``), and from a fresh hub-owned
   empty cwd (never the target repo), so the model judges from the bounded prompt
-  alone rather than live repository state; model from ``ORCH_HUB_EVAL_MODEL``, with
-  an injected subprocess seam so every mechanic is unit-tested without launching
-  ``claude``; the default :class:`_UnavailableSemanticBackend` still fails cleanly
+  alone rather than live repository state; model/effort from
+  ``ORCH_HUB_EVAL_MODEL``/``ORCH_HUB_EVAL_EFFORT``, with an injected subprocess
+  seam so every mechanic is unit-tested without launching ``claude``; the default :class:`_UnavailableSemanticBackend` still fails cleanly
   when no backend is wired.
 """
 
@@ -63,7 +63,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .config import Config
+from .config import DEFAULT_EVAL_EFFORT, Config
 from .evaluation import EvaluationDisabledError, EvaluationService, EvidencePack
 from .models import (
     EvaluationTarget,
@@ -96,11 +96,6 @@ is comparable rather than silently conflated with an older one."""
 
 SEMANTIC_BACKEND_CLAUDE = "claude-cli"
 """``SemanticEvaluatorInfo.backend`` value for the concrete Claude CLI backend."""
-
-DEFAULT_SEMANTIC_EFFORT = "high"
-"""Reasoning effort for the semantic evaluation turn. Judging one task's process
-quality is a bounded analysis, so this defaults below the orchestrator's ``max``;
-injectable, and the model itself comes from ``ORCH_HUB_EVAL_MODEL``."""
 
 # Sentinels delimiting the imposed report JSON envelope. Distinct opaque markers
 # (not ```` ```json ````) so evidence text that itself contains Markdown fences
@@ -582,8 +577,9 @@ class ClaudeSemanticBackend:
     assistant's final text (the report envelope) for the service to parse. With all
     tools disabled and an isolated cwd, the model judges from the bounded prompt
     alone and cannot reach target-repo files — so the report stays reproducible from
-    the persisted evidence. ``model`` comes from ``ORCH_HUB_EVAL_MODEL``
-    (via :attr:`~orch_hub.config.Config.eval_model`); ``runner`` is injected for
+    the persisted evidence. ``model``/``effort`` come from ``ORCH_HUB_EVAL_MODEL`` /
+    ``ORCH_HUB_EVAL_EFFORT`` (via :attr:`~orch_hub.config.Config.eval_model` and
+    :attr:`~orch_hub.config.Config.eval_effort`); ``runner`` is injected for
     tests. Constructing it launches nothing — a subprocess only starts when a
     semantic evaluation is actually requested — so the default app wiring can build
     it unconditionally, exactly like the intake agent.
@@ -593,7 +589,7 @@ class ClaudeSemanticBackend:
         self,
         *,
         model: str,
-        effort: str = DEFAULT_SEMANTIC_EFFORT,
+        effort: str = DEFAULT_EVAL_EFFORT,
         runner: SemanticRunner = _default_runner,
         which: Callable[[], str | None] | None = None,
         usage_observer: Callable[[str], None] | None = None,

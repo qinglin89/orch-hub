@@ -79,10 +79,27 @@ means :data:`DEFAULT_EVAL_MODEL`. It only matters when evaluation is enabled and
 a semantic evaluation is requested — the deterministic Layer 1 static metrics
 make no model call."""
 
-DEFAULT_EVAL_MODEL = "claude-opus-4-8"
-"""Default semantic-evaluator model (mirrors the intake agent's cc model). A
-strong model is appropriate for judging task/process quality; override with
-``ORCH_HUB_EVAL_MODEL``."""
+DEFAULT_EVAL_MODEL = "claude-opus-5"
+"""Default semantic-evaluator model: the same tier the orchestrator runs dev
+sessions at. Judging one task's process quality is the review side of the work
+those sessions produced, so it gets the same reasoning tier rather than a
+cheaper one; override with ``ORCH_HUB_EVAL_MODEL``."""
+
+EVAL_EFFORT_ENV = "ORCH_HUB_EVAL_EFFORT"
+"""Environment variable selecting the reasoning effort for the semantic task
+evaluator's Claude CLI turn.
+
+The model-side companion of :data:`EVAL_MODEL_ENV`: same turn, same gate. Unset
+or blank means :data:`DEFAULT_EVAL_EFFORT`. Values are whatever the installed
+``claude`` CLI accepts for ``--effort`` — not validated here, so an unusable
+value surfaces as a clean failed semantic job rather than a startup error (an
+effort typo must not take the whole service down)."""
+
+DEFAULT_EVAL_EFFORT = "max"
+"""Default reasoning effort for the semantic evaluation turn, matching
+:data:`DEFAULT_EVAL_MODEL`'s tier. The judgment is a bounded one-shot analysis
+over persisted evidence with no tool loop to recover from a shallow read, so
+depth is bought once here; override with ``ORCH_HUB_EVAL_EFFORT``."""
 
 EVAL_RETENTION_ENV = "ORCH_HUB_EVAL_RETENTION"
 """Environment variable bounding how many evaluations are kept per task.
@@ -229,6 +246,16 @@ class Config:
     actually requested while evaluation is enabled.
     """
 
+    eval_effort: str = DEFAULT_EVAL_EFFORT
+    """Reasoning effort for the semantic task evaluator's Claude CLI turn.
+
+    Selected by ``ORCH_HUB_EVAL_EFFORT``; defaults to :data:`DEFAULT_EVAL_EFFORT`.
+    Always a concrete string, for the same reason as ``eval_model``: the backend
+    is constructed unconditionally and only reaches a subprocess when a semantic
+    evaluation actually runs. Not validated against the CLI's accepted values —
+    an unusable effort fails that one evaluation, not service startup.
+    """
+
     eval_retention: int = DEFAULT_EVAL_RETENTION
     """Per-task cap on retained evaluations (``ORCH_HUB_EVAL_RETENTION``).
 
@@ -273,6 +300,7 @@ class Config:
                 env_name=EVAL_ENABLED_ENV,
             ),
             eval_model=(env.get(EVAL_MODEL_ENV) or "").strip() or DEFAULT_EVAL_MODEL,
+            eval_effort=(env.get(EVAL_EFFORT_ENV) or "").strip() or DEFAULT_EVAL_EFFORT,
             eval_retention=_parse_retention(env.get(EVAL_RETENTION_ENV)),
         )
 

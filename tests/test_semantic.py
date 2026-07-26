@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from orch_hub.config import Config
+from orch_hub.config import DEFAULT_EVAL_EFFORT, Config
 from orch_hub.evaluation import (
     EVIDENCE_NAME,
     SOURCE_ACTIVE,
@@ -42,7 +42,6 @@ from orch_hub.models import (
     SemanticScore,
 )
 from orch_hub.semantic import (
-    DEFAULT_SEMANTIC_EFFORT,
     SEMANTIC_BACKEND_CLAUDE,
     SEMANTIC_END,
     SEMANTIC_REPORT_MD_NAME,
@@ -953,7 +952,24 @@ def test_claude_backend_returns_assistant_text_and_defaults_effort(tmp_path):
     backend = ClaudeSemanticBackend(model="claude-x", runner=runner)
 
     assert backend.evaluate("p", _repo(tmp_path)) == "MY ENVELOPE TEXT"
-    assert backend.effort == DEFAULT_SEMANTIC_EFFORT
+    assert backend.effort == DEFAULT_EVAL_EFFORT
+
+
+def test_claude_backend_default_tier_reaches_argv(tmp_path):
+    # End of the config→argv chain: an unconfigured hub judges tasks at the same
+    # tier its dev sessions run at, and nothing between Config and the CLI call
+    # quietly substitutes a cheaper one.
+    config = Config.from_env({})
+    runner = ScriptRunner(stream(envelope()))
+    backend = ClaudeSemanticBackend(
+        model=config.eval_model, effort=config.eval_effort, runner=runner
+    )
+
+    backend.evaluate("PROMPT", _repo(tmp_path))
+
+    argv = runner.argv
+    assert argv[argv.index("--model") + 1] == "claude-opus-5"
+    assert argv[argv.index("--effort") + 1] == "max"
 
 
 def test_claude_backend_info_reports_claude_cli_and_model():
