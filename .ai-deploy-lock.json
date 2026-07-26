@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "bd3fce67ee8589bb7345586f4db9320c47160f28f6a925717f0e2880aba494a2",
+  "canonical_payload_sha256": "1dedac406e90f7ca16b49ab5c50dd0917d19f2a2c7e2d3dbb3a7c3eeedbfde61",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -153,8 +153,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/.env.example",
-      "canonical_sha256": "7de96cd57aa836064b96d7b74cc1c7bf6bca2a7ecb687d3f7742645167232b59",
-      "canonical_size_bytes": 1405,
+      "canonical_sha256": "ac698f62572932c36e6c0159269cf39780868c3105e5c85325899d1d5532064c",
+      "canonical_size_bytes": 1404,
       "target_relative_path": ".cursor/orchestrator/.env.example"
     },
     {
@@ -639,8 +639,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "6119019f8686824377ec2fdd867465f30467dbc9fb11479ecdc2095d8fe3ae4e",
-      "canonical_size_bytes": 102243,
+      "canonical_sha256": "d485797036239a51990e9242cddf91ac0732edfcba45e0d357da72c3d45be24f",
+      "canonical_size_bytes": 102230,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
@@ -663,6 +663,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "32206f66e99e09a588153eb5c3a656b06505425c",
+  "source_git_commit": "d3f44240d8ddf1ccbf79a5a43cb60c72098889a5",
   "source_repo": "ai-native-deployment"
 }
