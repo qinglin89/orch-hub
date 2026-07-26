@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: ace16953edd39e42d5f68238d55f2874350c7bcd
+last-updated: 2026-07-26
+verified-against: 6ed68b72e032a4253946b428c40bca37fb7bfca8
 ---
 
 # Project Map
@@ -56,7 +56,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 
 | Module | Responsibilities |
 |---|---|
-| config | env overrides; default ai-native-development path; token/Bark URL; host/port/data-dir; eval gate/model/retention; Codex home; derived `aii-2`/registry paths |
+| config | env overrides; default ai-native-development path; token/Bark URL; host/port/data-dir; eval gate/model/effort/retention; Codex home; derived `aii-2`/registry paths |
 | models | stable shared data shapes for CLI/API/tests; `RunRecord` → `ManagedRepo` reconstruction for run-scoped reads |
 | registry | discover managed repos from `aii-2` or registry file |
 | readiness | seven fail-closed launch readiness checks |

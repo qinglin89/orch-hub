@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
+last-updated: 2026-07-26
+verified-against: 6ed68b72e032a4253946b428c40bca37fb7bfca8
 ---
 
 # Modules: Core
@@ -59,7 +59,7 @@ Location: `orch_hub/config.py`
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
-`ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`,
+`ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
 `ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CODEX_HOME`, and derived
 `aii-2`/registry file paths:
 
@@ -78,7 +78,8 @@ whitespace-only values disable push notifications. `ORCH_HUB_EVAL_ENABLED`
 defaults true and accepts normal truthy/falsy tokens; malformed explicit values
 raise `ValueError`, while falsy values disable evaluation services fail-closed.
 `ORCH_HUB_EVAL_MODEL` selects the semantic evaluator's Claude CLI model and
-defaults to `claude-opus-4-8`; blank/unset uses the default so the backend is
+defaults to `claude-opus-5`; `ORCH_HUB_EVAL_EFFORT` selects its reasoning
+effort and defaults to `max`. Blank/unset uses either default so the backend is
 constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
 to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
 values raise `ValueError`. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is

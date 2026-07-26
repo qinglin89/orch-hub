@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-07-26
+verified-against: 6ed68b72e032a4253946b428c40bca37fb7bfca8
 ---
 
 # APIs: HTTP — Core
@@ -136,7 +136,7 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
-  `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`,
+  `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
   `ORCH_HUB_EVAL_RETENTION`, and `ORCH_HUB_CODEX_HOME`; surrounding whitespace
   is stripped and empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
