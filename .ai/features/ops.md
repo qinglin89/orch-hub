@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 5b9035236a5c892c44f182f178d8e101a49c800d
+last-updated: 2026-07-26
+verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
 ---
 
 # Features: Operations Surfaces
@@ -59,10 +59,12 @@ Implemented behavior:
 Status: implemented
 
 Description: Notify when a pending question is first observed, when a run
-reaches a terminal state, and when an intake draft/revision is ready for
-review. Bark is the v1 backend.
+reaches a terminal state, when an intake draft/revision is ready for review,
+and when a semantic-evaluation job freshly completes or fails. Bark is the v1
+backend.
 
-Modules: notifications, config, runs, intake, monitor, launchd, api, cli.
+Modules: notifications, config, runs, intake, semantic_jobs, monitor, launchd,
+api, cli.
 
 Implemented behavior:
 
@@ -76,9 +78,9 @@ Implemented behavior:
 - `Notification` carries title/body/optional group. `BarkNotifier` sends JSON
   to the configured endpoint with a bounded timeout and injectable transport;
   the URL is treated as secret and is never logged.
-- The API app builds the default `RunManager` and `IntakeManager` with
-  `build_notifier(config)`. Production delivery uses manager-owned
-  daemon-thread dispatch; tests can inject synchronous dispatch.
+- The API app builds the default `RunManager`, `IntakeManager`, and
+  `SemanticJobManager` with `build_notifier(config)`. Production delivery uses
+  manager-owned daemon-thread dispatch; tests can inject synchronous dispatch.
 - The FastAPI lifespan starts a resident `RunMonitor` over the app's
   `RunManager`; it calls `list_runs()` on a 30s interval, is created without
   starting a thread at app construction, and stops cleanly on shutdown.
@@ -102,6 +104,12 @@ Implemented behavior:
   failed, cancelled/discarded, confirmed, and still-running intake turns do not
   emit. A `None` notifier is a no-op and backend failures are swallowed without
   changing `intake.json` or `events.jsonl`.
+- Semantic-job notifications fire exactly once from `SemanticJobManager`'s
+  guarded fresh `completed`/`failed` finalizer after `job.json` is persisted.
+  Payloads carry only repo, task id, outcome, and the completed evaluation id;
+  backend diagnostics/model output stay out. Queued/running/error records,
+  duplicate settles, and restart orphan reconciliation do not emit. A `None`
+  notifier is a no-op and backend failures cannot change the settled job record.
 - API/dashboard reads still refresh run status, but they are no longer required
   for timely pushes because the resident monitor drives the same status path.
 - Launchd deploy/update surface `ORCH_HUB_BARK_URL` into the installed plist,

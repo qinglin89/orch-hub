@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-26
-verified-against: 6ed68b72e032a4253946b428c40bca37fb7bfca8
+verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
 ---
 
 # Project Map
@@ -16,7 +16,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Task inventory | task_store, api, models | implemented; local parser only; index ids/summaries normalized (Markdown-link cells, five-column form); frontmatter authoritative status/blockers; reads index-gated + contained under `.ai-tasks`; exact-id archive + `session-est` reads |
 | Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | implemented; `ORCH_HUB_EVAL_ENABLED` gate + per-task `ORCH_HUB_EVAL_RETENTION`; exact active/archive ids; read-only `(repo_path, task_id)` run aggregation; bounded evidence + best-effort git window; hub-owned artifacts under `<data_dir>/evaluations/`; prune only after durable artifacts |
 | Task static metrics | static_metrics, evaluation, config, models, api, web | implemented; gated deterministic Layer 1 over `EvidencePack`; rollups, protocol facts, five score axes, confidence, warnings; `static_metrics.json` beside `evidence.json`; no model call |
-| Task semantic evaluator | semantic_jobs, semantic, static_metrics, evaluation, config, models, api, cli, web | implemented; gated Layer 2 model report over bounded evidence + static; persisted async job blocks duplicate in-flight calls, survives restart; `semantic_report.json` + `report.md`; isolated Claude CLI backend (no tools/persistence/repo cwd; safe mode; plan-mode writes blocked); doctor probes without model call |
+| Task semantic evaluator | semantic_jobs, semantic, static_metrics, evaluation, config, models, notifications, api, cli, web | implemented; gated Layer 2 model report over bounded evidence + static; persisted async job blocks duplicate in-flight calls, survives restart; fresh terminal outcomes emit metadata-only push; `semantic_report.json` + `report.md`; isolated Claude CLI backend (no tools/persistence/repo cwd; safe mode; plan-mode writes blocked); doctor probes without model call |
 | Agent subscription usage | usage, statusline, models, config, api, intake_agent, semantic, web | implemented; normalized Claude/Codex windows/percentages/resets/freshness/plan/credits; Codex = newest local rollout `rate_limits`; Claude = hub store fed by operator statusLine sink (2.1.218 stream-json has no 5h/7d windows → wired observer usually inert); fail-soft display-only; never gates readiness/attention/run/launch/intake |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; localhost-default env-configured uvicorn; only health + enumerated shell assets public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; malformed answers = pending repair; atomic answer writes; mirrors answer-mode parser rules; idempotent `stop.flag` |
@@ -26,7 +26,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Mobile dashboard | api, web | implemented mobile-first SPA v1; public shell + localStorage bearer token; CSS-only theme with pre-paint Mode/Palette axes; Overview landing + display-only usage section; display-ready softening only for live runs with sole `git_clean` failure (raw gates unchanged); split DEV/REVIEW Start dialog; evaluation L1/L2 sidecar; details in features/dashboard.md + dashboard-views.md |
 | Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store, notifications | implemented; readiness-gated draft/revise/confirm/cancel; hub-owned draft/audit state; off-lock transient turns + dashboard polling; Claude CLI backend; metadata-only intake-ready push; confirm verified via inventory `pending`/`blocked` |
 | Auth and private access | api, config | implemented pure-ASGI bearer middleware; Tailscale-only/private exposure still required; SSE header auth via fetch streams, no query tokens |
-| Notifications | notifications, config, runs, intake, monitor, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL`; run manager owns terminal/pending-question triggers, intake manager owns intake-ready; delivery isolated; `notify test` probe with plist fallback + URL redaction |
+| Notifications | notifications, config, runs, intake, semantic_jobs, monitor, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL`; owning managers trigger run/question, intake-ready, and semantic-job-outcome pushes; delivery isolated; `notify test` probe with plist fallback + URL redaction |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging + ops CLI; plist template = source of truth; manages only the fixed service label, not orchestrator runs |
 | Run history and audit | history, runs, orch_config, sessions, api, models, control_dir, task_store | implemented; per-run `events.jsonl`; launch-time task status; metadata events with mode, never answer text; session/effective-config snapshots + `session-est` for history views; run-scoped reads reach archived/ended context without listing archive |
 
@@ -73,7 +73,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | evaluation | resolve targets; aggregate related runs; bounded evidence packs; persist/prune/list/read hub-owned artifacts behind optional gate |
 | static_metrics | deterministic Layer 1 score reports from evidence packs; `static_metrics.json` persistence; retention after durable writes |
 | semantic | Layer 2 model-judged reports; Markdown render; Claude CLI evidence isolation; doctor; persisted artifacts behind gate |
-| semantic_jobs | persisted async job records; duplicate in-flight guard; off-lock execution; orphan reconciliation; completed-job evaluation linkage |
+| semantic_jobs | persisted async job records; duplicate in-flight guard; off-lock execution; orphan reconciliation; completed-job evaluation linkage; isolated fresh terminal-outcome push |
 | usage | read-only Claude/Codex normalization; Codex rollout scan; statusLine sink ingestion; bounded cache; fail-soft states |
 | statusline | operator-installed statusLine wrapper; captures only `rate_limits` + `subscription_type`; passes wrapped command through; never edits `~/.claude/**` |
 | history | append/read per-run JSONL events; no answer text; answer-mode metadata round-trip |
@@ -81,7 +81,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | logs | locate/read/stream orchestrator logs from run records |
 | sessions | parse per-session context usage from logs; persist/load `sessions.json` |
 | api | app factory; pure-ASGI bearer middleware; public shell; protected route wiring; uvicorn entry |
-| notifications | backend-agnostic payloads; Bark backend; notifier protocol; run/question/intake/probe formatters |
+| notifications | backend-agnostic payloads; Bark backend; notifier protocol; run/question/intake/semantic-job/probe formatters |
 | web | mobile-first dashboard SPA assets (shell, theme, views, controls); details in modules/web.md |
 | docs | launchd, evaluation, Claude statusLine operator docs |
 | deploy | launchd plist template + future deployment templates |

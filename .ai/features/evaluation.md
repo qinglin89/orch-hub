@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 40d3725f9c85ad2fc9dbcaa60a68f3a1c00f1e93
+last-updated: 2026-07-26
+verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
 ---
 
 # Features: Task Evaluation
@@ -121,7 +121,7 @@ evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
 Modules: semantic_jobs, semantic, static_metrics, evaluation, config, models,
-api, cli, web.
+notifications, api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`,
@@ -156,7 +156,9 @@ Implemented behavior:
 - `SemanticJobManager` persists one current job per `(repo, task)` under
   `<data_dir>/semantic-jobs/`, prevents duplicate in-flight model calls, marks
   restart-orphaned transient jobs failed, and links completed jobs to the fresh
-  `evaluation_id`.
+  `evaluation_id`. Fresh completed/failed finalizers emit one metadata-only,
+  best-effort push after persistence; transient/error states, duplicate settles,
+  and restart orphan reconciliation stay silent.
 - Backend/model failures or non-conforming output remove the reserved evaluation
   dir and surface as persisted failed jobs with bounded diagnostics; disabled
   mode still fails closed at service/API boundaries.

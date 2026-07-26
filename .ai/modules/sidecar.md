@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 5b9035236a5c892c44f182f178d8e101a49c800d
+last-updated: 2026-07-26
+verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -129,7 +129,10 @@ Codex reset credits, or participates in readiness/attention/run/intake gates.
 `queued`/`running` jobs to prevent duplicate model calls, runs
 `SemanticEvaluator.evaluate` off-lock/off-thread, reconciles orphaned transient
 jobs to failed on startup, and links completed jobs to the fresh
-`evaluation_id`. The old synchronous `POST /semantic` route is retired.
+`evaluation_id`. A guarded fresh completion/failure finalizer emits one
+metadata-only notification through isolated manager-owned dispatch; startup
+orphan reconciliation stays silent. The old synchronous `POST /semantic` route
+is retired.
 
 ## StatusLine Writer
 

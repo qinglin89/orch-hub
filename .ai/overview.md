@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 272dcc0657cc2b1943fd3b8b559de72cff468143
+last-updated: 2026-07-26
+verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
 ---
 
 # Project Overview
@@ -27,8 +27,9 @@ reattach orchestrator subprocess runs with per-repo serialization, answer
 waiting questions remotely, retrieve or stream run logs, persist run lifecycle
 plus answer-audit metadata, serve the dashboard, push Bark notifications for
 pending questions, terminal run states, and intake drafts/revisions ready for
-review, and run a confirmed remote intake loop that drafts a task before
-writing it to the target repo, generate bounded read-only task evidence packs
+review, and fresh completed/failed semantic-evaluation jobs, and run a confirmed
+remote intake loop that drafts a task before writing it to the target repo,
+generate bounded read-only task evidence packs
 under the hub data dir for active or archived tasks, compute deterministic
 protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
 `static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
@@ -65,8 +66,8 @@ control.
 - Stream or tail orchestrator logs to the dashboard.
 - Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
 - Push mobile notifications for pending questions, terminal run states, and
-  intake drafts/revisions ready for review via Bark when `ORCH_HUB_BARK_URL`
-  is configured.
+  intake drafts/revisions ready for review, and fresh completed/failed
+  semantic-evaluation jobs via Bark when `ORCH_HUB_BARK_URL` is configured.
 - Draft, revise, confirm, or cancel new task proposals remotely while keeping
   target repo `.ai-tasks/` files unchanged until explicit confirmation.
 - Generate bounded, read-only evidence packs for active or archived tasks from

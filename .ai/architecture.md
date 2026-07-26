@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 2076fc9c1071c439cf2dfa3f21c60a49bfbe552f
+last-updated: 2026-07-26
+verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
 ---
 
 # Architecture
@@ -90,7 +90,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 | Startup diagnostics | hub-owned run dir capture | scoped to the persisted run record |
 | Commit metadata | target repo git history | display/evidence only; never gates |
 | Housekeeping marker | target repo `.ai/.housekeeping-pending` | display-only; never gates |
-| Notifications | derived from run/question/intake state | best-effort delivery; must not affect state writes |
+| Notifications | derived from run/question/intake/semantic-job state | best-effort delivery; must not affect state writes |
 
 ## Core Flows
 
@@ -140,8 +140,11 @@ semantic job start/status, doctor readiness, history, and artifact readback.
 `SemanticJobManager` stores one current job per `(repo, task)` under
 `<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job
 instead of starting a duplicate model call, and reconciles restart-orphaned
-transient jobs to failed. The dashboard doctor-gates the semantic trigger,
-polls persisted job state, and keeps raw artifacts behind Copy/Download.
+transient jobs to failed. A fresh completed/failed settlement emits one
+metadata-only notification through isolated dispatch after persistence;
+startup reconciliation stays silent. The dashboard doctor-gates the semantic
+trigger, polls persisted job state, and keeps raw artifacts behind
+Copy/Download.
 
 Subscription usage is a sidecar display flow: `UsageService` reads Claude from
 the hub-owned observation store (ingesting newer statusLine sink records
