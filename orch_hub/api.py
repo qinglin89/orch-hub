@@ -380,15 +380,17 @@ def create_app(
     ``intake_manager`` is the single :class:`~orch_hub.intake.IntakeManager` the
     intake routes drive; it is built from ``resolved`` by default with the
     concrete :class:`~orch_hub.intake_agent.ClaudeIntakeAgent` backend (a headless
-    ``/intake-task`` driver over ``claude -p``). If ``claude`` is unavailable the
-    drafting turn fails cleanly and the intake is recorded as ``failed`` — the
-    same graceful, auditable outcome the earlier unavailable-agent default gave,
-    now actually functional wherever the CLI is installed. It shares the run
-    manager's push notifier (:func:`~orch_hub.notifications.build_notifier`), so
-    a draft or revision reaching ``awaiting_review`` fires one metadata-only
-    ``intake ready`` Bark push when ``ORCH_HUB_BARK_URL`` is set. Tests inject
-    one wired with a fake agent so the read-only-until-confirm invariant is
-    exercised through the HTTP surface without launching a real intake session.
+    ``/intake-task`` driver over ``claude -p``, model/effort from
+    ``ORCH_HUB_INTAKE_MODEL``/``ORCH_HUB_INTAKE_EFFORT``). If ``claude`` is
+    unavailable the drafting turn fails cleanly and the intake is recorded as
+    ``failed`` — the same graceful, auditable outcome the earlier
+    unavailable-agent default gave, now actually functional wherever the CLI is
+    installed. It shares the run manager's push notifier
+    (:func:`~orch_hub.notifications.build_notifier`), so a draft or revision
+    reaching ``awaiting_review`` fires one metadata-only ``intake ready`` Bark
+    push when ``ORCH_HUB_BARK_URL`` is set. Tests inject one wired with a fake
+    agent so the read-only-until-confirm invariant is exercised through the HTTP
+    surface without launching a real intake session.
 
     A :class:`~orch_hub.monitor.RunMonitor` over that manager is started on
     lifespan startup and stopped on shutdown, so run-ended / pending-question
@@ -421,7 +423,11 @@ def create_app(
         if intake_manager is not None
         else IntakeManager(
             resolved,
-            agent=ClaudeIntakeAgent(usage_observer=claude_usage_observer),
+            agent=ClaudeIntakeAgent(
+                model=resolved.intake_model,
+                effort=resolved.intake_effort,
+                usage_observer=claude_usage_observer,
+            ),
             notifier=build_notifier(resolved),
         )
     )

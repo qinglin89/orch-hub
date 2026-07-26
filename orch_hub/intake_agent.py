@@ -46,6 +46,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import DEFAULT_INTAKE_EFFORT, DEFAULT_INTAKE_MODEL
 from .intake import AgentConfirmResult, AgentDraftResult
 from .models import IntakeDraft, ManagedRepo
 from .runs import _orchestrator_env
@@ -57,13 +58,6 @@ DRAFT_START = "<<<INTAKE_DRAFT_JSON>>>"
 DRAFT_END = "<<<END_INTAKE_DRAFT_JSON>>>"
 CONFIRM_START = "<<<INTAKE_CONFIRMED_JSON>>>"
 CONFIRM_END = "<<<END_INTAKE_CONFIRMED_JSON>>>"
-
-DEFAULT_INTAKE_MODEL = "claude-opus-4-8"
-"""Claude model for intake turns; mirrors the orchestrator's cc dev model."""
-
-DEFAULT_INTAKE_EFFORT = "high"
-"""Effort for intake turns. Drafting a task spec is lighter than a full dev
-session, so this defaults below the orchestrator's ``max``; injectable."""
 
 
 class IntakeAgentError(Exception):
@@ -136,7 +130,13 @@ class ClaudeIntakeAgent:
     a new session and returns the parsed proposal; ``revise`` resumes it with
     feedback; ``confirm`` resumes it once more with write permission to perform
     the protocol write; ``cancel`` is a no-op (each turn is its own stateless CLI
-    process — there is no live session to release). ``runner`` and
+    process — there is no live session to release). ``model``/``effort`` come from
+    ``ORCH_HUB_INTAKE_MODEL`` / ``ORCH_HUB_INTAKE_EFFORT`` (via
+    :attr:`~orch_hub.config.Config.intake_model` and
+    :attr:`~orch_hub.config.Config.intake_effort`) and apply to all three turn
+    kinds; the defaults are the tier the orchestrator runs dev sessions at, since
+    the scope/decomposition/``session-est``/``prefetch`` judgments made here are
+    inherited by every dev session on the resulting task. ``runner`` and
     ``new_session_id`` are injected for tests.
     """
 

@@ -56,6 +56,35 @@ The value is a full URL such as ``https://api.day.app/<device-key>``. It embeds
 a device key, so treat it as a secret and never log it. Unset (or blank)
 disables push notifications entirely."""
 
+INTAKE_MODEL_ENV = "ORCH_HUB_INTAKE_MODEL"
+"""Environment variable selecting the model for remote-intake agent turns.
+
+Remote intake drives a Claude CLI ``/intake-task`` session; all three turn kinds
+(draft, revise, confirm) share one model. Unset or blank means
+:data:`DEFAULT_INTAKE_MODEL`. Independent of the evaluation knobs — intake is not
+behind ``ORCH_HUB_EVAL_ENABLED``."""
+
+DEFAULT_INTAKE_MODEL = "claude-opus-5"
+"""Default remote-intake model: the same tier the orchestrator runs dev sessions
+at. An intake turn decides a task's scope, decomposition, ``session-est``, and
+``prefetch`` — judgments every later dev session inherits and pays for — so the
+leverage is dev-session grade rather than drafting grade; override with
+``ORCH_HUB_INTAKE_MODEL``."""
+
+INTAKE_EFFORT_ENV = "ORCH_HUB_INTAKE_EFFORT"
+"""Environment variable selecting the reasoning effort for remote-intake turns.
+
+The companion of :data:`INTAKE_MODEL_ENV` on the same turns. Unset or blank means
+:data:`DEFAULT_INTAKE_EFFORT`. Values are whatever the installed ``claude`` CLI
+accepts for ``--effort`` — not validated here, so an unusable value surfaces as a
+clean failed intake rather than a startup error (an effort typo must not take the
+whole service down)."""
+
+DEFAULT_INTAKE_EFFORT = "max"
+"""Default reasoning effort for intake turns, matching
+:data:`DEFAULT_INTAKE_MODEL`'s tier: the same depth the dev sessions that will
+consume the task run at; override with ``ORCH_HUB_INTAKE_EFFORT``."""
+
 EVAL_ENABLED_ENV = "ORCH_HUB_EVAL_ENABLED"
 """Environment variable gating the optional task-evaluation subsystem.
 
@@ -226,6 +255,24 @@ class Config:
     push notifications are disabled; there is no separate on/off flag.
     """
 
+    intake_model: str = DEFAULT_INTAKE_MODEL
+    """Model id for the remote-intake agent's Claude CLI turns.
+
+    Selected by ``ORCH_HUB_INTAKE_MODEL``; defaults to
+    :data:`DEFAULT_INTAKE_MODEL`. Always a concrete string (never ``None``) so
+    the agent can be constructed unconditionally at app startup — it only
+    reaches a subprocess when an intake turn actually runs.
+    """
+
+    intake_effort: str = DEFAULT_INTAKE_EFFORT
+    """Reasoning effort for the remote-intake agent's Claude CLI turns.
+
+    Selected by ``ORCH_HUB_INTAKE_EFFORT``; defaults to
+    :data:`DEFAULT_INTAKE_EFFORT`. Not validated against the CLI's accepted
+    values — an unusable effort fails that one intake turn (recorded as a
+    ``failed`` intake), not service startup.
+    """
+
     evaluation_enabled: bool = DEFAULT_EVAL_ENABLED
     """Whether the optional task-evaluation subsystem is enabled.
 
@@ -294,6 +341,12 @@ class Config:
                 Path(raw_codex_home).expanduser() if raw_codex_home else DEFAULT_CODEX_HOME
             ),
             bark_url=bark_url or None,
+            intake_model=(
+                (env.get(INTAKE_MODEL_ENV) or "").strip() or DEFAULT_INTAKE_MODEL
+            ),
+            intake_effort=(
+                (env.get(INTAKE_EFFORT_ENV) or "").strip() or DEFAULT_INTAKE_EFFORT
+            ),
             evaluation_enabled=_parse_bool(
                 env.get(EVAL_ENABLED_ENV),
                 default=DEFAULT_EVAL_ENABLED,

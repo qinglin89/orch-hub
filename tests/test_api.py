@@ -20,6 +20,8 @@ from orch_hub import api
 from orch_hub.config import (
     DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
+    DEFAULT_INTAKE_EFFORT,
+    DEFAULT_INTAKE_MODEL,
     HOST_ENV,
     PORT_ENV,
     Config,
@@ -2757,6 +2759,34 @@ def test_default_semantic_backend_gets_configured_model_and_effort(tmp_path, mon
     assert (seen[-1]["model"], seen[-1]["effort"]) == (DEFAULT_EVAL_MODEL, DEFAULT_EVAL_EFFORT)
 
     api.create_app(replace(eval_config(tmp_path), eval_model="claude-x", eval_effort="low"))
+    assert (seen[-1]["model"], seen[-1]["effort"]) == ("claude-x", "low")
+
+
+def test_default_intake_agent_gets_configured_model_and_effort(tmp_path, monkeypatch):
+    # Same argument one layer over: every other intake test injects a fake agent, so
+    # this is the one place the app's OWN ``/intake-task`` backend is built and the
+    # configured tier (ORCH_HUB_INTAKE_MODEL / ORCH_HUB_INTAKE_EFFORT, resolved into
+    # Config) has to reach it. ``eval_config`` is reused only for its token and
+    # isolated data dir — intake is not behind the evaluation gate. Building the app
+    # still launches no ``claude``; only an intake turn would.
+    seen: list[dict] = []
+
+    class RecordingAgent(FakeIntakeAgent):
+        def __init__(self, **kwargs):
+            super().__init__()
+            seen.append(kwargs)
+
+    monkeypatch.setattr(api, "ClaudeIntakeAgent", RecordingAgent)
+
+    api.create_app(eval_config(tmp_path))
+    assert (seen[-1]["model"], seen[-1]["effort"]) == (
+        DEFAULT_INTAKE_MODEL,
+        DEFAULT_INTAKE_EFFORT,
+    )
+
+    api.create_app(
+        replace(eval_config(tmp_path), intake_model="claude-x", intake_effort="low")
+    )
     assert (seen[-1]["model"], seen[-1]["effort"]) == ("claude-x", "low")
 
 

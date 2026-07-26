@@ -23,11 +23,15 @@ from orch_hub.config import (
     DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
     DEFAULT_EVAL_RETENTION,
+    DEFAULT_INTAKE_EFFORT,
+    DEFAULT_INTAKE_MODEL,
     EVAL_EFFORT_ENV,
     EVAL_ENABLED_ENV,
     EVAL_MODEL_ENV,
     EVAL_RETENTION_ENV,
     HOST_ENV,
+    INTAKE_EFFORT_ENV,
+    INTAKE_MODEL_ENV,
     PORT_ENV,
     TOKEN_ENV,
     Config,
@@ -168,6 +172,52 @@ def test_bark_url_from_env_strips_whitespace():
 def test_bark_url_empty_or_whitespace_counts_as_unset():
     assert Config.from_env({BARK_URL_ENV: ""}).bark_url is None
     assert Config.from_env({BARK_URL_ENV: "   "}).bark_url is None
+
+
+def test_intake_model_defaults_and_overrides():
+    # Always a concrete string so the intake agent is unconditionally
+    # constructible at app startup; overridden by ORCH_HUB_INTAKE_MODEL.
+    assert Config.from_env({}).intake_model == DEFAULT_INTAKE_MODEL
+    assert Config(ai_native_path=Path("/root/ai-native")).intake_model == DEFAULT_INTAKE_MODEL
+    assert (
+        Config.from_env({INTAKE_MODEL_ENV: "claude-sonnet-5"}).intake_model
+        == "claude-sonnet-5"
+    )
+    # Empty/whitespace-only counts as unset and falls back to the default.
+    assert Config.from_env({INTAKE_MODEL_ENV: "  "}).intake_model == DEFAULT_INTAKE_MODEL
+    assert Config.from_env({INTAKE_MODEL_ENV: " claude-x "}).intake_model == "claude-x"
+
+
+def test_intake_effort_defaults_and_overrides():
+    # The model's companion knob on the same intake turns, same unset rules.
+    assert Config.from_env({}).intake_effort == DEFAULT_INTAKE_EFFORT
+    direct = Config(ai_native_path=Path("/root/ai-native"))
+    assert direct.intake_effort == DEFAULT_INTAKE_EFFORT
+    assert Config.from_env({INTAKE_EFFORT_ENV: "low"}).intake_effort == "low"
+    # Empty/whitespace-only counts as unset and falls back to the default.
+    assert Config.from_env({INTAKE_EFFORT_ENV: ""}).intake_effort == DEFAULT_INTAKE_EFFORT
+    assert Config.from_env({INTAKE_EFFORT_ENV: "   "}).intake_effort == DEFAULT_INTAKE_EFFORT
+    assert Config.from_env({INTAKE_EFFORT_ENV: " high "}).intake_effort == "high"
+
+
+def test_intake_default_tier_matches_dev_session_tier():
+    # Intake's defaults are a deliberate tier decision (the scope/decomposition/
+    # session-est/prefetch calls made here are inherited by every dev session on the
+    # task), not incidental constants — pin the literals so a silent downgrade to a
+    # cheaper drafting tier is a test failure.
+    assert (DEFAULT_INTAKE_MODEL, DEFAULT_INTAKE_EFFORT) == ("claude-opus-5", "max")
+
+
+def test_intake_and_eval_tiers_are_independent_knobs():
+    # Two subsystems, two turn kinds: an operator downgrading one must not move the
+    # other (and intake is not behind the evaluation gate).
+    cfg = Config.from_env({INTAKE_MODEL_ENV: "claude-x", INTAKE_EFFORT_ENV: "low"})
+    assert (cfg.eval_model, cfg.eval_effort) == (DEFAULT_EVAL_MODEL, DEFAULT_EVAL_EFFORT)
+    cfg = Config.from_env({EVAL_MODEL_ENV: "claude-y", EVAL_EFFORT_ENV: "low"})
+    assert (cfg.intake_model, cfg.intake_effort) == (
+        DEFAULT_INTAKE_MODEL,
+        DEFAULT_INTAKE_EFFORT,
+    )
 
 
 def test_evaluation_enabled_defaults_to_true():

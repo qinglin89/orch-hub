@@ -39,7 +39,7 @@ from orch_hub.intake_agent import (
     IntakeAgentError,
     _ClaudeIntakeHandle,
 )
-from orch_hub.config import Config
+from orch_hub.config import DEFAULT_INTAKE_EFFORT, DEFAULT_INTAKE_MODEL, Config
 from orch_hub.models import (
     IntakeDraft,
     ManagedRepo,
@@ -161,8 +161,8 @@ def test_draft_argv_first_turn_picks_session_and_is_read_only(tmp_path):
 
     argv, cwd = runner.calls[0]
     assert argv[:5] == ["claude", "-p", "--output-format", "stream-json", "--verbose"]
-    assert "--model" in argv and "claude-opus-4-8" in argv
-    assert "--effort" in argv and "high" in argv
+    assert argv[argv.index("--model") + 1] == DEFAULT_INTAKE_MODEL
+    assert argv[argv.index("--effort") + 1] == DEFAULT_INTAKE_EFFORT
     # read-only gate: plan mode, session-id (not resume), never write-permitted.
     assert argv[argv.index("--permission-mode") + 1] == "plan"
     assert "--dangerously-skip-permissions" not in argv
@@ -216,6 +216,51 @@ def test_confirm_resumes_with_write_permission(tmp_path):
     assert "--permission-mode" not in argv
     assert confirmed.task_id == TASK_ID
     assert confirmed.task_path == Path("/repos/repo-a/.ai-tasks/x.md")
+
+
+def test_default_tier_reaches_argv(tmp_path):
+    # End of the config→argv chain: an unconfigured hub drafts tasks at the same
+    # tier its dev sessions run at, and nothing between Config and the CLI call
+    # quietly substitutes a cheaper one.
+    repo = make_repo(tmp_path)
+    config = Config.from_env({})
+    runner = ScriptRunner(stream(draft_envelope()))
+    agent = ClaudeIntakeAgent(
+        model=config.intake_model,
+        effort=config.intake_effort,
+        runner=runner,
+        new_session_id=lambda: "sid-1",
+    )
+
+    agent.draft(REQUEST, repo)
+
+    argv = runner.argvs[0]
+    assert argv[argv.index("--model") + 1] == "claude-opus-5"
+    assert argv[argv.index("--effort") + 1] == "max"
+
+
+def test_every_turn_kind_carries_the_configured_tier(tmp_path):
+    # One tier for the whole conversation: the confirm turn takes the other argv
+    # branch (write-permitted, not plan), so a downgrade hiding on just one turn
+    # kind — the revise loop or the write turn — would not show up above.
+    repo = make_repo(tmp_path)
+    runner = ScriptRunner(
+        stream(draft_envelope()),
+        stream(draft_envelope(task_file=_task_file(tag=" revised"))),
+        stream(confirm_envelope()),
+    )
+    agent = ClaudeIntakeAgent(
+        model="claude-x", effort="low", runner=runner, new_session_id=lambda: "sid-t"
+    )
+
+    drafted = agent.draft(REQUEST, repo)
+    revised = agent.revise(drafted.handle, "Scope it down", repo)
+    agent.confirm(revised.handle, repo)
+
+    assert len(runner.argvs) == 3
+    for argv in runner.argvs:
+        assert argv[argv.index("--model") + 1] == "claude-x"
+        assert argv[argv.index("--effort") + 1] == "low"
 
 
 # -- draft envelope parsing ---------------------------------------------------
