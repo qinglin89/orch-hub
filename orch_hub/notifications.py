@@ -8,12 +8,12 @@ backend; the :class:`Notifier` protocol keeps room for later ones (an IM bot).
 Two invariants shape this module:
 
 - It **formats and delivers** notifications; it does not decide *when* one fires.
-  The run manager owns firing (mirroring how it owns when history events are
-  written), so trigger policy stays in one place.
+  Each owning manager fires (mirroring how the run manager owns when history
+  events are written), so trigger policy stays with the state it observes.
 - Delivery is **best-effort and isolating**. A backend may raise (network down,
-  bad Bark key); the run manager delivers through an isolating dispatch that
+  bad Bark key); each manager delivers through an isolating dispatch that
   swallows the failure, so a dropped notification never corrupts run.json,
-  events.jsonl, or the control-dir channel.
+  events.jsonl, job.json, or the control-dir channel.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 
-from .models import IntakeRecord, Question, RunRecord
+from .models import IntakeRecord, Question, RunRecord, SemanticJob
 
 if TYPE_CHECKING:
     from .config import Config
@@ -247,6 +247,42 @@ def intake_ready_notification(record: IntakeRecord) -> Notification:
         descriptor = "draft ready for review"
     body = f"{record.intake_id}\n{descriptor}"
     return Notification(title=f"{repo}: intake ready", body=body, group=repo)
+
+
+# Terminal semantic-job statuses, mirrored from ``orch_hub.semantic_jobs.STATUS_*``
+# for the same reason as ``_END_LABELS``: that module imports this one, so the
+# labels are a local presentation map, not an import. ``error`` (an unreadable
+# record) and the transient statuses are deliberately absent — the job manager
+# never fires for them.
+_SEMANTIC_JOB_LABELS = {
+    "completed": "evaluation completed",
+    "failed": "evaluation failed",
+}
+
+
+def semantic_job_notification(job: SemanticJob) -> Notification:
+    """Format the notification for a semantic-evaluation job that settled.
+
+    The semantic-job manager fires this once from the finalize step that writes
+    a terminal ``completed``/``failed`` record, so an operator who started a
+    Layer 2 evaluation and navigated away learns the outcome without keeping the
+    dashboard open. Same shape as the other formatters: ``title`` names the repo
+    and the outcome, ``group`` clusters a repo's notifications into one device
+    thread, and ``body`` carries the task id plus — on ``completed`` — the linked
+    ``evaluation_id`` the dashboard selects.
+
+    Deliberately metadata-only: the prompt, the evidence, the report, and the
+    failure diagnostic (``job.error``, which may quote a backend stderr tail)
+    stay out of the push by construction — the formatter never reads those
+    fields. A failed job's diagnostic stays in the dashboard and the hub-owned
+    job record.
+    """
+    label = _SEMANTIC_JOB_LABELS.get(job.status, "evaluation ended")
+    repo = job.repo_name or (job.repo_path.name if job.repo_path else "?")
+    body = job.task_id or "(unknown task)"
+    if job.evaluation_id:
+        body = f"{body}\nreport {job.evaluation_id}"
+    return Notification(title=f"{repo}: {label}", body=body, group=repo)
 
 
 def probe_notification() -> Notification:

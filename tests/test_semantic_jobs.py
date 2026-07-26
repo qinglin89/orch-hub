@@ -9,10 +9,14 @@ turn; a terminal job is overwritten by a fresh attempt; state reloads from disk
 across manager instances; orphaned transient jobs are reconciled to ``failed`` at
 startup; unsafe task ids fail closed; a corrupt record surfaces as ``error``
 without holding the duplicate slot; and the manager writes only under the
-hub-owned ``semantic-jobs/`` subtree. One integration test drives a *real*
-:class:`~orch_hub.semantic.SemanticEvaluator` (fake backend) through the manager
-to confirm the completed job links a real evaluation dir and the target repo is
-untouched. The protected HTTP surfaces live in ``tests/test_api.py``.
+hub-owned ``semantic-jobs/`` subtree. Terminal-outcome notifications are covered
+over a fake notifier (never a real Bark backend): one push per settled job,
+nothing for transient transitions, duplicate settles, or the startup reconcile
+sweep, and delivery failures isolated from the persisted record. One integration
+test drives a *real* :class:`~orch_hub.semantic.SemanticEvaluator` (fake backend)
+through the manager to confirm the completed job links a real evaluation dir and
+the target repo is untouched. The protected HTTP surfaces live in
+``tests/test_api.py``.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ import pytest
 from orch_hub.config import Config
 from orch_hub.evaluation import EvaluationService
 from orch_hub.models import ManagedRepo, SemanticEvaluatorInfo, SemanticReport
+from orch_hub.notifications import Notification
 from orch_hub.semantic import SemanticEvaluationError, SemanticEvaluator
 from orch_hub.semantic_jobs import (
     SEMANTIC_JOB_NAME,
@@ -129,6 +134,38 @@ def sync_executor(run) -> None:
     run()
 
 
+class RecordingNotifier:
+    """Stands in for the Bark backend: records pushes, optionally raising."""
+
+    def __init__(self, *, fail: Exception | None = None):
+        self.sent: list[Notification] = []
+        self._fail = fail
+
+    def notify(self, notification: Notification) -> None:
+        self.sent.append(notification)
+        if self._fail is not None:
+            raise self._fail
+
+
+class RecordingDispatch:
+    """A synchronous notify dispatch that also counts how often it was invoked.
+
+    Counting matters for the disabled case: a ``None`` notifier must spawn *no*
+    delivery work at all, not merely deliver nothing.
+    """
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, deliver) -> None:
+        self.calls += 1
+        deliver()
+
+
+def sync_dispatch(deliver) -> None:
+    deliver()
+
+
 def config(tmp_path: Path, *, enabled: bool = True) -> Config:
     return Config(
         ai_native_path=tmp_path / "ai-native",
@@ -137,12 +174,22 @@ def config(tmp_path: Path, *, enabled: bool = True) -> Config:
     )
 
 
-def manager(tmp_path: Path, *, evaluator=None, clock=None, executor=sync_executor) -> SemanticJobManager:
+def manager(
+    tmp_path: Path,
+    *,
+    evaluator=None,
+    clock=None,
+    executor=sync_executor,
+    notifier=None,
+    notify_dispatch=sync_dispatch,
+) -> SemanticJobManager:
     return SemanticJobManager(
         config(tmp_path),
         evaluator=evaluator if evaluator is not None else FakeEvaluator(),
         clock=clock or Clock(),
         executor=executor,
+        notifier=notifier,
+        notify_dispatch=notify_dispatch,
     )
 
 
@@ -438,6 +485,124 @@ def test_corrupt_record_surfaces_as_error_without_holding_slot(tmp_path):
     assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
     # A corrupt orphan is skipped by reconciliation (already terminal).
     assert mgr.reconcile_orphans() == []
+
+
+# -- terminal-outcome notifications -------------------------------------------
+
+
+def test_completed_job_fires_one_push_linking_the_evaluation(tmp_path):
+    notifier = RecordingNotifier()
+    ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-42"))
+    mgr = manager(tmp_path, evaluator=ev, notifier=notifier)
+
+    mgr.start_job(repo(), TASK)
+
+    assert len(notifier.sent) == 1
+    note = notifier.sent[0]
+    assert note.title == "alpha: evaluation completed"
+    assert note.group == "alpha"
+    assert note.body == f"{TASK}\nreport EVAL-42"
+
+
+def test_failed_job_fires_one_push_without_the_diagnostic(tmp_path):
+    notifier = RecordingNotifier()
+    ev = FakeEvaluator(error=SemanticEvaluationError("SECRET-MODEL-STDERR"))
+    mgr = manager(tmp_path, evaluator=ev, notifier=notifier)
+
+    mgr.start_job(repo(), TASK)
+
+    assert mgr.get_job(repo(), TASK).status == STATUS_FAILED
+    assert len(notifier.sent) == 1
+    note = notifier.sent[0]
+    assert note.title == "alpha: evaluation failed"
+    # The bounded diagnostic stays in job.json and the dashboard, not in the push.
+    assert "SECRET-MODEL-STDERR" not in f"{note.title}\n{note.body}"
+
+
+def test_no_notifier_settles_the_job_and_spawns_no_delivery_work(tmp_path):
+    dispatch = RecordingDispatch()
+    mgr = manager(tmp_path, notifier=None, notify_dispatch=dispatch)
+
+    mgr.start_job(repo(), TASK)
+
+    assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
+    assert dispatch.calls == 0  # disabled push does no dispatch work at all
+
+
+def test_delivery_failure_leaves_the_settled_record_intact(tmp_path):
+    notifier = RecordingNotifier(fail=RuntimeError("bark unreachable"))
+    ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-OK"))
+    mgr = manager(tmp_path, evaluator=ev, notifier=notifier)
+
+    mgr.start_job(repo(), TASK)  # must not raise: delivery is best-effort
+
+    assert len(notifier.sent) == 1  # attempted, and the failure was swallowed
+    persisted = read_job(mgr._config, "alpha", TASK)
+    assert persisted["status"] == STATUS_COMPLETED
+    assert persisted["evaluation_id"] == "EVAL-OK"
+    assert persisted["error"] is None
+
+
+def test_transient_transitions_do_not_notify(tmp_path):
+    notifier = RecordingNotifier()
+    mgr_ref: dict = {}
+    seen: dict = {}
+
+    def spy(r, task_id):
+        # Mid-turn the job is persisted as running; nothing has been pushed yet.
+        seen["status"] = mgr_ref["mgr"].get_job(r, task_id).status
+        seen["sent"] = list(notifier.sent)
+
+    executor = DeferredExecutor()
+    mgr = manager(
+        tmp_path, evaluator=FakeEvaluator(on_evaluate=spy), executor=executor, notifier=notifier
+    )
+    mgr_ref["mgr"] = mgr
+
+    mgr.start_job(repo(), TASK)
+    assert mgr.get_job(repo(), TASK).status == STATUS_QUEUED
+    assert notifier.sent == []  # queued alone never notifies
+
+    executor.run_all()
+    assert seen["status"] == STATUS_RUNNING and seen["sent"] == []
+    assert len(notifier.sent) == 1  # only the terminal settle pushed
+
+
+def test_duplicate_start_and_re_finalize_do_not_re_notify(tmp_path):
+    notifier = RecordingNotifier()
+    executor = DeferredExecutor()
+    mgr = manager(tmp_path, executor=executor, notifier=notifier)
+
+    first = mgr.start_job(repo(), TASK)
+    mgr.start_job(repo(), TASK)  # deduped while queued: one turn, one outcome
+    executor.run_all()
+    assert len(notifier.sent) == 1
+
+    # A stale finalize for the same attempt (the defensive guard's case) is a
+    # no-op on an already-terminal record, so it must not push a second time.
+    job_dir = mgr._config.data_dir / "semantic-jobs" / "alpha" / TASK
+    mgr._finalize(job_dir, first.job_id, status=STATUS_COMPLETED, evaluation_id="EVAL-DUP")
+    assert len(notifier.sent) == 1
+    assert mgr.get_job(repo(), TASK).evaluation_id != "EVAL-DUP"
+
+
+def test_reconciled_orphans_do_not_notify(tmp_path):
+    # A startup sweep is not a fresh outcome the operator is waiting on: failing
+    # abandoned jobs at boot must stay silent.
+    cfg = config(tmp_path)
+    _write_raw_job(cfg, "alpha", TASK, STATUS_RUNNING)
+    notifier = RecordingNotifier()
+    mgr = SemanticJobManager(
+        cfg,
+        evaluator=FakeEvaluator(),
+        clock=Clock(),
+        executor=sync_executor,
+        notifier=notifier,
+        notify_dispatch=sync_dispatch,
+    )
+
+    assert [j.status for j in mgr.reconcile_orphans()] == [STATUS_FAILED]
+    assert notifier.sent == []
 
 
 # -- containment / no mutation ------------------------------------------------

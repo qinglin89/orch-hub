@@ -39,6 +39,13 @@ and the task-id segment — are validated as single safe path components, which 
 what makes the deterministic path containment-safe (and keeps every record on the
 two-level ``<repo-slug>/<task-id>/`` layout the startup reconcile scan walks).
 
+It also owns the trigger timing for the terminal-outcome push (mirroring how the
+run manager owns run-end pushes and the intake manager owns intake-ready ones):
+one metadata-only notification fires from the finalize that settles a job to
+``completed``/``failed``, so an operator who started an evaluation and navigated
+away learns the result without keeping the dashboard open. Delivery is isolated —
+a dead Bark backend can never corrupt the job record.
+
 The manager owns **only** job status. The read-only evaluation itself — evidence,
 static metrics, semantic report, retention — stays entirely in
 :class:`~orch_hub.semantic.SemanticEvaluator`, so the async wrapper introduces no
@@ -51,6 +58,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import re
 import threading
@@ -60,7 +68,10 @@ from pathlib import Path
 
 from .config import Config
 from .models import ManagedRepo, SemanticJob
+from .notifications import Notification, Notifier, semantic_job_notification
 from .semantic import SemanticEvaluator
+
+_log = logging.getLogger(__name__)
 
 SEMANTIC_JOBS_SUBDIR = "semantic-jobs"
 """Top-level hub-data-dir subtree holding semantic-job records, parallel to the
@@ -140,6 +151,30 @@ def _thread_executor(run: Callable[[], None]) -> None:
     threading.Thread(target=run, daemon=True, name="orch-hub-semantic-job").start()
 
 
+SemanticJobNotifyDispatch = Callable[[Callable[[], None]], None]
+"""Runs one notification delivery. The default detaches it onto a daemon thread.
+
+Kept separate from :data:`SemanticJobExecutor` even though the shapes match: a
+test injects a synchronous executor to settle a turn deterministically, and must
+still be able to choose independently whether delivery is synchronous. Mirrors
+the intake manager's ``notify_dispatch`` seam."""
+
+
+def _thread_notify_dispatch(deliver: Callable[[], None]) -> None:
+    """Default notification dispatch: deliver on a short-lived daemon thread.
+
+    Mirrors :func:`orch_hub.intake._thread_notify_dispatch`. The push is emitted
+    from :meth:`SemanticJobManager._finalize`, which holds the manager lock, so a
+    slow or hung Bark backend must never stall the finalize (nor an unrelated
+    task's job read). The thread is daemon so it never blocks interpreter
+    shutdown; a dropped push is an acceptable loss. Tests inject a synchronous
+    dispatch (``lambda deliver: deliver()``) for deterministic assertions.
+    """
+    threading.Thread(
+        target=deliver, daemon=True, name="orch-hub-semantic-job-notify"
+    ).start()
+
+
 def _slug(value: str) -> str:
     """Make a repo name safe as a semantic-jobs path component.
 
@@ -208,6 +243,12 @@ class SemanticJobManager:
     (a daemon thread in production; a synchronous ``lambda run: run()`` in tests so
     a turn settles before :meth:`start_job` returns).
 
+    ``notifier`` is the optional push backend (``None`` disables notifications
+    entirely): the manager owns *when* a semantic-job push fires — exactly once,
+    from the finalize that settles a job to ``completed``/``failed``
+    (:meth:`_finalize`) — and ``notify_dispatch`` runs each delivery off the lock
+    so a hung backend cannot stall a finalize.
+
     Concurrency: :meth:`start_job` gates and persists the transient ``queued``
     status under the lock, returns that transient record, then runs the turn off
     the lock (:meth:`_run_job` flips it to ``running``, drives the evaluation, and
@@ -225,11 +266,15 @@ class SemanticJobManager:
         evaluator: SemanticEvaluator,
         clock: Callable[[], dt.datetime] = _utc_now,
         executor: SemanticJobExecutor = _thread_executor,
+        notifier: Notifier | None = None,
+        notify_dispatch: SemanticJobNotifyDispatch = _thread_notify_dispatch,
     ):
         self._config = config
         self._evaluator = evaluator
         self._clock = clock
         self._executor = executor
+        self._notifier = notifier
+        self._notify_dispatch = notify_dispatch
         self._lock = threading.Lock()
 
     @property
@@ -367,30 +412,39 @@ class SemanticJobManager:
         diagnostic. The creation-time backend/model/schema are preserved when a
         finalize does not pass them (the ``failed`` path), so a failed job still
         names which model it tried.
+
+        This is also the single semantic-job notification trigger, and the guard
+        above is what makes it fire exactly once per settled job: only the write
+        that actually moves a transient record to its terminal state reaches the
+        emit, so a duplicate/superseded finalize (which returns early) and the
+        transient ``queued``/``running`` writes notify nothing. Startup
+        reconciliation writes ``failed`` without going through here, so a restart
+        sweep — not a fresh outcome the operator is waiting on — stays silent.
         """
         with self._lock:
             record = self._load_if_present(job_dir)
             if record is None or record.status not in _TRANSIENT or record.job_id != job_id:
                 return
             ts = self._clock().isoformat()
-            _write_record(
-                job_dir,
-                replace(
-                    record,
-                    status=status,
-                    evaluation_id=evaluation_id,
-                    error=error,
-                    backend=backend if backend is not None else record.backend,
-                    model=model if model is not None else record.model,
-                    schema_version=(
-                        schema_version
-                        if schema_version is not None
-                        else record.schema_version
-                    ),
-                    ended_ts=ts,
-                    updated_ts=ts,
+            settled = replace(
+                record,
+                status=status,
+                evaluation_id=evaluation_id,
+                error=error,
+                backend=backend if backend is not None else record.backend,
+                model=model if model is not None else record.model,
+                schema_version=(
+                    schema_version
+                    if schema_version is not None
+                    else record.schema_version
                 ),
+                ended_ts=ts,
+                updated_ts=ts,
             )
+            _write_record(job_dir, settled)
+            # Settled to a terminal state: notify best-effort, off the lock. The
+            # guard above returns before this, so no duplicate settle re-notifies.
+            self._emit(semantic_job_notification(settled))
 
     # -- startup reconciliation -----------------------------------------------
 
@@ -475,6 +529,36 @@ class SemanticJobManager:
         so :meth:`start_job` returns at once with the transient record.
         """
         self._executor(run)
+
+    def _emit(self, notification: Notification) -> None:
+        """Deliver a notification best-effort; never raise into job state.
+
+        Mirrors :meth:`orch_hub.intake.IntakeManager._emit`. Isolation is the
+        invariant: a backend failure (network down, bad Bark key) must not
+        corrupt the just-written ``job.json`` — the terminal record is already
+        durable when this runs. It is called from :meth:`_finalize` under the
+        manager lock, so delivery runs through the injected dispatch (a daemon
+        thread in production) off the lock, and the backend call is wrapped so any
+        exception is logged, not propagated. A ``None`` notifier short-circuits —
+        no dispatch work at all.
+        """
+        notifier = self._notifier
+        if notifier is None:
+            return
+
+        def deliver() -> None:
+            try:
+                notifier.notify(notification)
+            except Exception as exc:  # noqa: BLE001 - delivery is best-effort
+                # Log the exception *type* and the (non-secret) title only; a
+                # Bark URL embeds a device key, so never log transport detail.
+                _log.warning(
+                    "semantic-job notification delivery failed (%s): %s",
+                    type(exc).__name__,
+                    notification.title,
+                )
+
+        self._notify_dispatch(deliver)
 
     def _job_dir_for(self, repo_name: str, task_id: str) -> Path:
         """Deterministic contained job dir for one ``(repo, task)`` (pure path math).

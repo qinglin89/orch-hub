@@ -471,11 +471,17 @@ def create_app(
     # under the hub data dir, so the dashboard can show in-flight/terminal status
     # across reload and prevent a duplicate model call per (repo, task). It owns
     # only job status; the read-only evaluation stays in ``semantic``. Orphaned
-    # transient jobs are reconciled to ``failed`` on lifespan startup below.
+    # transient jobs are reconciled to ``failed`` on lifespan startup below. It
+    # shares the run/intake push notifier, so a job settling to completed/failed
+    # fires one metadata-only Bark push when ``ORCH_HUB_BARK_URL`` is set — the
+    # walk-away signal for a long Layer 2 turn (the startup reconcile sweep is
+    # deliberately silent).
     semantic_jobs = (
         semantic_job_manager
         if semantic_job_manager is not None
-        else SemanticJobManager(resolved, evaluator=semantic)
+        else SemanticJobManager(
+            resolved, evaluator=semantic, notifier=build_notifier(resolved)
+        )
     )
     monitor = RunMonitor(manager)
 

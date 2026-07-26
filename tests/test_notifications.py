@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import Config
-from orch_hub.models import IntakeDraft, IntakeRecord, Question, RunRecord
+from orch_hub.models import IntakeDraft, IntakeRecord, Question, RunRecord, SemanticJob
 from orch_hub.notifications import (
     QUESTION_PROMPT_MAX_CHARS,
     BarkNotifier,
@@ -23,6 +23,7 @@ from orch_hub.notifications import (
     probe_notification,
     question_notification,
     run_end_notification,
+    semantic_job_notification,
 )
 
 BARK_URL = "https://bark.example/DEVICEKEY"
@@ -266,6 +267,78 @@ def test_intake_ready_notification_falls_back_when_repo_name_is_empty():
     note = intake_ready_notification(_intake_record(repo_name=""))
     assert note.title == "?: intake ready"
     assert note.group == "?"
+
+
+# -- semantic_job_notification formatting --------------------------------------
+
+
+def _semantic_job(**overrides) -> SemanticJob:
+    """A settled semantic job; ``**overrides`` set the fields a test varies.
+
+    The failure tests pass a sentinel ``error`` so they can prove the push
+    carries no diagnostic — that field may quote a backend stderr tail (model
+    output), and the payload is metadata-only by construction.
+    """
+    fields = {
+        "job_id": "20260723T120000Z",
+        "repo_name": "repo-a",
+        "repo_path": Path("/repos/repo-a"),
+        "task_id": "2026-07-19-add-widget",
+        "status": "completed",
+        "backend": "claude-cli",
+        "model": "claude-opus-5",
+        "schema_version": "1",
+        "evaluation_id": "20260723T115900Z",
+        "error": None,
+    }
+    fields.update(overrides)
+    return SemanticJob(**fields)
+
+
+def test_semantic_job_notification_completed_links_the_evaluation():
+    note = semantic_job_notification(_semantic_job())
+    assert note.title == "repo-a: evaluation completed"
+    assert note.group == "repo-a"  # clusters into the repo's device thread
+    assert note.body == "2026-07-19-add-widget\nreport 20260723T115900Z"
+
+
+def test_semantic_job_notification_failed_names_the_task_only():
+    # A failed job has no evaluation to link, so the body is task identity alone.
+    note = semantic_job_notification(
+        _semantic_job(status="failed", evaluation_id=None, error="boom")
+    )
+    assert note.title == "repo-a: evaluation failed"
+    assert note.body == "2026-07-19-add-widget"
+
+
+def test_semantic_job_notification_excludes_the_failure_diagnostic():
+    # Metadata only: the bounded diagnostic may quote backend stderr / model
+    # output, so it must never reach the push payload.
+    note = semantic_job_notification(
+        _semantic_job(
+            status="failed",
+            evaluation_id=None,
+            error="semantic evaluation failed: SECRET-MODEL-STDERR",
+        )
+    )
+    blob = f"{note.title}\n{note.body}\n{note.group}"
+    assert "SECRET-MODEL-STDERR" not in blob
+    assert "/repos/repo-a" not in blob  # nor the repo filesystem path
+
+
+def test_semantic_job_notification_falls_back_to_repo_path_then_placeholder():
+    named = semantic_job_notification(_semantic_job(repo_name=""))
+    assert named.title == "repo-a: evaluation completed"  # from repo_path.name
+    anonymous = semantic_job_notification(_semantic_job(repo_name="", repo_path=None))
+    assert anonymous.title == "?: evaluation completed"
+    assert anonymous.group == "?"
+
+
+def test_semantic_job_notification_unknown_status_uses_neutral_label():
+    # Defensive: the manager only fires on terminal statuses, so an unmapped one
+    # still formats a sane push rather than leaking a raw status string.
+    note = semantic_job_notification(_semantic_job(status="error", evaluation_id=None))
+    assert note.title == "repo-a: evaluation ended"
 
 
 # -- probe_notification formatting ---------------------------------------------
