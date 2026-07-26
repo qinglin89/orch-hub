@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: d7c0d8d8a3427336794c05e29596620564d21d4d
+last-updated: 2026-07-26
+verified-against: 3582180d93032df92e22fd39c83b64896b526583
 ---
 
 # APIs: Internal — Runtime
@@ -39,10 +39,12 @@ perform the `/intake-task` write. `ClaudeIntakeAgent` is the default concrete
 adapter: it shells out to Claude in the target repo, uses stream-json output,
 requires structured draft envelopes, resumes sessions by id, runs draft/revise
 under `--permission-mode plan`, and uses the write-permitted mode only for
-confirm. It accepts an optional usage observer called with stdout after a Claude
-turn returns; observer failures are swallowed so usage bookkeeping cannot change
-intake outcomes. Bad CLI exits or bad envelopes raise so the manager records
-failed intakes.
+confirm. One model/effort pair applies to every turn and comes from
+`Config.intake_model` / `Config.intake_effort` (environment defaults:
+`claude-opus-5` / `max`). It accepts an optional usage observer called with
+stdout after a Claude turn returns; observer failures are swallowed so usage
+bookkeeping cannot change intake outcomes. Bad CLI exits or bad envelopes raise
+so the manager records failed intakes.
 
 ## Run Manager
 

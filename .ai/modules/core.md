@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-26
-verified-against: 6ed68b72e032a4253946b428c40bca37fb7bfca8
+verified-against: 3582180d93032df92e22fd39c83b64896b526583
 ---
 
 # Modules: Core
@@ -59,6 +59,7 @@ Location: `orch_hub/config.py`
 Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
 ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
+`ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
 `ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CODEX_HOME`, and derived
 `aii-2`/registry file paths:
@@ -74,7 +75,11 @@ whitespace-only values count as unset; a malformed or out-of-range
 `<data_dir>/runs/<run_id>/` directories there, and evaluation writes
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/` artifacts there.
 `ORCH_HUB_BARK_URL` is the full Bark endpoint including device key; empty or
-whitespace-only values disable push notifications. `ORCH_HUB_EVAL_ENABLED`
+whitespace-only values disable push notifications. `ORCH_HUB_INTAKE_MODEL` /
+`ORCH_HUB_INTAKE_EFFORT` select one tier shared by draft/revise/confirm,
+defaulting to `claude-opus-5` / `max`; their constants live in `config.py`
+because `config` cannot import the agent side of the
+`intake_agent → intake/runs → config` dependency chain. `ORCH_HUB_EVAL_ENABLED`
 defaults true and accepts normal truthy/falsy tokens; malformed explicit values
 raise `ValueError`, while falsy values disable evaluation services fail-closed.
 `ORCH_HUB_EVAL_MODEL` selects the semantic evaluator's Claude CLI model and

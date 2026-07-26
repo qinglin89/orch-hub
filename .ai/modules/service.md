@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 4a6e102b957455ecec21dd6da01db64d2013f4e6
+last-updated: 2026-07-26
+verified-against: 3582180d93032df92e22fd39c83b64896b526583
 ---
 
 # Modules: Service Surface
@@ -69,8 +69,9 @@ route reports Layer 2 backend availability without a model call.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.
-The default intake backend is `ClaudeIntakeAgent`; the default semantic backend
-is `ClaudeSemanticBackend`, constructed at app startup but only launched by the
+The default intake backend is `ClaudeIntakeAgent`, constructed with
+`Config.intake_model` / `Config.intake_effort`; the default semantic backend is
+`ClaudeSemanticBackend`, constructed at app startup but only launched by the
 semantic job manager. The default `UsageService` ingests the opt-in Claude
 statusLine sink on the read path and is constructed before those Claude backends
 so one shared best-effort stream observer can still record a supported Claude

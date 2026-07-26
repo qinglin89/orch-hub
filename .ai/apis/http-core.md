@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-26
-verified-against: 6ed68b72e032a4253946b428c40bca37fb7bfca8
+verified-against: 3582180d93032df92e22fd39c83b64896b526583
 ---
 
 # APIs: HTTP — Core
@@ -125,17 +125,19 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   Default managers are built with `build_notifier(config)`: run-ended/
   pending-question and intake-ready notifications share the configured Bark
   path, and `None` keeps delivery disabled. The default intake backend is
-  `ClaudeIntakeAgent`; the default semantic backend is `ClaudeSemanticBackend`
-  constructed at app startup but only invoked by semantic generation or probed
-  by the doctor. Both default Claude backends receive the shared
-  `UsageService.claude_observer()` callback; observer failures are swallowed and
-  never alter intake/semantic outcomes.
+  `ClaudeIntakeAgent`, constructed with `Config.intake_model` /
+  `Config.intake_effort`; the default semantic backend is
+  `ClaudeSemanticBackend` constructed at app startup but only invoked by
+  semantic generation or probed by the doctor. Both default Claude backends
+  receive the shared `UsageService.claude_observer()` callback; observer failures
+  are swallowed and never alter intake/semantic outcomes.
 - The app constructs a `RunMonitor` over that manager, exposes it as
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.
 - `Config` is loaded from environment by default. Current variables are
   `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
+  `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
   `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
   `ORCH_HUB_EVAL_RETENTION`, and `ORCH_HUB_CODEX_HOME`; surrounding whitespace
   is stripped and empty/whitespace-only values count as unset.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-26
-verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
+verified-against: 3582180d93032df92e22fd39c83b64896b526583
 ---
 
 # Features: Operations Surfaces
@@ -204,7 +204,9 @@ Implemented behavior:
 - The concrete default backend is `ClaudeIntakeAgent`, a headless Claude CLI
   adapter that drives `/intake-task` with structured draft/confirm envelopes,
   session resume, read-only `--permission-mode plan` draft/revise turns, and a
-  write-permitted confirm turn.
+  write-permitted confirm turn. Draft/revise/confirm share the config-resolved
+  `ORCH_HUB_INTAKE_MODEL` / `ORCH_HUB_INTAKE_EFFORT` tier, default
+  `claude-opus-5` / `max`.
 - Confirmation is not trusted on agent exit code alone. The manager records
   `confirmed` only after the created task appears through `list_repo_tasks` with
   frontmatter status `pending` or `blocked`; no-write, partial-write,

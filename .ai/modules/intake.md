@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: d249e7ab7e818633e9ef82d6218de21c229d32e1
+last-updated: 2026-07-26
+verified-against: 3582180d93032df92e22fd39c83b64896b526583
 ---
 
 # Modules: Remote Intake
@@ -52,6 +52,9 @@ Responsibility: provide the concrete Claude CLI backend for `/intake-task`.
 repo, uses a structured fenced JSON envelope for drafts and confirmations,
 threads session ids through `--session-id`/`--resume`, and parses assistant text
 from stream events. Draft and revise use `--permission-mode plan`; confirm uses
-the write-permitted CLI mode. Bad exits, stream errors, missing/invalid required
-envelopes, and bad handles fail the agent turn so the manager records an
-auditable failed intake.
+the write-permitted CLI mode. All three turns share the `Config`-resolved
+`ORCH_HUB_INTAKE_MODEL` / `ORCH_HUB_INTAKE_EFFORT` tier, default
+`claude-opus-5` / `max`; the default constants live in `config.py` because the
+agent side already reaches `config` through `intake`/`runs`. Bad exits, stream
+errors, missing/invalid required envelopes, and bad handles fail the agent turn
+so the manager records an auditable failed intake.
