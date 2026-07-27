@@ -385,6 +385,38 @@ def test_live_run_probe_reports_active_waiting_and_clears_on_end(tmp_path):
     assert hub.runs.live_run_for(repo) is None
 
 
+def test_live_run_probe_holds_a_dead_run_until_its_end_is_persisted(tmp_path):
+    """Occupancy is the persisted record, not current process liveness.
+
+    Between an orchestrator exiting and the hub's next status scan, ``run.json``
+    still reads ``ended_ts: null`` — the run's own state machine has not ended
+    it, and the dying process may still be writing the tree. Reading liveness
+    here instead would report the repo free for that whole window and admit an
+    intake into it.
+    """
+    repo = make_repo(tmp_path)
+    hub = make_hub(tmp_path)
+    record = hub.runs.start_run(repo, TASK_ID)
+    run_json = hub.runs.runs_dir / record.run_id / "run.json"
+
+    hub.spawner.procs[0].returncode = 0  # the process exits...
+    hub.pids.kill(hub.spawner.procs[0].pid)
+    assert json.loads(run_json.read_text())["ended_ts"] is None  # ...unobserved
+
+    assert hub.runs.live_run_for(repo) == record.run_id
+    with pytest.raises(RunLiveError) as exc:
+        hub.intakes.start_intake(repo, REQUEST)
+    assert exc.value.run_id == record.run_id
+    assert hub.intakes.list_intakes() == []
+
+    hub.runs.list_runs()  # the scan persists the end
+    assert json.loads(run_json.read_text())["ended_ts"] is not None
+    assert hub.runs.live_run_for(repo) is None
+    assert hub.settle(hub.intakes.start_intake(repo, REQUEST)).status == (
+        STATUS_AWAITING_REVIEW
+    )
+
+
 def test_live_run_probe_is_scoped_to_the_repo(tmp_path):
     repo_a = make_repo(tmp_path, "repo-a")
     repo_b = make_repo(tmp_path, "repo-b")

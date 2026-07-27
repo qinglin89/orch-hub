@@ -352,8 +352,7 @@ class RunManager:
         # In-memory (run_id, seq) set of questions already pushed, so a pending
         # question notifies once per hub process; see _notify_new_questions.
         self._notified_questions: set[tuple[str, int]] = set()
-        self._admission = admission if admission is not None else RepoAdmission()
-        self._admission.bind_run_source(self.live_run_for)
+        self.use_admission(admission if admission is not None else RepoAdmission())
 
     @property
     def runs_dir(self) -> Path:
@@ -363,6 +362,21 @@ class RunManager:
     def admission(self) -> RepoAdmission:
         """The shared repo-admission coordinator (see :mod:`orch_hub.admission`)."""
         return self._admission
+
+    def use_admission(self, admission: RepoAdmission) -> None:
+        """Place this manager on ``admission``, registering its live-run probe.
+
+        Called at construction, and again by
+        :func:`orch_hub.api.create_app` when two independently built managers
+        must end up on ONE coordinator — adopting a coordinator without moving
+        both managers onto it leaves each coordinating against an unbound peer,
+        which admits a live run and an intake for the same repo. Re-registering
+        the same probe is idempotent, and both callers run before the manager
+        serves traffic, which is what makes rebinding safe (the coordinator reads
+        its probes without a lock; see :mod:`orch_hub.admission`).
+        """
+        self._admission = admission
+        admission.bind_run_source(self.live_run_for)
 
     # -- launch ---------------------------------------------------------------
 
@@ -458,46 +472,43 @@ class RunManager:
         """Return ``repo``'s live run id, or ``None`` — read-only, lock-free.
 
         The run subsystem's occupancy probe for the shared repo admission
-        coordinator. Live means a persisted, not-yet-ended record whose process
-        is still running, so it reports exactly what a status scan would show as
-        ``active`` or ``waiting`` — the two live states — plus an unended record
-        this hub has not scanned since. ``error`` records carry no repo
-        attribution and can never match a repo.
+        coordinator. Occupancy is the **persisted** state: a readable,
+        repo-attributed record with no ``ended_ts`` holds the repo. ``error``
+        records carry no repo attribution and can never match a repo.
+
+        Deliberately *not* a liveness probe. A run whose process has already
+        exited but whose end this hub has not observed yet still has
+        ``ended_ts: null`` in ``run.json``, and the run's own state machine ends
+        it only through :meth:`_refresh` — which persists the transition, its
+        session/effective-config snapshots, and the run-end notification. Asking
+        ``poll()``/the pid instead would report that repo free during the window
+        between the exit and the refresh, admitting an intake against a repo the
+        run record still claims and whose tree the dying orchestrator may not be
+        finished with. Every unended persisted run is live for admission; the
+        window closes on the next status scan (:meth:`list_runs`, driven by the
+        resident :class:`~orch_hub.monitor.RunMonitor`, or the launch path's
+        refreshing :meth:`_ensure_repo_free`).
 
         Deliberately outside :attr:`_lock` and deliberately non-mutating (no
         :meth:`_refresh`, so nothing is persisted and no end notification fires
-        here). The admission coordinator calls this while holding a repo's
-        section, and taking the manager-wide lock would make an intake start for
-        one repo queue behind an unrelated repo's launch — the ``aii-2 status``
-        readiness subprocess runs under that lock. Correctness does not need it:
-        the repo section already orders this read against the ``run.json`` write
-        it must observe, and every read here is either a plain file read or an
-        atomic dict/poll probe. An end observed here is simply not persisted
-        yet; the next status scan records it. Racing a concurrent
-        :meth:`_refresh` can only make a just-ended run read as still live for
-        an instant — the fail-closed direction, and self-correcting.
+        from a probe). The admission coordinator calls this while holding a
+        repo's section, and taking the manager-wide lock would make an intake
+        start for one repo queue behind an unrelated repo's launch — the
+        ``aii-2 status`` readiness subprocess runs under that lock. Correctness
+        does not need it: the repo section already orders this read against the
+        ``run.json`` write it must observe, and each ``run.json`` is written
+        atomically (same-dir temp + rename), so a concurrent write yields the old
+        or the new record, never a torn one. Racing a concurrent :meth:`_refresh`
+        can only make a just-ended run read as still live — the fail-closed
+        direction, and self-correcting.
         """
         for run_dir in self._run_dirs():
             record = _load_record(run_dir)
             if record.error or record.ended_ts is not None:
                 continue
-            if record.repo_path == repo.path and self._process_alive(record):
+            if record.repo_path == repo.path:
                 return record.run_id
         return None
-
-    def _process_alive(self, record: RunRecord) -> bool:
-        """Whether ``record``'s process is still running, without persisting.
-
-        The liveness half of :meth:`_refresh`, minus the state transition. A held
-        handle answers authoritatively (``Popen.poll`` is safe to call
-        concurrently — a losing caller sees ``None``, i.e. the conservative
-        "still running"); otherwise the record's pid is probed, which is also how
-        a run reattached from a previous hub process is judged.
-        """
-        proc = self._procs.get(record.run_id)
-        if proc is not None:
-            return proc.poll() is None
-        return record.pid is not None and self._pid_probe(record.pid)
 
     def _ensure_repo_free(self, repo: ManagedRepo) -> None:
         """Per-repo single-run gate (caller holds the lock).

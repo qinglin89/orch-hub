@@ -446,8 +446,7 @@ class IntakeManager:
         # a lost session (fail closed) on the next revise/confirm — never a
         # silent repo write.
         self._handles: dict[str, object] = {}
-        self._admission = admission if admission is not None else RepoAdmission()
-        self._admission.bind_intake_source(self.active_intake_for)
+        self.use_admission(admission if admission is not None else RepoAdmission())
 
     @property
     def intake_dir(self) -> Path:
@@ -457,6 +456,17 @@ class IntakeManager:
     def admission(self) -> RepoAdmission:
         """The shared repo-admission coordinator (see :mod:`orch_hub.admission`)."""
         return self._admission
+
+    def use_admission(self, admission: RepoAdmission) -> None:
+        """Place this manager on ``admission``, registering its intake probe.
+
+        The intake-side mirror of
+        :meth:`orch_hub.runs.RunManager.use_admission`, with the same contract:
+        called at construction and again by :func:`orch_hub.api.create_app` when
+        two independently built managers must end up on ONE coordinator.
+        """
+        self._admission = admission
+        admission.bind_intake_source(self.active_intake_for)
 
     # -- start ----------------------------------------------------------------
 

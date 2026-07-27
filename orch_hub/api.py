@@ -404,15 +404,15 @@ def create_app(
     The run and intake managers share one
     :class:`~orch_hub.admission.RepoAdmission` coordinator so a repo never holds
     a live run and a remote intake at once. An injected manager brings its own
-    (that is what a standalone-manager test constructs), so the app adopts it
-    rather than building a second one — otherwise a test injecting one manager
-    would leave the app-built peer coordinating against nothing. It is exposed on
-    ``app.state.repo_admission``.
+    (that is what a standalone-manager test constructs), so the app adopts one
+    rather than building a second — and then places *both* managers on it, since
+    two independently injected managers otherwise keep two coordinators, each
+    blind to the other subsystem, which admits exactly the overlap this exists to
+    prevent. The chosen coordinator is exposed on ``app.state.repo_admission``.
     """
     resolved = config if config is not None else Config.from_env()
     # Adopt an injected manager's coordinator (see the docstring); with both
-    # injected the run manager's wins, and a test wanting them coordinated builds
-    # both over one coordinator itself.
+    # injected the run manager's wins. Both managers are moved onto it below.
     admission = (
         run_manager.admission
         if run_manager is not None
@@ -453,6 +453,15 @@ def create_app(
             admission=admission,
         )
     )
+    # Realize the single-coordinator invariant unconditionally, whatever mix of
+    # injected and app-built managers arrived: a manager built above is already on
+    # ``admission`` (this re-registers its probe, which is idempotent), and an
+    # injected one that brought a different coordinator is moved onto this one.
+    # Without this, two independently injected managers each keep a coordinator
+    # whose peer probe is unbound, and the app admits a live run and an intake for
+    # the same repo. Safe here: no request thread exists until the app is served.
+    manager.use_admission(admission)
+    intake.use_admission(admission)
     # Optional task-evaluation subsystem (gated by ``Config.evaluation_enabled``).
     # The static evaluator wraps the same evaluation service the evidence/read
     # routes use, so injecting a fake ``evaluation_service`` alone (a hermetic

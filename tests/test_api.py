@@ -2703,6 +2703,73 @@ def test_run_is_admitted_once_the_intake_is_cancelled(tmp_path, monkeypatch):
     assert resp.json()["state"] == "active"
 
 
+def make_independent_manager_client(tmp_path, monkeypatch):
+    """A client whose two managers were built *independently*.
+
+    Neither was handed the other's coordinator, so each arrives carrying its own
+    — the wiring ``create_app`` has to reconcile, and the shape any caller
+    constructing both managers separately produces.
+    """
+    repo = make_run_repo(tmp_path)
+    run_manager, spawner = make_run_manager(tmp_path)
+    agent = FakeIntakeAgent()
+    intake_manager = IntakeManager(
+        run_config(tmp_path),
+        agent=agent,
+        readiness_checker=passing_readiness,
+        clock=lambda: FIXED_NOW,
+        executor=intake_sync_executor,
+    )
+    assert intake_manager.admission is not run_manager.admission
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    app = api.create_app(
+        run_config(tmp_path), run_manager=run_manager, intake_manager=intake_manager
+    )
+    client = TestClient(app)
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    return client, app, run_manager, intake_manager, spawner, agent, repo
+
+
+@pytest.mark.parametrize("admitted", ["run", "intake"])
+def test_independently_injected_managers_share_one_coordinator(
+    tmp_path, monkeypatch, admitted
+):
+    """The app must place BOTH managers on the coordinator it adopts.
+
+    Adopting one manager's coordinator and leaving the other on its own gives
+    each an unbound peer probe: every cross-kind check answers "nothing there"
+    and the app admits a live run and a remote intake for the same repo, in
+    either order — the exact overlap this feature exists to prevent.
+    """
+    client, app, run_manager, intake_manager, spawner, agent, repo = (
+        make_independent_manager_client(tmp_path, monkeypatch)
+    )
+
+    assert run_manager.admission is app.state.repo_admission
+    assert intake_manager.admission is app.state.repo_admission
+
+    if admitted == "run":
+        run = start_a_run(client, repo)
+        resp = client.post(
+            "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["conflict"] == "run_live"
+        assert resp.json()["run_id"] == run["run_id"]
+        assert client.get("/api/intakes").json() == {"intakes": []}
+        assert agent.draft_calls == 0
+    else:
+        intake = start_an_intake(client, repo)
+        resp = client.post(
+            "/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID}
+        )
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["conflict"] == "intake_in_flight"
+        assert resp.json()["intake_id"] == intake["intake_id"]
+        assert client.get("/api/runs").json() == {"runs": []}
+        assert spawner.calls == []
+
+
 def recovered_overlap(tmp_path, monkeypatch):
     """A repo carrying both an ``awaiting_review`` intake and a live run.
 
