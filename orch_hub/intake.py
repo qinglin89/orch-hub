@@ -59,6 +59,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
 
+from .admission import RepoAdmission
 from .config import Config
 from .models import (
     IntakeDraft,
@@ -399,6 +400,13 @@ class IntakeManager:
     lock — a daemon thread by default so a slow Bark backend never stalls a
     finalize; tests inject a synchronous dispatch.
 
+    ``admission`` is the per-repo critical section shared with the run manager
+    (:mod:`orch_hub.admission`): the hub admits either a live run or a remote
+    intake for one repo, never both. The manager registers its own
+    non-terminal-intake probe on the coordinator it is given, and a standalone
+    manager (every intake-only test) gets a private one whose run side is
+    unbound — a process with no run manager has no run to conflict with.
+
     The invariant the tests pin down: the target repo is unchanged until an
     explicit :meth:`confirm_intake`, because only that method reaches the
     agent's write path. Drafting, revision, cancellation, agent failure, and a
@@ -423,6 +431,7 @@ class IntakeManager:
         executor: IntakeExecutor = _thread_executor,
         notifier: Notifier | None = None,
         notify_dispatch: IntakeExecutor = _thread_notify_dispatch,
+        admission: RepoAdmission | None = None,
     ):
         self._config = config
         self._agent: IntakeAgent = agent if agent is not None else _UnavailableIntakeAgent()
@@ -437,30 +446,46 @@ class IntakeManager:
         # a lost session (fail closed) on the next revise/confirm — never a
         # silent repo write.
         self._handles: dict[str, object] = {}
+        self._admission = admission if admission is not None else RepoAdmission()
+        self._admission.bind_intake_source(self.active_intake_for)
 
     @property
     def intake_dir(self) -> Path:
         return self._config.data_dir / INTAKE_SUBDIR
+
+    @property
+    def admission(self) -> RepoAdmission:
+        """The shared repo-admission coordinator (see :mod:`orch_hub.admission`)."""
+        return self._admission
 
     # -- start ----------------------------------------------------------------
 
     def start_intake(self, repo: ManagedRepo, request: str) -> IntakeRecord:
         """Gate and start one intake for ``repo``; return the ``drafting`` record.
 
-        Gates fail closed cheapest-first: non-empty request, no other in-flight
-        intake for the repo, then readiness. The ``drafting`` record is persisted
-        under the lock *before* the agent turn so an interrupted hub leaves an
+        Gates fail closed cheapest-first: non-empty request, the shared repo
+        admission section (no live run for this repo), no other in-flight intake
+        for the repo, then readiness. The ``drafting`` record is persisted under
+        the lock *before* the agent turn so an interrupted hub leaves an
         observable record and (critically) never a repo write. The drafting turn
         then runs off the lock (:meth:`_run_draft_turn`) and this returns the
         transient ``drafting`` record immediately — a later ``get``/``list`` (or
         the dashboard poll) observes the settled ``awaiting_review`` draft, or a
         ``failed`` record if the turn (including the default unconfigured
         backend) failed.
+
+        Admission comes before readiness deliberately: a live run dirties the
+        working tree, so readiness would usually refuse with a ``git_clean``
+        failure — a misleading proxy for "this repo is claimed by a run". The
+        section stays held until the ``drafting`` record is on disk, so a
+        concurrent run start either loses the section and then sees this intake,
+        or wins it and makes this start fail with
+        :class:`~orch_hub.admission.RunLiveError`.
         """
         text = request.strip()
         if not text:
             raise ValueError("intake request must be a non-empty string")
-        with self._lock:
+        with self._admission.admit_intake(repo), self._lock:
             self._ensure_repo_free(repo)
             self._gate_readiness(repo)
             intake_dir, intake_id = self._create_intake_dir(repo.name)
@@ -485,7 +510,9 @@ class IntakeManager:
         # Draft off the lock; the transient record is returned now and the turn
         # settles the record asynchronously. Submit strictly OUTSIDE the lock:
         # the turn re-acquires it to finalize, which a synchronous executor would
-        # deadlock on the non-reentrant lock.
+        # deadlock on the non-reentrant lock. Outside the admission section too —
+        # the record is persisted, so the repo is already claimed and a long turn
+        # need not hold the section.
         self._submit(lambda: self._run_draft_turn(intake_dir, intake_id, text, repo))
         return record
 
@@ -541,6 +568,13 @@ class IntakeManager:
         or an agent failure resolves to a ``failed`` record. The revised draft
         replaces the current one and bumps ``iteration``; each revision is
         audited as its own iteration event.
+
+        A recovered overlap (a live run alongside this intake, which admission
+        prevents from forming but cannot undo for a legacy or restart-reattached
+        pair) fails closed with
+        :class:`~orch_hub.admission.RunLiveError`: revising re-reads a repo the
+        run is actively rewriting. The intake stays cancellable — refusing here
+        is a guard, not a state change.
         """
         text = feedback.strip()
         if not text:
@@ -550,6 +584,7 @@ class IntakeManager:
             record = _load_record(intake_dir)
             self._require_status(record, STATUS_AWAITING_REVIEW, "revise")
             repo = self._require_repo(record)
+            self._admission.require_no_live_run(repo, "revise an intake")
             handle = self._handles.get(intake_id)
             if handle is None:
                 return self._fail(
@@ -652,12 +687,18 @@ class IntakeManager:
         ``failed`` — and any partial ``.ai-tasks/`` write from a failed/unverified
         confirm turn is rolled back (:class:`_ConfirmGuard`), so a non-confirmed
         intake leaves the target repo unchanged.
+
+        A recovered overlap fails closed here for a stronger reason than in
+        :meth:`revise_intake`: this is the one turn that writes ``.ai-tasks/``,
+        and a live run owns that tree. Refusing leaves the intake reviewable and
+        cancellable rather than racing two writers.
         """
         with self._lock:
             intake_dir = self._intake_dir_for(intake_id)
             record = _load_record(intake_dir)
             self._require_status(record, STATUS_AWAITING_REVIEW, "confirm")
             repo = self._require_repo(record)
+            self._admission.require_no_live_run(repo, "confirm an intake")
             handle = self._handles.get(intake_id)
             if handle is None:
                 return self._fail(
@@ -765,6 +806,12 @@ class IntakeManager:
         state). Cancellation never needs a live session, so it always succeeds
         for a cancellable intake — even after a restart dropped the handle — and
         releases the session best-effort if one is still held.
+
+        Deliberately NOT admission-guarded: cancelling writes nothing to the
+        target repo, and it is the escape hatch that clears a recovered overlap
+        (a live run plus a surviving intake) whose revise/confirm are fail-closed.
+        Refusing it would strand the intake — and keep it blocking the repo's
+        next run start.
         """
         with self._lock:
             intake_dir = self._intake_dir_for(intake_id)
@@ -849,6 +896,25 @@ class IntakeManager:
         with self._lock:
             return [_load_record(d) for d in self._intake_dirs()]
 
+    def active_intake_for(self, repo: ManagedRepo) -> str | None:
+        """Return ``repo``'s non-terminal intake id, or ``None`` — lock-free.
+
+        The intake subsystem's occupancy probe for the shared repo admission
+        coordinator, and the same scan the one-intake-per-repo gate uses — one
+        definition of "this repo has an intake in flight", derived from the
+        persisted intake records rather than a second in-memory table.
+
+        Deliberately outside :attr:`_lock`. The admission coordinator calls this
+        while holding a repo's section, and taking the manager-wide lock would
+        make a run launch for one repo queue behind an unrelated repo's intake
+        turn. Correctness does not need it: this reads only ``intake.json``
+        files, each written atomically (same-dir temp + rename), so a concurrent
+        write yields either the old or the new record and never a torn one — and
+        the repo section already orders this read against the record write it
+        must observe.
+        """
+        return self._active_intake_id(repo)
+
     def intake_history(self, intake_id: str) -> IntakeHistoryEntry:
         """Return one intake's record paired with its persisted audit events."""
         with self._lock:
@@ -861,12 +927,29 @@ class IntakeManager:
     # -- internals ------------------------------------------------------------
 
     def _ensure_repo_free(self, repo: ManagedRepo) -> None:
+        intake_id = self._active_intake_id(repo)
+        if intake_id is not None:
+            raise IntakeBusyError(repo.name, intake_id)
+
+    def _active_intake_id(self, repo: ManagedRepo) -> str | None:
+        """Non-terminal intake id for ``repo``, or ``None``.
+
+        Pure reads with no side effects, so it is safe both under the manager
+        lock (the one-intake-per-repo gate) and outside it (the admission probe).
+
+        Non-terminal is the transient trio plus ``awaiting_review``: each one
+        either has a turn in flight or is a draft still awaiting a human. The
+        terminal quartet (``confirmed``/``cancelled``/``failed``/``error``) is a
+        resting outcome and holds nothing — an ``error`` record additionally
+        carries no repo attribution, so it can never match a repo.
+        """
         for intake_dir in self._intake_dirs():
             record = _load_record(intake_dir)
             if record.status in _TERMINAL:
                 continue
             if record.repo_path == repo.path:
-                raise IntakeBusyError(repo.name, record.intake_id)
+                return record.intake_id
+        return None
 
     def _gate_readiness(self, repo: ManagedRepo) -> None:
         report = self._readiness_checker(repo, self._config)

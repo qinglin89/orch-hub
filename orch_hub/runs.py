@@ -59,6 +59,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import BinaryIO, Protocol
 
+from .admission import RepoAdmission
 from .config import Config
 from .control_dir import pending_questions, request_stop, stop_answered, stop_requested
 from .history import (
@@ -316,6 +317,13 @@ class RunManager:
     ``(run_id, seq)``). ``notify_dispatch`` runs each delivery — a daemon thread
     by default so a slow backend never stalls run operations; tests inject a
     synchronous dispatch.
+
+    ``admission`` is the per-repo critical section shared with the intake
+    manager (:mod:`orch_hub.admission`): the hub admits either a live run or a
+    remote intake for one repo, never both. The manager registers its own
+    live-run probe on the coordinator it is given, and a standalone manager
+    (every run-only test) gets a private one whose intake side is unbound — a
+    process with no intake manager has no intake to conflict with.
     """
 
     def __init__(
@@ -329,6 +337,7 @@ class RunManager:
         clock: Callable[[], dt.datetime] = _utc_now,
         notifier: Notifier | None = None,
         notify_dispatch: NotifyDispatch = _thread_dispatch,
+        admission: RepoAdmission | None = None,
     ):
         self._config = config
         self._readiness_checker = readiness_checker
@@ -343,10 +352,17 @@ class RunManager:
         # In-memory (run_id, seq) set of questions already pushed, so a pending
         # question notifies once per hub process; see _notify_new_questions.
         self._notified_questions: set[tuple[str, int]] = set()
+        self._admission = admission if admission is not None else RepoAdmission()
+        self._admission.bind_run_source(self.live_run_for)
 
     @property
     def runs_dir(self) -> Path:
         return self._config.data_dir / RUNS_SUBDIR
+
+    @property
+    def admission(self) -> RepoAdmission:
+        """The shared repo-admission coordinator (see :mod:`orch_hub.admission`)."""
+        return self._admission
 
     # -- launch ---------------------------------------------------------------
 
@@ -360,12 +376,21 @@ class RunManager:
     ) -> RunRecord:
         """Gate, spawn, and record one orchestrator run for ``repo``/``task_id``.
 
-        Gates run cheapest-first and all fail closed: per-repo single-run,
+        Gates run cheapest-first and all fail closed: the shared repo admission
+        section (no in-flight remote intake for this repo), per-repo single-run,
         task inventory (frontmatter-authoritative status), then the full
         readiness checker. ``extra_args`` are appended to the orchestrator
         argv (e.g. ``--plan-gate``, ``--backend cc-codex``).
+
+        Admission comes first for a reason: a confirming intake writes
+        ``.ai-tasks/``, so readiness would often refuse the launch with a
+        ``git_clean`` failure — a misleading proxy for "this repo is claimed by
+        an intake". The section stays held until ``run.json`` is on disk, so a
+        concurrent intake start either loses the section and then sees this run,
+        or wins it and makes this launch fail with
+        :class:`~orch_hub.admission.IntakeInFlightError`.
         """
-        with self._lock:
+        with self._admission.admit_run(repo), self._lock:
             self._ensure_repo_free(repo)
             task_status = self._gate_task(repo, task_id, acknowledge_blocked)
             self._gate_readiness(repo)
@@ -429,7 +454,58 @@ class RunManager:
             self._procs[run_id] = proc
             return record
 
+    def live_run_for(self, repo: ManagedRepo) -> str | None:
+        """Return ``repo``'s live run id, or ``None`` — read-only, lock-free.
+
+        The run subsystem's occupancy probe for the shared repo admission
+        coordinator. Live means a persisted, not-yet-ended record whose process
+        is still running, so it reports exactly what a status scan would show as
+        ``active`` or ``waiting`` — the two live states — plus an unended record
+        this hub has not scanned since. ``error`` records carry no repo
+        attribution and can never match a repo.
+
+        Deliberately outside :attr:`_lock` and deliberately non-mutating (no
+        :meth:`_refresh`, so nothing is persisted and no end notification fires
+        here). The admission coordinator calls this while holding a repo's
+        section, and taking the manager-wide lock would make an intake start for
+        one repo queue behind an unrelated repo's launch — the ``aii-2 status``
+        readiness subprocess runs under that lock. Correctness does not need it:
+        the repo section already orders this read against the ``run.json`` write
+        it must observe, and every read here is either a plain file read or an
+        atomic dict/poll probe. An end observed here is simply not persisted
+        yet; the next status scan records it. Racing a concurrent
+        :meth:`_refresh` can only make a just-ended run read as still live for
+        an instant — the fail-closed direction, and self-correcting.
+        """
+        for run_dir in self._run_dirs():
+            record = _load_record(run_dir)
+            if record.error or record.ended_ts is not None:
+                continue
+            if record.repo_path == repo.path and self._process_alive(record):
+                return record.run_id
+        return None
+
+    def _process_alive(self, record: RunRecord) -> bool:
+        """Whether ``record``'s process is still running, without persisting.
+
+        The liveness half of :meth:`_refresh`, minus the state transition. A held
+        handle answers authoritatively (``Popen.poll`` is safe to call
+        concurrently — a losing caller sees ``None``, i.e. the conservative
+        "still running"); otherwise the record's pid is probed, which is also how
+        a run reattached from a previous hub process is judged.
+        """
+        proc = self._procs.get(record.run_id)
+        if proc is not None:
+            return proc.poll() is None
+        return record.pid is not None and self._pid_probe(record.pid)
+
     def _ensure_repo_free(self, repo: ManagedRepo) -> None:
+        """Per-repo single-run gate (caller holds the lock).
+
+        Refreshes as it scans, unlike the lock-free :meth:`live_run_for` probe:
+        this runs under the manager lock on the launch path, so a just-observed
+        end is persisted here rather than being re-derived on the next scan.
+        """
         for run_dir in self._run_dirs():
             record = self._refresh(run_dir, _load_record(run_dir))
             if record.error or record.ended_ts is not None:

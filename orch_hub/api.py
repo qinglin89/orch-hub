@@ -37,6 +37,7 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .config import TOKEN_ENV, Config
 from .control_dir import (
     DEFAULT_RESPONDER,
@@ -399,12 +400,32 @@ def create_app(
     path, and the module-level ``app`` below — spawns no background thread; only
     running the lifespan (uvicorn, or ``with TestClient(app)``) does. The monitor
     is exposed on ``app.state.run_monitor`` for lifecycle introspection in tests.
+
+    The run and intake managers share one
+    :class:`~orch_hub.admission.RepoAdmission` coordinator so a repo never holds
+    a live run and a remote intake at once. An injected manager brings its own
+    (that is what a standalone-manager test constructs), so the app adopts it
+    rather than building a second one — otherwise a test injecting one manager
+    would leave the app-built peer coordinating against nothing. It is exposed on
+    ``app.state.repo_admission``.
     """
     resolved = config if config is not None else Config.from_env()
+    # Adopt an injected manager's coordinator (see the docstring); with both
+    # injected the run manager's wins, and a test wanting them coordinated builds
+    # both over one coordinator itself.
+    admission = (
+        run_manager.admission
+        if run_manager is not None
+        else intake_manager.admission
+        if intake_manager is not None
+        else RepoAdmission()
+    )
     manager = (
         run_manager
         if run_manager is not None
-        else RunManager(resolved, notifier=build_notifier(resolved))
+        else RunManager(
+            resolved, notifier=build_notifier(resolved), admission=admission
+        )
     )
     # Read-only, display-only agent-subscription-usage sidecar (Claude + Codex).
     # Built here — before the hub-driven Claude backends — so its best-effort observer
@@ -429,6 +450,7 @@ def create_app(
                 usage_observer=claude_usage_observer,
             ),
             notifier=build_notifier(resolved),
+            admission=admission,
         )
     )
     # Optional task-evaluation subsystem (gated by ``Config.evaluation_enabled``).
@@ -516,6 +538,7 @@ def create_app(
         lifespan=lifespan,
     )
     app.state.run_monitor = monitor
+    app.state.repo_admission = admission
 
     @app.exception_handler(RegistryError)
     async def _registry_error(request: Request, exc: RegistryError) -> JSONResponse:
@@ -597,6 +620,37 @@ def create_app(
     @app.exception_handler(IntakeStateError)
     async def _intake_state(request: Request, exc: IntakeStateError) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    # Cross-subsystem repo admission conflicts (orch_hub.admission): a repo holds
+    # either a live run or a remote intake, never both. Both map to 409 like the
+    # per-subsystem busy errors, and both carry the blocking id plus a stable
+    # ``conflict`` discriminator so the dashboard can link straight to the run or
+    # intake instead of parsing the message. These are NOT readiness failures and
+    # deliberately carry no ``reasons`` list: an admission conflict says the repo
+    # is claimed, not that it is unready.
+    @app.exception_handler(RunLiveError)
+    async def _run_live(request: Request, exc: RunLiveError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "conflict": "run_live",
+                "run_id": exc.run_id,
+            },
+        )
+
+    @app.exception_handler(IntakeInFlightError)
+    async def _intake_in_flight(
+        request: Request, exc: IntakeInFlightError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content={
+                "detail": str(exc),
+                "conflict": "intake_in_flight",
+                "intake_id": exc.intake_id,
+            },
+        )
 
     # The optional evaluation subsystem is off (``ORCH_HUB_EVAL_ENABLED`` falsy):
     # every evaluation action/read route is removed → 404 with the fail-closed
@@ -820,9 +874,11 @@ def create_app(
         ``dev_mode``/``review_mode`` roles or the legacy run-wide ``mode``) or,
         for legacy callers, the raw ``extra_args`` list — mutually exclusive (both
         non-empty → 400). The run manager then applies the fail-closed launch
-        gates (per-repo single run, task inventory/status, readiness) and spawns
-        the deployed orchestrator subprocess; gate refusals surface as the mapped
-        4xx responses above. An unknown ``repo_id`` is a 404; an invalid launch
+        gates (repo admission — no in-flight remote intake, 409 with the blocking
+        ``intake_id`` — then per-repo single run, task inventory/status,
+        readiness) and spawns the deployed orchestrator subprocess; gate refusals
+        surface as the mapped 4xx responses above. An unknown ``repo_id`` is a
+        404; an invalid launch
         selection (both selection shapes at once, neither, custom missing a model,
         ``--dev-agent`` on Cursor, ...) is a 400. The response is the new run's
         :class:`RunStatus` (``active`` with no pending questions), the same shape
@@ -1126,8 +1182,10 @@ def create_app(
 
         Resolves ``repo_id`` by managed-repo name (unknown → 404) and delegates
         to :meth:`IntakeManager.start_intake`, which fail-closed gates on a
-        non-empty request (empty → 400), one in-flight intake per repo (busy →
-        409), and readiness (not ready → 409) before drafting. The drafting turn
+        non-empty request (empty → 400), repo admission (a live run holds the
+        repo → 409 with the blocking ``run_id``), one in-flight intake per repo
+        (busy → 409), and readiness (not ready → 409) before drafting. The
+        drafting turn
         runs off the manager lock, so the response is the transient
         :class:`~orch_hub.models.IntakeRecord` (``status: drafting``, no draft
         yet) returned immediately; the client then polls
@@ -1172,7 +1230,9 @@ def create_app(
         """Send review feedback back to the intake session for a fresh draft.
 
         Legal only from ``awaiting_review`` (any other status → 409); empty
-        feedback → 400. Still read-only: the revise turn runs off the lock and
+        feedback → 400. A recovered overlap — a live run on the same repo — is
+        also a 409 carrying the blocking ``run_id``; the intake stays cancellable.
+        Still read-only: the revise turn runs off the lock and
         the revised draft replaces the current one and bumps ``iteration``
         without touching the target repo. The response is the transient
         ``revising`` record (200) returned immediately; poll ``GET
@@ -1192,7 +1252,10 @@ def create_app(
 
         The sole route that reaches the agent's write path, so it is the only way
         an intake creates the ``.ai-tasks/`` task file and index row. Legal only
-        from ``awaiting_review`` (else 409); unknown ids are 404. The write turn
+        from ``awaiting_review`` (else 409); unknown ids are 404. A recovered
+        overlap — a live run on the same repo — is a 409 carrying the blocking
+        ``run_id``, so the write never races the run; the intake stays
+        cancellable. The write turn
         runs off the lock, so the response is the transient ``confirming`` record
         (200) returned immediately; poll ``GET /api/intakes/{id}`` for the settled
         outcome. On success that record carries ``created_task_id`` and the new
@@ -1211,7 +1274,8 @@ def create_app(
         Legal from ``drafting``/``awaiting_review``/``revising`` (a terminal or
         mid-write ``confirming`` intake → 409); unknown ids are 404. Cancellation
         never writes to the repo and never needs a live session, so it always
-        succeeds for a cancellable intake.
+        succeeds for a cancellable intake — including across a recovered overlap,
+        which is exactly the state whose revise/confirm are refused.
         """
         return intake.cancel_intake(intake_id).to_dict()
 

@@ -2569,6 +2569,196 @@ def test_intake_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.post("/api/intakes/anything/cancel").status_code == 401
 
 
+# --- repo admission: a live run and a remote intake never share a repo --------
+#
+# Both managers are wired to ONE RepoAdmission (as the app wires them) over one
+# repo, so these drive the real cross-subsystem gate through HTTP. The manager
+# and concurrency coverage lives in tests/test_admission.py; what is pinned here
+# is the wire contract: 409 with the blocking id, and no side effect before it.
+
+
+def make_admission_client(
+    tmp_path, monkeypatch, *, repo: ManagedRepo | None = None
+) -> tuple[TestClient, RunManager, IntakeManager, FakeSpawner, FakeIntakeAgent, ManagedRepo]:
+    """One client whose run and intake managers share an admission coordinator.
+
+    The repo carries ``RUN_TASK_ID`` so it is launchable, and an intake can still
+    draft a new task into it. The app adopts the injected run manager's
+    coordinator and hands it to the intake manager built alongside it — the same
+    single-coordinator wiring the real service uses.
+    """
+    repo = repo if repo is not None else make_run_repo(tmp_path)
+    run_manager, spawner = make_run_manager(tmp_path)
+    agent = FakeIntakeAgent()
+    intake_manager = IntakeManager(
+        run_config(tmp_path),
+        agent=agent,
+        readiness_checker=passing_readiness,
+        clock=lambda: FIXED_NOW,
+        executor=intake_sync_executor,
+        admission=run_manager.admission,
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    client = TestClient(
+        api.create_app(
+            run_config(tmp_path),
+            run_manager=run_manager,
+            intake_manager=intake_manager,
+        )
+    )
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    return client, run_manager, intake_manager, spawner, agent, repo
+
+
+def test_start_intake_during_a_live_run_is_409_with_the_run_id(tmp_path, monkeypatch):
+    client, _, intake_manager, _, agent, repo = make_admission_client(
+        tmp_path, monkeypatch
+    )
+    run = start_a_run(client, repo)
+
+    resp = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+    )
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["conflict"] == "run_live"
+    assert body["run_id"] == run["run_id"]
+    # An admission conflict is not a readiness failure and carries no reasons.
+    assert "reasons" not in body
+    # Refused before any intake record was created or agent turn invoked.
+    assert client.get("/api/intakes").json() == {"intakes": []}
+    assert agent.draft_calls == 0
+
+
+def test_start_run_during_an_in_flight_intake_is_409_with_the_intake_id(
+    tmp_path, monkeypatch
+):
+    client, _, _, spawner, _, repo = make_admission_client(tmp_path, monkeypatch)
+    intake = start_an_intake(client, repo)
+
+    resp = client.post(
+        "/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID}
+    )
+
+    assert resp.status_code == 409
+    body = resp.json()
+    assert body["conflict"] == "intake_in_flight"
+    assert body["intake_id"] == intake["intake_id"]
+    assert "reasons" not in body
+    # Refused before any run record was created or process spawned.
+    assert client.get("/api/runs").json() == {"runs": []}
+    assert spawner.calls == []
+
+
+def test_admission_conflicts_do_not_alter_the_readiness_payload(tmp_path, monkeypatch):
+    """Admission and readiness stay separate concepts.
+
+    A repo claimed by the other subsystem is not an unready repo: the readiness
+    payload the dashboard badges off must read exactly as it did before the
+    conflict, so the refusal cannot leak into READY/NOT READY.
+    """
+    client, _, _, _, _, repo = make_admission_client(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "check_readiness", passing_readiness)
+    before = client.get("/api/repos").json()
+
+    start_a_run(client, repo)
+    conflict = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+    )
+
+    assert conflict.status_code == 409
+    after = client.get("/api/repos").json()
+    assert after == before
+    assert after["repos"][0]["readiness"]["ready"] is True
+
+
+def test_intake_is_admitted_once_the_run_ends(tmp_path, monkeypatch):
+    client, _, _, spawner, _, repo = make_admission_client(tmp_path, monkeypatch)
+    start_a_run(client, repo)
+    spawner.procs[0].returncode = 0  # the run exits
+    client.get("/api/runs")  # the scan persists its end
+
+    resp = client.post(
+        "/api/intakes", json={"repo_id": repo.name, "request": INTAKE_REQUEST}
+    )
+
+    assert resp.status_code == 201
+    settled = client.get(f"/api/intakes/{resp.json()['intake_id']}").json()
+    assert settled["status"] == STATUS_AWAITING_REVIEW
+
+
+def test_run_is_admitted_once_the_intake_is_cancelled(tmp_path, monkeypatch):
+    client, _, _, _, _, repo = make_admission_client(tmp_path, monkeypatch)
+    intake = start_an_intake(client, repo)
+    assert client.post(
+        f"/api/intakes/{intake['intake_id']}/cancel"
+    ).status_code == 200
+
+    resp = client.post(
+        "/api/runs", json={"repo_id": repo.name, "task_id": RUN_TASK_ID}
+    )
+
+    assert resp.status_code == 201
+    assert resp.json()["state"] == "active"
+
+
+def recovered_overlap(tmp_path, monkeypatch):
+    """A repo carrying both an ``awaiting_review`` intake and a live run.
+
+    Admission stops this pair from forming but cannot undo one that already
+    exists — a legacy record, or a restart that reattaches a run while a
+    persisted ``awaiting_review`` intake survives. Built here by launching
+    through a run manager that is not admission-coupled, which is the state a
+    pre-feature hub leaves on disk.
+    """
+    client, _, intake_manager, spawner, agent, repo = make_admission_client(
+        tmp_path, monkeypatch
+    )
+    intake = start_an_intake(client, repo)
+    assert client.get(f"/api/intakes/{intake['intake_id']}").json()["status"] == (
+        STATUS_AWAITING_REVIEW
+    )
+    uncoupled = RunManager(
+        run_config(tmp_path),
+        readiness_checker=passing_readiness,
+        spawner=spawner,
+        pid_probe=lambda pid: True,
+        clock=lambda: FIXED_NOW,
+    )
+    run = uncoupled.start_run(repo, RUN_TASK_ID)
+    return client, intake["intake_id"], run.run_id, repo, agent
+
+
+def test_recovered_overlap_refuses_revise_and_confirm_but_allows_cancel(
+    tmp_path, monkeypatch
+):
+    client, intake_id, run_id, repo, agent = recovered_overlap(tmp_path, monkeypatch)
+    before = intake_task_files(repo)
+
+    revise = client.post(
+        f"/api/intakes/{intake_id}/revise", json={"feedback": "tighten the scope"}
+    )
+    confirm = client.post(f"/api/intakes/{intake_id}/confirm")
+
+    for resp in (revise, confirm):
+        assert resp.status_code == 409, resp.text
+        assert resp.json()["conflict"] == "run_live"
+        assert resp.json()["run_id"] == run_id
+    assert agent.revise_calls == 0
+    assert agent.confirm_calls == 0
+    assert intake_task_files(repo) == before  # no write raced the live run
+    # Refusing is a guard, not a state change, and Cancel stays available so the
+    # overlap can be cleared.
+    assert client.get(f"/api/intakes/{intake_id}").json()["status"] == (
+        STATUS_AWAITING_REVIEW
+    )
+    cancelled = client.post(f"/api/intakes/{intake_id}/cancel")
+    assert cancelled.status_code == 200
+    assert cancelled.json()["status"] == STATUS_CANCELLED
+    assert intake_task_files(repo) == before
+
+
 # --- task evaluation routes ---------------------------------------------------
 #
 # These drive the app's real EvaluationService + StaticEvaluator over a fake repo
