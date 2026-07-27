@@ -1,9 +1,32 @@
 ---
-last-updated: 2026-07-26
-verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Modules: Runtime
+
+## Repo Admission
+
+Location: `orch_hub/admission.py`
+
+Responsibility: enforce the cross-kind repo invariant: one live orchestrator
+run and one non-terminal hub-driven intake cannot coexist. `RepoAdmission`
+holds a distinct critical section per repo across each start gate until the
+winner persists `run.json` or `intake.json`; cross-repo starts remain
+independent. It asks `RunManager.live_run_for` and
+`IntakeManager.active_intake_for` for file-backed occupancy rather than keeping
+a second reservation table. Run occupancy is every readable repo-attributed
+persisted record with no `ended_ts`, even after process death until `_refresh`
+persists the end; intake occupancy is every non-terminal record.
+
+The probes are read-only and manager-lock-free so lock order stays repo section
+→ own manager lock and cross-repo work never queues behind an unrelated
+manager-wide readiness call. `create_app` places both managers on one
+coordinator even when they were independently injected. Cross-kind refusals
+carry the blocking id through `RunLiveError` / `IntakeInFlightError`; admission
+is checked before readiness and never changes readiness payloads. A recovered
+overlap uses the non-locking `require_no_live_run` guard to refuse intake
+revise/confirm while lifecycle-legal Cancel remains available.
 
 ## Run Manager
 
@@ -12,8 +35,9 @@ Location: `orch_hub/runs.py`
 Responsibility: own run lifecycle for deployed orchestrator subprocesses:
 start, stop, list, get, reattach, record pid, enforce a per-repo live-run
 mutex, connect run dirs, and expose computed run state to future API/UI layers.
-Launch gates run fail-closed in order: existing live run for the repo, task
-inventory/status from `list_repo_tasks`, then readiness from `check_readiness`.
+Launch gates run fail-closed in order: shared repo admission (no non-terminal
+intake), existing live run for the repo, task inventory/status from
+`list_repo_tasks`, then readiness from `check_readiness`.
 `blocked` tasks require explicit acknowledgement before launch; `missing`,
 `unknown`, and unrecognized task statuses are rejected.
 

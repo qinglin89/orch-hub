@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Conventions
@@ -29,6 +29,9 @@ verified-against: 5d4e90eb9b65b5a2564ef2144ad8604a6d606c4c
 ## Error Handling
 
 - Fail closed for launch readiness.
+- Fail closed for repo admission: a persisted unended run and a non-terminal
+  hub-driven intake cannot share a repo. Check admission before readiness and
+  return the blocking id without changing readiness payloads.
 - Fail closed for run starts: repo already busy, missing/unlisted/unknown task,
   unrecognized task status, unacknowledged `blocked` task, or readiness failure
   should prevent subprocess launch.

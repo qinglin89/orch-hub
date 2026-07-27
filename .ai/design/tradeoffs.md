@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-19
-verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Design: Tradeoffs
@@ -154,6 +154,19 @@ verified-against: 60c0b31dfa8f74dd43f6daa68f46e54281d4799c
   settles; finalizers re-load and settle only the expected transient status so
   cancel wins over draft/revise completion, and startup `reconcile_orphans()`
   marks abandoned transient records `failed` without target-repo mutation.
+
+## Tradeoff: file-backed repo admission vs in-memory reservations
+
+- Chose: one per-repo admission section that asks the run/intake managers'
+  read-only persisted-record probes and stays held until the winner writes its
+  record.
+- Reason: a separate reservation table would require restart reconstruction
+  and could diverge from `run.json` / `intake.json`. File-backed occupancy also
+  makes a persisted unended run fail closed until the normal refresh transition
+  writes all end snapshots and notifications.
+- Consequence: probes take no manager lock, preserving repo-section → own-lock
+  ordering and cross-repo concurrency; a just-ended run may over-block until
+  refresh, but cannot transiently admit intake against an unended record.
 
 ## Tradeoff: shared core before dashboard
 

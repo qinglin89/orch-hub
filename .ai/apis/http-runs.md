@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -22,6 +22,10 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
   `extra_args` callers remain supported verbatim, but `launch` plus non-empty
   `extra_args` is 400.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
+- Admission error: a non-terminal remote intake returns HTTP 409 before any
+  run record or subprocess exists:
+  `{"detail", "conflict": "intake_in_flight", "intake_id"}`. This is not a
+  readiness failure and carries no `reasons`.
 
 ## `GET /api/runs`
 

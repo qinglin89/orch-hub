@@ -1,12 +1,28 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # APIs: Internal — Runtime
 
-Intake, run, control-dir, log, history, notifier, and launchd-template
+Repo-admission, intake, run, control-dir, log, history, notifier, and launchd-template
 interfaces. Core/sidecar interfaces and API conventions: `internal-core.md`.
+
+## Repo Admission
+
+Input: `ManagedRepo` plus manager-provided run/intake occupancy probes.
+
+Output: `admit_run` / `admit_intake` per-repo context managers, structured
+`IntakeInFlightError` / `RunLiveError`, and the recovered-overlap
+`require_no_live_run` guard.
+
+Behavior: both start paths share one per-repo critical section until the
+winner's file-backed record is persisted. `RunManager.live_run_for` treats
+every readable repo-attributed record with no `ended_ts` as occupied;
+`IntakeManager.active_intake_for` treats every non-terminal record as occupied.
+Probes are read-only and manager-lock-free. `create_app` rebinds both managers
+to one coordinator before serving. Admission is checked before readiness but
+does not modify readiness or each manager's same-kind serialization.
 
 ## Intake Manager
 
@@ -16,10 +32,13 @@ explicit confirm/cancel operations.
 Output: persisted `IntakeRecord` values, metadata-only intake events, and
 optional intake-ready notification dispatch.
 
-Behavior: `IntakeManager` gates start on request text, one in-flight intake per
-repo, and readiness. It stores records under `<data_dir>/intake/<id>/` and
-drives an injected `IntakeAgent`. Draft/revise turns are proposal-only; confirm
-is the sole write-capable turn. The manager records `confirmed` only when the
+Behavior: `IntakeManager` gates start on request text, shared repo admission,
+one in-flight intake per repo, and readiness. It stores records under
+`<data_dir>/intake/<id>/` and drives an injected `IntakeAgent`. Draft/revise
+turns are proposal-only; confirm is the sole write-capable turn. Recovered
+live-run overlaps refuse revise/confirm before handle use; lifecycle-legal
+Cancel stays available because it writes no repo state. The manager records
+`confirmed` only when the
 reported/draft task id is visible through `list_repo_tasks` with status
 `pending` or `blocked`; otherwise it records `failed`. Failed/unverified
 in-process confirms restore the proposed task file and `.ai-tasks/index.md`
@@ -57,9 +76,10 @@ stop-request results.
 Behavior: implemented subprocess lifecycle, per-repo serialization, and history
 event ownership.
 `RunManager` receives a `ManagedRepo` plus task id, rejects launches when the
-repo already has a live run, when task inventory is missing/unlisted or reports
-`missing`/`unknown`/unrecognized statuses, when a `blocked` task is not
-explicitly acknowledged, or when readiness fails. A successful launch creates a
+repo has a non-terminal intake, when it already has a live run, when task
+inventory is missing/unlisted or reports `missing`/`unknown`/unrecognized
+statuses, when a `blocked` task is not explicitly acknowledged, or when
+readiness fails. A successful launch creates a
 fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
 deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
 an explicit subprocess `PATH` for user-installed agent CLIs, persists

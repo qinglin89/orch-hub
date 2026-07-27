@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Modules: Service Surface
@@ -23,7 +23,10 @@ public `GET /api/health`, public dashboard shell routes served with
 `Cache-Control: no-store`, protected repo/task routes, and protected run,
 escalation, log, and history routes over one `RunManager` instance plus a
 lifespan-owned `RunMonitor`, plus protected intake routes over one
-`IntakeManager`. Implemented run
+`IntakeManager`. Both managers are placed on one `RepoAdmission` coordinator
+before serving, including independently injected managers; cross-kind conflicts
+map to structured HTTP 409 payloads with the blocking run/intake id and no
+readiness reasons. Implemented run
 routes are `GET /api/repos/{repo_id}/orchestrator-config`,
 `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{run_id}`,
 `GET /api/runs/{run_id}/task`, `GET /api/runs/{run_id}/sessions`,

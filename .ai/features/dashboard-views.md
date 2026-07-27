@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -62,6 +62,13 @@ Implemented behavior:
 - Start is hidden or replaced with an explanation when the dashboard already
   sees a live run for the repo, the task file is missing/unknown or otherwise
   non-runnable, or best-effort `/api/repos` readiness reports launch blockers.
+- Repo admission pre-reflects the cross-kind gate without changing operational
+  presentation: repo detail withholds New Task Intake while an active/waiting
+  run holds the repo and links to its task controls; task detail withholds Start
+  while drafting/awaiting_review/revising/confirming intake state holds the repo
+  and links to intake review. Structured admission 409s repaint into the same
+  linked explanation. These branches precede readiness, but do not change
+  READY/NOT READY, Needs attention, or run-state signals.
 - Run history uses `GET /api/history/runs` newest-first, grouped client-side by
   `(repo, task)`. Repo/state/task-id filters compose client-side over the
   fetched payload before grouping; the view shows filtered group/run counts,
@@ -113,3 +120,7 @@ Implemented behavior:
   status is `drafting`, `revising`, or `confirming`; it shows live status,
   elapsed time, and a safe-to-navigate-away note, stops polling on resting
   statuses, and tears down the single poll handle on navigation like live logs.
+- If an `awaiting_review` intake overlaps a recovered live run, the review view
+  removes Confirm and Request changes, links to the run, and retains only
+  lifecycle-legal Cancel. A raced revise/confirm `run_live` 409 repaints into
+  this fail-closed state.

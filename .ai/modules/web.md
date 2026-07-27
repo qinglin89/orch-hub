@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 4a6e102b957455ecec21dd6da01db64d2013f4e6
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Modules: Web UI
@@ -116,9 +116,14 @@ Stop posts to `POST /api/runs/{run_id}/stop`; while a live run record carries
 `stop_requested`, the Stop control renders disabled as "Stop requested" from
 server state so reloads and other devices do not re-enable it. Launch refusal UI
 renders structured 409 details such as readiness `reasons`, repo-busy `run_id`,
-or blocked-task `acknowledge_required`. The log view renders the recent-log
-route's `spawn.out` diagnostic and falls back to it when a live stream ends
-before any orchestrator log line is seen; its task back-link sends live
+or blocked-task `acknowledge_required`. Repo-admission conflicts are recognized
+by their structured discriminator: task detail withholds Start and links to a
+non-terminal intake; repo detail withholds intake start and links to the live
+run's task controls. A raced 409 repaints into the same explanation. Admission
+notes precede readiness but never alter readiness badges, attention rows, or
+run-state signals. The log view renders the recent-log route's `spawn.out`
+diagnostic and falls back to it when a live stream ends before any orchestrator
+log line is seen; its task back-link sends live
 `active`/`waiting` runs with repo+task attribution to the full task detail
 route for controls/questions/session strips, while ended or
 attribution-incomplete runs use `#/runs/{run_id}/task` so archived task files
@@ -171,4 +176,6 @@ draft/revise/confirm is transient, the review view shows an in-flight panel with
 status, elapsed time from `updated_ts`, a safe-to-navigate-away note, and a poll
 of `GET /api/intakes/{id}`; the poll uses one module-level handle that is torn
 down on navigation like the log stream. A confirmed intake routes to the created
-task's existing detail/Start flow.
+task's existing detail/Start flow. In a recovered live-run overlap, the review
+withholds revise/confirm, retains lifecycle-legal Cancel, and links to the run;
+a raced admission refusal repaints to that state.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Design Principles and Decisions
@@ -22,6 +22,8 @@ verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 - Display-only capacity: agent subscription usage is an operator signal, not a
   readiness, attention, run-state, launch, or intake gate.
 - Per-repo serialization: one active run per target repo to protect the working tree.
+- Cross-kind repo admission: a live run and a non-terminal hub-driven intake
+  cannot share a repo; admission is atomic and distinct from readiness.
 - Auditability: human questions, answers, and stop requests should be reconstructable after the fact.
 
 ## Detail Files
@@ -50,6 +52,8 @@ verified-against: 61067dee83b3f2c39166ee65ac44931422482c73
 - Adding a cookie or query-token credential path for the dashboard shell.
 - Exposing the hub outside the tailnet.
 - Running multiple orchestrators against the same repo.
+- Using readiness/`git_clean` as a proxy for run↔intake admission, or keeping a
+  second in-memory occupancy truth beside persisted run/intake records.
 - Treating an unconfirmed intake draft as a task or exposing it through active
   task inventory.
 - Duplicating run start/stop behavior inside the intake flow after a task is

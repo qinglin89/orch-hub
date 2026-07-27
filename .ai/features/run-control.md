@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: fa5cb8be1e638086950e46eab825ab9b06649c26
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Features: Run Control
@@ -14,9 +14,10 @@ Status: implemented
 
 Description: Start, stop, list, get, and reattach orchestrator subprocesses.
 Each run attaches to one repo and one task. Same-repo live runs are serialized;
-cross-repo runs may overlap.
+cross-repo runs may overlap. A shared per-repo admission section also prevents
+a run start from overlapping a non-terminal hub-driven remote intake.
 
-Modules: runs, config, control_dir, models, readiness, task_store,
+Modules: admission, runs, intake, config, control_dir, models, readiness, task_store,
 orch_config.
 
 APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
@@ -27,8 +28,15 @@ APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
 Implemented behavior:
 
 - `RunManager.start_run(repo, task_id, extra_args=(), acknowledge_blocked=False)`
-  gates launches fail-closed: same-repo live run, task inventory/status from
-  `list_repo_tasks`, then readiness from `check_readiness`.
+  gates launches fail-closed: no non-terminal intake through shared repo
+  admission, same-repo live run, task inventory/status from `list_repo_tasks`,
+  then readiness from `check_readiness`.
+- Run and intake starts hold one per-repo admission section until the winner's
+  persisted record exists, so simultaneous starts admit exactly one. Persisted
+  unended run records remain admission-live until `_refresh` records the end;
+  terminal intake records release admission. Cross-kind 409s carry
+  `conflict: run_live|intake_in_flight` plus the blocking id and are separate
+  from readiness.
 - Task launch validation uses frontmatter-authoritative `TaskSummary.status`;
   unlisted tasks, `missing`/`unknown` task-store sentinels, and unrecognized
   statuses are rejected. `blocked` tasks require explicit acknowledgement.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: b4a5a4d1d391452acbe66a37978e9dcb1d1cba9c
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Modules
@@ -19,6 +19,7 @@ Full responsibilities live in the detail files below.
 | Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | shared subprocess wrappers |
 | Task inventory | `orch_hub/task_store.py` | `.ai-tasks` index/frontmatter parsing; contained active/archive reads |
+| Repo admission | `orch_hub/admission.py` | per-repo atomic run↔intake admission; persisted occupancy probes; structured conflicts |
 | Evaluation | `orch_hub/evaluation.py` | evidence targets/packs; artifact persistence/retention/reads |
 | Static metrics | `orch_hub/static_metrics.py` | deterministic metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation; backend isolation; doctor |
@@ -48,7 +49,7 @@ Full responsibilities live in the detail files below.
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
 | sidecar.md | Evaluation, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
 | intake.md | Intake manager, intake agent |
-| runtime.md | Run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
+| runtime.md | Repo admission, run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
 | service.md | API app, launchd operations |
 | web.md | Web UI |
 
@@ -60,6 +61,9 @@ Full responsibilities live in the detail files below.
   or evidence.
 - Housekeeping marker state is display-only; never gates readiness or launch.
 - Task inventory reads task files; it does not decide orchestrator turns.
+- Repo admission coordinates only cross-kind run/intake starts; each manager
+  keeps same-kind serialization and file-backed occupancy truth. Admission is
+  checked before, and remains separate from, readiness.
 - Evaluation reads target tasks/run artifacts via existing stores; writes only
   contained artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`.
 - Static metrics read evidence packs; write only contained

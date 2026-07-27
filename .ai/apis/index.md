@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # APIs and Interfaces
@@ -13,4 +13,4 @@ verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
 | http-evaluation.md | Evaluation availability, doctor, evidence/metrics, and semantic-job routes |
 | http-intake.md | Remote intake lifecycle routes |
 | internal-core.md | Registry/readiness/task-store/evaluation/static/semantic/usage interfaces, API conventions |
-| internal-runtime.md | Intake, run, control-dir, log, history, notifier, launchd-template interfaces |
+| internal-runtime.md | Repo-admission, intake, run, control-dir, log, history, notifier, launchd-template interfaces |

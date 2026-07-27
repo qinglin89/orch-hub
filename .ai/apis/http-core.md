@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # APIs: HTTP — Core
@@ -121,7 +121,10 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   services, and holds one `RunManager` for run, run-task, escalation, log, and
   background-monitor scans plus one `IntakeManager` for remote intake routes and
   one `UsageService` for the protected usage route, Claude statusLine sink
-  ingestion, and Claude stream observation feed.
+  ingestion, and Claude stream observation feed. The run and intake managers
+  are placed on one shared `RepoAdmission` coordinator even when both were
+  independently injected; the run manager's coordinator is adopted when both
+  are supplied.
   Default managers are built with `build_notifier(config)`: run-ended/
   pending-question and intake-ready notifications share the configured Bark
   path, and `None` keeps delivery disabled. The default intake backend is
@@ -174,6 +177,9 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   outcomes in the intake record. Mutating intake routes persist and return
   transient records (`drafting`/`revising`/`confirming`) before the slow agent
   turn finishes; clients poll `GET /api/intakes/{id}` for the resting result.
+- Cross-subsystem repo-admission errors are HTTP 409 and stay distinct from
+  readiness: `RunLiveError` returns `conflict: run_live` + `run_id`;
+  `IntakeInFlightError` returns `conflict: intake_in_flight` + `intake_id`.
 - The dashboard repo/task status layout consumes these APIs directly: repo
   cards use `/api/repos` for readiness/latest commit/housekeeping warning
   state, `/api/runs` for the tri-state run signal, and `/api/tasks` for active

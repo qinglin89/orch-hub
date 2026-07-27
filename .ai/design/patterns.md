@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-23
-verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Design: Patterns
@@ -29,6 +29,12 @@ verified-against: 0e716612253d7579fc8dee78b1dc565782e2755d
   stale `stop.flag` files would stop reused runs immediately.
 - Treat `run.json` as the source of truth for run state; in-memory process
   handles are only an optimization for observing exit codes.
+- Coordinate run/intake start through one per-repo admission section held until
+  the winner's record is persisted; ask each manager's lock-free file-backed
+  occupancy probe instead of duplicating reservations in memory.
+- Treat every readable, repo-attributed persisted unended run record as
+  admission-live until the normal refresh path persists its end; process death
+  alone must not open a fail-open intake window.
 - Store launch-time task frontmatter status on `RunRecord.task_status`; history
   code should not re-parse task files to reconstruct run context.
 - Keep run history metadata-only: answer audit records responder and question

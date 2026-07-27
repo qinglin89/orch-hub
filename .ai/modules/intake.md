@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Modules: Remote Intake
@@ -16,9 +16,12 @@ Responsibility: own the remote intake-task lifecycle, hub-owned audit state,
 and intake-ready notification trigger timing.
 `IntakeManager` stores each intake under `<data_dir>/intake/<intake_id>/` with
 `intake.json` and metadata-only `events.jsonl`, gates start on non-empty input,
-one in-flight intake per repo, and readiness, then drives an injected
-`IntakeAgent` through draft, revise, confirm, and cancel turns. It accepts an
-optional notifier and dispatch seam; `None` disables delivery work.
+shared repo admission (no persisted unended run), one in-flight intake per
+repo, and readiness, then drives an injected `IntakeAgent` through draft,
+revise, confirm, and cancel turns. The per-repo admission section is held until
+the drafting record is persisted, then released before the agent submission.
+It accepts an optional notifier and dispatch seam; `None` disables delivery
+work.
 
 Draft, revise, and confirm turns persist a transient status
 (`drafting`/`revising`/`confirming`) under the manager lock, submit the slow
@@ -29,6 +32,14 @@ expected transient status; a cancel that landed during draft/revise wins, the
 finished turn is discarded, and cancelled intakes are never resurrected.
 `confirming` is deliberately non-cancellable because the write may already have
 landed.
+
+`active_intake_for` is the coordinator's read-only, lock-free occupancy probe:
+drafting, awaiting_review, revising, and confirming records hold the repo;
+confirmed, cancelled, failed, and error records do not. Revise and confirm call
+the shared fail-closed live-run guard before touching the conversational handle,
+so a legacy/recovered overlap cannot read or write the moving repo and a
+refusal does not burn the session. Cancel remains unguarded wherever the intake
+lifecycle permits it because it writes no repo state and clears the overlap.
 
 Draft/revise turns return complete proposals and leave target repos unchanged.
 When either turn successfully settles the record to `awaiting_review`, the

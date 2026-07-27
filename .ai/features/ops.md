@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Features: Operations Surfaces
@@ -177,7 +177,8 @@ Description: Let the user type a request remotely, review the full proposed
 task file and index entry, revise or cancel it, and only on explicit
 confirmation write the new task into the target repo.
 
-Modules: intake, intake_agent, api, web, models, readiness, task_store, notifications.
+Modules: admission, intake, intake_agent, runs, api, web, models, readiness,
+task_store, notifications.
 
 APIs: protected `POST /api/intakes`, `GET /api/intakes`,
 `GET /api/intakes/{id}`, `GET /api/intakes/{id}/history`,
@@ -188,7 +189,10 @@ Implemented behavior:
 
 - `IntakeManager` owns hub state under `<ORCH_HUB_DATA_DIR>/intake/<id>/`
   (`intake.json` plus metadata-only `events.jsonl`) and enforces one in-flight
-  intake per repo after readiness passes.
+  intake per repo. A shared per-repo admission section first excludes every
+  persisted unended run and is held until the drafting record exists; a
+  non-terminal intake symmetrically blocks run start. Admission conflicts carry
+  the blocking id and remain separate from readiness.
 - Draft and revise turns produce hub-owned proposals only. They are not active
   tasks, are not returned by task inventory, and are not launchable. Draft,
   revise, and confirm turns run off the manager lock after persisting transient
@@ -200,7 +204,12 @@ Implemented behavior:
   complete proposed task file, index entry, notes, status, and audit events with
   Confirm, Request changes, and Cancel outcomes. In-flight turns show a live
   working panel with elapsed time; confirmed intakes route to the created task
-  detail so the existing Start control launches it.
+  detail so the existing Start control launches it. A live run withholds intake
+  start; a non-terminal intake withholds run Start. Linked admission notes and
+  raced-409 repaints do not change readiness, attention, or run-state signals.
+- A legacy/recovered overlap refuses revise/confirm before handle use and keeps
+  lifecycle-legal Cancel, which writes no target state and releases the intake
+  claim.
 - The concrete default backend is `ClaudeIntakeAgent`, a headless Claude CLI
   adapter that drives `/intake-task` with structured draft/confirm envelopes,
   session resume, read-only `--permission-mode plan` draft/revise turns, and a

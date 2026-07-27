@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Project Overview
@@ -62,6 +62,9 @@ control.
 - Inspect each managed repo for orchestrator launch readiness.
 - List active, waiting, pending, and blocked tasks per repo.
 - Launch and supervise one orchestrator run per repo at a time, each run attached to one `.ai-tasks/<task-id>.md` task.
+- Mutually exclude live orchestrator runs and non-terminal hub-driven remote
+  intakes per repo through one atomic admission coordinator; keep admission
+  separate from readiness.
 - Surface orchestrator human input requests remotely, collect answers, and deliver them back through the implemented control-dir file channel.
 - Stream or tail orchestrator logs to the dashboard.
 - Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
@@ -133,6 +136,7 @@ The repository contains the first product package and tests:
 ```text
 orch_hub/
   __init__.py
+  admission.py
   api.py
   cli.py
   config.py

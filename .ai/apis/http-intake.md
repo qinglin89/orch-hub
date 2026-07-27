@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # APIs: HTTP — Remote Intake
@@ -20,7 +20,9 @@ intake error mapping: `http-core.md`.
   `awaiting_review` draft or `failed` outcome.
 - Errors: unknown repo returns 404; empty request returns 400; repo already has
   an in-flight intake or readiness fails returns 409, with readiness `reasons`
-  included.
+  included only for readiness. A persisted unended run is checked before
+  readiness and returns HTTP 409 before record/agent creation:
+  `{"detail", "conflict": "run_live", "run_id"}`.
 
 ## `GET /api/intakes`
 
@@ -50,7 +52,8 @@ intake error mapping: `http-core.md`.
   immediately; poll `GET /api/intakes/{intake_id}` for the settled
   `awaiting_review` draft or `failed` outcome. Wrong lifecycle state returns
   409; empty feedback returns 400; a lost session can fail synchronously as a
-  `failed` record.
+  `failed` record. A recovered live-run overlap returns structured `run_live`
+  409 before the handle is consumed or state mutates.
 
 ## `POST /api/intakes/{intake_id}/confirm`
 
@@ -63,6 +66,8 @@ intake error mapping: `http-core.md`.
   immediately; poll `GET /api/intakes/{intake_id}` for `confirmed` plus
   `created_task_id` or a `failed` outcome. A failed/unverified confirm is an
   auditable record with status `failed`, not a transport 5xx.
+- A recovered live-run overlap returns structured `run_live` 409 before the
+  handle is consumed or target state can be written.
 
 ## `POST /api/intakes/{intake_id}/cancel`
 
@@ -70,3 +75,5 @@ intake error mapping: `http-core.md`.
 - Shape: serialized `IntakeRecord` with status `cancelled`; legal from
   `drafting`, `awaiting_review`, and `revising`. Wrong lifecycle state,
   including `confirming`, returns 409.
+- Cancellation is deliberately not blocked by a recovered live-run overlap: it
+  writes no repo state and is the intake-side way to release the claim.

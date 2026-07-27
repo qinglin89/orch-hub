@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Architecture
@@ -97,8 +97,9 @@ tokens, Bark endpoints) must not be logged or displayed.
 Discovery reads the registry, then overlays per-repo readiness; ordinary
 readiness failures stay payload data, not route errors.
 
-Run launch: operator-selected repo/task → per-repo live-run serialization,
-task existence/status validation via the task store, readiness verification,
+Run launch: operator-selected repo/task → shared repo admission (no
+non-terminal remote intake), per-repo live-run serialization, task
+existence/status validation via the task store, readiness verification,
 external run dir creation, then deployed-orchestrator launch with a control
 dir inside it. Cross-repo runs may overlap.
 
@@ -115,15 +116,19 @@ Log access resolves a known run record first, then locates recent/streamed
 logs from its task/timestamp context; browser streaming uses
 bearer-authenticated fetch streams, never query tokens.
 
-Remote intake: a natural-language request for a ready repo creates hub-owned
-intake state; `/intake-task` runs read-only draft/revise turns showing the
-full proposed task file plus index row, and only explicit confirm runs the
-write turn. `confirmed` requires the created task to round-trip through
-frontmatter-authoritative inventory as `pending`/`blocked`; every other
-outcome stays outside inventory and rolls back the paths it was authorized to
-touch while the process is alive. `awaiting_review` settlement emits one
-metadata-only intake-ready notification off the state-critical path when Bark
-is configured.
+Remote intake: shared repo admission first refuses a start while any readable,
+repo-attributed persisted unended run holds the repo; otherwise a
+natural-language request for a ready repo creates hub-owned intake state.
+`/intake-task` runs read-only draft/revise
+turns showing the full proposed task file plus index row, and only explicit
+confirm runs the write turn. A non-terminal intake blocks run start until it
+settles. A legacy/recovered overlap fails closed for revise/confirm while
+lifecycle-legal Cancel remains available. `confirmed` requires the created
+task to round-trip through frontmatter-authoritative inventory as
+`pending`/`blocked`; every other outcome stays outside inventory and rolls back
+the paths it was authorized to touch while the process is alive.
+`awaiting_review` settlement emits one metadata-only intake-ready notification
+off the state-critical path when Bark is configured.
 
 Task evaluation: exact active/archive id → read-only aggregation of every
 `(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics
@@ -164,6 +169,10 @@ never feed attention, readiness, run state, or launch/intake gates.
 - Task inventory reads task files but does not decide orchestrator turn state.
 - Intake owns the draft/revise/confirm/cancel lifecycle, audit state, and
   read-only-until-confirm contract.
+- Repo admission owns only the cross-kind invariant: one per-repo critical
+  section admits either a run start or an intake start until the winner's
+  persisted record exists. Run/intake managers retain their same-kind gates and
+  file-backed occupancy truth; admission is not readiness.
 - Evaluation owns evidence assembly/persistence; it reads target tasks/run
   artifacts and writes only hub-owned artifacts.
 - Static metrics owns deterministic scoring over evidence packs; no model
@@ -217,6 +226,9 @@ never feed attention, readiness, run state, or launch/intake gates.
 - Hub-owned evaluation artifacts stay outside target trees and do not mutate
   task/run/protocol state.
 - Hub-owned unconfirmed intake drafts are not tasks and cannot be launched.
+- A persisted unended run and a non-terminal hub-driven intake must not coexist
+  for one repo; admission conflicts are structured 409s, not readiness
+  failures.
 - A confirmed intake must land through task inventory as `pending`/`blocked`;
   every other confirm outcome is failed/unverified.
 - Human answers are auditable, but history must not duplicate answer text.

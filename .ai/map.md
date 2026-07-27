@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-07-27
+verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ---
 
 # Project Map
@@ -20,11 +20,11 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Agent subscription usage | usage, statusline, models, config, api, intake_agent, semantic, web | implemented; normalized Claude/Codex windows/percentages/resets/freshness/plan/credits; Codex = newest local rollout `rate_limits`; Claude = hub store fed by operator statusLine sink (2.1.218 stream-json has no 5h/7d windows → wired observer usually inert); fail-soft display-only; never gates readiness/attention/run/launch/intake |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; localhost-default env-configured uvicorn; only health + enumerated shell assets public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; malformed answers = pending repair; atomic answer writes; mirrors answer-mode parser rules; idempotent `stop.flag` |
-| Run lifecycle | runs, orch_config, sessions, api, config, control_dir, models, readiness, task_store | implemented; detached `caffeinate` launch with explicit agent-CLI `PATH`; external run dirs; `run.json` + internal `spawn_out`; per-repo serialization; reattach; live-only `stop_requested`; stop/end classification; split-role `--print-config` preview + legacy detection; split/legacy argv; session/effective-config snapshots from logs |
+| Run lifecycle | admission, runs, intake, orch_config, sessions, api, config, control_dir, models, readiness, task_store | implemented; shared per-repo run↔intake admission before readiness; detached `caffeinate` launch with explicit agent-CLI `PATH`; external run dirs; `run.json` + internal `spawn_out`; per-repo run serialization; reattach; live-only `stop_requested`; stop/end classification; split-role `--print-config` preview + legacy detection; split/legacy argv; session/effective-config snapshots from logs |
 | Human question relay | control_dir, runs, api, notifications, models, web | implemented over live control dirs; omitted mode = legacy verbatim; explicit answer/discuss fail-closed by question kind; metadata-only audit events carry mode; Bark push once per `(run_id, seq)`, compact plan-gate text |
 | Log viewing | logs, runs, api | implemented; locate from `RunRecord`; bounded recent tails; `spawn.out` diagnostic fallback; bearer-header SSE |
-| Mobile dashboard | api, web | implemented mobile-first SPA v1; public shell + localStorage bearer token; CSS-only theme with pre-paint Mode/Palette axes; Overview landing + display-only usage section; display-ready softening only for live runs with sole `git_clean` failure (raw gates unchanged); split DEV/REVIEW Start dialog; evaluation L1/L2 sidecar; details in features/dashboard.md + dashboard-views.md |
-| Remote intake-task | intake, intake_agent, api, web, models, readiness, task_store, notifications | implemented; readiness-gated draft/revise/confirm/cancel; hub-owned draft/audit state; off-lock transient turns + dashboard polling; Claude CLI backend; metadata-only intake-ready push; confirm verified via inventory `pending`/`blocked` |
+| Mobile dashboard | api, web | implemented mobile-first SPA v1; public shell + localStorage bearer token; CSS-only theme with pre-paint Mode/Palette axes; Overview landing + display-only usage section; display-ready softening only for live runs with sole `git_clean` failure (raw gates unchanged); run↔intake admission pre-reflection with linked blockers and neutral readiness/state presentation; split DEV/REVIEW Start dialog; evaluation L1/L2 sidecar; details in features/dashboard.md + dashboard-views.md |
+| Remote intake-task | admission, intake, intake_agent, runs, api, web, models, readiness, task_store, notifications | implemented; shared per-repo run↔intake admission before readiness; hub-owned draft/audit state; off-lock transient turns + dashboard polling; recovered overlaps refuse revise/confirm but permit lifecycle-legal Cancel; Claude CLI backend; metadata-only intake-ready push; confirm verified via inventory `pending`/`blocked` |
 | Auth and private access | api, config | implemented pure-ASGI bearer middleware; Tailscale-only/private exposure still required; SSE header auth via fetch streams, no query tokens |
 | Notifications | notifications, config, runs, intake, semantic_jobs, monitor, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL`; owning managers trigger run/question, intake-ready, and semantic-job-outcome pushes; delivery isolated; `notify test` probe with plist fallback + URL redaction |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging + ops CLI; plist template = source of truth; manages only the fixed service label, not orchestrator runs |
@@ -66,7 +66,8 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | cli | human + JSON readiness output; launchd, notify-test, eval-doctor dispatch |
 | launchd | deployment settings incl. optional Bark URL; plist render/install; package install/update; launchctl lifecycle; status probe |
 | task_store | parse `.ai-tasks` indexes + frontmatter; contained active/archive reads + typed `session-est` by exact id |
-| intake | intake lifecycle; hub-owned records/events; readiness + repo-busy gates; off-lock transient turns; orphan reconciliation; intake-ready triggers; inventory-verified confirm/rollback |
+| admission | per-repo run↔intake start critical section; lock-free persisted occupancy probes; structured cross-kind conflicts; recovered-overlap guard |
+| intake | intake lifecycle; hub-owned records/events; shared admission + same-kind + readiness gates; off-lock transient turns; recovered-overlap fail-closed writes; orphan reconciliation; intake-ready triggers; inventory-verified confirm/rollback |
 | intake_agent | Claude CLI `/intake-task` session; structured envelopes; session resume; read-only draft/revise; write-permitted confirm |
 | runs | start/list/get/stop/reattach subprocess runs; run state; per-repo serialization; live/end classification; history events; session/effective-config snapshots; isolated notifications |
 | orch_config | split-role `--print-config` query; strict parse + legacy detection; split/legacy argv; tolerant `effective-config:` snapshots; no orchestrator imports |
