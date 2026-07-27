@@ -26,7 +26,10 @@ from orch_hub.usage import (
     ClaudeObservation,
     ClaudeUsageStore,
     UsageService,
+    WindowBoundary,
     claude_usage,
+    merge_window_boundaries,
+    parse_claude_stream_boundaries,
     parse_claude_stream_usage,
     read_claude_statusline,
     read_codex_usage,
@@ -219,13 +222,14 @@ def test_codex_staleness(tmp_path: Path) -> None:
 
 
 # -- Claude stream-json rate-limit parser -------------------------------------
-# The window shape below is the installed CLI's real subscription shape (verified
-# against Claude Code 2.1.218 — see the module's section note): a ``rate_limits``
-# container keyed ``five_hour``/``seven_day``, each window carrying a 0-100
-# ``used_percentage`` and an epoch-seconds ``resets_at``. The CLI does not put that
-# container on ``claude -p`` stream-json stdout, so the contract these tests pin is
-# mostly the graceful one: that shape -> observation, everything else (including the
-# one rate-limit field the stream really does carry) -> None, never a raise.
+# The window shape below is the CLI's real subscription shape (verified against
+# Claude Code 2.1.218 — see the module's section note): a ``rate_limits`` container
+# keyed ``five_hour``/``seven_day``, each window carrying a 0-100
+# ``used_percentage`` and an epoch-seconds ``resets_at``. No verified CLI version
+# puts that container on ``claude -p`` stream-json stdout, so the contract these
+# tests pin is mostly the graceful one: that shape -> observation, everything else
+# (including the percentage-less rate-limit frames the stream really does carry)
+# -> None, never a raise.
 
 OBS_TS = "2026-07-24T01:00:00Z"
 SYSTEM_EVENT = {"type": "system", "subtype": "init"}
@@ -361,9 +365,8 @@ def test_parse_claude_stream_latest_container_wins() -> None:
 
 
 def test_parse_claude_stream_absent_returns_none() -> None:
-    # Ordinary stream-json carries no rate-limit fields at all — every turn of the
-    # installed CLI -> no observation, so the store stays unfed and Claude reads
-    # unavailable.
+    # An ordinary turn carries no usage figure on any verified version -> no
+    # observation, so the store stays unfed and Claude reads unavailable.
     stdout = claude_stream(SYSTEM_EVENT, ASSISTANT_EVENT, claude_result())
     assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
 
@@ -431,6 +434,167 @@ def test_parse_claude_stream_excludes_account_and_credentials() -> None:
     assert obs is not None
     assert obs.plan == "max"
     assert "SECRET" not in json.dumps(obs.to_dict())
+
+
+# -- Claude stream boundary events (2.1.220) ----------------------------------
+# 2.1.220 adds one event to the same stream: camelCase, naming ONE window and when
+# it resets, with no percentage. That is a boundary refresh, not an observation, so
+# these pin both halves — the parse, and the three merge rules from the module's
+# boundary section note: it never creates a window, it only moves `resets_at`
+# forward, and it leaves the figures (and their observation time) untouched.
+
+BOUNDARY_EVENT = {
+    "type": "rate_limit_event",
+    "rate_limit_info": {
+        "status": "allowed",
+        "resetsAt": 1785130800,
+        "rateLimitType": "five_hour",
+        "overageStatus": "rejected",
+        "overageDisabledReason": "org_level_disabled",
+        "isUsingOverage": False,
+    },
+}
+"""Verbatim, as captured from Claude Code 2.1.220 on one ordinary ``claude -p`` turn
+(``status: allowed`` — not a 429)."""
+
+BOUNDARY_ISO = "2026-07-27T05:40:00+00:00"
+"""``resetsAt: 1785130800`` as the parser normalizes it (epoch seconds -> ISO UTC)."""
+
+STORED_FIVE_RESET = "2026-07-27T00:40:00+00:00"  # the window before BOUNDARY_ISO
+STORED_SEVEN_RESET = "2026-08-01T00:00:00+00:00"
+
+
+def boundary_event(**info: object) -> dict:
+    """The 2.1.220 boundary event with its ``rate_limit_info`` fields overridden."""
+    payload = dict(BOUNDARY_EVENT["rate_limit_info"])  # type: ignore[arg-type]
+    payload.update(info)
+    return {"type": "rate_limit_event", "rate_limit_info": payload}
+
+
+def bounded_observation(
+    *,
+    observed_ts: str = "2026-07-27T02:30:00+00:00",
+    five_reset: str | None = STORED_FIVE_RESET,
+    used: float = 4.0,
+) -> ClaudeObservation:
+    """A stored sink observation whose windows already carry reset instants."""
+    return ClaudeObservation(
+        observed_ts=observed_ts,
+        plan="max",
+        windows=(
+            UsageWindow(
+                key="five_hour",
+                label="5h",
+                window_minutes=300,
+                used_percent=used,
+                remaining_percent=100 - used,
+                resets_at=five_reset,
+            ),
+            UsageWindow(
+                key="seven_day",
+                label="7d",
+                window_minutes=10080,
+                used_percent=11.0,
+                remaining_percent=89.0,
+                resets_at=STORED_SEVEN_RESET,
+            ),
+        ),
+    )
+
+
+def test_parse_claude_boundary_event_verbatim_2_1_220() -> None:
+    stdout = claude_stream(SYSTEM_EVENT, BOUNDARY_EVENT, ASSISTANT_EVENT, claude_result())
+    assert parse_claude_stream_boundaries(stdout) == (
+        WindowBoundary(key="five_hour", resets_at=BOUNDARY_ISO),
+    )
+    # The same stream is still NOT a usage observation: no percentage means no
+    # window, so the figure carrier stays the only source of figures.
+    assert parse_claude_stream_usage(stdout, observed_ts=OBS_TS) is None
+
+
+def test_parse_claude_boundary_accepts_the_snake_case_spelling() -> None:
+    # camelCase is what 2.1.220 emits; snake_case is accepted as tolerance because
+    # the CLI spells the same two fields that way elsewhere.
+    stdout = claude_stream(
+        {"type": "rate_limit_event", "rate_limit_info": {"rate_limit_type": "seven_day", "resets_at": 1785290400}}
+    )
+    assert parse_claude_stream_boundaries(stdout) == (
+        WindowBoundary(key="seven_day", resets_at="2026-07-29T02:00:00+00:00"),
+    )
+
+
+def test_parse_claude_boundary_needs_a_known_window_and_a_reset() -> None:
+    # An unknown window name must not create a bucket, and a boundary with no usable
+    # reset instant carries nothing to merge.
+    assert parse_claude_stream_boundaries(claude_stream(boundary_event(rateLimitType="five_hour_opus"))) == ()
+    assert parse_claude_stream_boundaries(claude_stream(boundary_event(resetsAt=None))) == ()
+    assert parse_claude_stream_boundaries(claude_stream(boundary_event(resetsAt="not-a-date"))) == ()
+
+
+def test_parse_claude_boundary_absent_or_malformed_yields_nothing() -> None:
+    # Every turn before 2.1.220, plus the usual garbage: never a raise.
+    assert parse_claude_stream_boundaries(claude_stream(SYSTEM_EVENT, claude_result())) == ()
+    assert parse_claude_stream_boundaries("") == ()
+    assert parse_claude_stream_boundaries('not json\n{bad\n[1,2,3]\n"a string"') == ()
+
+
+def test_parse_claude_boundary_newest_per_window_wins() -> None:
+    stdout = claude_stream(
+        boundary_event(resetsAt=1785088200),
+        boundary_event(resetsAt=1785130800),
+        boundary_event(rateLimitType="seven_day", resetsAt=1785290400),
+    )
+    assert parse_claude_stream_boundaries(stdout) == (
+        WindowBoundary(key="five_hour", resets_at=BOUNDARY_ISO),
+        WindowBoundary(key="seven_day", resets_at="2026-07-29T02:00:00+00:00"),
+    )
+
+
+def test_merge_boundary_moves_only_the_reset_instant() -> None:
+    stored = bounded_observation()
+    merged = merge_window_boundaries(stored, [WindowBoundary(key="five_hour", resets_at=BOUNDARY_ISO)])
+    assert merged is not None
+    assert merged.windows[0].resets_at == BOUNDARY_ISO
+    # Everything that describes usage is untouched — including `observed_ts`, which
+    # dates the FIGURES, so staleness keeps measuring their age.
+    assert merged.observed_ts == stored.observed_ts
+    assert merged.plan == stored.plan
+    assert merged.windows[0].used_percent == 4.0
+    assert merged.windows[0].remaining_percent == 96.0
+    assert merged.windows[1] == stored.windows[1]  # unnamed window untouched
+
+
+def test_merge_boundary_is_forward_only() -> None:
+    stored = bounded_observation()
+    # Equal (a second turn inside the same window) and earlier (out-of-order or a
+    # duplicate) both change nothing -> nothing is written.
+    assert merge_window_boundaries(stored, [WindowBoundary(key="five_hour", resets_at=STORED_FIVE_RESET)]) is None
+    assert (
+        merge_window_boundaries(stored, [WindowBoundary(key="five_hour", resets_at="2026-07-26T17:50:00+00:00")])
+        is None
+    )
+
+
+def test_merge_boundary_never_creates_a_window() -> None:
+    # A boundary for a window the figure carrier never observed adds nothing: the
+    # "no used_percentage -> no window" rule holds through the merge too.
+    stored = ClaudeObservation(
+        observed_ts="2026-07-27T02:30:00+00:00",
+        plan="max",
+        windows=(UsageWindow(key="seven_day", label="7d", window_minutes=10080, used_percent=11.0, resets_at=STORED_SEVEN_RESET),),
+    )
+    assert merge_window_boundaries(stored, [WindowBoundary(key="five_hour", resets_at=BOUNDARY_ISO)]) is None
+    assert merge_window_boundaries(stored, []) is None
+
+
+def test_merge_boundary_fills_a_window_with_no_stored_reset() -> None:
+    # A stored window whose carrier gave no reset instant gains one — new
+    # information about an already-observed window, not a new window.
+    stored = bounded_observation(five_reset=None)
+    merged = merge_window_boundaries(stored, [WindowBoundary(key="five_hour", resets_at=BOUNDARY_ISO)])
+    assert merged is not None
+    assert merged.windows[0].resets_at == BOUNDARY_ISO
+    assert merged.windows[0].used_percent == 4.0
 
 
 # -- Claude store + read ------------------------------------------------------
@@ -752,6 +916,60 @@ def test_service_claude_observer_ignores_unsupported_turn(tmp_path: Path) -> Non
     service.claude_observer()(claude_stream(SYSTEM_EVENT, ASSISTANT_EVENT, claude_result()))
     assert {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE].available is False
     assert service.store.latest() is None  # unsupported output records nothing
+
+
+def test_service_claude_observer_refreshes_a_boundary_without_touching_figures(tmp_path: Path) -> None:
+    # The 2.1.220 acceptance case: a hub-driven turn carrying only the boundary event
+    # moves the stored window's reset instant forward and changes nothing else.
+    config = make_config(tmp_path)
+    store = ClaudeUsageStore(config.data_dir)
+    store.record(bounded_observation())
+    later = dt.datetime(2026, 7, 27, 5, 45, tzinfo=UTC)  # past the stored 5h boundary
+    service = UsageService(config, claude_store=store, clock=lambda: later)
+    assert service.get_usage().providers[0].windows[0].resets_at == STORED_FIVE_RESET  # primes the cache
+
+    service.claude_observer()(claude_stream(SYSTEM_EVENT, BOUNDARY_EVENT, claude_result()))
+
+    stored = store.latest()
+    assert stored is not None
+    assert stored.windows[0].resets_at == BOUNDARY_ISO
+    assert stored.windows[0].used_percent == 4.0  # figures are the sink's, untouched
+    assert stored.observed_ts == "2026-07-27T02:30:00+00:00"  # still dates the figures
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    assert claude.windows[0].resets_at == BOUNDARY_ISO  # the refresh invalidated the cache
+    assert claude.windows[0].used_percent == 4.0
+    assert claude.stale is True  # a boundary refresh is not an observation of figures
+
+
+def test_service_claude_observer_boundary_alone_records_nothing(tmp_path: Path) -> None:
+    # Never observed + a boundary event = still unavailable. The merge creates no
+    # window, so a percentage-less "available" card is impossible.
+    config = make_config(tmp_path)
+    service = UsageService(config, clock=lambda: NOW)
+    service.claude_observer()(claude_stream(BOUNDARY_EVENT))
+    assert service.store.latest() is None
+    assert {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE].available is False
+
+
+def test_service_claude_observer_prefers_figures_over_a_boundary(tmp_path: Path) -> None:
+    # A stream carrying both is recorded as an observation: it already carries the
+    # turn's own boundary, so there is nothing left to merge.
+    config = make_config(tmp_path)
+    store = ClaudeUsageStore(config.data_dir)
+    store.record(bounded_observation())
+    service = UsageService(config, claude_store=store, clock=lambda: NOW)
+    service.claude_observer()(
+        claude_stream(
+            BOUNDARY_EVENT,
+            claude_result(claude_rate_limits(five_hour={"used_percentage": 60.0, "resets_at": 1785290400})),
+        )
+    )
+    stored = store.latest()
+    assert stored is not None
+    assert [w.key for w in stored.windows] == ["five_hour"]
+    assert stored.windows[0].used_percent == 60.0
+    assert stored.windows[0].resets_at == "2026-07-29T02:00:00+00:00"
+    assert stored.observed_ts == NOW.isoformat()  # a real observation, so freshly stamped
 
 
 def test_service_claude_observer_swallows_record_failure(tmp_path: Path) -> None:

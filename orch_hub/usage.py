@@ -35,17 +35,21 @@ differently:
      simply absent and Claude reads *unavailable* exactly as before.
   2. *Hub-driven turns* — the hub also drives Claude (intake, semantic eval), and
      :meth:`UsageService.claude_observer` is the best-effort seam those backends
-     feed each turn's ``stream-json`` stdout into
-     (:func:`parse_claude_stream_usage`). Verified against Claude Code 2.1.218,
-     that stdout carries no 5h/7d windows on any event (the section note below
-     records the evidence), so on the installed CLI this carrier is structurally
-     inert — it recognizes nothing and records nothing. It stays wired because it
-     costs one no-op call per turn and is where a future carrier would arrive.
+     feed each turn's ``stream-json`` stdout into. No verified version puts a
+     *used-percentage* there (2.1.218: no rate-limit field at all; 2.1.220: a
+     ``rate_limit_event`` naming one window and its reset instant, with no
+     figure — the two section notes below carry the evidence), so this carrier
+     never originates Claude usage. What 2.1.220 does give is a free *boundary*
+     refresh: a turn the hub already runs can move a stored window's
+     ``resets_at`` forward (:func:`parse_claude_stream_boundaries`,
+     :func:`merge_window_boundaries`) without touching the percentages carrier 1
+     observed. Figures come only from the sink; this keeps their window boundary
+     current between status-line renders.
 
-  Both share one parser, one store, and one read path. No Claude turn is ever
-  started just to refresh usage, and no interactive UI or private OAuth endpoint
-  is scraped — including the CLI's own ``/usage`` command, which fetches from a
-  private endpoint and spends a ``quota_check`` API call.
+  Both share one store and one read path. No Claude turn is ever started just to
+  refresh usage, and no interactive UI or private OAuth endpoint is scraped —
+  including the CLI's own ``/usage`` command, which fetches from a private
+  endpoint and spends a ``quota_check`` API call.
 
 :class:`UsageService` aggregates both behind a small bounded cache so a burst of
 Overview refreshes does not re-scan rollout files every time, and degrades each
@@ -60,7 +64,7 @@ import json
 import os
 import threading
 from collections.abc import Callable, Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .config import Config
@@ -491,38 +495,46 @@ def claude_usage(store: ClaudeUsageStore, *, now: dt.datetime | None = None) -> 
 
 # -- Claude: parse a hub-driven ``claude -p`` turn's stream-json for usage -----
 #
-# VERIFIED — AND THE ANSWER IS "NOT ON THIS CHANNEL" (Claude Code 2.1.218). The hub
-# never starts a probe turn (the scope bars it), so Claude usage can only come from
-# the stream-json of turns the hub already drives (intake, semantic eval). That
-# stdout does not carry the subscription windows. In the CLI's own emitted-message
-# schema, neither ``result`` (success and error subtypes) nor ``system/init`` has a
-# rate-limit field at all; the single event that does, ``system/api_error``, carries
-# only ``error.rate_limits = {resets_at, rate_limit_type} | null``, described there
-# as the quota-429 retry-banner headers — a reset time and a window name, never a
-# percentage, and only when a turn is actually rejected. Corroborated empirically:
-# no local Claude session record carries a rate-limit *field* at all.
+# VERIFIED — NO USED-PERCENTAGE ON THIS CHANNEL, ON ANY VERSION CHECKED. The hub
+# never starts a probe turn (the scope bars it), so Claude *figures* can only come
+# from the stream-json of turns the hub already drives (intake, semantic eval) —
+# and they do not. Verified against Claude Code 2.1.218: in the CLI's own
+# emitted-message schema neither ``result`` (success and error subtypes) nor
+# ``system/init`` has a rate-limit field at all, and the single event that does,
+# ``system/api_error``, carries only
+# ``error.rate_limits = {resets_at, rate_limit_type} | null`` — the quota-429
+# retry-banner headers, a reset time and a window name, never a percentage, and
+# only when a turn is actually rejected. Corroborated empirically on that version:
+# no local Claude session record carried a rate-limit field at all.
 #
-# So on absence this parser stays exactly what the scope mandates: it recognizes
-# nothing in an ordinary turn and returns no observation, leaving the store unfed
-# and Claude reading *unavailable*. What verification changed is the target — the
-# keys below are no longer guesses but the CLI's real subscription shape, the one it
-# publishes to a statusLine command's stdin:
+# 2.1.220 adds one event to this channel, ``rate_limit_event`` — still no
+# percentage, so nothing here changes; it is a *boundary* signal and is parsed by
+# the next section, not by this one.
+#
+# So this parser stays exactly what the scope mandates: it recognizes no usage in
+# an ordinary turn and returns no observation, leaving the store unfed and Claude
+# reading *unavailable*. What verification changed is the target — the keys below
+# are no longer guesses but the CLI's real subscription shape, the one it publishes
+# to a statusLine command's stdin:
 #
 #     "rate_limits": {"five_hour": {"used_percentage": <0-100>, "resets_at": <epoch s>},
 #                     "seven_day": {"used_percentage": <0-100>, "resets_at": <epoch s>}}
 #
 # "Only present for subscribers after first API response", each window optional.
-# Reading *that* channel needs a feed the hub does not have today (a statusLine hook
-# is operator-configured, and it is fed by the operator's own interactive sessions
-# rather than by hub-driven ones) — its own task. Until such a feed exists this path
-# is correctly inert, but aligned: a carrier appearing on the stream is parsed, not
-# missed. Everything below is tolerant and never raises — a malformed line is skipped
-# like the orchestrator/intake readers do, and the last usable container wins.
+# That channel is read by the statusLine sink section further down — the carrier that
+# actually delivers figures. On the stream this path stays inert but aligned: the
+# mapping is shared, so a figure-carrying container appearing here on some future
+# version is parsed, not missed. Everything below is tolerant and never raises — a
+# malformed line is skipped like the orchestrator/intake readers do, and the last
+# usable container wins.
 
 _CLAUDE_CONTAINER_KEYS = ("rate_limits",)
-"""The key the rate-limit container arrives under. Snake-case ``rate_limits`` is the
-only spelling the CLI writes — statusLine payload, ``/usage`` payload, and the
-``system/api_error`` wire schema alike."""
+"""The key a *figure-carrying* rate-limit container arrives under. Snake-case
+``rate_limits`` is the only spelling the CLI uses for one — statusLine payload,
+``/usage`` payload, and the ``system/api_error`` wire schema alike. 2.1.220's
+boundary event is a different container under a different key, with camelCase
+fields (see :data:`_CLAUDE_BOUNDARY_KEYS`); it carries no figure, so it is
+deliberately not reachable from here."""
 
 _CLAUDE_WINDOW_KEYS = ("five_hour", "seven_day")
 """The two subscription windows the CLI publishes, keyed by its own names — which
@@ -592,7 +604,9 @@ def _claude_window(key: str, raw: object) -> UsageWindow | None:
     less than the sink now says (no percentage, a window naming scheme of its own),
     about a condition that is transient and only observable while a hub-driven turn
     is being rejected. Rejecting it here keeps one rule: an available Claude card
-    carries figures."""
+    carries figures. 2.1.220's percentage-less ``rate_limit_event`` is rejected by
+    the same rule and reaches the store only as a boundary refresh onto a window
+    the sink already established (next section)."""
     if not isinstance(raw, dict):
         return None
     used = _percent(_first(raw, _CLAUDE_USED_KEYS))
@@ -627,22 +641,24 @@ def _claude_windows(container: object) -> list[UsageWindow]:
     return windows
 
 
-def _claude_container(event: dict) -> object | None:
+def _claude_container(event: dict, keys: tuple[str, ...] = _CLAUDE_CONTAINER_KEYS) -> object | None:
     """Locate a rate-limit container on one stream-json event, if any.
 
-    Looks under the container key at the event top level and one level down under
-    the wrappers a session payload would plausibly nest in
+    Looks under ``keys`` at the event top level and one level down under the
+    wrappers a session payload would plausibly nest in
     (``result``/``usage``/``message``/``payload``). That descent is tolerance, not
-    guesswork: no event of the installed CLI carries the container at all, so this
-    is what would find it if a future CLI attached the statusLine-shaped payload to
-    the stream. Returns the first container found, else ``None``."""
-    container = _first(event, _CLAUDE_CONTAINER_KEYS)
+    guesswork: no verified event carries the *figure* container at all, so this is
+    what would find it if a future CLI attached the statusLine-shaped payload to the
+    stream — and the 2.1.220 boundary event puts its own container at the top level,
+    where the same lookup finds it. Returns the first container found, else
+    ``None``."""
+    container = _first(event, keys)
     if container is not None:
         return container
     for wrapper_key in ("result", "usage", "message", "payload"):
         wrapper = event.get(wrapper_key)
         if isinstance(wrapper, dict):
-            container = _first(wrapper, _CLAUDE_CONTAINER_KEYS)
+            container = _first(wrapper, keys)
             if container is not None:
                 return container
     return None
@@ -692,6 +708,174 @@ def parse_claude_stream_usage(stdout: str, *, observed_ts: str) -> ClaudeObserva
         return None
     windows, plan = latest
     return ClaudeObservation(observed_ts=observed_ts, plan=plan, windows=tuple(windows))
+
+
+# -- Claude: the stream's boundary-only rate-limit event (2.1.220) -------------
+#
+# VERIFIED ON CLAUDE CODE 2.1.220 — a free boundary refresh, and nothing more. One
+# ordinary ``claude -p`` turn (``status: "allowed"``, not a 429) puts this on the
+# stream the hub already drives:
+#
+#     {"type": "rate_limit_event", "rate_limit_info": {
+#        "status": "allowed", "resetsAt": 1785130800, "rateLimitType": "five_hour",
+#        "overageStatus": "rejected", "overageDisabledReason": "org_level_disabled",
+#        "isUsingOverage": false}}
+#
+# camelCase, its own container key, and *no percentage* — so it is not usage. It is
+# the one thing the figure carrier cannot keep current: the statusLine sink is only
+# written while an interactive session renders its status line, so a stored window's
+# ``resets_at`` goes stale between renders, while a hub-driven turn (intake,
+# semantic eval) touches the live quota and learns the current boundary for free —
+# no probe turn, no private endpoint, no extra quota.
+#
+# WHY THE BOUNDARY IS WORTH REFRESHING AT ALL. Also verified: the five-hour window
+# is anchored to the *first call of that window*, not to a fixed clock grid
+# (``resetsAt`` 1785130800 = 05:40Z with a session started 08:40 CST; 1785088200 =
+# 17:50Z with one started 20:50 CST the prior evening). So a passed ``resets_at``
+# does not mean "a fresh window just started with the same figures" — it means *no
+# window is open*, and the next call opens one. That is what the Overview renders
+# from these fields, and it is why a percentage may not be presented as the current
+# window's once its boundary has moved.
+#
+# PARTIAL-UPDATE SEMANTICS against the single-snapshot store. The store keeps one
+# newest-wins :class:`ClaudeObservation`; a boundary observation carries no figures,
+# so recording it as an observation would erase the percentages, and dropping it
+# would waste the only fresh signal the hub can get. It is therefore merged, not
+# recorded (:func:`merge_window_boundaries`), under three rules:
+#
+#   * It never creates anything. No stored observation, or no stored window with
+#     that key, means nothing is written — "no ``used_percentage`` -> no window"
+#     still holds, and Claude stays *unavailable* until the sink observes figures.
+#   * It touches only ``resets_at``, and only forward (:func:`_is_newer`). The
+#     percentages, plan, and ``observed_ts`` are left exactly as observed —
+#     ``observed_ts`` dates the *figures*, so staleness keeps measuring their age
+#     and a boundary refresh cannot make an old figure look fresh.
+#   * Out-of-order or duplicate events are inert: an equal or earlier boundary
+#     writes nothing (a window boundary only advances), so repeated turns cost
+#     nothing.
+#
+# The quota-429 ``system/api_error`` frame from the section above carries the same
+# information in the older snake-case shape, and is deliberately *not* read here as
+# a second source: it only appears while a hub-driven turn is being rejected, and
+# the boundary it would report is the one the next ordinary turn's
+# ``rate_limit_event`` carries anyway. One verified carrier, one code path.
+
+_CLAUDE_BOUNDARY_KEYS = ("rate_limit_info",)
+"""The key 2.1.220's boundary container arrives under (event ``rate_limit_event``).
+
+Matched on the container rather than on ``type``: the container is the payload the
+CLI documents, and keying on it means a re-envelope (a rename, a nesting change)
+still parses. Deliberately distinct from :data:`_CLAUDE_CONTAINER_KEYS` so a
+figure-less boundary can never be mistaken for a usage container."""
+
+_CLAUDE_BOUNDARY_WINDOW_KEYS = ("rateLimitType", "rate_limit_type")
+"""Which window the boundary belongs to. camelCase is what 2.1.220 emits; the
+snake-case spelling is accepted as tolerance because the CLI uses it for the same
+field elsewhere (the ``api_error`` frame). The value must be one of
+:data:`_CLAUDE_WINDOW_KEYS` — an unknown window name is ignored rather than
+creating a bucket."""
+
+_CLAUDE_BOUNDARY_RESET_KEYS = ("resetsAt", "resets_at")
+"""The reset instant, as Unix epoch seconds (:func:`_claude_reset` also takes ISO).
+Both spellings for the same reason as the window key."""
+
+
+@dataclass(frozen=True)
+class WindowBoundary:
+    """One window's reset instant, observed *without* any usage figure.
+
+    Deliberately not a :class:`UsageWindow`: it carries no percentage and must not
+    be able to become a window on its own. ``key`` is one of
+    :data:`_CLAUDE_WINDOW_KEYS` and ``resets_at`` an ISO-8601 UTC instant. Its only
+    use is :func:`merge_window_boundaries`, which can move an already-observed
+    window's boundary forward and nothing else."""
+
+    key: str
+    resets_at: str
+
+
+def _claude_boundary(raw: object) -> WindowBoundary | None:
+    """Normalize one boundary container into a :class:`WindowBoundary`.
+
+    ``None`` unless it names a window we already model *and* an interpretable reset
+    instant — the two fields the merge needs. The overage fields
+    (``overageStatus`` / ``isUsingOverage`` / ``overageDisabledReason``) and
+    ``status`` are read by nobody: no card shows them, so carrying them would add a
+    model field, a route field, and a display state for information the operator
+    cannot act on. ``status`` is also *not* used to filter — a rejected turn's
+    boundary is still the true boundary."""
+    if not isinstance(raw, dict):
+        return None
+    key = _first(raw, _CLAUDE_BOUNDARY_WINDOW_KEYS)
+    if not isinstance(key, str) or key.strip() not in _CLAUDE_WINDOW_KEYS:
+        return None
+    resets_at = _claude_reset(_first(raw, _CLAUDE_BOUNDARY_RESET_KEYS))
+    if resets_at is None:
+        return None
+    return WindowBoundary(key=key.strip(), resets_at=resets_at)
+
+
+def parse_claude_stream_boundaries(stdout: str) -> tuple[WindowBoundary, ...]:
+    """Parse a hub-driven turn's stream-json stdout for window-boundary events.
+
+    Returns one boundary per named window, newest wins within the stream, in
+    :data:`_CLAUDE_WINDOW_KEYS` order; an empty tuple when the stdout carries none
+    (every turn before 2.1.220), is empty, or is unparseable. Never raises — a
+    malformed line is skipped, like the usage parser above."""
+    # Substring pre-filter before parsing, like the Codex rollout scan: this runs on
+    # every hub-driven turn, and almost every line of a semantic-eval stream is model
+    # output that cannot carry the container. Derived from the key tuple so a second
+    # spelling cannot be silently skipped here.
+    tokens = tuple(f'"{key}"' for key in _CLAUDE_BOUNDARY_KEYS)
+    latest: dict[str, str] = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line or not any(token in line for token in tokens):
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        container = _claude_container(event, _CLAUDE_BOUNDARY_KEYS)
+        if container is None:
+            continue
+        boundary = _claude_boundary(container)
+        if boundary is not None:
+            latest[boundary.key] = boundary.resets_at
+    return tuple(
+        WindowBoundary(key=key, resets_at=latest[key])
+        for key in _CLAUDE_WINDOW_KEYS
+        if key in latest
+    )
+
+
+def merge_window_boundaries(
+    observation: ClaudeObservation, boundaries: Iterable[WindowBoundary]
+) -> ClaudeObservation | None:
+    """``observation`` with each matching window's boundary advanced, or ``None``.
+
+    ``None`` means *nothing changed*, so the caller writes nothing: no boundary
+    matched a stored window, or every one was equal to / older than what is stored.
+    Per the section note, this only ever moves ``resets_at`` forward on a window the
+    figure carrier already established — it adds no window, alters no percentage,
+    and leaves ``observed_ts`` dating the figures."""
+    by_key = {b.key: b for b in boundaries}
+    if not by_key:
+        return None
+    changed = False
+    windows: list[UsageWindow] = []
+    for window in observation.windows:
+        boundary = by_key.get(window.key)
+        if boundary is not None and _is_newer(boundary.resets_at, window.resets_at):
+            windows.append(replace(window, resets_at=boundary.resets_at))
+            changed = True
+        else:
+            windows.append(window)
+    if not changed:
+        return None
+    return replace(observation, windows=tuple(windows))
 
 
 # -- Claude: read the operator-installed statusLine sink ----------------------
@@ -764,12 +948,15 @@ def read_claude_statusline(path: Path) -> ClaudeObservation | None:
 
 
 def _is_newer(candidate: str | None, current: str | None) -> bool:
-    """Whether ``candidate`` is a strictly later observation time than ``current``.
+    """Whether ``candidate`` is a strictly later ISO instant than ``current``.
 
-    Gates sink ingestion so it never regresses the store: equal timestamps (the
-    common case — repeated reads of an unchanged sink) write nothing, and an older
-    sink cannot overwrite a fresher observation. An unparseable stored timestamp
-    yields to the candidate; an unparseable candidate never wins."""
+    One monotonic-forward rule for both store writes, since both are "a later
+    observation of the same thing wins": sink ingestion (candidate = the sink's
+    observation time) and boundary merging (candidate = an event's ``resets_at``).
+    Equal instants — the common case, a repeated read of an unchanged sink or a
+    second turn inside the same window — write nothing, and an older value cannot
+    regress a fresher one. An unparseable stored value yields to the candidate; an
+    unparseable candidate never wins."""
     new = _parse_iso(candidate)
     if new is None:
         return False
@@ -790,18 +977,18 @@ def _safe(provider: str, fn: Callable[[], ProviderUsage]) -> ProviderUsage:
 
 
 ClaudeUsageObserver = Callable[[str], None]
-"""Best-effort seam: given one hub-driven ``claude -p`` turn's raw stdout, record a
-Claude usage observation when the supported rate-limit fields are present.
+"""Best-effort seam: given one hub-driven ``claude -p`` turn's raw stdout, update
+Claude usage from whatever that stream supports.
 
 The hub-driven ``claude -p`` backends (the intake agent and the semantic backend)
-call it once per turn, so a turn the hub already runs updates Claude usage without a
-probe turn — and without those modules importing usage internals (they take a plain
-``Callable[[str], None]``). The seam stays wired although the installed CLI puts no
-subscription windows on that stdout (see the section note): it costs one no-op call
-per turn, and it is the placement a carrier would arrive on. It MUST never raise:
-usage bookkeeping can never affect a turn. :meth:`UsageService.claude_observer` is
-the production implementation; the backends default to a no-op when no observer is
-wired."""
+call it once per turn, so a turn the hub already runs refreshes Claude usage without
+a probe turn — and without those modules importing usage internals (they take a
+plain ``Callable[[str], None]``). What it can extract depends on the installed CLI:
+no verified version carries figures there, but 2.1.220 carries a window *boundary*,
+so on that version an ordinary turn keeps the stored window's ``resets_at`` current
+for free. It MUST never raise: usage bookkeeping can never affect a turn.
+:meth:`UsageService.claude_observer` is the production implementation; the backends
+default to a no-op when no observer is wired."""
 
 
 class UsageService:
@@ -825,6 +1012,15 @@ class UsageService:
         self._store = claude_store if claude_store is not None else ClaudeUsageStore(config.data_dir)
         self._clock = clock
         self._cache: tuple[dt.datetime, SubscriptionUsage] | None = None
+        # Serializes this process's writes to the Claude store. Two of them are
+        # read-modify-write (sink ingestion compares observation times; a boundary
+        # merge rewrites one window of the stored snapshot) and both can run
+        # concurrently: hub-driven turns observe from daemon threads while an HTTP
+        # read ingests the sink. ``record`` itself is atomic, so an unguarded race
+        # loses no file — but it can lose a *fresher* observation by writing a
+        # snapshot read before it. Non-reentrant: the guarded methods must touch the
+        # store directly, never through each other.
+        self._claude_write_lock = threading.Lock()
 
     @property
     def store(self) -> ClaudeUsageStore:
@@ -837,7 +1033,27 @@ class UsageService:
 
     def record_claude_observation(self, observation: ClaudeObservation) -> None:
         """Persist a fresh Claude observation and drop the cached snapshot."""
-        self._store.record(observation)
+        with self._claude_write_lock:
+            self._store.record(observation)
+        self._cache = None
+
+    def refresh_claude_boundaries(self, boundaries: Iterable[WindowBoundary]) -> None:
+        """Advance stored window boundaries from a hub-driven turn's stream events.
+
+        A partial update, not an observation (see the boundary section note): it
+        moves ``resets_at`` forward on windows the figure carrier already observed
+        and writes nothing otherwise — no stored observation, no matching window, or
+        no forward movement all mean the store is left exactly as it was. Claude
+        therefore stays *unavailable* until real figures arrive, and the stored
+        percentages and their ``observed_ts`` are never touched."""
+        with self._claude_write_lock:
+            current = self._store.latest()
+            if current is None:
+                return
+            merged = merge_window_boundaries(current, boundaries)
+            if merged is None:
+                return
+            self._store.record(merged)
         self._cache = None
 
     def claude_observer(self) -> ClaudeUsageObserver:
@@ -845,12 +1061,13 @@ class UsageService:
 
         This is the :data:`ClaudeUsageObserver` seam the hub-driven Claude backends
         (intake agent, semantic backend) call each turn, so a turn the hub already
-        runs updates Claude usage without a probe turn. The callback parses the stdout
-        (:func:`parse_claude_stream_usage`, stamping the observation with this
-        service's clock) and records only when the supported rate-limit fields are
-        present; unsupported/empty output records nothing, and every exception is
-        swallowed so usage bookkeeping can never affect the driving turn. Records run
-        through the concurrency-safe store, so intake and semantic turns on separate
+        runs refreshes Claude usage without a probe turn. Figures win when the stream
+        carries any (:func:`parse_claude_stream_usage`, stamped with this service's
+        clock) — that snapshot already contains the turn's own boundaries, so the
+        merge is skipped. Otherwise the turn's boundary events, if any, are merged
+        into the stored snapshot. A stream with neither records nothing, and every
+        exception is swallowed so usage bookkeeping can never affect the driving turn.
+        Writes are serialized and atomic, so intake and semantic turns on separate
         daemon threads can observe at once."""
         def observe(stdout: str) -> None:
             try:
@@ -859,6 +1076,10 @@ class UsageService:
                 )
                 if observation is not None:
                     self.record_claude_observation(observation)
+                    return
+                boundaries = parse_claude_stream_boundaries(stdout)
+                if boundaries:
+                    self.refresh_claude_boundaries(boundaries)
             except Exception:  # noqa: BLE001 — display-only; never affect the driving turn
                 pass
 
@@ -903,11 +1124,14 @@ class UsageService:
         both carriers, and persists the last-known figures so a rotated, deleted, or
         newly-uninstalled sink still shows them as stale rather than losing them.
         The newness gate makes repeated reads of an unchanged sink a no-op and stops
-        a sink from regressing a fresher hub-driven observation."""
+        a sink from regressing a fresher hub-driven observation. The write lock is
+        held across the compare-then-write so a concurrent boundary merge (also a
+        read-modify-write) cannot interleave and drop this sink's fresher figures."""
         observation = read_claude_statusline(self.statusline_sink)
         if observation is None:
             return
-        current = self._store.latest()
-        if current is not None and not _is_newer(observation.observed_ts, current.observed_ts):
-            return
-        self._store.record(observation)
+        with self._claude_write_lock:
+            current = self._store.latest()
+            if current is not None and not _is_newer(observation.observed_ts, current.observed_ts):
+                return
+            self._store.record(observation)

@@ -1,12 +1,15 @@
 """Claude Code statusLine writer: capture the CLI's own subscription usage.
 
-Claude Code publishes the five-hour / seven-day subscription windows to exactly
+Claude Code publishes the five-hour / seven-day subscription *figures* to exactly
 one local channel: the JSON payload it pipes to a configured statusLine
 command's stdin, as ``rate_limits.{five_hour,seven_day}.{used_percentage,
 resets_at}`` ("only present for subscribers after first API response"). Its
-``claude -p`` stream-json stdout carries no such windows at all (verified against
-Claude Code 2.1.218 — see the Claude parser section note in
-:mod:`orch_hub.usage`), so no hub-driven turn can ever observe them.
+``claude -p`` stream-json stdout carries no used-percentage on any verified
+version — nothing at all on Claude Code 2.1.218, and on 2.1.220 a
+``rate_limit_event`` naming one window and its reset instant but no figure (see
+the two Claude section notes in :mod:`orch_hub.usage`). A hub-driven turn can
+therefore keep a window's *boundary* current, but only this channel can say how
+much of it is used.
 
 This module is the small writer that reads that payload and persists the
 rate-limit part to a hub-readable sink, applying the *Codex pattern* to Claude:

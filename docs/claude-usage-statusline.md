@@ -32,9 +32,12 @@ JSON payload it pipes to a configured statusLine command's stdin, as
 
 ("only present for subscribers after first API response"). Its
 `claude -p --output-format stream-json` stdout — the output of the turns orch-hub
-itself drives for intake and semantic evaluation — carries no such windows on any
-event, verified against Claude Code 2.1.218. So the hub cannot observe your quota
-from its own turns, no matter how many it runs.
+itself drives for intake and semantic evaluation — carries no used-percentage on
+any version checked: nothing at all on Claude Code 2.1.218, and on 2.1.220 a
+`rate_limit_event` that names one window and when it resets, but no figure. The hub
+does read that event, so its own turns keep a window's reset time current — but how
+much you have used can only come from this hook, no matter how many turns the hub
+runs.
 
 The alternatives were rejected deliberately:
 

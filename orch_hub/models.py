@@ -1554,6 +1554,13 @@ class UsageWindow:
     time as an ISO-8601 UTC string (derived from the provider's epoch), or
     ``None`` when unknown. Any field the provider omits stays ``None`` rather than
     defaulting to zero, so a missing signal never reads as "0% used".
+
+    ``resets_at`` may be refreshed on its own, without the figures: Claude's
+    boundary arrives on a channel that carries no percentage (see
+    ``orch_hub.usage.merge_window_boundaries``). A consumer therefore must not
+    assume the percentage was observed *inside* the window this boundary closes —
+    ``window_minutes`` plus the provider's ``observed_ts`` are what decide that,
+    and a boundary already in the past means no window is open at all.
     """
 
     key: str
@@ -1588,9 +1595,10 @@ class ProviderUsage:
     ``detail`` says why. When ``True``, ``windows`` carries the parsed buckets,
     ``plan`` the sanitized plan/tier name (never an account or credential id),
     and ``credits`` the optional reset-credit balance. ``observed_ts`` is when the
-    underlying data was captured (ISO-8601 UTC) and ``stale`` marks an observation
-    older than the freshness threshold — still shown, but flagged as last-observed
-    rather than current. Everything here is display-only.
+    *figures* were captured (ISO-8601 UTC) — a boundary-only refresh of a window
+    does not move it — and ``stale`` marks an observation older than the freshness
+    threshold, still shown but flagged as last-observed rather than current.
+    Everything here is display-only.
     """
 
     provider: str
