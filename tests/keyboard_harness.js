@@ -877,9 +877,22 @@ var TASKS = {
 
 // The display-only subscription-usage payload (SubscriptionUsage.to_dict shape):
 // both providers available, Claude with a 5h+7d window pair, Codex with one
-// primary window plus reset credits. resets_at is far-future so the forward
-// reset formatter is deterministic regardless of the harness wall clock; the
-// scenario overrides this route for the unavailable/stale/unknown paths.
+// primary window plus reset credits.
+//
+// A usage fixture has to be internally COHERENT now that the card asks whether a
+// stored figure was observed inside the window its `resets_at` closes — a passed
+// boundary means no window is open, and an observation predating the open window's
+// start means its usage is unobserved (app.js: usageWindowPhase). A far-future
+// boundary with a 2026 observation would describe a figure taken decades before
+// the window opened, which correctly renders as "usage unknown". So these
+// timestamps are anchored to the harness's own wall clock: observation shortly
+// before now, boundary a few hours ahead, which stays "current" whenever the suite
+// runs. The scenario overrides this route for the rolled-over, unobserved,
+// unavailable, stale, and unknown paths.
+var USAGE_CLOCK = Date.now();
+var usageIso = function (offsetMinutes) {
+  return new Date(USAGE_CLOCK + offsetMinutes * 60000).toISOString();
+};
 var USAGE = {
   providers: [
     {
@@ -887,11 +900,11 @@ var USAGE = {
       available: true,
       plan: "max",
       windows: [
-        { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
-        { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: "2999-01-05T00:00:00Z", used: null, limit: null },
+        { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: usageIso(120), used: null, limit: null },
+        { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: usageIso(5 * 1440), used: null, limit: null },
       ],
       credits: null,
-      observed_ts: "2026-07-20T08:00:00Z",
+      observed_ts: usageIso(-30),
       stale: false,
       detail: null,
     },
@@ -900,10 +913,10 @@ var USAGE = {
       available: true,
       plan: "prolite",
       windows: [
-        { key: "primary", label: "5h", window_minutes: 300, used_percent: 73, remaining_percent: 27, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+        { key: "primary", label: "5h", window_minutes: 300, used_percent: 73, remaining_percent: 27, resets_at: usageIso(120), used: null, limit: null },
       ],
       credits: { has_credits: true, unlimited: false, balance: "3" },
-      observed_ts: "2026-07-20T07:00:00Z",
+      observed_ts: usageIso(-45),
       stale: false,
       detail: null,
     },
@@ -2954,8 +2967,9 @@ async function scenarioSubscriptionUsage() {
   // local wall-clock instant. A no-offset ISO value is a wall-clock time in the
   // viewer's own zone, so `getHours()/getDate()/getMonth()` return its literal
   // components regardless of the harness timezone — deterministic. The far-future
-  // year keeps it non-past (the format carries no year), a far-past window pins
-  // the "reset due" fallback, and an unparseable window pins the never-"NaN" one.
+  // year keeps both boundaries non-past (the format carries no year) with the
+  // observation inside the 5h window that closes at 09:06, and the unparseable
+  // window pins the never-"NaN" fallback.
   route("GET", "/api/usage", {
     providers: [
       {
@@ -2964,11 +2978,11 @@ async function scenarioSubscriptionUsage() {
         plan: "max",
         windows: [
           { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: "2099-07-29T09:06:00", used: null, limit: null },
-          { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: "2000-01-01T00:00:00", used: null, limit: null },
+          { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: "2099-08-02T09:06:00", used: null, limit: null },
           { key: "primary", label: "raw", window_minutes: 300, used_percent: 5, remaining_percent: 95, resets_at: "not-a-date", used: null, limit: null },
         ],
         credits: null,
-        observed_ts: "2026-07-20T08:00:00Z",
+        observed_ts: "2099-07-29T08:00:00",
         stale: false,
         detail: null,
       },
@@ -2980,7 +2994,7 @@ async function scenarioSubscriptionUsage() {
           { key: "primary", label: "5h", window_minutes: 300, used_percent: 73, remaining_percent: 27, resets_at: "2099-07-29T09:06:00", used: null, limit: null },
         ],
         credits: null,
-        observed_ts: "2026-07-20T07:00:00Z",
+        observed_ts: "2099-07-29T08:00:00",
         stale: false,
         detail: null,
       },
@@ -3006,14 +3020,142 @@ async function scenarioSubscriptionUsage() {
     doc.querySelector("#view .overview-usage").textContent
   );
   check(
-    "usage: a past reset still reads \"reset due\"",
-    resetClaude.textContent.indexOf("reset due") !== -1,
-    resetClaude.textContent
-  );
-  check(
     "usage: an unparseable reset never renders \"NaN\"",
     resetClaude.textContent.indexOf("NaN") === -1,
     resetClaude.textContent
+  );
+
+  // ---- 1c) a passed boundary is NO ACTIVE WINDOW, not a current figure ----
+  // The reported case: a 5h window whose reset instant went by while nothing
+  // observed the new one (the statusLine sink only writes while an interactive
+  // session renders). The card used to keep the full meter and degrade the meta
+  // line to "reset due", presenting a figure from a closed window as live. Claude's
+  // 5h window is anchored to the first call OF THAT WINDOW, so a passed boundary
+  // means no window is open at all — the next call opens one — and the retained
+  // figure must read as explicitly last-observed, with no fill and no derived
+  // "% left" (an inferred "96% left" claims free capacity the hub cannot see).
+  route("GET", "/api/usage", {
+    providers: [
+      {
+        provider: "claude",
+        available: true,
+        plan: "max",
+        windows: [
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 4, remaining_percent: 96, resets_at: usageIso(-60), used: null, limit: null },
+          { key: "seven_day", label: "7d", window_minutes: 10080, used_percent: 12.5, remaining_percent: 87.5, resets_at: usageIso(4 * 1440), used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: usageIso(-180),
+        stale: true,
+        detail: null,
+      },
+    ],
+  });
+  await navigate("#/repos");
+  await navigate("#/overview");
+  var rolledCard = cards()[0];
+  var rolled = rolledCard.querySelectorAll(".usage-window")[0];
+  var stillOpen = rolledCard.querySelectorAll(".usage-window")[1];
+  check(
+    "usage: a window whose reset instant passed reads \"no active window\"",
+    rolled.querySelector(".uw-readout").textContent === "no active window",
+    rolled.querySelector(".uw-readout").textContent
+  );
+  check(
+    "usage: the rolled-over window says the next window starts at the next call",
+    rolled.textContent.indexOf("starts at next call") !== -1,
+    rolled.textContent
+  );
+  check(
+    "usage: the retained percentage is labelled last-observed, not current",
+    rolled.textContent.indexOf("last observed 4% used") !== -1,
+    rolled.textContent
+  );
+  check(
+    "usage: a rolled-over window no longer reads \"reset due\"",
+    rolledCard.textContent.indexOf("reset due") === -1,
+    rolledCard.textContent
+  );
+  check(
+    "usage: a rolled-over window draws no fill (not a 0% bar, not the old figure)",
+    rolled.querySelector(".usage-bar.unknown") !== null &&
+      rolled.querySelector(".usage-bar-fill") === null,
+    rolled.innerHTML
+  );
+  check(
+    "usage: a rolled-over window infers no remaining capacity (\"% left\")",
+    rolled.textContent.indexOf("% left") === -1,
+    rolled.textContent
+  );
+  check(
+    "usage: the rolled-over state is marked on the window",
+    rolled.className.indexOf("uw-rolled") !== -1,
+    rolled.className
+  );
+  // Per-window, not per-card: the same card's 7d window is still open, so its
+  // figures keep rendering as current.
+  check(
+    "usage: a sibling window that is still open keeps its live meter",
+    stillOpen.textContent.indexOf("12.5% used") !== -1 &&
+      stillOpen.textContent.indexOf("87.5% left") !== -1 &&
+      !!stillOpen.querySelector(".usage-bar-fill"),
+    stillOpen.textContent
+  );
+
+  // ---- 1d) boundary refreshed by a hub-driven turn, figures not re-observed ----
+  // Claude Code 2.1.220 puts a percentage-less `rate_limit_event` on the stream the
+  // hub already drives, so an ordinary intake/semantic turn can move the stored
+  // window's boundary forward for free (orch_hub.usage: merge_window_boundaries)
+  // while the figures stay as the sink last observed them. A window IS open then —
+  // its boundary is ahead — but nothing has observed ITS usage: that reads as
+  // "usage unknown" with the boundary shown and the old figure kept as
+  // last-observed. Never a percentage attached to a window it did not come from.
+  route("GET", "/api/usage", {
+    providers: [
+      {
+        provider: "claude",
+        available: true,
+        plan: "max",
+        windows: [
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 4, remaining_percent: 96, resets_at: usageIso(240), used: null, limit: null },
+        ],
+        credits: null,
+        observed_ts: usageIso(-180),
+        stale: true,
+        detail: null,
+      },
+    ],
+  });
+  await navigate("#/repos");
+  await navigate("#/overview");
+  var refreshed = doc.querySelector("#view .usage-window");
+  check(
+    "usage: an open window whose figure predates it reads \"usage unknown\"",
+    refreshed.querySelector(".uw-readout").textContent === "usage unknown",
+    refreshed.querySelector(".uw-readout").textContent
+  );
+  check(
+    "usage: the refreshed boundary is still shown as a forward reset time",
+    refreshed.textContent.indexOf("resets ") !== -1 &&
+      refreshed.textContent.indexOf("starts at next call") === -1,
+    refreshed.textContent
+  );
+  check(
+    "usage: its stale figure is kept as last-observed, never as the window's own",
+    refreshed.textContent.indexOf("last observed 4% used") !== -1 &&
+      refreshed.textContent.indexOf("% left") === -1,
+    refreshed.textContent
+  );
+  check(
+    "usage: an unobserved open window draws no fill (not a 0% bar)",
+    refreshed.querySelector(".usage-bar.unknown") !== null &&
+      refreshed.querySelector(".usage-bar-fill") === null,
+    refreshed.innerHTML
+  );
+  check(
+    "usage: the unobserved state is marked on the window",
+    refreshed.className.indexOf("uw-unobserved") !== -1,
+    refreshed.className
   );
 
   // ---- 2) high usage flags amber (neutral→warn capacity idiom, not an alarm) ----
@@ -3024,10 +3166,10 @@ async function scenarioSubscriptionUsage() {
         available: true,
         plan: "max",
         windows: [
-          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 96, remaining_percent: 4, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 96, remaining_percent: 4, resets_at: usageIso(120), used: null, limit: null },
         ],
         credits: null,
-        observed_ts: "2026-07-20T08:00:00Z",
+        observed_ts: usageIso(-30),
         stale: false,
         detail: null,
       },
@@ -3050,12 +3192,12 @@ async function scenarioSubscriptionUsage() {
         plan: "pro",
         windows: [
           // A provider-supplied numeric limit → exact count, never invented.
-          { key: "primary", label: "5h", window_minutes: 300, used_percent: null, remaining_percent: null, resets_at: "2999-01-01T00:00:00Z", used: 100, limit: 500 },
+          { key: "primary", label: "5h", window_minutes: 300, used_percent: null, remaining_percent: null, resets_at: usageIso(120), used: 100, limit: 500 },
           // No count and no percentage → explicit unknown, NOT a 0% bar.
           { key: "secondary", label: "7d", window_minutes: 10080, used_percent: null, remaining_percent: null, resets_at: null, used: null, limit: null },
         ],
         credits: null,
-        observed_ts: "2026-07-20T08:00:00Z",
+        observed_ts: usageIso(-30),
         stale: false,
         detail: null,
       },
@@ -3111,6 +3253,10 @@ async function scenarioSubscriptionUsage() {
   );
 
   // ---- 5) stale → still shown, flagged last-observed ----
+  // Stale is about the FIGURES' age, not the window: observed two hours ago, inside
+  // a five-hour window that is still open. The figures therefore stay current for
+  // that window (full meter) and carry the stale flag — the rolled-over path above
+  // is the separate case where the window itself is gone.
   route("GET", "/api/usage", {
     providers: [
       {
@@ -3118,10 +3264,10 @@ async function scenarioSubscriptionUsage() {
         available: true,
         plan: "max",
         windows: [
-          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: "2999-01-01T00:00:00Z", used: null, limit: null },
+          { key: "five_hour", label: "5h", window_minutes: 300, used_percent: 42, remaining_percent: 58, resets_at: usageIso(120), used: null, limit: null },
         ],
         credits: null,
-        observed_ts: "2026-07-20T08:00:00Z",
+        observed_ts: usageIso(-120),
         stale: true,
         detail: null,
       },

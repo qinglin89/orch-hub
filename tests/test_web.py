@@ -1216,6 +1216,22 @@ def test_overview_usage_is_percent_first_and_explicit():
     assert "usage-stale" in body
 
 
+def test_overview_usage_states_a_rolled_over_window():
+    body = app_js()
+    # A window's reset instant is compared to the clock in exactly one place, so a
+    # passed boundary reads as "no window is open" (the 5h window is anchored to the
+    # first call of the window) instead of keeping the full meter and degrading the
+    # meta line to the old reset-is-due phrasing.
+    assert "usageWindowPhase" in body
+    assert "no active window" in body
+    assert "starts at next call" in body
+    assert "last observed " in body
+    assert '"reset due"' not in body  # the string literal is gone, not just unused
+    # The phase is a per-window question about the provider's observation time, so
+    # the meter is built from both.
+    assert "usageWindow(w, p.observed_ts)" in body
+
+
 def test_overview_usage_never_exposes_reset_credit_identifiers():
     body = app_js()
     # Only the aggregate reset-credit fields the model already sanitized are
@@ -1235,6 +1251,9 @@ def test_overview_usage_styles():
     assert ".usage-bar.high .usage-bar-fill" in css
     # An unknown window gets a distinct track, not a 0% fill.
     assert ".usage-bar.unknown" in css
+    # A window whose figure is not the open window's reads as a muted state phrase.
+    assert ".uw-rolled .uw-readout" in css
+    assert ".uw-unobserved .uw-readout" in css
     # Two-up on a wider screen, like the metric row.
     assert "min-width: 520px" in css
 

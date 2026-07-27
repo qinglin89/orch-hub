@@ -5192,9 +5192,13 @@
   // Absolute reset time in the viewer's local zone: "resets 09:06 on 29 Jul".
   // A relative "resets in 4d" floors away up to a day of lead time — a reset
   // nearly five days out reads as merely four — so show the exact local
-  // wall-clock instant instead. Past timestamps read "reset due"; an
-  // unparseable value falls back to the raw string (never "NaN"), mirroring
-  // formatCommitTime's trust-the-hub-value stance.
+  // wall-clock instant instead. An unparseable value falls back to the raw
+  // string (never "NaN"), mirroring formatCommitTime's trust-the-hub-value
+  // stance. A boundary that has already PASSED never reaches here:
+  // usageWindowPhase is the single place that compares a boundary to the clock,
+  // and it routes that case to the rolled-over state below — where a "resets"
+  // phrase, and the reset-is-due phrasing this used to fall back to, are both
+  // wrong, because no window is open at all.
   const RESET_MONTHS = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun",
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
@@ -5203,7 +5207,6 @@
     if (!iso) return "";
     const then = new Date(iso);
     if (isNaN(then.getTime())) return "resets " + iso;
-    if (then.getTime() <= Date.now()) return "reset due";
     const hh = String(then.getHours()).padStart(2, "0");
     const mm = String(then.getMinutes()).padStart(2, "0");
     return (
@@ -5212,11 +5215,54 @@
     );
   }
 
+  // Is a window's stored percentage still the CURRENT window's figure?
+  //
+  // `resets_at` closes the window that is open now and `window_minutes` gives its
+  // length, so `resets_at - window_minutes` is when that window opened. The
+  // carrier that supplies Claude's percentage (an operator statusLine render)
+  // only writes while an interactive session is on screen, so a figure routinely
+  // outlives the window it was taken in — and the five-hour window is anchored to
+  // the first call OF THAT WINDOW, not to a clock grid, so a boundary that has
+  // passed does NOT mean "a fresh window carrying the same figures":
+  //
+  //   * boundary passed → no window is open; the next call opens one.
+  //   * boundary still ahead but the observation predates the window's start → a
+  //     window IS open (a hub-driven turn refreshed its boundary) and nothing has
+  //     observed its usage yet.
+  //
+  // In both, the stored figure is not this window's: the meter must not fill to
+  // it, and "N% left" must not be derived from it — an inferred "96% left" reads
+  // as free capacity when the truth is unknown. The figure is still shown,
+  // explicitly labelled last-observed, because a real figure from a closed window
+  // beats no figure at all. Percent-only there even for a count-reporting
+  // provider, so one phrase covers both shapes.
+  //
+  // Unknowable inputs stay CURRENT rather than degrading: no boundary, no window
+  // length, or an unparseable/absent observation time cannot prove a figure is out
+  // of window, and claiming "unknown" without evidence is its own kind of wrong.
+  const UW_CURRENT = "current";
+  const UW_ROLLED = "rolled"; // boundary passed: no window is open
+  const UW_UNOBSERVED = "unobserved"; // window open, figure predates its start
+  function usageWindowPhase(w, observedTs) {
+    const reset = w.resets_at ? new Date(w.resets_at) : null;
+    if (!reset || isNaN(reset.getTime())) return UW_CURRENT;
+    if (reset.getTime() <= Date.now()) return UW_ROLLED;
+    if (!w.window_minutes || !observedTs) return UW_CURRENT;
+    const observed = new Date(observedTs);
+    if (isNaN(observed.getTime())) return UW_CURRENT;
+    return observed.getTime() < reset.getTime() - w.window_minutes * 60000
+      ? UW_UNOBSERVED
+      : UW_CURRENT;
+  }
+
   // The primary readout for a window. Percent-first: an exact count is shown ONLY
   // when the provider gives a real numeric limit (neither Claude nor Codex does
   // today) — the UI never invents a fixed message total. With no percentage
-  // either, it reads "usage unknown", never a misleading 0%.
-  function usageWindowReadout(w) {
+  // either, it reads "usage unknown", never a misleading 0%. A window whose figure
+  // is not current reads as its state instead of as a figure.
+  function usageWindowReadout(w, phase) {
+    if (phase === UW_ROLLED) return "no active window";
+    if (phase === UW_UNOBSERVED) return "usage unknown";
     if (w.limit != null && w.used != null)
       return escapeHtml(w.used + " / " + w.limit);
     if (w.used_percent != null) return escapeHtml(w.used_percent + "% used");
@@ -5225,26 +5271,39 @@
 
   // A used/remaining meter for one window. Fill width is the used percentage
   // (derived from an exact count only when the provider gave a real limit); with
-  // no percentage at all the track carries an explicit "unknown" state instead of
-  // rendering as 0% used. The bar is aria-hidden — the readout + meta text already
-  // carry the figures for a screen reader (mirrors the .ctx-meter idiom).
-  function usageWindow(w) {
+  // no current percentage the track carries an explicit "unknown" state instead of
+  // rendering as 0% used — that covers a provider that reported no figure and a
+  // figure that no longer belongs to the open window alike. The bar is aria-hidden
+  // — the readout + meta text already carry the figures for a screen reader
+  // (mirrors the .ctx-meter idiom).
+  function usageWindow(w, observedTs) {
+    const phase = usageWindowPhase(w, observedTs);
+    const current = phase === UW_CURRENT;
     let pct = w.used_percent;
     if (pct == null && w.limit != null && w.used != null && w.limit > 0)
       pct = Math.round((w.used / w.limit) * 1000) / 10;
-    const known = pct != null;
+    const known = current && pct != null;
     const clamped = known ? Math.max(0, Math.min(100, pct)) : 0;
     const high = known && clamped >= 90 ? " high" : "";
-    const remaining =
-      w.remaining_percent != null ? w.remaining_percent + "% left" : "";
-    const meta = [remaining, formatResetTime(w.resets_at)]
+    const meta = (current
+      ? [
+          w.remaining_percent != null ? w.remaining_percent + "% left" : "",
+          formatResetTime(w.resets_at),
+        ]
+      : [
+          phase === UW_ROLLED
+            ? "starts at next call"
+            : formatResetTime(w.resets_at),
+          pct != null ? "last observed " + pct + "% used" : "",
+        ]
+    )
       .filter(Boolean)
       .join(" · ");
     return (
-      `<div class="usage-window">` +
+      `<div class="usage-window${current ? "" : " uw-" + phase}">` +
       `<div class="uw-head">` +
       `<span class="uw-label">${escapeHtml(usageWindowTitle(w))}</span>` +
-      `<span class="uw-readout">${usageWindowReadout(w)}</span>` +
+      `<span class="uw-readout">${usageWindowReadout(w, phase)}</span>` +
       `</div>` +
       `<span class="usage-bar${known ? "" : " unknown"}${high}" aria-hidden="true">` +
       (known ? `<span class="usage-bar-fill" style="width: ${clamped}%"></span>` : "") +
@@ -5302,8 +5361,12 @@
           p.detail || "Usage is unavailable."
         )}</p></li>`
       );
+    // Each window is rendered against the provider's observation time: whether a
+    // stored percentage is still the open window's figure is a per-window question
+    // about when it was observed (usageWindowPhase), so the meter cannot be built
+    // from the window alone.
     const windows = (p.windows || []).length
-      ? (p.windows || []).map(usageWindow).join("")
+      ? (p.windows || []).map((w) => usageWindow(w, p.observed_ts)).join("")
       : `<p class="usage-detail muted">No usage windows reported.</p>`;
     return (
       `<li class="card usage-card${p.stale ? " usage-stale" : ""}">` +

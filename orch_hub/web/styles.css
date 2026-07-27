@@ -1029,6 +1029,15 @@ code {
   font-variant-numeric: tabular-nums;
 }
 
+/* A window whose stored figure is not the open window's — its boundary passed
+   (.uw-rolled: no window is open) or the observation predates the open window
+   (.uw-unobserved). The readout is a state phrase, not a gauge value, so it reads
+   muted and lets the cards' live figures stay visually dominant. */
+.uw-rolled .uw-readout,
+.uw-unobserved .uw-readout {
+  color: var(--muted);
+}
+
 .uw-meta {
   font-size: 12px;
 }
