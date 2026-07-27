@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # Features: Operations Surfaces
@@ -19,9 +19,10 @@ the Operations Overview without conflating quota with repo health or run state.
 Modules: usage, statusline, models, config, api, intake_agent, semantic, web.
 
 APIs: protected `GET /api/usage`; internal `UsageService`,
-`ClaudeUsageStore`, `parse_claude_stream_usage`, `parse_claude_statusline`,
-`read_claude_statusline`, `read_codex_usage`; console script
-`orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`.
+`ClaudeUsageStore`, `WindowBoundary`, `parse_claude_stream_usage`,
+`parse_claude_stream_boundaries`, `merge_window_boundaries`,
+`parse_claude_statusline`, `read_claude_statusline`, `read_codex_usage`;
+console script `orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`.
 
 Implemented behavior:
 
@@ -36,9 +37,12 @@ Implemented behavior:
   `rate_limits` payload to `<data_dir>/usage/claude-statusline.json`; the read
   path ingests it into `ClaudeUsageStore` when newer, so stale last-observed
   figures survive sink deletion/rotation instead of becoming zero usage.
-- The best-effort observer remains wired into intake and semantic `claude -p`
-  stream-json backends, but Claude Code 2.1.218 exposes no 5h/7d subscription
-  windows on that stream; unsupported/absent output records nothing.
+- The best-effort observer wired into intake and semantic `claude -p`
+  stream-json backends sees no used-percentage on verified versions: 2.1.218
+  emits no rate-limit signal, while 2.1.220 emits a percentage-less
+  `rate_limit_event`. The latter advances only `resets_at` on an already-stored
+  known window; it never creates a window or changes figures, plan, or
+  `observed_ts`. Unsupported/absent output records nothing.
 - The statusLine writer is opt-in and pass-through: the hub never writes
   `~/.claude/**`, the sink stores only `rate_limits` plus `subscription_type`,
   and wrapped operator statusline argv/stdin/stdout/stderr/exit code are relayed.
@@ -50,7 +54,10 @@ Implemented behavior:
   `-- /bin/sh -c`, is silent when already configured, and never fails deploy.
 - The Overview renders separate Claude/Codex cards with percent-first bars,
   reset timing, freshness/stale flags, explicit unknown/unavailable states, and
-  aggregate reset-credit availability. Source failures degrade only this
+  aggregate reset-credit availability. A passed boundary reads as no active
+  window/starts at next call; retained figures are last-observed with no fill
+  or inferred remaining percentage. A refreshed open window whose figure
+  predates its start reads usage unknown. Source failures degrade only this
   section and never create Needs attention rows or affect readiness, run state,
   launch, or intake gates.
 

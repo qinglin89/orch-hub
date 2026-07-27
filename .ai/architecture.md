@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # Architecture
@@ -84,7 +84,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
-| Agent subscription usage | Codex local rollouts + Claude statusLine sink + hub `<data_dir>/usage/claude.json` | display-only; never probes, spends credits, or gates; statusLine sink = primary Claude carrier |
+| Agent subscription usage | Codex local rollouts + Claude statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; never probes, spends credits, or gates; statusLine sink = only Claude figure carrier |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
 | Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
 | Startup diagnostics | hub-owned run dir capture | scoped to the persisted run record |
@@ -155,10 +155,14 @@ Subscription usage is a sidecar display flow: `UsageService` reads Claude from
 the hub-owned observation store (ingesting newer statusLine sink records
 first) and Codex from recent local rollout `rate_limits` under the Codex
 home. The Claude stream-json observer stays wired but
-records nothing on Claude Code 2.1.218. Protected `GET /api/usage` returns
-both providers fail-soft with normalized windows/percentages/resets/freshness/
-plan/credits; missing/stale/failed sources are explicit display states that
-never feed attention, readiness, run state, or launch/intake gates.
+sees no used-percentage on verified versions: 2.1.218 has no rate-limit signal;
+2.1.220's percentage-less `rate_limit_event` advances only `resets_at` on an
+already-stored known window, without changing figures or their observation
+timestamp. Protected `GET /api/usage` returns both providers fail-soft with
+normalized windows/percentages/resets/freshness/plan/credits; passed boundaries
+render as no active window, and missing/stale/failed sources remain explicit
+display states that never feed attention, readiness, run state, or
+launch/intake gates.
 
 ## Component Boundaries
 
@@ -209,8 +213,9 @@ never feed attention, readiness, run state, or launch/intake gates.
 - FastAPI and uvicorn; launchd for resident operation.
 - Optional Bark push endpoint.
 - Claude CLI for the intake and semantic evaluator backends.
-- Claude Code statusLine stdin as the opt-in usage carrier via
-  `orch-hub-statusline`.
+- Claude Code statusLine stdin as the opt-in figure carrier via
+  `orch-hub-statusline`; 2.1.220 stream `rate_limit_event` as a passive stored
+  boundary refresh.
 - Codex local session rollouts for read-only rate-limit display; Codex is
   never invoked for usage.
 - Tailscale or an equivalent private network.

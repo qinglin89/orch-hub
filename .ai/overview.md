@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # Project Overview
@@ -39,9 +39,11 @@ plus `report.md`, and expose evaluation evidence/static/semantic artifacts
 through protected HTTP routes. The dashboard renders Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
 Codex is read from local session rollout `rate_limits`; Claude reads a
-hub-owned observation store fed by the operator-installed statusLine sink, while
-the hub-driven stream-json observer remains wired but inert for Claude Code
-2.1.218 because that stream has no local 5h/7d subscription windows. Missing,
+hub-owned observation store whose figures come from the operator-installed
+statusLine sink. Hub-driven Claude Code 2.1.220 stream events can refresh a
+stored window's reset boundary without creating a window or changing figures;
+no verified stream carries a used-percentage. Rolled-over windows render as no
+active window rather than presenting retained figures as current. Missing,
 stale, or failing data is explicit display state that never affects readiness,
 attention, run state, or launch/intake gates. The dashboard renders the
 task-evaluation sidecar with
@@ -89,7 +91,8 @@ control.
   unavailable/stale reasons, without starting probe turns, consuming reset
   credits, scraping private endpoints/UI, or influencing operational gates.
   Codex is local rollout data; Claude's verified local carrier is statusLine
-  stdin captured by the opt-in `orch-hub-statusline` wrapper into the hub store.
+  stdin captured by the opt-in `orch-hub-statusline` wrapper into the hub store;
+  percentage-less 2.1.220 stream events may refresh stored reset boundaries.
 - Expose task evaluation as a sidecar HTTP workflow: availability, evidence
   generation/readback, static metrics generation/readback, semantic generation/
   readback, semantic doctor readiness, active or archived task targeting,

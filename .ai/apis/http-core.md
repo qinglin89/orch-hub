@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # APIs: HTTP — Core
@@ -81,15 +81,17 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
 - Source: delegates to `UsageService`, which ingests the opt-in Claude
   statusLine sink into the latest hub-owned observation store, then reads Claude
   from that store and Codex from local Codex rollout `rate_limits` snapshots
-  under `ORCH_HUB_CODEX_HOME`. The wired Claude stream-json observer records
-  nothing for Claude Code 2.1.218 because that stream has no 5h/7d subscription
-  windows. It never starts probe turns, calls provider endpoints, opens
-  credential files, edits `~/.claude/**`, or consumes reset credits.
+  under `ORCH_HUB_CODEX_HOME`. The wired Claude stream-json observer sees no
+  used-percentage on verified versions; Claude Code 2.1.220's
+  percentage-less `rate_limit_event` may advance only the reset instant of an
+  already-stored window. It never starts probe turns, calls provider endpoints,
+  opens credential files, edits `~/.claude/**`, or consumes reset credits.
 - Shape: `{"providers": [ProviderUsage...]}`. Each provider is
   `{provider, available, plan, windows, credits, observed_ts, stale, detail}`;
   windows carry `key`, optional `label`/`window_minutes`, `used_percent`,
   derived `remaining_percent`, optional `resets_at`, and exact `used`/`limit`
-  only when a provider supplies them.
+  only when a provider supplies them. `observed_ts` dates figures; a boundary
+  may have been refreshed independently.
 - Errors/degradation: protected like every data route. Missing, unsupported,
   stale, or failed provider sources return explicit provider states rather than
   zero usage or route failure; account, credential, private endpoint, and

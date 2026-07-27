@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
+last-updated: 2026-07-27
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -109,16 +109,20 @@ credits sanitized by whitelist. Claude usage is read from
 `<data_dir>/usage/claude.json`; `UsageService` first ingests a newer
 `<data_dir>/usage/claude-statusline.json` record from the operator-installed
 writer, then reads the same store so the HTTP payload and staleness rules stay
-unchanged. The hub-driven `claude -p --output-format stream-json` observer is
-still wired, but Claude Code 2.1.218 exposes no subscription windows on that
-channel, so unsupported/absent output records no observation. Both
-`parse_claude_stream_usage` and `parse_claude_statusline` accept only verified
-statusLine-shaped `rate_limits.five_hour/seven_day` windows with
-`used_percentage` and optional `resets_at`, reject reset-only quota frames and
-ambiguous `utilization`, and never raise into driving/read paths.
+unchanged. No verified `claude -p --output-format stream-json` version carries
+a used-percentage: 2.1.218 emits no rate-limit signal; 2.1.220 emits a
+percentage-less `rate_limit_event`. `parse_claude_stream_boundaries` normalizes
+the latter to `WindowBoundary`; `merge_window_boundaries` advances only
+`resets_at` on a matching stored window, never creating a window or changing
+figures, plan, or `observed_ts`. `parse_claude_stream_usage` and
+`parse_claude_statusline` accept only verified statusLine-shaped
+`rate_limits.five_hour/seven_day` windows with `used_percentage` and optional
+`resets_at`, reject reset-only quota frames and ambiguous `utilization`, and
+never raise into driving/read paths.
 `ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
-so concurrent observations cannot collide. `UsageService` aggregates Claude then
-Codex behind a 30s cache and returns fail-soft
+so concurrent observations cannot collide; `UsageService` serializes Claude
+store read-modify-write paths. It aggregates Claude then Codex behind a 30s
+cache and returns fail-soft
 `ProviderUsage.unavailable(...)` snapshots on missing/failed sources. It never
 starts a model turn, calls provider endpoints, opens credential files, spends
 Codex reset credits, or participates in readiness/attention/run/intake gates.

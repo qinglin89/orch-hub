@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: d7c0d8d8a3427336794c05e29596620564d21d4d
+last-updated: 2026-07-27
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -138,9 +138,9 @@ bookkeeping cannot change semantic-evaluation outcomes.
 Input: config with `codex_home`, optional `ClaudeUsageStore`, and injectable
 clock.
 
-Output: `SubscriptionUsage`, `ProviderUsage`, `UsageWindow`, and optional
-`UsageCredits` values; `UsageService.claude_observer()` callback for hub-driven
-Claude stdout.
+Output: `SubscriptionUsage`, `ProviderUsage`, `UsageWindow`, `WindowBoundary`,
+and optional `UsageCredits` values; `UsageService.claude_observer()` callback
+for hub-driven Claude stdout.
 
 Behavior: `read_codex_usage(codex_home)` scans the newest bounded Codex session
 rollout files for `rate_limits`, normalizes dynamic buckets plus optional
@@ -151,15 +151,17 @@ temp files plus `os.replace`; `read_claude_statusline(path)` reads the bounded
 operator-installed sink `<data_dir>/usage/claude-statusline.json` and
 `UsageService` records it only when its observation timestamp is newer than the
 store. `parse_claude_stream_usage(stdout, observed_ts=...)` remains wired to
-hub-driven `claude -p --output-format stream-json` stdout, but Claude Code
-2.1.218 emits no 5h/7d subscription windows there; the parser returns no
-observation on absent/unknown/malformed shapes. Claude parsers accept only
-verified statusLine-shaped
+hub-driven `claude -p --output-format stream-json`; no verified version carries
+a used-percentage there (2.1.218 has no rate-limit signal; 2.1.220 adds a
+percentage-less `rate_limit_event`). `parse_claude_stream_boundaries` and
+`merge_window_boundaries` advance only the reset instant of an already-stored
+known window, never its figures/plan/`observed_ts`, and never create a window.
+Claude figure parsers accept only verified statusLine-shaped
 `rate_limits.five_hour/seven_day.used_percentage` windows. `UsageService`
-aggregates Claude then Codex behind a 30s cache and returns fail-soft
-unavailable provider snapshots on missing or failed sources. All usage data is
-display-only and must not affect readiness, attention, run state, launch, or
-intake.
+serializes Claude store writes, aggregates Claude then Codex behind a 30s
+cache, and returns fail-soft unavailable provider snapshots on missing or
+failed sources. All usage data is display-only and must not affect readiness,
+attention, run state, launch, or intake.
 
 ## API Conventions
 

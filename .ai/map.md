@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
 ---
 
 # Project Map
@@ -17,7 +17,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | implemented; `ORCH_HUB_EVAL_ENABLED` gate + per-task `ORCH_HUB_EVAL_RETENTION`; exact active/archive ids; read-only `(repo_path, task_id)` run aggregation; bounded evidence + best-effort git window; hub-owned artifacts under `<data_dir>/evaluations/`; prune only after durable artifacts |
 | Task static metrics | static_metrics, evaluation, config, models, api, web | implemented; gated deterministic Layer 1 over `EvidencePack`; rollups, protocol facts, five score axes, confidence, warnings; `static_metrics.json` beside `evidence.json`; no model call |
 | Task semantic evaluator | semantic_jobs, semantic, static_metrics, evaluation, config, models, notifications, api, cli, web | implemented; gated Layer 2 model report over bounded evidence + static; persisted async job blocks duplicate in-flight calls, survives restart; fresh terminal outcomes emit metadata-only push; `semantic_report.json` + `report.md`; isolated Claude CLI backend (no tools/persistence/repo cwd; safe mode; plan-mode writes blocked); doctor probes without model call |
-| Agent subscription usage | usage, statusline, models, config, api, intake_agent, semantic, web | implemented; normalized Claude/Codex windows/percentages/resets/freshness/plan/credits; Codex = newest local rollout `rate_limits`; Claude = hub store fed by operator statusLine sink (2.1.218 stream-json has no 5h/7d windows → wired observer usually inert); fail-soft display-only; never gates readiness/attention/run/launch/intake |
+| Agent subscription usage | usage, statusline, models, config, api, intake_agent, semantic, web | implemented; normalized Claude/Codex windows/percentages/resets/freshness/plan/credits; Codex = newest local rollout; Claude figures = operator statusLine sink, reset boundary may advance from percentage-less 2.1.220 stream event; rolled boundary = no active window; fail-soft display-only; never gates |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; localhost-default env-configured uvicorn; only health + enumerated shell assets public |
 | Control-dir file channel | control_dir, models | implemented; file-channel only; malformed answers = pending repair; atomic answer writes; mirrors answer-mode parser rules; idempotent `stop.flag` |
 | Run lifecycle | admission, runs, intake, orch_config, sessions, api, config, control_dir, models, readiness, task_store | implemented; shared per-repo run↔intake admission before readiness; detached `caffeinate` launch with explicit agent-CLI `PATH`; external run dirs; `run.json` + internal `spawn_out`; per-repo run serialization; reattach; live-only `stop_requested`; stop/end classification; split-role `--print-config` preview + legacy detection; split/legacy argv; session/effective-config snapshots from logs |
@@ -39,7 +39,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Task evaluation foundation | internal `EvaluationService` (target/evidence/generate/list/read/prune methods); `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; `POST .../evidence`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | internal `StaticEvaluator` (`run_metrics`, `build_report`, `generate_metrics`, `STATIC_METRICS_NAME`); `POST .../evaluations/{task_id}/metrics`; detail readback; dashboard Layer 1 |
 | Task semantic evaluator | internal `SemanticEvaluator.evaluate`/`doctor`, `SemanticJobManager`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; CLI `orch-hub eval doctor`; detail `semantic_report`/`report_md` readback |
-| Agent subscription usage | console script `orch-hub-statusline`; internal `UsageService`, `ClaudeUsageStore`, statusline/stream/codex parsers; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage`; Overview usage section |
+| Agent subscription usage | console script `orch-hub-statusline`; internal `UsageService`, `ClaudeUsageStore`, `WindowBoundary`, statusline/stream-boundary/codex parsers; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage`; Overview usage section |
 | HTTP API foundation | public shell routes; `GET /api/health`; all protected data APIs; `orch-hub-api` |
 | Control-dir file channel | internal `list_questions`, `pending_questions`, `write_answer`, `request_stop` |
 | Run lifecycle | internal `RunManager`; `GET /api/repos/{repo_id}/orchestrator-config`; `POST/GET /api/runs`; `GET /api/runs/{run_id}[/sessions|/effective-config]`; `POST /api/runs/{run_id}/stop` |
@@ -75,7 +75,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | static_metrics | deterministic Layer 1 score reports from evidence packs; `static_metrics.json` persistence; retention after durable writes |
 | semantic | Layer 2 model-judged reports; Markdown render; Claude CLI evidence isolation; doctor; persisted artifacts behind gate |
 | semantic_jobs | persisted async job records; duplicate in-flight guard; off-lock execution; orphan reconciliation; completed-job evaluation linkage; isolated fresh terminal-outcome push |
-| usage | read-only Claude/Codex normalization; Codex rollout scan; statusLine sink ingestion; bounded cache; fail-soft states |
+| usage | read-only Claude/Codex normalization; Codex rollout scan; statusLine figure ingestion; stream-boundary merge; bounded cache; fail-soft/rolled states |
 | statusline | operator-installed statusLine wrapper; captures only `rate_limits` + `subscription_type`; passes wrapped command through; never edits `~/.claude/**` |
 | history | append/read per-run JSONL events; no answer text; answer-mode metadata round-trip |
 | control_dir | question/answer/stop file mechanics; pure answer-mode normalization |
