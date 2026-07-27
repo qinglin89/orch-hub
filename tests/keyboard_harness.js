@@ -565,6 +565,13 @@ function route(method, path, payload) {
   ROUTES[method + " " + path] = payload;
 }
 
+// Stub a refusal: the route answers `status` with `payload` as its JSON body, so
+// api() raises an ApiError carrying that body — the only way to drive a handler's
+// structured-409 path (a raced repo-admission conflict, a launch refusal).
+function routeError(method, path, status, payload) {
+  ROUTES[method + " " + path] = { __status: status, __body: payload };
+}
+
 // Hold a route's response open until the scenario releases it. Every other stub
 // resolves immediately, so this is the only way to park a route handler mid-await
 // and navigate on top of it — i.e. to exercise a stale route completion.
@@ -589,6 +596,7 @@ globalThis.fetch = function (path, init) {
   // there); `bare` is the query-stripped route key the ROUTES table matches on.
   CALLS.push({ method: method, path: bare, url: String(path), body: body, init: init });
   var payload = ROUTES[method + " " + bare];
+  var refusal = payload && payload.__status ? payload : null;
   var response =
     payload === undefined
       ? {
@@ -599,6 +607,15 @@ globalThis.fetch = function (path, init) {
             return Promise.resolve({
               detail: "no stub for " + method + " " + bare,
             });
+          },
+        }
+      : refusal
+      ? {
+          ok: false,
+          status: refusal.__status,
+          statusText: "Conflict",
+          json: function () {
+            return Promise.resolve(refusal.__body);
           },
         }
       : {
@@ -2730,13 +2747,16 @@ async function scenarioLiveRunReadiness() {
 
   await navigate("#/repos/" + REPO);
   eq("readiness: repo detail shows READY for a live dirty repo", textOf(".detail-head .badge"), "ready");
-  // The Intake gate is deliberately NOT softened — it still reads raw readiness,
-  // so the intake section keeps pre-explaining the dirty-tree block. This proves
-  // the display softening never leaked into a launch/intake gate.
+  // While a run holds the repo, the intake section reports the ADMISSION claim,
+  // never the readiness state — softened or raw. A live run is what makes the
+  // tree dirty, so naming `git_clean` here would turn readiness into a proxy for
+  // "claimed" (the raw-readiness branch is proven alive in case 4 below, where no
+  // run holds the repo).
   check(
-    "readiness: the intake gate on detail still reads raw readiness",
-    (textOf(".section.intake") || "").indexOf("not ready, so a task intake") !== -1,
-    "the intake section dropped its raw-readiness block: " + textOf(".section.intake")
+    "readiness: a live run's intake block is admission, not a dirty tree",
+    (textOf(".section.intake") || "").indexOf("A run is live on this repo") !== -1 &&
+      (textOf(".section.intake") || "").indexOf("git_clean") === -1,
+    "the intake section explained the live run as a readiness failure: " + textOf(".section.intake")
   );
 
   await navigate("#/overview");
@@ -2800,6 +2820,14 @@ async function scenarioLiveRunReadiness() {
     "readiness: active tasks alone do not soften readiness (reasons shown)",
     !!listReasons(),
     "an idle dirty repo with active tasks was wrongly softened"
+  );
+  // With no run holding the repo, the intake gate falls through to raw readiness
+  // and pre-explains the dirty tree — the branch admission preempts in case 1.
+  await navigate("#/repos/" + REPO);
+  check(
+    "readiness: an unclaimed dirty repo's intake block is raw readiness",
+    (textOf(".section.intake") || "").indexOf("not ready, so a task intake") !== -1,
+    "the intake section dropped its raw-readiness block: " + textOf(".section.intake")
   );
   await navigate("#/overview");
   eq("readiness: the overview counts an ended/idle dirty repo as not ready", reposReadyMetric(), "0/1");
@@ -3137,6 +3165,222 @@ async function scenarioSubscriptionUsage() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// Repo admission: a live run and a remote intake are mutually exclusive per repo
+// (orch_hub.admission), in both orderings. The dashboard pre-reflects that claim
+// in three places — the repo-detail intake entry, the task-detail run controls,
+// and the intake review's write controls — and repaints into the same
+// explanation when a start loses the race and comes back 409. These checks drive
+// each direction, the recovered overlap, the terminal states that must NOT
+// block, and the invariant that a conflict is presented as a claim on the repo,
+// never as a readiness/attention/run-state change.
+async function scenarioRepoAdmission() {
+  installRoutes({ waiting: false }); // ready repo, no live run, no intake
+
+  var textOf = function (sel) {
+    var el = doc.querySelector(sel);
+    return el ? el.textContent.trim() : null;
+  };
+  var LIVE = {
+    runs: [
+      {
+        run_id: RUN,
+        repo_name: REPO,
+        task_id: TASK,
+        state: "active",
+        started_ts: "2026-07-20T08:00:00Z",
+        pending_questions: 0,
+        stop_requested: false,
+      },
+    ],
+  };
+  var intakeIn = function (status) {
+    return {
+      intakes: [
+        {
+          intake_id: "i1",
+          repo_name: REPO,
+          status: status,
+          request: "Add a thing",
+          updated_ts: "2026-07-20T08:00:00Z",
+        },
+      ],
+    };
+  };
+
+  // ---- 1) a live run claims the repo → no intake entry, linked explanation ----
+  route("GET", "/api/runs", LIVE);
+  await navigate("#/repos/" + REPO);
+  var runNote = doc.querySelector(".section.intake .admission-note");
+  check("admission: a live run replaces the intake entry with an explanation", !!runNote, "no .admission-note on repo detail");
+  check(
+    "admission: no intake form is offered while a run holds the repo",
+    doc.querySelector(".intake-form") === null,
+    "the intake form survived a live run"
+  );
+  var runLink = runNote && runNote.querySelector("a.text-link");
+  eq(
+    "admission: the intake block links to the blocking run's task",
+    runLink && runLink.getAttribute("href"),
+    "#/tasks/" + REPO + "/" + TASK
+  );
+  check("admission: that link is keyboard-reachable", !!runLink && isTabbable(runLink), "the blocking-run link is not tabbable");
+  // Presentation stays neutral: the repo is claimed, not unready, and the run
+  // signal keeps its own meaning.
+  eq("admission: the readiness badge is untouched by the conflict", textOf(".detail-head .badge"), "ready");
+  await navigate("#/overview");
+  eq("admission: a claimed repo creates no Needs attention row", doc.querySelectorAll("#view .attn").length, 0);
+  eq("admission: the repos-ready metric is untouched by the conflict", textOf("#view .metric .metric-value"), "1/1");
+
+  // ---- 2) an intake claims the repo → Start is not offered, links to it ----
+  route("GET", "/api/runs", { runs: [] });
+  route("GET", "/api/intakes", intakeIn("awaiting_review"));
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check(
+    "admission: an in-flight intake withholds Start",
+    doc.querySelector(".open-run-options") === null,
+    "Start was offered while an intake held the repo"
+  );
+  var intakeNote = doc.querySelector(".run-controls .admission-note");
+  check("admission: run controls explain the blocking intake", !!intakeNote, "no .admission-note in the run controls");
+  var intakeLink = intakeNote && intakeNote.querySelector("a.text-link");
+  eq("admission: run controls link to the blocking intake", intakeLink && intakeLink.getAttribute("href"), "#/intakes/i1");
+  check("admission: that link is keyboard-reachable", !!intakeLink && isTabbable(intakeLink), "the blocking-intake link is not tabbable");
+
+  // Every non-terminal status claims the repo; every terminal one releases it.
+  // (Statuses mirror orch_hub.intake — a resting draft awaiting review holds the
+  // repo exactly like an in-flight turn, because confirming it writes.)
+  var blocking = ["drafting", "awaiting_review", "revising", "confirming"];
+  for (var i = 0; i < blocking.length; i++) {
+    route("GET", "/api/intakes", intakeIn(blocking[i]));
+    await navigate("#/tasks/" + REPO + "/" + TASK);
+    check(
+      "admission: a " + blocking[i] + " intake withholds Start",
+      doc.querySelector(".open-run-options") === null,
+      "Start was offered against a " + blocking[i] + " intake"
+    );
+  }
+  var settled = ["confirmed", "cancelled", "failed", "error"];
+  for (var j = 0; j < settled.length; j++) {
+    route("GET", "/api/intakes", intakeIn(settled[j]));
+    await navigate("#/tasks/" + REPO + "/" + TASK);
+    check(
+      "admission: a " + settled[j] + " intake does not block Start",
+      !!doc.querySelector(".open-run-options"),
+      "Start stayed hidden after the intake reached " + settled[j]
+    );
+  }
+
+  // ---- 3) recovered overlap: the review keeps only Cancel ----
+  // A live run alongside an awaiting_review intake is the pre-existing overlap
+  // admission can refuse but not undo. Revise/confirm re-read or rewrite a tree
+  // the run owns, so the backend fails both closed; Cancel writes nothing and is
+  // the only way to clear the claim from this side.
+  route("GET", "/api/runs", LIVE);
+  route("GET", "/api/intakes", intakeIn("awaiting_review"));
+  await navigate("#/intakes/i1");
+  check(
+    "admission: an overlapped draft offers no Confirm",
+    doc.querySelector(".intake-confirm") === null,
+    "Confirm survived a live run on the repo"
+  );
+  check(
+    "admission: an overlapped draft offers no revision form",
+    doc.querySelector(".intake-revise-form") === null,
+    "the revise form survived a live run on the repo"
+  );
+  var overlapCancel = doc.querySelector(".intake-cancel");
+  check("admission: Cancel remains available on an overlap", !!overlapCancel && isTabbable(overlapCancel), "Cancel was withdrawn or is not tabbable");
+  var overlapLink = doc.querySelector(".section.intake .admission-note a.text-link");
+  eq(
+    "admission: the overlap explanation links to the blocking run's task",
+    overlapLink && overlapLink.getAttribute("href"),
+    "#/tasks/" + REPO + "/" + TASK
+  );
+  check(
+    "admission: the draft itself still renders under an overlap",
+    !!doc.querySelector(".task-content"),
+    "the proposed task file vanished with the write controls"
+  );
+  pressEnter(overlapCancel);
+  await flush();
+  check("admission: the surviving Cancel still posts", !!lastCall("POST", "/api/intakes/i1/cancel"), "no cancel POST");
+
+  // ---- 4) a raced start repaints into the linked explanation ----
+  // The dashboard's pre-reflection is best-effort; the 409 is the authority. A
+  // start that loses the race must land on the same explanation it would have
+  // shown had the claim been visible on load — not a status line naming an id
+  // the operator cannot click.
+  installRoutes({ waiting: false }); // no run, no intake → Start is offered
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var opener = doc.querySelector(".open-run-options");
+  pressEnter(opener);
+  await flush();
+  route("GET", "/api/intakes", intakeIn("drafting")); // the race: it claims the repo now
+  routeError("POST", "/api/runs", 409, {
+    detail: "cannot start a run for repo 'demo': intake i1 is in flight",
+    conflict: "intake_in_flight",
+    intake_id: "i1",
+  });
+  pressEnter(doc.querySelector('.start-form button[type="submit"]'));
+  await flush();
+  check(
+    "admission: a raced 409 repaints into the blocking-intake explanation",
+    !!doc.querySelector(".run-controls .admission-note a.text-link"),
+    "the raced refusal left no linked explanation"
+  );
+  check(
+    "admission: the raced refusal closes the launch dialog",
+    doc.querySelector(".run-options") === null || !doc.querySelector(".run-options").open,
+    "the launch dialog stayed open over a refusal it cannot retry"
+  );
+  activeIs("admission: the repaint lands focus on the page heading", pageHeading());
+
+  // A run can also claim the repo while a draft sits in review. Confirm then
+  // 409s, and leaving the refused write controls on screen would keep offering
+  // an action that now always fails — so it repaints into the overlap view.
+  installRoutes({ waiting: false }); // no live run yet → the full review controls
+  await navigate("#/intakes/i1");
+  check("admission: the review offers Confirm while the repo is unclaimed", !!doc.querySelector(".intake-confirm"), "no Confirm on an unclaimed repo");
+  route("GET", "/api/runs", LIVE); // the race: a run claims the repo now
+  routeError("POST", "/api/intakes/i1/confirm", 409, {
+    detail: "cannot confirm an intake for repo 'demo': run r1 is live",
+    conflict: "run_live",
+    run_id: RUN,
+  });
+  pressEnter(doc.querySelector(".intake-confirm"));
+  await flush();
+  check(
+    "admission: a raced confirm withdraws the refused write controls",
+    doc.querySelector(".intake-confirm") === null && doc.querySelector(".intake-revise-form") === null,
+    "the refused write controls survived the raced 409"
+  );
+  check(
+    "admission: the raced confirm still leaves Cancel available",
+    !!doc.querySelector(".intake-cancel"),
+    "Cancel was withdrawn along with the refused controls"
+  );
+
+  // A raced intake start is refused the same way, from the other direction.
+  installRoutes({ waiting: false });
+  await navigate("#/repos/" + REPO);
+  route("GET", "/api/runs", LIVE); // the race: a run claims the repo now
+  routeError("POST", "/api/intakes", 409, {
+    detail: "cannot start an intake for repo 'demo': run r1 is live",
+    conflict: "run_live",
+    run_id: RUN,
+  });
+  type(doc.querySelector(".intake-request"), "Add a thing");
+  pressEnter(doc.querySelector(".intake-form button"));
+  await flush();
+  check(
+    "admission: a raced intake 409 repaints into the blocking-run explanation",
+    !!doc.querySelector(".section.intake .admission-note a.text-link"),
+    "the raced intake refusal left no linked explanation"
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -3153,6 +3397,7 @@ async function scenarioSubscriptionUsage() {
     await scenarioStaleRoute();
     await scenarioRunHistory();
     await scenarioLiveRunReadiness();
+    await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();
   } catch (err) {
     FAILED++;

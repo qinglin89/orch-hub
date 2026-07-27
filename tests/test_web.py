@@ -595,6 +595,63 @@ def test_intake_confirm_handoff_shared_by_sync_and_polled_settle():
     assert "confirming" in body  # the poll's confirmed-settle branch keys on it
 
 
+# ---- repo admission: run ⟷ intake exclusion (2026-07-24, session-2) ----------
+#
+# The backend admits either a live run or a non-terminal remote intake per repo
+# (orch_hub.admission) and refuses the loser with a 409 carrying a stable
+# `conflict` discriminator plus the blocking id. These pin the dashboard's half
+# at the served-asset boundary: the wire contract it consumes, and the fact that
+# the conflict is presented as a claim rather than folded into readiness. The
+# rendered behaviour in each direction (which control disappears, where its link
+# points, what a raced 409 repaints into) is driven for real in the JavaScriptCore
+# harness — see scenarioRepoAdmission in tests/keyboard_harness.js.
+
+
+def test_dashboard_consumes_the_admission_conflict_discriminator():
+    body = app_js()
+    # A refused start is recognized by the structured discriminator, not by
+    # parsing the human message, and both directions are handled.
+    assert "isAdmissionConflict" in body
+    assert '"run_live"' in body
+    assert '"intake_in_flight"' in body
+
+
+def test_admission_notes_link_to_the_blocking_run_or_intake():
+    body = app_js()
+    # Each direction explains the claim and links to the thing that settles it:
+    # the run's task detail (where Stop lives) and the intake's review view.
+    assert "runHoldsRepoNote" in body
+    assert "intakeHoldsRepoNote" in body
+    assert "a run and a task intake can't share a repo" in body
+    assert "repoInflightIntake" in body  # the intake-side occupancy probe
+    assert "INTAKE_TERMINAL.has(i.status)" in body  # terminal records never block
+
+
+def test_admission_is_presented_before_readiness_not_as_readiness():
+    body = app_js()
+    # A live run dirties the tree, so the repo's raw readiness fails `git_clean`
+    # for the run's whole duration. The intake block must name the claim, never
+    # that failure — so the live-run branch precedes the readiness branch and the
+    # shared display-readiness rule is left alone.
+    intake_section = body[body.index("function intakeSection") :]
+    intake_section = intake_section[: intake_section.index("function wireIntakeStart")]
+    assert intake_section.index("if (liveRun)") < intake_section.index(
+        "readiness.ready"
+    )
+    # The one display-readiness rule keeps its inputs: raw readiness + a live run.
+    assert "function displayReady(readiness, hasLiveRun)" in body
+
+
+def test_recovered_overlap_keeps_only_the_write_free_control():
+    body = app_js()
+    # A pre-existing overlap can't revise or confirm (both touch a tree the run
+    # owns); Cancel writes nothing, so it stays — it is the only way to clear the
+    # claim from the intake side.
+    assert "intakeReviewControls(repoName, liveRun)" in body
+    assert "this draft can't be revised or confirmed" in body
+    assert "cancelling writes nothing to the repo" in body
+
+
 # ---- per-session context strips (session-context-usage, session-2) -----------
 #
 # Run detail (live runs) and run-history cards render a per-session context strip

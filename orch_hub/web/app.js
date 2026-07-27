@@ -1136,14 +1136,18 @@
       if (err instanceof ApiError && err.status === 401) throw err;
     }
     let liveByTask = {};
-    let hasLiveRun = false;
+    let liveRun = null;
     try {
       const runsData = await api("/api/runs");
       liveByTask = liveRunsByTask(runsData.runs, repoName);
-      hasLiveRun = repoHasLiveRun(runsData.runs, repoName);
+      // `repoLiveRun` and `repoHasLiveRun` share one LIVE_STATES predicate, so
+      // this is the same boolean the readiness softening always consumed — it is
+      // just kept alongside the run itself, which the intake section links to.
+      liveRun = repoLiveRun(runsData.runs, repoName);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
+    const hasLiveRun = !!liveRun;
     // Best-effort recent commits for the bottom-of-detail section. A fetch
     // failure leaves `commitLog` null; the section renders "unavailable" rather
     // than hiding the repo or its tasks (a 401 still re-gates).
@@ -1160,10 +1164,7 @@
     let inflightIntake = null;
     try {
       const intakesData = await api("/api/intakes");
-      inflightIntake =
-        (intakesData.intakes || []).find(
-          (i) => i.repo_name === repoName && !INTAKE_TERMINAL.has(i.status)
-        ) || null;
+      inflightIntake = repoInflightIntake(intakesData.intakes, repoName);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
@@ -1205,7 +1206,7 @@
       <div class="path muted">${escapeHtml(repoPath || "")}</div>
       ${housekeepingPending ? housekeepingWarning(false) : ""}
       ${reasons}
-      ${intakeSection(repoName, inflightIntake, readiness)}
+      ${intakeSection(repoName, inflightIntake, readiness, liveRun)}
       ${
         entry.index_present
           ? `<div class="filters"><label for="rd-status">Status
@@ -1477,6 +1478,75 @@
     if (el && !el.disabled && typeof el.focus === "function") el.focus();
   }
 
+  // ---- repo admission (a live run and a task intake never share a repo) ----
+  //
+  // Backend contract (orch_hub.admission): every repo is claimed by EITHER a
+  // live run OR a non-terminal remote intake, decided in one per-repo critical
+  // section. The loser of a race gets a 409 carrying a stable `conflict`
+  // discriminator plus the blocking id — `run_live`/`run_id` for a refused
+  // intake, `intake_in_flight`/`intake_id` for a refused run. The dashboard
+  // pre-reflects that claim so an operator is never offered a control the hub
+  // would refuse; the 409 stays the authority for anything raced.
+  //
+  // Admission is NOT readiness. A live run rewrites the working tree, so the
+  // repo's raw readiness genuinely fails `git_clean` for its whole duration —
+  // explaining a refused intake with that failure would make readiness a proxy
+  // for "claimed", which it isn't. So each note below is rendered BEFORE its
+  // view's readiness branch (mirroring the backend, which checks admission
+  // before its readiness gate), and none of this touches READY/NOT READY, the
+  // Needs-attention list, or the idle/running/waiting run signals.
+
+  // The repo's one non-terminal intake, if any — the intake-side mirror of
+  // repoLiveRun. Every status outside INTAKE_TERMINAL holds the repo: a draft
+  // resting in `awaiting_review` claims it exactly like an in-flight turn does,
+  // because confirming it writes `.ai-tasks/`.
+  function repoInflightIntake(intakes, repoName) {
+    return (
+      (intakes || []).find(
+        (i) => i.repo_name === repoName && !INTAKE_TERMINAL.has(i.status)
+      ) || null
+    );
+  }
+
+  // "A run holds this repo, so <refused>". Links to the run's task detail, which
+  // is where the Stop control lives, so the note also names the way out.
+  function runHoldsRepoNote(repoName, run, refused) {
+    return `<p class="muted admission-note">A run is live on this repo
+      (<a class="text-link" href="${taskHash(
+        repoName,
+        run.task_id
+      )}">${escapeHtml(run.task_id)}</a> ${runBadge(
+      run.state
+    )}), so ${refused}: a run and a task intake can't share a repo.</p>`;
+  }
+
+  // "A task intake holds this repo, so <refused>". Links to its review view,
+  // where Confirm or Cancel settles the intake and frees the repo.
+  function intakeHoldsRepoNote(intake, refused) {
+    return `<p class="muted admission-note">A task intake is in flight for this
+      repo ${badge(
+        intake.status,
+        intakeBadgeKind(intake.status)
+      )}, so ${refused}: a run and a task intake can't share a repo.
+      <a class="text-link" href="${intakeHash(
+        intake.intake_id
+      )}">Review the intake →</a></p>`;
+  }
+
+  // A refusal that came from repo admission, recognized by the stable `conflict`
+  // discriminator rather than by parsing the message. Both start paths repaint
+  // on one: the blocking id is only useful as a link, which a text status line
+  // can't carry, and the repaint renders exactly the pre-reflected explanation
+  // the view would have shown had the claim been visible on load.
+  function isAdmissionConflict(err) {
+    return !!(
+      err instanceof ApiError &&
+      err.body &&
+      (err.body.conflict === "run_live" ||
+        err.body.conflict === "intake_in_flight")
+    );
+  }
+
   // ---- run controls (start / stop) ----
 
   // The one live run for this repo, if any. Per-repo serialization means at most
@@ -1562,10 +1632,11 @@
 
   // The Start/Stop control for a task, chosen from the run overlay the backend
   // already enforces. Order matters: a live run for THIS task offers Stop; a
-  // live run elsewhere in the repo blocks Start (busy); otherwise Start is
-  // offered only when the task status and (best-effort) readiness look launchable
-  // — every hidden Start is still backed by the backend 409 if raced.
-  function runControlsSection(repoName, detail, run, busyRun, readiness) {
+  // live run elsewhere in the repo blocks Start (busy); a non-terminal remote
+  // intake blocks Start (repo admission); otherwise Start is offered only when
+  // the task status and (best-effort) readiness look launchable — every hidden
+  // Start is still backed by the backend 409 if raced.
+  function runControlsSection(repoName, detail, run, busyRun, readiness, intake) {
     const head = `<section class="section run-controls"><h2>Run controls</h2>`;
     const foot = `</section>`;
 
@@ -1604,6 +1675,21 @@
           )}">${escapeHtml(busyRun.task_id)}</a> ${runBadge(
           busyRun.state
         )}). Only one run per repo at a time.</p>` +
+        foot
+      );
+    }
+
+    // Repo admission: a non-terminal intake claims the repo, so a start would be
+    // refused with 409 `intake_in_flight`. Placed after the two live-run branches
+    // on purpose — when both hold the repo (a recovered overlap the backend can
+    // refuse but not undo) the run is the stronger fact and Stop, offered above,
+    // is what clears it. This branch precedes the readiness one because a claimed
+    // repo is not an unready repo.
+    if (intake) {
+      return (
+        head +
+        intakeHoldsRepoNote(intake, "a run can't start") +
+        `<p class="muted">Confirming or cancelling the intake frees the repo.</p>` +
         foot
       );
     }
@@ -2254,6 +2340,15 @@
       router(); // now shows the live run + Stop control
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
+      // An intake claimed the repo while this dialog was open. Repaint (the same
+      // way a successful launch does) so the view renders the admission
+      // explanation with its link to the blocking intake — the dialog's status
+      // line is text-only and would drop exactly the part worth acting on.
+      if (isAdmissionConflict(err)) {
+        if (dialog && dialog.open) closeRunOptions(dialog);
+        router();
+        return;
+      }
       button.disabled = false;
       statusEl.classList.add("error-text");
       statusEl.textContent = controlErrorText(err, "Failed to start the run.");
@@ -2322,6 +2417,18 @@
       const reposData = await api("/api/repos");
       const match = (reposData.repos || []).find((r) => r.name === repoName);
       if (match) readiness = match.readiness;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+    }
+
+    // Best-effort repo-admission overlay: a non-terminal remote intake claims
+    // the repo until it is confirmed or cancelled, so Start would 409. A fetch
+    // failure degrades to offering Start — the backend still refuses it, and
+    // hiding the control on unknown state would be worse than a raced refusal.
+    let inflightIntake = null;
+    try {
+      const intakesData = await api("/api/intakes");
+      inflightIntake = repoInflightIntake(intakesData.intakes, repoName);
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
@@ -2396,7 +2503,14 @@
       ${blockers}
       ${unknownNote}
       ${runStatusSection(run, sessions)}
-      ${runControlsSection(repoName, detail, run, busyRun, readiness)}
+      ${runControlsSection(
+        repoName,
+        detail,
+        run,
+        busyRun,
+        readiness,
+        inflightIntake
+      )}
       ${answerSection(run ? run.run_id : "", questions)}
       ${
         evalEnabled
@@ -3904,9 +4018,12 @@
 
   // The "new task intake" entry on repo detail. If the repo already has an
   // in-flight intake (the backend allows one at a time), link to its review
-  // instead of offering a second. A known-not-ready repo pre-explains the block
-  // the backend would 409 on; the submit handler still renders a raced 409.
-  function intakeSection(repoName, inflight, readiness) {
+  // instead of offering a second. A live run claims the repo for the run
+  // subsystem (repo admission), and a known-not-ready repo pre-explains the
+  // readiness block — in that order, because a running repo is claimed, not
+  // unready, and its dirty tree must not be reported as the reason. The submit
+  // handler still handles a raced refusal of either kind.
+  function intakeSection(repoName, inflight, readiness, liveRun) {
     const head = `<section class="section intake"><h2>New task intake</h2>`;
     const foot = `</section>`;
     if (inflight) {
@@ -3917,6 +4034,25 @@
          <p><a class="text-link" href="${intakeHash(
            inflight.intake_id
          )}">Review the draft →</a></p>` +
+        // A live run alongside an in-flight intake is a recovered overlap
+        // (legacy state, or a run reattached after a restart): admission stops
+        // one from forming but cannot undo one. Say so here, because the review
+        // view's write controls stay refused until the run ends.
+        (liveRun
+          ? runHoldsRepoNote(
+              repoName,
+              liveRun,
+              "the draft can't be revised or confirmed"
+            )
+          : "") +
+        foot
+      );
+    }
+    if (liveRun) {
+      return (
+        head +
+        runHoldsRepoNote(repoName, liveRun, "a task intake can't start") +
+        `<p class="muted">Task intake becomes available once the run ends.</p>` +
         foot
       );
     }
@@ -3993,6 +4129,13 @@
         location.hash = intakeHash(existing);
         return;
       }
+      // A run claimed the repo while this form was open (409 `run_live`).
+      // Repaint: the section then explains the run and links to it, instead of
+      // a status line that names a run id the operator can't click.
+      if (isAdmissionConflict(err)) {
+        router();
+        return;
+      }
       if (statusEl) {
         statusEl.classList.add("error-text");
         statusEl.textContent = controlErrorText(err, "Failed to start intake.");
@@ -4026,7 +4169,30 @@
   // The review controls for an awaiting_review intake. Confirm writes the task
   // (the only write); Request changes sends feedback back into the same session
   // for a fresh draft (still read-only); Cancel discards it (writes nothing).
-  function intakeReviewControls() {
+  //
+  // A recovered overlap (`liveRun`) removes both agent turns: revising re-reads
+  // a tree the run is rewriting and confirming writes `.ai-tasks/` behind it, so
+  // the backend fails both closed with 409 `run_live`. Cancel survives because it
+  // writes nothing — and it is the only way to clear the overlap from this side,
+  // which otherwise keeps blocking the repo's next run start.
+  function intakeReviewControls(repoName, liveRun) {
+    if (liveRun) {
+      return `
+      <section class="section intake">
+        <h2>Review</h2>
+        ${runHoldsRepoNote(
+          repoName,
+          liveRun,
+          "this draft can't be revised or confirmed"
+        )}
+        <p class="muted">Stop the run to resume the review, or cancel the
+          intake — cancelling writes nothing to the repo.</p>
+        <div class="intake-actions">
+          <button type="button" class="btn-danger intake-cancel">Cancel</button>
+          <span class="control-status intake-status" role="status"></span>
+        </div>
+      </section>`;
+    }
     return `
       <section class="section intake">
         <h2>Review</h2>
@@ -4191,10 +4357,23 @@
     const data = await api(
       "/api/intakes/" + encodeURIComponent(intakeId) + "/history"
     );
+    const repoName = data.repo_name || "";
+    // Best-effort repo-admission probe, only for the one state that offers the
+    // write controls: a live run on this repo means revise/confirm are refused
+    // (409 `run_live`) until it ends. A fetch failure degrades to offering them
+    // — the backend still fails them closed.
+    let liveRun = null;
+    if (data.status === "awaiting_review" && repoName) {
+      try {
+        const runsData = await api("/api/runs");
+        liveRun = repoLiveRun(runsData.runs, repoName);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) throw err;
+      }
+    }
     // A newer route owns the view: drop the paint, and with it the poll this
     // render would otherwise restart for a view that is gone.
     if (superseded()) return;
-    const repoName = data.repo_name || "";
     const back = repoName
       ? `<a class="back-link" href="${repoHash(repoName)}">← ${escapeHtml(
           repoName
@@ -4203,7 +4382,8 @@
 
     let body;
     if (data.status === "awaiting_review") {
-      body = intakeDraftView(data.draft) + intakeReviewControls();
+      body =
+        intakeDraftView(data.draft) + intakeReviewControls(repoName, liveRun);
     } else if (data.status === "confirmed") {
       const taskId = data.created_task_id;
       body =
@@ -4335,6 +4515,14 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
       if (superseded()) return; // the button and its status line are gone
+      // A run claimed the repo while this draft sat in review (409 `run_live`).
+      // A status line would leave the refused write controls on screen, still
+      // offering an action that now always fails; repaint into the overlap view,
+      // which withdraws them and keeps the Cancel that still works.
+      if (isAdmissionConflict(err)) {
+        rerender(renderIntakeReview(intakeId));
+        return;
+      }
       setControlBusy(button, statusEl, false);
       if (statusEl) {
         statusEl.classList.add("error-text");
@@ -4397,6 +4585,12 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) return; // login shown
       if (superseded()) return; // the form and its status line are gone
+      // Same raced admission refusal as confirm: repaint rather than leave a
+      // revision form the backend will refuse until the run ends.
+      if (isAdmissionConflict(err)) {
+        rerender(renderIntakeReview(intakeId));
+        return;
+      }
       if (button) button.disabled = false;
       if (statusEl) {
         statusEl.classList.add("error-text");
