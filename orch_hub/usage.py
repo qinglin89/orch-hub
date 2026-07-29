@@ -1003,6 +1003,17 @@ def _later(a: str | None, b: str | None) -> str | None:
     return b if _is_newer(b, a) else a
 
 
+def _earlier(a: str | None, b: str | None) -> str | None:
+    """The earlier of two ISO instants — the mirror of :func:`_later`.
+
+    ``b`` wins only when strictly older; equal or unparseable ``b`` yields ``a``.
+    The never-over-claim floor for a mixed-moment merge (see
+    :func:`merge_observations`): when the merged result holds figures from two
+    observations, the older stamp is the only shared one that dates no window ahead
+    of the observation that actually supplied its figure."""
+    return b if _is_newer(a, b) else a
+
+
 def _used_at_least(candidate: UsageWindow, current: UsageWindow) -> bool:
     """Whether ``candidate``'s used-percentage is at least ``current``'s.
 
@@ -1065,10 +1076,14 @@ def merge_observations(
 
     Returns ``None`` when nothing changed — an unchanged re-read, or a wholly
     stale/older candidate — so the caller writes nothing and the stored figures and
-    their observation time stand. When something changed, ``observed_ts`` is the
-    later of the two stamps; a per-window observation time (so freshness follows the
-    winning figure per window) is the next slice's payload-shape work, not this
-    merge's."""
+    their observation time stand. When something changed, ``observed_ts`` stays one
+    provider-level stamp — freshness is a single sampling moment, since both windows
+    arrive in one payload: the later stamp for a coherent same-window-set merge, the
+    earlier one as a never-over-claim floor when a partial payload mixes two moments
+    (see below). Per-window freshness was considered and rejected: the real carrier
+    never samples one window without the other, so it would only ever duplicate this
+    stamp; the genuine per-window fact — whether a figure is still the open window's —
+    is the binary ``figure_instant`` vs ``resets_at`` the card already reads."""
     cand_by_key = {w.key: w for w in candidate.windows}
     merged: list[UsageWindow] = []
     for window in current.windows:
@@ -1080,8 +1095,22 @@ def merge_observations(
     plan = candidate.plan if candidate.plan is not None else current.plan
     if merged_windows == current.windows and plan == current.plan:
         return None
+    # ``observed_ts`` is one provider-level stamp shared by every window, honest only
+    # while the store holds a single observation moment. A full statusLine payload
+    # keeps it so: both windows arrive together, and the per-window merge picks a
+    # uniform winner (used% is monotonic within a window and ``figure_instant`` orders
+    # rollovers), so the later stamp dates the whole coherent result. The one
+    # exception is a PARTIAL payload — each window is optional (``_claude_windows``),
+    # so a read carrying only one window keeps the other from the stored, differently
+    # timed observation, mixing two moments. There the never-over-claim floor is the
+    # OLDER stamp, so no window is dated newer than the observation that supplied its
+    # figure. Same window set -> coherent -> later; different -> mixed -> earlier.
+    if stored_keys == {w.key for w in candidate.windows}:
+        observed_ts = _later(current.observed_ts, candidate.observed_ts)
+    else:
+        observed_ts = _earlier(current.observed_ts, candidate.observed_ts)
     return ClaudeObservation(
-        observed_ts=_later(current.observed_ts, candidate.observed_ts),
+        observed_ts=observed_ts,
         plan=plan,
         windows=merged_windows,
     )

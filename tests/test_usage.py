@@ -735,6 +735,81 @@ def test_merge_unchanged_reread_writes_nothing() -> None:
     assert merge_observations(current, five_obs(7.0, WIN_A)) is None
 
 
+# The observed_ts freshness floor: observed_ts is ONE provider-level stamp, honest
+# only while the store holds a single observation moment. A full statusLine payload
+# keeps it coherent (both windows in one sample, uniform merge winner); a PARTIAL
+# payload — each window is optional — keeps one window from a differently-timed
+# observation, mixing two moments, so the merge floors the shared stamp to the OLDER
+# one and no window is ever dated newer than the observation that supplied its figure.
+
+def _two_window_obs(
+    observed_ts: str,
+    five_used: float,
+    seven_used: float,
+    *,
+    five_reset: str = WIN_A,
+    seven_reset: str = STORED_SEVEN_RESET,
+) -> ClaudeObservation:
+    """A coherent 5h+7d observation — both figures measured at ``observed_ts``."""
+    return ClaudeObservation(
+        observed_ts=observed_ts,
+        plan="max",
+        windows=(
+            UsageWindow(key="five_hour", label="5h", window_minutes=300, used_percent=five_used, remaining_percent=round(100 - five_used, 2), resets_at=five_reset, figure_instant=five_reset),
+            UsageWindow(key="seven_day", label="7d", window_minutes=10080, used_percent=seven_used, remaining_percent=round(100 - seven_used, 2), resets_at=seven_reset, figure_instant=seven_reset),
+        ),
+    )
+
+
+def test_merge_full_payload_advances_observed_ts() -> None:
+    # The guard must not touch the real path: a full same-window-set payload is one
+    # coherent moment, so a genuinely later reading advances the shared stamp as before.
+    older = "2026-07-29T00:24:00+00:00"
+    newer = "2026-07-29T02:40:00+00:00"
+    merged = merge_observations(
+        _two_window_obs(older, 5.0, 5.0), _two_window_obs(newer, 9.0, 6.0)
+    )
+    assert merged is not None
+    assert merged.observed_ts == newer
+    by_key = {w.key: w for w in merged.windows}
+    assert by_key["five_hour"].used_percent == 9.0
+    assert by_key["seven_day"].used_percent == 6.0
+
+
+def test_merge_partial_candidate_does_not_advance_observed_ts_over_a_kept_window() -> None:
+    # The freshness floor. A read carries only five_hour (windows are optional), fresh
+    # and higher, with a NEWER stamp. It merges in, but seven_day is kept from the older
+    # stored observation, so the result holds two moments. The shared observed_ts must
+    # stay the OLDER stamp, or the kept 7d would claim a freshness it never had.
+    older = "2026-07-29T00:24:00+00:00"
+    newer = "2026-07-29T02:40:00+00:00"
+    current = _two_window_obs(older, 5.0, 11.0)
+    merged = merge_observations(current, five_obs(9.0, WIN_A, observed_ts=newer))
+    assert merged is not None
+    by_key = {w.key: w for w in merged.windows}
+    assert by_key["five_hour"].used_percent == 9.0  # fresh 5h applied
+    assert by_key["seven_day"].used_percent == 11.0  # 7d kept untouched
+    assert merged.observed_ts == older  # NOT advanced to the 5h-only read's newer stamp
+
+
+def test_merge_partial_candidate_adding_a_window_floors_observed_ts_to_the_older() -> None:
+    # The mirror edge: the store holds only five_hour (a prior partial read) at a NEWER
+    # moment; a candidate carrying both arrives OLDER. Its seven_day is new to the store
+    # but from the older moment, so the shared stamp floors to that older time — a naive
+    # "candidate covered all stored windows -> take the later stamp" rule would instead
+    # over-claim the freshly-added 7d.
+    older = "2026-07-29T00:24:00+00:00"
+    newer = "2026-07-29T02:40:00+00:00"
+    current = five_obs(9.0, WIN_A, observed_ts=newer)  # five_hour only, newer
+    candidate = _two_window_obs(older, 5.0, 3.0)  # both windows, older + lower 5h
+    merged = merge_observations(current, candidate)
+    assert merged is not None
+    by_key = {w.key: w for w in merged.windows}
+    assert by_key["five_hour"].used_percent == 9.0  # stored 5h kept (candidate older/lower)
+    assert by_key["seven_day"].used_percent == 3.0  # 7d added from the older candidate
+    assert merged.observed_ts == older  # floored to the older moment, never over-claims 7d
+
+
 # -- Claude store + read ------------------------------------------------------
 
 
