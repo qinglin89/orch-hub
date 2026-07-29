@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
+last-updated: 2026-07-29
+verified-against: fa9930065ae3d9050dac426640151657d71fe3a2
 ---
 
 # Architecture
@@ -152,17 +152,21 @@ trigger, polls persisted job state, and keeps raw artifacts behind
 Copy/Download.
 
 Subscription usage is a sidecar display flow: `UsageService` reads Claude from
-the hub-owned observation store (ingesting newer statusLine sink records
-first) and Codex from recent local rollout `rate_limits` under the Codex
-home. The Claude stream-json observer stays wired but
-sees no used-percentage on verified versions: 2.1.218 has no rate-limit signal;
-2.1.220's percentage-less `rate_limit_event` advances only `resets_at` on an
-already-stored known window, without changing figures or their observation
-timestamp. Protected `GET /api/usage` returns both providers fail-soft with
-normalized windows/percentages/resets/freshness/plan/credits; passed boundaries
-render as no active window, and missing/stale/failed sources remain explicit
-display states that never feed attention, readiness, run state, or
-launch/intake gates.
+the hub-owned observation store (merging the statusLine sink per window first)
+and Codex from recent local rollout `rate_limits` under the Codex home. Claude
+figures are keyed by store-internal `figure_instant`, so idle statusLine writers
+cannot lower same-window usage, genuine rollovers replace old figures, legacy
+pre-`figure_instant` store windows self-heal by yielding to identified
+candidates, and partial payload merges floor the single provider-level
+`observed_ts` to the older source moment. The Claude stream-json observer stays
+wired but sees no used-percentage on verified versions: 2.1.218 has no
+rate-limit signal; 2.1.220's percentage-less `rate_limit_event` advances only
+`resets_at` on an already-stored known window, without changing figures or their
+observation timestamp. Protected `GET /api/usage` returns both providers
+fail-soft with normalized windows/percentages/resets/freshness/plan/credits;
+passed boundaries render as no active window, and missing/stale/failed sources
+remain explicit display states that never feed attention, readiness, run state,
+or launch/intake gates.
 
 ## Component Boundaries
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
+last-updated: 2026-07-29
+verified-against: fa9930065ae3d9050dac426640151657d71fe3a2
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -106,10 +106,23 @@ subscription usage for display. Codex usage is read from the newest local
 `rate_limits` snapshots in `<codex_home>/sessions/**/rollout-*.jsonl`, bounded
 by file count and size, with optional primary/secondary windows and aggregate
 credits sanitized by whitelist. Claude usage is read from
-`<data_dir>/usage/claude.json`; `UsageService` first ingests a newer
-`<data_dir>/usage/claude-statusline.json` record from the operator-installed
-writer, then reads the same store so the HTTP payload and staleness rules stay
-unchanged. No verified `claude -p --output-format stream-json` version carries
+`<data_dir>/usage/claude.json`; `UsageService` first reads the operator-installed
+`<data_dir>/usage/claude-statusline.json` sink and merges it into the same store
+per window, then serves the store so the HTTP payload and staleness rules stay
+unchanged. The sink stamp is write/capture time, not proof that all figures are
+newer than stored ones: concurrent Claude Code sessions publish their own last
+API response to one last-write-wins file. `merge_observations` therefore keys
+each figure by store-internal `UsageWindow.figure_instant`, ignores older-window
+snapshots, replaces on genuine rollovers even when used% drops, and takes
+`max(used_percent)` within one window so an idle writer cannot lower current
+usage. `figure_instant` is persisted only in `claude.json`, not exposed by
+`GET /api/usage`; legacy pre-`figure_instant` windows deserialize with unknown
+identity and yield once to an identified candidate so upgraded stores self-heal
+instead of freezing a boundary-advanced stale figure. A single provider-level
+`observed_ts` remains the freshness stamp: coherent same-window-set payloads
+advance it to the later stamp, while partial payloads with omitted/new windows
+floor it to the older stamp so no retained figure is dated newer than its source
+observation. No verified `claude -p --output-format stream-json` version carries
 a used-percentage: 2.1.218 emits no rate-limit signal; 2.1.220 emits a
 percentage-less `rate_limit_event`. `parse_claude_stream_boundaries` normalizes
 the latter to `WindowBoundary`; `merge_window_boundaries` advances only

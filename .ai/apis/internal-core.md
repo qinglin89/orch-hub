@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
+last-updated: 2026-07-29
+verified-against: fa9930065ae3d9050dac426640151657d71fe3a2
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -149,8 +149,18 @@ opens credential/reset-credit identifiers. `ClaudeUsageStore` persists the
 latest Claude observation under `<data_dir>/usage/claude.json` with per-writer
 temp files plus `os.replace`; `read_claude_statusline(path)` reads the bounded
 operator-installed sink `<data_dir>/usage/claude-statusline.json` and
-`UsageService` records it only when its observation timestamp is newer than the
-store. `parse_claude_stream_usage(stdout, observed_ts=...)` remains wired to
+`UsageService` merges it into the store per window, not by whole-record write
+recency. Merge identity is store-internal `UsageWindow.figure_instant`; same
+window instants take the higher `used_percent`, newer instants replace as a
+rollover, older instants are ignored, candidate-only windows are added, and
+omitted stored windows are retained. Pre-`figure_instant` store windows keep an
+unknown identity on read and yield once to a candidate with a real
+`figure_instant`, self-healing upgraded `claude.json` files without exposing
+that field in `GET /api/usage`. The provider-level `observed_ts` remains a
+single freshness stamp: same-window-set merges advance to the later stamp,
+while partial mixed-window-set merges floor to the older stamp so a kept or
+newly-added window is not dated newer than its source observation.
+`parse_claude_stream_usage(stdout, observed_ts=...)` remains wired to
 hub-driven `claude -p --output-format stream-json`; no verified version carries
 a used-percentage there (2.1.218 has no rate-limit signal; 2.1.220 adds a
 percentage-less `rate_limit_event`). `parse_claude_stream_boundaries` and
