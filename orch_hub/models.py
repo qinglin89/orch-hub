@@ -1561,6 +1561,16 @@ class UsageWindow:
     assume the percentage was observed *inside* the window this boundary closes —
     ``window_minutes`` plus the provider's ``observed_ts`` are what decide that,
     and a boundary already in the past means no window is open at all.
+
+    ``figure_instant`` is the reset boundary of the window ``used_percent`` was
+    actually measured in — the figure's *own* window identity. At observation it
+    equals ``resets_at``, but a boundary-only refresh advances ``resets_at``
+    (the displayed boundary) ahead of it, so the two must stay distinct: the
+    per-window sink merge (``orch_hub.usage.merge_observations``) keys window
+    identity on ``figure_instant``, never on the displayable ``resets_at``.
+    Store-internal only — deliberately excluded from :meth:`to_dict` so the
+    ``GET /api/usage`` payload is unchanged; it round-trips through the Claude
+    observation store instead.
     """
 
     key: str
@@ -1571,6 +1581,7 @@ class UsageWindow:
     resets_at: str | None = None
     used: int | None = None
     limit: int | None = None
+    figure_instant: str | None = None
 
     def to_dict(self) -> dict:
         return {

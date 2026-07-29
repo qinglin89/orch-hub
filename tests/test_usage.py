@@ -28,6 +28,7 @@ from orch_hub.usage import (
     UsageService,
     WindowBoundary,
     claude_usage,
+    merge_observations,
     merge_window_boundaries,
     parse_claude_stream_boundaries,
     parse_claude_stream_usage,
@@ -597,6 +598,143 @@ def test_merge_boundary_fills_a_window_with_no_stored_reset() -> None:
     assert merged.windows[0].used_percent == 4.0
 
 
+# -- Claude sink per-window merge (the stale-writer fix) -----------------------
+# Every concurrent Claude Code session writes the one statusLine sink
+# last-write-wins, each publishing the rate_limits of its OWN last API response —
+# so a sink's write stamp is not its measurement time. `merge_observations` folds
+# a fresh sink read into the store per window, keyed on each figure's own window
+# instant (`figure_instant`, distinct from the displayable `resets_at` a boundary
+# refresh may advance), with ties broken by max(used_percent). These pin the five
+# rules: same-window stale figure ignored, same-window max, rollover replace,
+# pre-reset snapshot ignored, and the boundary-advance interaction.
+
+# Two 5h window instants: WIN_B is a later window (a rollover from WIN_A). WIN_A is
+# also the epoch the default `write_sink` five-hour reset normalizes to.
+WIN_A = "2026-07-29T02:00:00+00:00"  # == epoch 1785290400
+WIN_B = "2026-07-29T05:00:00+00:00"  # a later 5h window
+
+
+def five_obs(
+    used: float,
+    reset: str | None,
+    *,
+    instant: str | None = None,
+    observed_ts: str = "2026-07-29T00:24:00+00:00",
+    plan: str | None = "max",
+) -> ClaudeObservation:
+    """A single-five-hour-window Claude observation for merge tests.
+
+    ``instant`` (the figure's own window instant) defaults to ``reset`` — the
+    fresh-figure invariant — but is set apart to model a stored window whose
+    displayed ``resets_at`` a boundary refresh has advanced past its figure."""
+    return ClaudeObservation(
+        observed_ts=observed_ts,
+        plan=plan,
+        windows=(
+            UsageWindow(
+                key="five_hour",
+                label="5h",
+                window_minutes=300,
+                used_percent=used,
+                remaining_percent=round(100 - used, 2),
+                resets_at=reset,
+                figure_instant=reset if instant is None else instant,
+            ),
+        ),
+    )
+
+
+def test_merge_same_window_ignores_a_lower_figure_whatever_its_stamp() -> None:
+    # The reported bug: a refresh dropped 5h from 5% to 3%. A stale concurrent
+    # writer republishes an older, LOWER same-window figure with a NEWER write
+    # stamp. used% only grows within a window, so the lower figure is the earlier
+    # measurement and must not win — nothing changes, so the caller writes nothing.
+    current = five_obs(5.0, WIN_A, observed_ts="2026-07-29T00:24:32+00:00")
+    candidate = five_obs(3.0, WIN_A, observed_ts="2026-07-29T00:26:10+00:00")
+    assert merge_observations(current, candidate) is None
+
+
+def test_merge_same_window_takes_the_higher_used_percent() -> None:
+    # A genuinely later reading in the same window (higher used%) advances the
+    # figure; identity (the window instant) and the displayed reset are unchanged.
+    current = five_obs(5.0, WIN_A)
+    merged = merge_observations(current, five_obs(8.0, WIN_A))
+    assert merged is not None
+    assert merged.windows[0].used_percent == 8.0
+    assert merged.windows[0].resets_at == WIN_A
+    assert merged.windows[0].figure_instant == WIN_A
+
+
+def test_merge_rollover_replaces_even_with_a_lower_figure() -> None:
+    # A newer window instant is a rollover: the fresh post-reset reading replaces
+    # the old near-full figure, even though its used% is far lower.
+    current = five_obs(90.0, WIN_A)
+    merged = merge_observations(current, five_obs(2.0, WIN_B))
+    assert merged is not None
+    assert merged.windows[0].used_percent == 2.0
+    assert merged.windows[0].resets_at == WIN_B
+    assert merged.windows[0].figure_instant == WIN_B
+
+
+def test_merge_ignores_a_pre_reset_older_window_snapshot() -> None:
+    # The mirror of rollover: a stale writer still on the PREVIOUS window (older
+    # instant) reports a high figure. Its window is older, so it is a pre-reset
+    # snapshot and is ignored — the current low post-reset figure is not regressed.
+    current = five_obs(2.0, WIN_B)
+    assert merge_observations(current, five_obs(90.0, WIN_A)) is None
+
+
+def test_merge_boundary_advance_does_not_freeze_the_pre_reset_figure() -> None:
+    # The crux. `merge_window_boundaries` advanced the DISPLAYED resets_at to the
+    # next window (WIN_B) while the figure is still the pre-reset one measured in
+    # WIN_A. Keying identity on figure_instant (WIN_A), not the displayed resets_at
+    # (WIN_B), lets the real post-reset reading win — if identity keyed on the
+    # displayed reset, WIN_B == WIN_B would tie and the stale 90 would win the max.
+    current = five_obs(90.0, WIN_B, instant=WIN_A)
+    merged = merge_observations(current, five_obs(2.0, WIN_B))
+    assert merged is not None
+    assert merged.windows[0].used_percent == 2.0
+    assert merged.windows[0].figure_instant == WIN_B
+
+
+def test_merge_window_boundary_leaves_the_figure_instant_behind() -> None:
+    # The setup above is what merge_window_boundaries actually produces: it advances
+    # the displayed resets_at but must NOT touch the figure's own window instant, or
+    # the next post-reset reading would lose the comparison and be discarded.
+    stored = five_obs(90.0, WIN_A)  # resets_at == figure_instant == WIN_A
+    merged = merge_window_boundaries(stored, [WindowBoundary(key="five_hour", resets_at=WIN_B)])
+    assert merged is not None
+    assert merged.windows[0].resets_at == WIN_B  # displayed boundary advanced
+    assert merged.windows[0].figure_instant == WIN_A  # figure identity stays put
+
+
+def test_merge_keeps_a_window_the_candidate_omits_and_adds_a_new_one() -> None:
+    # Per-window: a stored window the fresh read does not mention is kept untouched,
+    # and a window the store never had is added — the read never has to carry every
+    # window to avoid dropping the others.
+    current = ClaudeObservation(
+        observed_ts="2026-07-29T00:24:00+00:00",
+        plan="max",
+        windows=(
+            UsageWindow(key="five_hour", label="5h", window_minutes=300, used_percent=5.0, resets_at=WIN_A, figure_instant=WIN_A),
+            UsageWindow(key="seven_day", label="7d", window_minutes=10080, used_percent=11.0, resets_at=STORED_SEVEN_RESET, figure_instant=STORED_SEVEN_RESET),
+        ),
+    )
+    # Candidate carries only a higher five_hour; seven_day is absent.
+    merged = merge_observations(current, five_obs(9.0, WIN_A))
+    assert merged is not None
+    by_key = {w.key: w for w in merged.windows}
+    assert by_key["five_hour"].used_percent == 9.0
+    assert by_key["seven_day"].used_percent == 11.0  # untouched
+
+
+def test_merge_unchanged_reread_writes_nothing() -> None:
+    # An identical re-read of an unchanged sink is a no-op, so repeated reads never
+    # churn the store (the old newness gate's job, now value-based).
+    current = five_obs(7.0, WIN_A)
+    assert merge_observations(current, five_obs(7.0, WIN_A)) is None
+
+
 # -- Claude store + read ------------------------------------------------------
 
 
@@ -621,6 +759,19 @@ def test_claude_store_round_trip(tmp_path: Path) -> None:
     assert loaded.plan == "max"
     assert [w.key for w in loaded.windows] == ["five_hour", "seven_day"]
     assert loaded.windows[0].used_percent == 20.0
+
+
+def test_claude_store_round_trips_figure_instant(tmp_path: Path) -> None:
+    # figure_instant must survive a restart, or the per-window merge loses each
+    # figure's window identity and a stale writer could regress a stored figure
+    # again. It is store-internal, so it persists through the store yet stays out of
+    # the HTTP-facing window dict.
+    store = ClaudeUsageStore(tmp_path / "data")
+    store.record(five_obs(7.0, WIN_A))
+    loaded = store.latest()
+    assert loaded is not None
+    assert loaded.windows[0].figure_instant == WIN_A
+    assert "figure_instant" not in loaded.windows[0].to_dict()
 
 
 def test_claude_store_latest_handles_corrupt(tmp_path: Path) -> None:
@@ -788,17 +939,23 @@ def test_service_statusline_stale_is_the_resting_state(tmp_path: Path) -> None:
     assert claude.windows[0].used_percent == 41.0  # last observed, not zeroed
 
 
-def test_service_statusline_never_regresses_a_fresher_observation(tmp_path: Path) -> None:
+def test_service_statusline_stale_writer_cannot_lower_a_current_figure(tmp_path: Path) -> None:
+    # End to end through the sink read path. A current figure is stored, then a
+    # stale concurrent writer's OLDER-but-same-window figure lands in the sink with
+    # a NEWER write stamp. Write recency must not lower the stored figure — the
+    # reported 5h 5% -> 3% regression.
     config = make_config(tmp_path)
-    store = ClaudeUsageStore(config.data_dir)
-    store.record(make_observation(observed_ts="2026-07-24T00:59:00Z", used=20.0))
-    service = UsageService(config, claude_store=store, clock=lambda: NOW)
-    write_sink(service.statusline_sink, five=41.0, observed_ts="2026-07-24T00:00:00Z")  # older
-    assert service.get_usage().providers[0].windows[0].used_percent == 20.0
-    write_sink(service.statusline_sink, five=55.0, observed_ts="2026-07-24T00:59:30Z")  # newer
-    assert UsageService(config, claude_store=store, clock=lambda: NOW).get_usage().providers[0].windows[
-        0
-    ].used_percent == 55.0
+    now = dt.datetime(2026, 7, 29, 0, 45, tzinfo=UTC)
+    service = UsageService(config, clock=lambda: now)
+    write_sink(service.statusline_sink, five=5.0, observed_ts="2026-07-29T00:24:32+00:00")
+    assert service.get_usage().providers[0].windows[0].used_percent == 5.0  # current figure stored
+    write_sink(service.statusline_sink, five=3.0, observed_ts="2026-07-29T00:26:10+00:00")  # stale, newer stamp
+    fresh = UsageService(config, clock=lambda: now)  # no cached snapshot
+    assert fresh.get_usage().providers[0].windows[0].used_percent == 5.0  # not lowered to 3
+    # A genuinely later reading in the same window (higher used%) still advances it.
+    write_sink(service.statusline_sink, five=9.0, observed_ts="2026-07-29T00:40:00+00:00")
+    newer = UsageService(config, clock=lambda: now)
+    assert newer.get_usage().providers[0].windows[0].used_percent == 9.0
 
 
 def test_service_statusline_ingest_failure_keeps_stored_observation(tmp_path: Path) -> None:
@@ -1012,6 +1169,19 @@ def test_usage_route_returns_both_providers(tmp_path: Path) -> None:
     assert providers[PROVIDER_CODEX]["windows"][0]["remaining_percent"] == 94.0
     # Claude store is unfed in session-1 -> unavailable, not zero usage.
     assert providers[PROVIDER_CLAUDE]["available"] is False
+
+
+def test_usage_route_keeps_the_window_shape_unchanged(tmp_path: Path) -> None:
+    # session-1 changes only the ingestion merge, not the public payload: the
+    # per-window figure_instant is store-internal and must not appear on GET
+    # /api/usage (a window-shape change is deferred Confirm-tier work).
+    config = make_config(tmp_path)
+    ClaudeUsageStore(config.data_dir).record(five_obs(7.0, WIN_A))
+    client = build_client(config)
+    providers = {p["provider"]: p for p in client.get("/api/usage").json()["providers"]}
+    window = providers[PROVIDER_CLAUDE]["windows"][0]
+    assert window["used_percent"] == 7.0
+    assert "figure_instant" not in window
 
 
 def test_usage_route_excludes_secrets(tmp_path: Path) -> None:

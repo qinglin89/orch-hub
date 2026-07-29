@@ -23,16 +23,21 @@ differently:
   this module never opens).
 
 - **Claude** — the latest observation is retained in a hub-owned store
-  (:class:`ClaudeUsageStore`), fed by two carriers, newest wins:
+  (:class:`ClaudeUsageStore`), fed by two carriers:
 
   1. *The statusLine sink* — the one local channel that actually carries the
      five-hour / seven-day windows. Claude Code pipes them to a configured
      statusLine command's stdin, so the operator-installed writer
      (:mod:`orch_hub.statusline`) persists that payload to
      :data:`CLAUDE_STATUSLINE_NAME` and :func:`read_claude_statusline` ingests it
-     into the same store on read. This is the Codex pattern applied to Claude:
-     read what the operator's own sessions already wrote. Uninstalled, the sink is
-     simply absent and Claude reads *unavailable* exactly as before.
+     into the same store on read. Because every concurrent Claude Code session
+     writes this one sink last-write-wins from its *own* last API response,
+     ingestion merges it into the store *per window* (:func:`merge_observations`) —
+     keyed on each figure's window instant, ties by ``max(used_percent)`` — rather
+     than trusting write recency, so an idle session's stale figure cannot lower a
+     current one. This is the Codex pattern applied to Claude: read what the
+     operator's own sessions already wrote. Uninstalled, the sink is simply absent
+     and Claude reads *unavailable* exactly as before.
   2. *Hub-driven turns* — the hub also drives Claude (intake, semantic eval), and
      :meth:`UsageService.claude_observer` is the best-effort seam those backends
      feed each turn's ``stream-json`` stdout into. No verified version puts a
@@ -391,10 +396,17 @@ class ClaudeObservation:
     windows: tuple[UsageWindow, ...]
 
     def to_dict(self) -> dict:
+        # ``figure_instant`` is store-internal (kept out of ``UsageWindow.to_dict``
+        # so the HTTP payload is unchanged) but must persist, or the per-window
+        # merge would lose each figure's window identity across a restart and let a
+        # stale writer regress a stored figure again. So the store serializes it
+        # alongside the public window dict.
         return {
             "observed_ts": self.observed_ts,
             "plan": self.plan,
-            "windows": [w.to_dict() for w in self.windows],
+            "windows": [
+                {**w.to_dict(), "figure_instant": w.figure_instant} for w in self.windows
+            ],
         }
 
     @classmethod
@@ -408,7 +420,12 @@ class ClaudeObservation:
 
 def _window_from_dict(data: dict) -> UsageWindow:
     """Rebuild a :class:`UsageWindow` from its persisted dict (tolerant of missing
-    keys, since a stored snapshot may predate a field)."""
+    keys, since a stored snapshot may predate a field).
+
+    ``figure_instant`` defaults to ``None`` for a snapshot written before it
+    existed; the first merge against a sink read (which always carries one) then
+    repopulates it, so the pre-upgrade store degrades to the conservative
+    unknown-instant path rather than failing."""
     return UsageWindow(
         key=data.get("key", ""),
         label=data.get("label"),
@@ -418,6 +435,7 @@ def _window_from_dict(data: dict) -> UsageWindow:
         resets_at=data.get("resets_at"),
         used=data.get("used"),
         limit=data.get("limit"),
+        figure_instant=data.get("figure_instant"),
     )
 
 
@@ -621,6 +639,11 @@ def _claude_window(key: str, raw: object) -> UsageWindow | None:
         used_percent=used,
         remaining_percent=_remaining(used),
         resets_at=resets,
+        # A freshly-parsed figure and its reset are measured together, so the
+        # figure's own window instant *is* this reset. It only diverges from the
+        # displayed ``resets_at`` later, when a boundary-only refresh advances the
+        # latter (see ``merge_window_boundaries`` / ``merge_observations``).
+        figure_instant=resets,
     )
 
 
@@ -964,6 +987,87 @@ def _is_newer(candidate: str | None, current: str | None) -> bool:
     return old is None or new > old
 
 
+def _later(a: str | None, b: str | None) -> str | None:
+    """The later of two ISO instants (forward-only): ``b`` only when strictly newer.
+
+    Equal or unparseable ``b`` yields ``a``. Used to keep a window's displayed
+    reset forward-most and to date a merged observation."""
+    return b if _is_newer(b, a) else a
+
+
+def _used_at_least(candidate: UsageWindow, current: UsageWindow) -> bool:
+    """Whether ``candidate``'s used-percentage is at least ``current``'s.
+
+    Within one window used% only grows, so the higher figure is the later
+    measurement; it is also the conservative (never under-report) tiebreaker when
+    two windows cannot be told apart. A missing figure ranks lowest."""
+    cand = candidate.used_percent if candidate.used_percent is not None else float("-inf")
+    cur = current.used_percent if current.used_percent is not None else float("-inf")
+    return cand >= cur
+
+
+def _merge_window(current: UsageWindow, candidate: UsageWindow) -> UsageWindow:
+    """Merge one freshly-observed ``candidate`` window into the stored ``current`` one.
+
+    Identity is the figure's *own* window instant (``figure_instant``), never the
+    displayable ``resets_at`` a boundary refresh may have advanced ahead of it:
+
+    * both instants known and different -> the newer instant is a rollover to a
+      later window, so take that side's figure even when its used% is lower (a
+      genuine post-reset reading), and never the older one (a pre-reset snapshot);
+    * same instant, or either instant unknown -> take the higher used% (the later
+      measurement within one window, and the conservative choice when the two
+      windows cannot be distinguished).
+
+    The displayed ``resets_at`` is always the forward-most of the two, so a
+    boundary already advanced past the losing side is never regressed."""
+    cur_instant = _parse_iso(current.figure_instant)
+    cand_instant = _parse_iso(candidate.figure_instant)
+    if cur_instant is not None and cand_instant is not None and cur_instant != cand_instant:
+        winner = candidate if cand_instant > cur_instant else current
+    else:
+        winner = candidate if _used_at_least(candidate, current) else current
+    return replace(winner, resets_at=_later(current.resets_at, candidate.resets_at))
+
+
+def merge_observations(
+    current: ClaudeObservation, candidate: ClaudeObservation
+) -> ClaudeObservation | None:
+    """Merge a freshly-read sink ``candidate`` into the stored ``current`` observation.
+
+    The fix for the stale-writer regression. Every concurrent Claude Code session
+    writes the one sink last-write-wins, each publishing the ``rate_limits`` of its
+    *own* last API response, so a sink's write stamp is not its measurement time.
+    Replacing the store wholesale on write recency therefore lets an idle session's
+    hours-old figure lower a current one. Instead each window is merged
+    independently by :func:`_merge_window` (identity from ``figure_instant``, ties
+    by ``max(used_percent)``); a window the store never had is added, and one the
+    candidate omits is kept untouched.
+
+    Returns ``None`` when nothing changed — an unchanged re-read, or a wholly
+    stale/older candidate — so the caller writes nothing and the stored figures and
+    their observation time stand. When something changed, ``observed_ts`` is the
+    later of the two stamps; a per-window observation time (so freshness follows the
+    winning figure per window) is the next slice's payload-shape work, not this
+    merge's."""
+    cand_by_key = {w.key: w for w in candidate.windows}
+    merged: list[UsageWindow] = []
+    for window in current.windows:
+        cand = cand_by_key.get(window.key)
+        merged.append(window if cand is None else _merge_window(window, cand))
+    stored_keys = {w.key for w in current.windows}
+    merged.extend(w for w in candidate.windows if w.key not in stored_keys)
+    merged_windows = tuple(merged)
+    plan = candidate.plan if candidate.plan is not None else current.plan
+    if merged_windows == current.windows and plan == current.plan:
+        return None
+    return ClaudeObservation(
+        observed_ts=_later(current.observed_ts, candidate.observed_ts),
+        plan=plan,
+        windows=merged_windows,
+    )
+
+
 # -- aggregation service ------------------------------------------------------
 
 
@@ -1117,21 +1221,28 @@ class UsageService:
         return claude_usage(self._store, now=now)
 
     def _ingest_statusline(self) -> None:
-        """Record the statusLine sink's observation when it is newer than the stored one.
+        """Merge the statusLine sink's observation into the store, per window.
 
         Routing the sink *through the store* (rather than reading it as a parallel
         source) keeps one read path, one payload shape, and one staleness rule for
         both carriers, and persists the last-known figures so a rotated, deleted, or
         newly-uninstalled sink still shows them as stale rather than losing them.
-        The newness gate makes repeated reads of an unchanged sink a no-op and stops
-        a sink from regressing a fresher hub-driven observation. The write lock is
-        held across the compare-then-write so a concurrent boundary merge (also a
-        read-modify-write) cannot interleave and drop this sink's fresher figures."""
+        The sink is merged per window (:func:`merge_observations`), not accepted
+        wholesale on write recency: concurrent Claude Code sessions each write the
+        one sink from their own last API response, so a newer *write* stamp is not a
+        newer *measurement*. Merging by each figure's window instant (ties broken by
+        ``max(used_percent)``) stops an idle session's stale figure from lowering a
+        current one, while a genuine rollover still replaces. The write lock is held
+        across the read-merge-write so a concurrent boundary merge (also a
+        read-modify-write) cannot interleave and drop this sink's figures."""
         observation = read_claude_statusline(self.statusline_sink)
         if observation is None:
             return
         with self._claude_write_lock:
             current = self._store.latest()
-            if current is not None and not _is_newer(observation.observed_ts, current.observed_ts):
+            if current is None:
+                self._store.record(observation)
                 return
-            self._store.record(observation)
+            merged = merge_observations(current, observation)
+            if merged is not None:
+                self._store.record(merged)

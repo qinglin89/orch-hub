@@ -133,9 +133,13 @@ def write_sink(path: Path, record: dict) -> bool:
     The temp name carries the pid because several Claude Code sessions render
     status lines concurrently, all writing this one sink; a shared temp name lets
     one writer's ``os.replace`` move the file out from under another. Per-writer
-    temps make each swap independent and last-write-wins — which is correct, since
-    every session reports the same account-level windows. Mirrors
-    :meth:`orch_hub.usage.ClaudeUsageStore.record`.
+    temps make each swap independent and last-write-wins. Every session reports the
+    same account-level *windows*, but not the same *figures* at a given instant —
+    an idle session publishes an older reading — so the writer does not attempt to
+    dedup: :func:`orch_hub.usage.merge_observations` merges the sink into the store
+    per window by each figure's own window instant, so a stale writer's newer write
+    cannot lower a current figure. Correctness lives on the read side; this writer
+    just persists atomically. Mirrors :meth:`orch_hub.usage.ClaudeUsageStore.record`.
 
     Returns whether the record was written: a record over :data:`MAX_SINK_BYTES`
     is refused, and the refusal is reported rather than silently reading as a
