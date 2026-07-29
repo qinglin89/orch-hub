@@ -774,12 +774,15 @@ def test_claude_store_round_trips_figure_instant(tmp_path: Path) -> None:
     assert "figure_instant" not in loaded.windows[0].to_dict()
 
 
-def test_from_dict_backfills_a_legacy_windows_figure_instant() -> None:
+def test_from_dict_leaves_a_legacy_windows_figure_instant_unknown() -> None:
     # A claude.json written before figure_instant existed (pre-93a0e5c) serialized
-    # only the public window dict — no figure_instant. Reading it must backfill each
-    # figure's window identity from its displayed reset, so the per-window merge can
-    # still tell a genuine rollover from a same-window update. A legacy window with
-    # no reset at all has nothing to key on and stays unknown (the conservative max).
+    # only the public window dict — no figure_instant. Its figure deserializes with an
+    # UNKNOWN identity, deliberately NOT fabricated from resets_at: a legacy store's
+    # displayed reset may be one the boundary refresh already advanced past the
+    # figure's own window, so it cannot be trusted as the figure's identity.
+    # _merge_window then yields an unknown-identity stored figure to any candidate that
+    # carries a real one, which rolls both a plain and a boundary-advanced legacy
+    # window over correctly (below) instead of freezing a stale figure via the max.
     loaded = ClaudeObservation.from_dict(
         {
             "observed_ts": "2026-07-29T00:24:00+00:00",
@@ -791,18 +794,17 @@ def test_from_dict_backfills_a_legacy_windows_figure_instant() -> None:
         }
     )
     by_key = {w.key: w for w in loaded.windows}
-    assert by_key["five_hour"].figure_instant == WIN_A  # backfilled from resets_at
-    assert by_key["seven_day"].figure_instant is None  # no reset -> stays unknown
+    assert by_key["five_hour"].figure_instant is None  # not fabricated from resets_at
+    assert by_key["seven_day"].figure_instant is None  # no reset either
 
 
 def test_legacy_store_without_figure_instant_still_rolls_over(tmp_path: Path) -> None:
-    # The review finding. A pre-figure_instant claude.json holds a near-full 5h
+    # The plain legacy case. A pre-figure_instant claude.json holds a near-full 5h
     # figure; on the first post-upgrade rollover a sink candidate arrives in a NEWER
-    # window with a far lower figure. Without the backfill the legacy window's absent
-    # figure_instant dropped it into the unknown-instant max branch, freezing 90 into
-    # the new window (the lower post-reset reading losing the max) and re-creating the
-    # boundary-advance freeze for upgraded installs. With the reset-backfilled
-    # identity the newer instant is recognized as a rollover and the old figure drops.
+    # window with a far lower figure. The legacy window deserializes with an unknown
+    # figure_instant (not fabricated from its reset); _merge_window yields an
+    # unknown-identity stored figure to the candidate that carries a real one, so the
+    # old figure drops instead of freezing into the new window via the max.
     store = ClaudeUsageStore(tmp_path / "data")
     store.path.parent.mkdir(parents=True, exist_ok=True)
     legacy_window = UsageWindow(
@@ -822,7 +824,43 @@ def test_legacy_store_without_figure_instant_still_rolls_over(tmp_path: Path) ->
     )
     current = store.latest()
     assert current is not None
+    assert current.windows[0].figure_instant is None  # unknown, not fabricated
     merged = merge_observations(current, five_obs(2.0, WIN_B))  # newer window, lower figure
+    assert merged is not None
+    assert merged.windows[0].used_percent == 2.0  # rolled over, not frozen at 90
+    assert merged.windows[0].figure_instant == WIN_B
+
+
+def test_boundary_advanced_legacy_store_rolls_over_same_reset(tmp_path: Path) -> None:
+    # The review finding's harder case. Before figure_instant existed, the 2.1.220
+    # boundary refresh (merge_window_boundaries advances resets_at only) could already
+    # have moved a legacy window's DISPLAYED reset to the CURRENT window while its
+    # figure is the stale one from the PREVIOUS window — so the persisted dict carries
+    # the advanced reset (== the sink's own reset) and no figure_instant. Fabricating
+    # figure_instant from that advanced reset would tie the fresh SAME-reset sink
+    # reading on the equal-instant max and freeze the stale 90. Leaving the legacy
+    # figure's identity unknown instead lets the candidate that carries one win.
+    store = ClaudeUsageStore(tmp_path / "data")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_window = UsageWindow(
+        key="five_hour", label="5h", window_minutes=300,
+        used_percent=90.0, remaining_percent=10.0, resets_at=WIN_B,  # already advanced to the current window
+    )
+    assert "figure_instant" not in legacy_window.to_dict()  # a faithful pre-upgrade record
+    store.path.write_text(
+        json.dumps(
+            {
+                "observed_ts": "2026-07-29T00:24:00+00:00",
+                "plan": "max",
+                "windows": [legacy_window.to_dict()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = store.latest()
+    assert current is not None
+    assert current.windows[0].figure_instant is None  # unknown, not the advanced reset
+    merged = merge_observations(current, five_obs(2.0, WIN_B))  # fresh reading, SAME reset
     assert merged is not None
     assert merged.windows[0].used_percent == 2.0  # rolled over, not frozen at 90
     assert merged.windows[0].figure_instant == WIN_B
@@ -1016,8 +1054,8 @@ def test_service_legacy_store_rolls_over_through_the_sink(tmp_path: Path) -> Non
     # End to end through the ingest read path. A pre-figure_instant claude.json holds
     # a near-full figure in an EARLIER 5h window; the operator sink then publishes a
     # fresh, far lower figure in a newer window. The rollover must drop the old
-    # figure — the legacy store's missing figure_instant is backfilled from its reset,
-    # so the newer window instant wins instead of the stale 90 freezing via the max.
+    # figure — the legacy store's missing figure_instant stays unknown, so the merge
+    # yields it to the sink's identified figure instead of the stale 90 freezing.
     config = make_config(tmp_path)
     now = dt.datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
     store = ClaudeUsageStore(config.data_dir)
@@ -1032,6 +1070,40 @@ def test_service_legacy_store_rolls_over_through_the_sink(tmp_path: Path) -> Non
                     UsageWindow(
                         key="five_hour", label="5h", window_minutes=300,
                         used_percent=90.0, remaining_percent=10.0, resets_at=prev_window,
+                    ).to_dict()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = UsageService(config, clock=lambda: now)
+    write_sink(service.statusline_sink, five=2.0, observed_ts="2026-07-29T00:55:00+00:00")
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    five = {w.key: w for w in claude.windows}["five_hour"]
+    assert five.used_percent == 2.0  # rolled over, not frozen at 90
+
+
+def test_service_boundary_advanced_legacy_rolls_over_through_the_sink(tmp_path: Path) -> None:
+    # End to end for the boundary-advanced legacy case (the review finding). A
+    # pre-figure_instant claude.json whose resets_at was already advanced to the
+    # CURRENT 5h window (the sink's own reset) still holds the stale near-full figure
+    # from the previous window. The operator sink then publishes the real, far lower
+    # current figure at that SAME reset. It must roll over — the legacy figure's
+    # unknown identity yields to the sink's, rather than freezing 90 via a same-reset
+    # equal-instant max. write_sink's five_hour reset (1785290400) normalizes to WIN_A.
+    config = make_config(tmp_path)
+    now = dt.datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
+    store = ClaudeUsageStore(config.data_dir)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text(
+        json.dumps(
+            {
+                "observed_ts": "2026-07-28T22:30:00+00:00",
+                "plan": "max",
+                "windows": [
+                    UsageWindow(
+                        key="five_hour", label="5h", window_minutes=300,
+                        used_percent=90.0, remaining_percent=10.0, resets_at=WIN_A,  # already advanced
                     ).to_dict()
                 ],
             }

@@ -423,16 +423,17 @@ def _window_from_dict(data: dict) -> UsageWindow:
     keys, since a stored snapshot may predate a field).
 
     A snapshot written before ``figure_instant`` existed (pre-``93a0e5c``: the old
-    ``to_dict`` serialized only the public window dict) has no such key. Backfill it
-    from ``resets_at`` rather than leaving it ``None``: when a figure is first
-    observed its window instant *is* its reset (:func:`_claude_window`), and no
-    legacy store recorded a divergence, so the displayed reset is the figure's own
-    window identity. Leaving it ``None`` would drop the window into
-    :func:`_merge_window`'s unknown-instant ``max`` branch, so the first
-    post-upgrade rollover would freeze a stored near-full figure into the new window
-    (its lower post-reset reading losing the max) instead of replacing it. A window
-    persisted with no reset at all has nothing to key identity on, so it stays
-    ``None`` and the conservative ``max`` remains the only safe rule."""
+    ``to_dict`` serialized only the public window dict) has no such key, so its figure
+    deserializes with an *unknown* window identity (``figure_instant=None``). It is
+    deliberately NOT backfilled from ``resets_at``: a legacy store's displayed reset
+    may be one a boundary refresh (:func:`merge_window_boundaries`) already advanced
+    past the figure's own window, so ``resets_at`` cannot be trusted as the figure's
+    identity — fabricating one from it freezes a stale near-full figure into the new
+    window on the first post-upgrade rollover (its lower same-reset post-reset reading
+    losing the equal-instant ``max``). Instead :func:`_merge_window` treats an
+    unknown-identity stored figure as yielding to any candidate that carries a real
+    one, so both a plain and a boundary-advanced legacy window roll over correctly and
+    the store self-heals a real ``figure_instant`` on the first write."""
     return UsageWindow(
         key=data.get("key", ""),
         label=data.get("label"),
@@ -442,7 +443,7 @@ def _window_from_dict(data: dict) -> UsageWindow:
         resets_at=data.get("resets_at"),
         used=data.get("used"),
         limit=data.get("limit"),
-        figure_instant=data.get("figure_instant") or data.get("resets_at"),
+        figure_instant=data.get("figure_instant"),
     )
 
 
@@ -1019,18 +1020,29 @@ def _merge_window(current: UsageWindow, candidate: UsageWindow) -> UsageWindow:
     Identity is the figure's *own* window instant (``figure_instant``), never the
     displayable ``resets_at`` a boundary refresh may have advanced ahead of it:
 
+    * stored identity unknown but the candidate's known -> take the candidate. The
+      stored figure is from a legacy store (pre-``figure_instant``) whose reset cannot
+      be trusted as its identity (a boundary refresh may have advanced it past the
+      figure's own window), so a candidate that carries a measured identity is the
+      more reliable reading. Both a plain and a boundary-advanced legacy figure thus
+      roll over instead of freezing. One-shot: the merged window carries the
+      candidate's real ``figure_instant``, and if the stored figure was in fact
+      current (an idle reader supplied the lower candidate) the next current reading
+      maxes it back;
     * both instants known and different -> the newer instant is a rollover to a
       later window, so take that side's figure even when its used% is lower (a
       genuine post-reset reading), and never the older one (a pre-reset snapshot);
-    * same instant, or either instant unknown -> take the higher used% (the later
-      measurement within one window, and the conservative choice when the two
-      windows cannot be distinguished).
+    * same instant, or the candidate carries no identity -> take the higher used%
+      (the later measurement within one window, and the conservative
+      never-under-report choice when the two windows cannot be distinguished).
 
     The displayed ``resets_at`` is always the forward-most of the two, so a
     boundary already advanced past the losing side is never regressed."""
     cur_instant = _parse_iso(current.figure_instant)
     cand_instant = _parse_iso(candidate.figure_instant)
-    if cur_instant is not None and cand_instant is not None and cur_instant != cand_instant:
+    if cur_instant is None and cand_instant is not None:
+        winner = candidate
+    elif cur_instant is not None and cand_instant is not None and cur_instant != cand_instant:
         winner = candidate if cand_instant > cur_instant else current
     else:
         winner = candidate if _used_at_least(candidate, current) else current
