@@ -774,6 +774,60 @@ def test_claude_store_round_trips_figure_instant(tmp_path: Path) -> None:
     assert "figure_instant" not in loaded.windows[0].to_dict()
 
 
+def test_from_dict_backfills_a_legacy_windows_figure_instant() -> None:
+    # A claude.json written before figure_instant existed (pre-93a0e5c) serialized
+    # only the public window dict — no figure_instant. Reading it must backfill each
+    # figure's window identity from its displayed reset, so the per-window merge can
+    # still tell a genuine rollover from a same-window update. A legacy window with
+    # no reset at all has nothing to key on and stays unknown (the conservative max).
+    loaded = ClaudeObservation.from_dict(
+        {
+            "observed_ts": "2026-07-29T00:24:00+00:00",
+            "plan": "max",
+            "windows": [
+                {"key": "five_hour", "used_percent": 90.0, "resets_at": WIN_A},
+                {"key": "seven_day", "used_percent": 12.0},  # legacy, no reset
+            ],
+        }
+    )
+    by_key = {w.key: w for w in loaded.windows}
+    assert by_key["five_hour"].figure_instant == WIN_A  # backfilled from resets_at
+    assert by_key["seven_day"].figure_instant is None  # no reset -> stays unknown
+
+
+def test_legacy_store_without_figure_instant_still_rolls_over(tmp_path: Path) -> None:
+    # The review finding. A pre-figure_instant claude.json holds a near-full 5h
+    # figure; on the first post-upgrade rollover a sink candidate arrives in a NEWER
+    # window with a far lower figure. Without the backfill the legacy window's absent
+    # figure_instant dropped it into the unknown-instant max branch, freezing 90 into
+    # the new window (the lower post-reset reading losing the max) and re-creating the
+    # boundary-advance freeze for upgraded installs. With the reset-backfilled
+    # identity the newer instant is recognized as a rollover and the old figure drops.
+    store = ClaudeUsageStore(tmp_path / "data")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_window = UsageWindow(
+        key="five_hour", label="5h", window_minutes=300,
+        used_percent=90.0, remaining_percent=10.0, resets_at=WIN_A,
+    )
+    assert "figure_instant" not in legacy_window.to_dict()  # a faithful pre-upgrade record
+    store.path.write_text(
+        json.dumps(
+            {
+                "observed_ts": "2026-07-29T00:24:00+00:00",
+                "plan": "max",
+                "windows": [legacy_window.to_dict()],
+            }
+        ),
+        encoding="utf-8",
+    )
+    current = store.latest()
+    assert current is not None
+    merged = merge_observations(current, five_obs(2.0, WIN_B))  # newer window, lower figure
+    assert merged is not None
+    assert merged.windows[0].used_percent == 2.0  # rolled over, not frozen at 90
+    assert merged.windows[0].figure_instant == WIN_B
+
+
 def test_claude_store_latest_handles_corrupt(tmp_path: Path) -> None:
     store = ClaudeUsageStore(tmp_path / "data")
     store.path.parent.mkdir(parents=True, exist_ok=True)
@@ -956,6 +1010,39 @@ def test_service_statusline_stale_writer_cannot_lower_a_current_figure(tmp_path:
     write_sink(service.statusline_sink, five=9.0, observed_ts="2026-07-29T00:40:00+00:00")
     newer = UsageService(config, clock=lambda: now)
     assert newer.get_usage().providers[0].windows[0].used_percent == 9.0
+
+
+def test_service_legacy_store_rolls_over_through_the_sink(tmp_path: Path) -> None:
+    # End to end through the ingest read path. A pre-figure_instant claude.json holds
+    # a near-full figure in an EARLIER 5h window; the operator sink then publishes a
+    # fresh, far lower figure in a newer window. The rollover must drop the old
+    # figure — the legacy store's missing figure_instant is backfilled from its reset,
+    # so the newer window instant wins instead of the stale 90 freezing via the max.
+    config = make_config(tmp_path)
+    now = dt.datetime(2026, 7, 29, 1, 0, tzinfo=UTC)
+    store = ClaudeUsageStore(config.data_dir)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    prev_window = "2026-07-28T23:00:00+00:00"  # an earlier 5h window than the sink's WIN_A
+    store.path.write_text(
+        json.dumps(
+            {
+                "observed_ts": "2026-07-28T22:30:00+00:00",
+                "plan": "max",
+                "windows": [
+                    UsageWindow(
+                        key="five_hour", label="5h", window_minutes=300,
+                        used_percent=90.0, remaining_percent=10.0, resets_at=prev_window,
+                    ).to_dict()
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = UsageService(config, clock=lambda: now)
+    write_sink(service.statusline_sink, five=2.0, observed_ts="2026-07-29T00:55:00+00:00")
+    claude = {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+    five = {w.key: w for w in claude.windows}["five_hour"]
+    assert five.used_percent == 2.0  # rolled over, not frozen at 90
 
 
 def test_service_statusline_ingest_failure_keeps_stored_observation(tmp_path: Path) -> None:

@@ -422,10 +422,17 @@ def _window_from_dict(data: dict) -> UsageWindow:
     """Rebuild a :class:`UsageWindow` from its persisted dict (tolerant of missing
     keys, since a stored snapshot may predate a field).
 
-    ``figure_instant`` defaults to ``None`` for a snapshot written before it
-    existed; the first merge against a sink read (which always carries one) then
-    repopulates it, so the pre-upgrade store degrades to the conservative
-    unknown-instant path rather than failing."""
+    A snapshot written before ``figure_instant`` existed (pre-``93a0e5c``: the old
+    ``to_dict`` serialized only the public window dict) has no such key. Backfill it
+    from ``resets_at`` rather than leaving it ``None``: when a figure is first
+    observed its window instant *is* its reset (:func:`_claude_window`), and no
+    legacy store recorded a divergence, so the displayed reset is the figure's own
+    window identity. Leaving it ``None`` would drop the window into
+    :func:`_merge_window`'s unknown-instant ``max`` branch, so the first
+    post-upgrade rollover would freeze a stored near-full figure into the new window
+    (its lower post-reset reading losing the max) instead of replacing it. A window
+    persisted with no reset at all has nothing to key identity on, so it stays
+    ``None`` and the conservative ``max`` remains the only safe rule."""
     return UsageWindow(
         key=data.get("key", ""),
         label=data.get("label"),
@@ -435,7 +442,7 @@ def _window_from_dict(data: dict) -> UsageWindow:
         resets_at=data.get("resets_at"),
         used=data.get("used"),
         limit=data.get("limit"),
-        figure_instant=data.get("figure_instant"),
+        figure_instant=data.get("figure_instant") or data.get("resets_at"),
     )
 
 
