@@ -63,13 +63,7 @@ from .intake import (
 )
 from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
-from .models import (
-    HISTORY_PAGE_SIZE,
-    LaunchSpec,
-    ManagedRepo,
-    repos_payload,
-    tasks_payload,
-)
+from .models import LaunchSpec, ManagedRepo, repos_payload, tasks_payload
 from .monitor import RunMonitor
 from .notifications import build_notifier
 from .orch_config import (
@@ -987,23 +981,54 @@ def create_app(
         return {"runs": [status.to_dict() for status in manager.list_runs()]}
 
     @app.get("/api/history/runs")
-    def list_run_history(limit: int = HISTORY_PAGE_SIZE, page: int = 1) -> dict:
-        """Return one page of run history plus batched newest-evaluation state.
+    def list_run_history(
+        limit: int | None = None, cursor: str | None = None
+    ) -> dict:
+        """Return run history — one page, or a bounded summary — plus batched
+        newest-evaluation state.
 
-        ``page`` walks the manager's stable newest-first ordering in ``limit``-run
-        windows, so every persisted run is reachable without the response growing
-        with history. The payload carries its own pagination metadata
-        (``page``/``page_size``/``total_runs``/``total_pages``/``has_prev``/
-        ``has_next``) so a client never has to infer boundaries from a short page.
+        Two deliberately separate contracts on one route:
+
+        * *Paged* (the default, what Run history uses): fixed-size windows walked
+          by echoing ``cursor`` back from the response's
+          ``prev_cursor``/``next_cursor``, so every persisted run is reachable
+          without the response growing with history and without a run persisted
+          or pruned mid-traversal shifting a window. The page size is not a query
+          parameter: it is the traversal's invariant, not a caller preference.
+          The payload carries its own pagination metadata
+          (``page``/``page_size``/``total_runs``/``total_pages``/``has_prev``/
+          ``has_next``), so a client never infers a boundary from a short page.
+        * *Summary* (``?limit=N``): the N newest runs for a glanceable strip (the
+          Overview's recent outcomes). It carries no cursors and no totals, so it
+          can be neither walked nor mistaken for a page — which is what keeps a
+          caller-chosen size from becoming a page size.
+
+        Sending both is a 400 rather than a silent precedence rule: they answer
+        different questions and only the caller knows which it asked.
 
         Evaluation state is folded into this one response rather than fetched
-        once per client-side task group, and covers exactly the task groups on
-        the returned page. The optional subsystem's enablement is explicit so the
+        once per client-side task group, and covers exactly the task groups in
+        the returned runs. The optional subsystem's enablement is explicit so the
         dashboard needs no second availability probe. Disabled mode returns an
         empty state list; a per-task sidecar read failure omits only that marker
         and never blanks run history.
         """
-        result = manager.recent_runs(limit=limit, page=page)
+        if limit is not None:
+            if cursor is not None:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "send either 'limit' (bounded summary) or 'cursor'"
+                        " (paged history), not both"
+                    ),
+                )
+            entries = manager.recent_runs(limit=limit)
+            return {
+                "runs": [entry.to_dict() for entry in entries],
+                "evaluation_enabled": evaluation.enabled,
+                "evaluation_states": _history_evaluation_states(entries, evaluation),
+            }
+        result = manager.history_page(cursor=cursor)
         return {
             **result.to_dict(),
             "evaluation_enabled": evaluation.enabled,

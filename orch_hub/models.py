@@ -452,56 +452,84 @@ class RunHistoryEntry:
 
 
 HISTORY_PAGE_SIZE = 50
-"""Run-history page size: how many runs one ``GET /api/history/runs`` page holds.
+"""Run-history page size: how many runs one page of run history holds.
 
-The dashboard's Run history always pages at this size; the route's ``limit``
-exists only so a summary caller (the Overview's recent-outcomes strip) can ask
-for a smaller window of the same newest-first ordering."""
+Fixed, not caller-supplied. Paging is a traversal contract — every persisted run
+reachable exactly once by walking cursors — and a size a client could vary
+between two steps would make each cursor mean a different window depending on
+who asked, on top of unbounding the per-request read. A caller that wants a
+short glanceable strip asks for the *summary* instead, which is a separate
+contract (:data:`HISTORY_SUMMARY_MAX`) and not walkable."""
 
-HISTORY_PAGE_MAX = 200
-"""Upper clamp on a caller-supplied run-history page size."""
+HISTORY_SUMMARY_MAX = 200
+"""Upper clamp on a bounded newest-first history summary (the Overview's
+recent-outcomes strip). A summary carries no cursors and no totals, so a
+caller-chosen size here can never become a page size."""
 
 
 @dataclass(frozen=True)
 class RunHistoryPage:
-    """One page of run history: its entries plus the totals a pager needs.
+    """One cursor-anchored page of run history: entries plus what a pager needs.
 
-    Pagination is positional over the manager's stable newest-first run ordering
-    (run dirs sort by their timestamped id), so page N is always the same window
-    for a given set of persisted runs — no cursor state and no duplicate or
-    skipped run between two adjacent pages of one snapshot.
+    Paging is anchored, not positional. A page starts at the newest run at or
+    below its cursor (a run id) in the manager's stable newest-first ordering and
+    hands back the cursors of the adjacent windows. Because a step is expressed
+    as a real run id rather than an offset into a list that is re-read on every
+    request, a run persisted or pruned between two requests cannot shift a window
+    under the pager: the next page never repeats the previous page's last run and
+    never skips its own first one, and no run can be pushed past the traversal by
+    later insertions. A cursor whose run has since been pruned still resolves —
+    the window simply starts at the next run below it.
 
-    ``page`` is 1-based and echoes the *normalized* request (below 1 clamps to 1),
-    so a client can trust it as the page it is looking at. ``total_runs`` counts
-    every persisted run dir, not just this page — the pager's scope line and the
-    "page-local results are not global results" contract both depend on it.
-    A page past the last one is not an error: it carries no entries, reports
-    ``has_next: False`` and ``has_prev: True``, and so navigates back.
+    ``prev_cursor``/``next_cursor`` are ``None`` exactly at the boundaries, which
+    is what ``has_prev``/``has_next`` report; a client navigates by echoing a
+    cursor back, never by computing one.
+
+    ``offset`` (not serialized) is where this window begins in the ordering *as
+    read for this response*, and ``page``/``total_pages`` derive from it for the
+    "Page N of M" indicator. Those are display data, not navigation inputs: with
+    history mutating between requests a position is a description, while the
+    cursor is the contract. A window past the last run — its cursor's
+    neighbourhood was pruned — carries no entries and reports ``total_pages + 1``,
+    so it reads as past the end rather than as a real page.
+
+    ``total_runs`` counts every persisted run dir, not just this page: the pager's
+    status line and the "page-local results are not global results" contract both
+    depend on it.
     """
 
     entries: tuple[RunHistoryEntry, ...] = ()
-    page: int = 1
+    offset: int = 0
     page_size: int = HISTORY_PAGE_SIZE
     total_runs: int = 0
+    prev_cursor: str | None = None
+    next_cursor: str | None = None
+
+    @property
+    def page(self) -> int:
+        """1-based position of this window; ``total_pages + 1`` past the end.
+
+        An empty history is page 1 of 0 pages — the view has a position even
+        when there is nothing at it.
+        """
+        if self.offset >= self.total_runs:
+            return self.total_pages + 1
+        return self.offset // self.page_size + 1
 
     @property
     def total_pages(self) -> int:
-        """Number of pages the current total spans; 0 for an empty history.
-
-        A zero page size (``limit=0``, a caller explicitly asking for nothing)
-        spans no pages rather than dividing by zero.
-        """
+        """Number of pages the current total spans; 0 for an empty history."""
         if self.page_size <= 0:
             return 0
         return -(-self.total_runs // self.page_size)
 
     @property
     def has_prev(self) -> bool:
-        return self.page > 1
+        return self.prev_cursor is not None
 
     @property
     def has_next(self) -> bool:
-        return self.page < self.total_pages
+        return self.next_cursor is not None
 
     def to_dict(self) -> dict:
         return {
@@ -512,6 +540,8 @@ class RunHistoryPage:
             "total_pages": self.total_pages,
             "has_prev": self.has_prev,
             "has_next": self.has_next,
+            "prev_cursor": self.prev_cursor,
+            "next_cursor": self.next_cursor,
         }
 
 

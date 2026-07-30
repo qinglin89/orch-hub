@@ -71,8 +71,8 @@ from .history import (
     read_events,
 )
 from .models import (
-    HISTORY_PAGE_MAX,
     HISTORY_PAGE_SIZE,
+    HISTORY_SUMMARY_MAX,
     ManagedRepo,
     Question,
     ReadinessReport,
@@ -287,6 +287,26 @@ def _dedupe_path(parts: Sequence[str]) -> tuple[str, ...]:
 def _slug(value: str) -> str:
     """Make a repo/task name safe as a run-dir path component."""
     return _SLUG.sub("-", value).strip("-") or "x"
+
+
+def _cursor_offset(newest_first: list[Path], cursor: str | None) -> int:
+    """Index of the first run at or below ``cursor`` in newest-first order.
+
+    The anchor is resolved by *comparing* run ids, never by locating a directory:
+    the cursor is client-supplied, so it must not reach the filesystem, and the
+    run it names may already have been pruned. ``<=`` makes it an inclusive
+    window start, so the id one page hands to the next is exactly the next
+    window's first run and nothing falls between two windows. No cursor (or an
+    id above every run) starts at the newest; one below every run returns the
+    length — an empty window past the end, which the pager renders as a state
+    rather than an error.
+    """
+    if not cursor:
+        return 0
+    for offset, run_dir in enumerate(newest_first):
+        if run_dir.name <= cursor:
+            return offset
+    return len(newest_first)
 
 
 NotifyDispatch = Callable[[Callable[[], None]], None]
@@ -605,10 +625,70 @@ class RunManager:
                 for run_dir in self._run_dirs()
             ]
 
-    def recent_runs(
-        self, limit: int = HISTORY_PAGE_SIZE, page: int = 1
-    ) -> RunHistoryPage:
-        """Return one newest-first page of run history plus the pager's totals.
+    def recent_runs(self, limit: int) -> list[RunHistoryEntry]:
+        """Return a bounded newest-first history *summary* — no paging.
+
+        The summary contract: a caller asks for the N newest runs and gets
+        exactly that (clamped to :data:`HISTORY_SUMMARY_MAX`), for a glanceable
+        strip such as the Overview's recent outcomes. It hands back no cursor and
+        no totals, so it cannot be walked — and a caller-chosen size can never
+        become a page size. Traversal is :meth:`history_page`, whose window size
+        is a fixed invariant; ``limit`` is required here so no caller inherits a
+        page's size as a summary default.
+        """
+        size = max(0, min(limit, HISTORY_SUMMARY_MAX))
+        with self._lock:
+            return self._history_entries(self._run_dirs()[::-1][:size])
+
+    def history_page(self, cursor: str | None = None) -> RunHistoryPage:
+        """Return one fixed-size newest-first page of run history and its cursors.
+
+        Ordering is the stable one the whole class uses (``_run_dirs`` sorts by
+        the timestamped run id), reversed to newest-first. A page starts at the
+        newest run at or below ``cursor`` (``None`` = the newest run) and holds
+        :data:`HISTORY_PAGE_SIZE` runs; the response carries the cursors of the
+        adjacent windows, which is how a client steps.
+
+        Anchoring on a run id — rather than an offset into a list re-read on every
+        request — is what makes the traversal stable while history keeps growing
+        underneath it. Positional paging would shift every window below a run
+        persisted since the last request (page 2 repeating page 1's last run, and
+        with enough insertions older runs never reachable) and above a pruned one
+        (page 2 skipping its own first run). Here the anchor is a value in the
+        ordering, so neither mutation moves it: only ``page``/``total_*``, which
+        are descriptions of the current snapshot, change.
+
+        Only the page's runs are read. That bounds a history request to a fixed
+        cost as history grows — which is the point of paging — and it means this
+        read is not an every-run refresh sweep: an off-page (older) run's
+        live->ended transition is observed by :meth:`list_runs` (the documented
+        rescan/reattach path, which ``GET /api/runs`` drives) or when that run's
+        page is viewed, not here. Nothing depends on history for that: the end
+        observation, its event, its snapshots, and its notification stay exactly
+        once-per-run wherever they are first seen.
+        """
+        size = HISTORY_PAGE_SIZE
+        with self._lock:
+            newest_first = self._run_dirs()[::-1]
+            offset = _cursor_offset(newest_first, cursor)
+            end = offset + size
+            return RunHistoryPage(
+                entries=tuple(self._history_entries(newest_first[offset:end])),
+                offset=offset,
+                page_size=size,
+                total_runs=len(newest_first),
+                # Boundaries are the absence of an adjacent run, never a count:
+                # a client is told where it can go, not asked to compute it.
+                prev_cursor=(
+                    newest_first[max(0, offset - size)].name if offset > 0 else None
+                ),
+                next_cursor=(
+                    newest_first[end].name if end < len(newest_first) else None
+                ),
+            )
+
+    def _history_entries(self, run_dirs: list[Path]) -> list[RunHistoryEntry]:
+        """Build history entries for exactly these run dirs (caller holds the lock).
 
         Each entry embeds the run's persisted per-session context snapshot so the
         history view renders context strips without a per-run follow-up request,
@@ -619,47 +699,21 @@ class RunManager:
         per ``(repo, task)`` within the call — a task with many runs reads its
         frontmatter once — and fully isolated so a target-repo read failure
         degrades that task's est to unknown without touching history.
-
-        Paging is positional over the same stable ordering the whole class uses
-        (``_run_dirs`` sorts by the timestamped run id), reversed to newest-first:
-        page N is the window ``[(N-1)*size, N*size)``, so adjacent pages of one
-        snapshot neither duplicate nor skip a run. ``total_runs`` counts every
-        persisted run dir so a client can size the pager without walking it.
-
-        Only the page's runs are read. That bounds a history request to a fixed
-        cost as history grows — which is the point of paging — and it means this
-        read is no longer an every-run refresh sweep: an off-page (older) run's
-        live->ended transition is observed by :meth:`list_runs` (the documented
-        rescan/reattach path, which ``GET /api/runs`` drives) or when that run's
-        page is viewed, not here. Nothing depends on history for that: the end
-        observation, its event, its snapshots, and its notification stay exactly
-        once-per-run wherever they are first seen.
         """
-        page_size = max(0, min(limit, HISTORY_PAGE_MAX))
-        index = max(1, page)
-        with self._lock:
-            run_dirs = self._run_dirs()
-            start = (index - 1) * page_size
-            window = run_dirs[::-1][start : start + page_size] if page_size else []
-            entries: list[RunHistoryEntry] = []
-            est_cache: dict[tuple[str, str], SessionEst | None] = {}
-            for run_dir in window:
-                record = self._refresh(run_dir, _load_record(run_dir))
-                entries.append(
-                    RunHistoryEntry(
-                        status=self._status(run_dir, record),
-                        events=read_events(run_dir),
-                        sessions=self._history_sessions(run_dir),
-                        session_est=self._history_session_est(record, est_cache),
-                        effective_config=self._history_effective_config(run_dir),
-                    )
+        est_cache: dict[tuple[str, str], SessionEst | None] = {}
+        entries: list[RunHistoryEntry] = []
+        for run_dir in run_dirs:
+            record = self._refresh(run_dir, _load_record(run_dir))
+            entries.append(
+                RunHistoryEntry(
+                    status=self._status(run_dir, record),
+                    events=read_events(run_dir),
+                    sessions=self._history_sessions(run_dir),
+                    session_est=self._history_session_est(record, est_cache),
+                    effective_config=self._history_effective_config(run_dir),
                 )
-            return RunHistoryPage(
-                entries=tuple(entries),
-                page=index,
-                page_size=page_size,
-                total_runs=len(run_dirs),
             )
+        return entries
 
     @staticmethod
     def _history_session_est(

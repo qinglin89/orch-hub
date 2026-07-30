@@ -12,6 +12,7 @@ import datetime as dt
 import itertools
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,14 @@ from orch_hub.history import (
     KIND_STOP_REQUESTED,
     read_events,
 )
-from orch_hub.models import ManagedRepo, ReadinessCheck, ReadinessReport, SessionEst
+from orch_hub.models import (
+    HISTORY_SUMMARY_MAX,
+    ManagedRepo,
+    ReadinessCheck,
+    ReadinessReport,
+    RunRecord,
+    SessionEst,
+)
 from orch_hub.orch_config import read_effective_config_snapshot
 from orch_hub.sessions import read_snapshot
 from orch_hub.runs import (
@@ -714,7 +722,7 @@ def test_recent_runs_returns_newest_first_with_events(tmp_path):
     clock.tick()
     second = manager.start_run(repo, TASK_ID)
 
-    entries = manager.recent_runs(limit=2).entries
+    entries = manager.recent_runs(limit=2)
 
     assert [entry.status.record.run_id for entry in entries] == [
         second.run_id,
@@ -725,30 +733,49 @@ def test_recent_runs_returns_newest_first_with_events(tmp_path):
         KIND_RUN_STARTED,
         KIND_RUN_ENDED,
     ]
-    assert manager.recent_runs(limit=1).entries[0].status.record.run_id == second.run_id
+    assert manager.recent_runs(limit=1)[0].status.record.run_id == second.run_id
 
 
-# -- run-history pagination --------------------------------------------------------
+# -- run-history paging ------------------------------------------------------------
 # (2026-07-30-run-history-pagination-collapse)
 #
-# Every persisted run must be reachable by paging the same stable newest-first
+# Every persisted run must be reachable by walking the same stable newest-first
 # order, so the checks below are about the *window*: no duplicate, no omission,
-# honest totals at both boundaries, and a bounded read cost per page.
+# fixed size, honest totals at both boundaries, and a bounded read cost per page.
+# History mutates while it is being walked (a run starts, an old run dir is
+# pruned), so several of these assert what a mutation must NOT do to a window.
 
 
-def run_arc(manager, spawner, repo, count: int, clock: FakeClock) -> list[str]:
-    """Start and end ``count`` runs of the repo's task; return ids oldest-first.
+def seed_ended_runs(manager, repo, count: int, *, first: int = 0) -> list[str]:
+    """Persist ``count`` ended run records directly; return ids oldest-first.
 
-    Each run must end before the next starts (per-repo serialization), and the
-    clock ticks between runs so the timestamped run ids order by start time.
+    Paging is a property of persisted run dirs, so seeding records is both the
+    honest fixture and what makes exercising the real fifty-run page cheap (a
+    start/end arc per run is O(n^2) file work and, under a fixed test clock,
+    produces collision-suffixed ids whose order is not chronological). The
+    production writer is reached through the module so the record format stays
+    single-sourced; each id carries its own timestamp, like a real one.
     """
     ids = []
-    for i in range(count):
-        record = manager.start_run(repo, TASK_ID)
-        spawner.procs[i].returncode = 0
-        manager.list_runs()  # observe the end, freeing the repo
-        clock.tick()
-        ids.append(record.run_id)
+    for index in range(first, first + count):
+        stamp = (FIXED_NOW + dt.timedelta(minutes=index)).strftime("%Y%m%dT%H%M%SZ")
+        run_id = f"{stamp}-{repo.name}-{TASK_ID}"
+        run_dir = manager.runs_dir / run_id
+        (run_dir / "control").mkdir(parents=True)
+        runs_module._write_record(
+            run_dir,
+            RunRecord(
+                run_id=run_id,
+                repo_name=repo.name,
+                repo_path=repo.path,
+                task_id=TASK_ID,
+                control_dir=run_dir / "control",
+                started_ts=stamp,
+                ended_ts=stamp,
+                exit_code=0,
+            ),
+        )
+        ids.append(run_id)
     return ids
 
 
@@ -756,41 +783,79 @@ def page_ids(page) -> list[str]:
     return [entry.status.record.run_id for entry in page.entries]
 
 
-def test_recent_runs_pages_the_whole_history_without_gaps_or_repeats(tmp_path):
+def test_history_page_holds_fifty_runs_and_anchors_the_rest(tmp_path):
     repo = make_repo(tmp_path)
-    manager, spawner, clock = make_manager(tmp_path)
-    oldest_first = run_arc(manager, spawner, repo, 7, clock)
-    newest_first = list(reversed(oldest_first))
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 51)))
 
-    pages = [manager.recent_runs(limit=3, page=n) for n in (1, 2, 3, 4)]
+    first = manager.history_page()
+    second = manager.history_page(cursor=first.next_cursor)
+    back = manager.history_page(cursor=second.prev_cursor)
 
-    # The three full/partial pages concatenate back into the exact newest-first
-    # order — every run reachable exactly once, and the page after the last is
-    # empty rather than wrapping.
-    assert [page_ids(page) for page in pages] == [
-        newest_first[0:3],
-        newest_first[3:6],
-        newest_first[6:7],
-        [],
+    # The page size is the contract's, not the caller's, and the two windows
+    # concatenate back into the exact newest-first order — every run reachable
+    # exactly once.
+    assert page_ids(first) == newest_first[:50]
+    assert page_ids(second) == newest_first[50:]
+    assert first.page_size == 50
+    # Totals describe the whole history, not the window, on every page.
+    assert [(page.total_runs, page.total_pages) for page in (first, second)] == [
+        (51, 2),
+        (51, 2),
     ]
-    # Totals describe the whole history, not the page, on every page.
-    assert [page.total_runs for page in pages] == [7, 7, 7, 7]
-    assert [page.total_pages for page in pages] == [3, 3, 3, 3]
-    # Boundaries: no Previous on page 1, no Next on the last page.
-    assert [(page.has_prev, page.has_next) for page in pages] == [
-        (False, True),
-        (True, True),
-        (True, False),
-        (True, False),
-    ]
+    assert (first.page, second.page) == (1, 2)
+    # Boundaries are the absence of an adjacent window, and stepping back lands
+    # on exactly the page stepped away from.
+    assert (first.has_prev, first.has_next) == (False, True)
+    assert (second.has_prev, second.has_next) == (True, False)
+    assert page_ids(back) == page_ids(first)
 
 
-def test_recent_runs_reads_only_the_requested_pages_runs(tmp_path, monkeypatch):
-    # Paging exists to bound the cost of a history read: asking for page 2 must
-    # not walk page 1's runs (nor any other page's).
+def test_history_page_window_is_unshifted_by_a_run_persisted_mid_walk(tmp_path):
+    # Why the anchor is a run id: an offset into a freshly read list slides down
+    # by one for every newer run, so the next page would repeat the previous
+    # page's last run — and enough insertions would keep the oldest runs out of
+    # reach entirely.
     repo = make_repo(tmp_path)
-    manager, spawner, clock = make_manager(tmp_path)
-    oldest_first = run_arc(manager, spawner, repo, 5, clock)
+    manager, _, _ = make_manager(tmp_path)
+    oldest_first = seed_ended_runs(manager, repo, 51)
+    first = manager.history_page()
+
+    seed_ended_runs(manager, repo, 2, first=500)  # newer runs, above the window
+
+    second = manager.history_page(cursor=first.next_cursor)
+    assert page_ids(second) == [oldest_first[0]]  # the one run below page 1, once
+    assert not set(page_ids(second)) & set(page_ids(first))
+    assert second.total_runs == 53  # the totals move; the window does not
+
+
+def test_history_page_window_survives_runs_pruned_mid_walk(tmp_path):
+    # The mirror case: a positional offset pulls the next page up when a run
+    # above it is pruned, skipping that page's own first run. An anchored window
+    # cannot see a deletion above it — including the deletion of the anchor
+    # itself, which resolves to the next run below rather than to nothing.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 52)))
+    first = manager.history_page()
+    assert first.next_cursor == newest_first[50]
+
+    shutil.rmtree(manager.runs_dir / newest_first[0])  # a run on page 1
+
+    assert page_ids(manager.history_page(cursor=first.next_cursor)) == newest_first[50:]
+
+    shutil.rmtree(manager.runs_dir / first.next_cursor)  # the anchor itself
+
+    assert page_ids(manager.history_page(cursor=first.next_cursor)) == newest_first[51:]
+
+
+def test_history_page_reads_only_its_own_windows_runs(tmp_path, monkeypatch):
+    # Paging exists to bound the cost of a history read: asking for the second
+    # page must not walk the first page's runs (nor any other page's).
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    oldest_first = seed_ended_runs(manager, repo, 51)
+    first = manager.history_page()
     read: list[str] = []
     original = runs_module.read_events
 
@@ -800,16 +865,16 @@ def test_recent_runs_reads_only_the_requested_pages_runs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(runs_module, "read_events", spy)
 
-    page = manager.recent_runs(limit=2, page=2)
+    second = manager.history_page(cursor=first.next_cursor)
 
-    assert page_ids(page) == [oldest_first[2], oldest_first[1]]
-    assert read == page_ids(page)
+    assert page_ids(second) == [oldest_first[0]]
+    assert read == page_ids(second)
 
 
-def test_recent_runs_empty_history_reports_a_first_page_with_no_pages(tmp_path):
+def test_history_page_empty_history_is_a_first_page_with_no_pages(tmp_path):
     manager, _, _ = make_manager(tmp_path)
 
-    page = manager.recent_runs()
+    page = manager.history_page()
 
     assert page.entries == ()
     assert (page.page, page.page_size, page.total_runs, page.total_pages) == (
@@ -818,46 +883,57 @@ def test_recent_runs_empty_history_reports_a_first_page_with_no_pages(tmp_path):
         0,
         0,
     )
-    assert (page.has_prev, page.has_next) == (False, False)
+    assert (page.prev_cursor, page.next_cursor) == (None, None)
 
 
-def test_recent_runs_out_of_range_page_stays_navigable(tmp_path):
+def test_history_page_past_the_end_stays_navigable(tmp_path):
     repo = make_repo(tmp_path)
-    manager, spawner, clock = make_manager(tmp_path)
-    run_arc(manager, spawner, repo, 3, clock)
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 3)))
 
-    page = manager.recent_runs(limit=2, page=9)
+    page = manager.history_page(cursor="0")  # below every run id
 
     # Past the end is not an error: an empty window that still reports the real
-    # totals and offers Previous, so a client can navigate back rather than
-    # stranding on a page that no longer exists.
+    # totals and anchors Previous on the last page that does exist, so a client
+    # navigates back rather than stranding where its runs used to be.
     assert page.entries == ()
-    assert (page.page, page.total_runs, page.total_pages) == (9, 3, 2)
-    assert (page.has_prev, page.has_next) == (True, False)
+    assert (page.page, page.total_runs, page.total_pages) == (2, 3, 1)
+    assert page.next_cursor is None
+    assert page.prev_cursor == newest_first[0]
 
 
-def test_recent_runs_normalizes_a_page_below_one_to_the_first_page(tmp_path):
+def test_history_page_resolves_an_unknown_cursor_by_position(tmp_path):
+    # A cursor is a position in the ordering, not a lookup: one above every run
+    # (a stale id from a pruned newest run) starts at the newest run instead of
+    # erroring or emptying the view. It is only ever *compared*, never used to
+    # reach the filesystem, so a path-shaped one is just a string below every id.
     repo = make_repo(tmp_path)
-    manager, spawner, clock = make_manager(tmp_path)
-    oldest_first = run_arc(manager, spawner, repo, 3, clock)
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 3)))
 
-    for requested in (0, -4):
-        page = manager.recent_runs(limit=2, page=requested)
-        assert page_ids(page) == list(reversed(oldest_first))[:2]
-        assert page.page == 1  # echoed normalized, so the pager can trust it
-        assert page.has_prev is False
+    above = manager.history_page(cursor="9999-later-than-every-run")
+    escaping = manager.history_page(cursor="../../etc")
+
+    assert page_ids(above) == newest_first
+    assert (above.page, above.has_prev) == (1, False)
+    assert (escaping.entries, escaping.total_runs) == ((), 3)
 
 
-def test_recent_runs_clamps_the_page_size(tmp_path):
+def test_recent_runs_summary_is_bounded_and_not_a_page(tmp_path):
+    # The summary is the other contract on this data: N newest runs for a
+    # glanceable strip. It hands back a plain bounded list — no cursor, no
+    # totals, nothing to walk — so a caller-chosen size can never become a page
+    # size, and it is clamped besides.
     repo = make_repo(tmp_path)
-    manager, spawner, clock = make_manager(tmp_path)
-    run_arc(manager, spawner, repo, 3, clock)
+    manager, _, _ = make_manager(tmp_path)
+    seeded = seed_ended_runs(manager, repo, HISTORY_SUMMARY_MAX + 5)
+    newest_first = list(reversed(seeded))
 
-    assert manager.recent_runs(limit=500).page_size == 200
-    # An explicit zero-size window still counts the history it declined to read,
-    # and spans no pages rather than dividing by zero.
-    empty = manager.recent_runs(limit=0)
-    assert (empty.entries, empty.total_runs, empty.total_pages) == ((), 3, 0)
+    assert [e.status.record.run_id for e in manager.recent_runs(limit=2)] == (
+        newest_first[:2]
+    )
+    assert manager.recent_runs(limit=0) == []
+    assert len(manager.recent_runs(limit=500)) == HISTORY_SUMMARY_MAX
 
 
 # -- end-of-run classification ----------------------------------------------------
@@ -1114,7 +1190,7 @@ def test_notification_fires_exactly_once_across_rescans(tmp_path):
     manager.list_runs()  # transition observed here
     manager.list_runs()  # settled record: no re-fire
     manager.get_run(record.run_id)
-    manager.recent_runs()
+    manager.recent_runs(limit=10)
 
     assert len(notifier.notifications) == 1
 
@@ -1186,7 +1262,7 @@ def test_pending_question_notifies_once_per_seq_across_rescans(tmp_path):
 
     manager.list_runs()
     manager.get_run(record.run_id)
-    manager.recent_runs()
+    manager.recent_runs(limit=10)
     manager.list_runs()
 
     assert len(notifier.notifications) == 1
@@ -1456,7 +1532,7 @@ def test_recent_runs_embeds_persisted_sessions_snapshot(tmp_path):
     end_run(spawner, 0)
     manager.list_runs()  # observe end -> snapshot persisted
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert [(s.role, s.sid, s.context_tokens) for s in entry.sessions.sessions] == [
         ("dev", "dev1", 150000),
         ("review", "rev1", 90000),
@@ -1473,7 +1549,7 @@ def test_recent_runs_sessions_empty_for_live_run(tmp_path):
     manager.start_run(repo, TASK_ID)
     write_orch_log(repo, ORCH_LOG_LINES[:2])  # a log exists, but the run is live
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.sessions.sessions == ()
 
 
@@ -1494,7 +1570,7 @@ def test_recent_runs_embeds_session_est(tmp_path):
     manager, _, _ = make_manager(tmp_path)
     manager.start_run(repo, TASK_ID)
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.session_est == SessionEst(current=1, total=3)
     assert entry.to_dict()["session_est"] == {"current": 1, "total": 3}
 
@@ -1506,7 +1582,7 @@ def test_recent_runs_session_est_unknown_without_frontmatter(tmp_path):
     manager, _, _ = make_manager(tmp_path)
     manager.start_run(repo, TASK_ID)
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.session_est is None
     assert entry.to_dict()["session_est"] is None
 
@@ -1534,7 +1610,7 @@ def test_recent_runs_session_est_reads_archived_task_after_closeout(tmp_path):
         encoding="utf-8",
     )
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.session_est == SessionEst(3, 3)
 
 
@@ -1551,7 +1627,7 @@ def test_recent_runs_session_est_isolated_on_read_failure(tmp_path, monkeypatch)
 
     monkeypatch.setattr("orch_hub.runs.read_session_est", boom)
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.session_est is None  # unknown, not a crash
     assert entry.status.record.task_id == TASK_ID  # run still in history
 
@@ -1574,7 +1650,7 @@ def test_recent_runs_session_est_deduped_per_task(tmp_path, monkeypatch):
 
     monkeypatch.setattr("orch_hub.runs.read_session_est", counting)
 
-    entries = manager.recent_runs().entries
+    entries = manager.recent_runs(limit=10)
     assert len(entries) == 2
     assert all(e.session_est == SessionEst(1, 2) for e in entries)
     assert calls == [TASK_ID]  # read once despite two runs of the task
@@ -1718,7 +1794,7 @@ def test_recent_runs_embeds_effective_config(tmp_path):
     end_run(spawner, 0)
     manager.list_runs()  # observe end -> snapshot persisted
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.effective_config == EFFECTIVE_CONFIG
     assert entry.to_dict()["effective_config"] == EFFECTIVE_CONFIG
 
@@ -1730,7 +1806,7 @@ def test_recent_runs_effective_config_none_for_live_run(tmp_path):
     manager.start_run(repo, TASK_ID)
     write_orch_log(repo, [effective_config_line()] + ORCH_LOG_LINES[:2])
 
-    entry = manager.recent_runs(limit=1).entries[0]
+    entry = manager.recent_runs(limit=1)[0]
     assert entry.effective_config is None
     assert entry.to_dict()["effective_config"] is None
 

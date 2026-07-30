@@ -1270,11 +1270,25 @@ def test_history_runs_returns_recent_runs_with_events(tmp_path, monkeypatch):
     assert first["run_id"] not in {run["run_id"] for run in runs}
 
 
-# -- run-history pagination ----------------------------------------------------
+# -- run-history paging --------------------------------------------------------
 # (2026-07-30-run-history-pagination-collapse)
 #
-# The route pages the manager's stable newest-first order and carries its own
-# pagination metadata, so a client never infers a boundary from a short page.
+# The route serves two contracts over the same data: fixed-size pages walked by
+# cursor (the traversal), and a bounded summary (`?limit=N`, the Overview's
+# strip). The checks below are that each stays itself — a page's size cannot be
+# chosen by the caller, and a summary cannot be walked — and that a page carries
+# the metadata a pager needs instead of leaving it to infer boundaries.
+
+PAGING_KEYS = {
+    "page",
+    "page_size",
+    "total_runs",
+    "total_pages",
+    "has_prev",
+    "has_next",
+    "prev_cursor",
+    "next_cursor",
+}
 
 
 def run_history_arc(client, spawner, repo, count: int) -> list[str]:
@@ -1291,37 +1305,58 @@ def run_history_arc(client, spawner, repo, count: int) -> list[str]:
     return ids
 
 
-def test_history_runs_pages_every_persisted_run(tmp_path, monkeypatch):
+def test_history_runs_walks_persisted_runs_by_cursor(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     newest_first = list(reversed(run_history_arc(client, spawner, repo, 3)))
 
-    first = client.get("/api/history/runs?limit=2&page=1").json()
-    second = client.get("/api/history/runs?limit=2&page=2").json()
+    first = client.get("/api/history/runs").json()
+    rest = client.get("/api/history/runs?cursor=" + newest_first[1]).json()
 
-    assert [run["run_id"] for run in first["runs"]] == newest_first[:2]
-    assert [run["run_id"] for run in second["runs"]] == newest_first[2:]
-    # Each page carries the whole-history totals, so the pager needs no second
+    # No cursor starts at the newest run; a cursor anchors the window at the run
+    # it names, so a step is a position in the ordering rather than an offset
+    # into a list re-read per request.
+    assert [run["run_id"] for run in first["runs"]] == newest_first
+    assert [run["run_id"] for run in rest["runs"]] == newest_first[1:]
+    # Both windows carry the whole-history totals, so a pager needs no second
     # request to know where it is.
-    for page, expected in ((first, 1), (second, 2)):
-        assert page["page"] == expected
-        assert page["page_size"] == 2
-        assert page["total_runs"] == 3
-        assert page["total_pages"] == 2
-    assert (first["has_prev"], first["has_next"]) == (False, True)
-    assert (second["has_prev"], second["has_next"]) == (True, False)
+    assert (first["total_runs"], rest["total_runs"]) == (3, 3)
+    assert (first["prev_cursor"], first["next_cursor"]) == (None, None)
+    assert (first["has_prev"], first["has_next"]) == (False, False)
+    # Off the newest window, Previous is anchored back at the newest run.
+    assert rest["prev_cursor"] == newest_first[0]
+    assert rest["has_prev"] is True
 
 
-def test_history_runs_defaults_to_a_fifty_run_page(tmp_path, monkeypatch):
+def test_history_runs_page_size_is_fixed_and_a_summary_is_not_a_page(
+    tmp_path, monkeypatch
+):
+    # The window size is the traversal's invariant, not a caller preference: no
+    # query can change it. `limit` selects the *other* contract, and what comes
+    # back carries no pagination metadata at all, so a short bounded read can
+    # never be mistaken for — or walked as — a page.
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
-    start_a_run(client, repo)
+    run_history_arc(client, spawner, repo, 3)
 
-    payload = client.get("/api/history/runs").json()
+    paged = client.get("/api/history/runs?page_size=2&page=2").json()
+    summary = client.get("/api/history/runs?limit=2").json()
 
-    assert payload["page"] == 1
-    assert payload["page_size"] == 50
-    assert payload["total_runs"] == 1
-    assert payload["total_pages"] == 1
-    assert (payload["has_prev"], payload["has_next"]) == (False, False)
+    assert paged["page_size"] == 50
+    assert (paged["page"], paged["total_pages"]) == (1, 1)
+    assert len(paged["runs"]) == 3
+    assert len(summary["runs"]) == 2
+    assert not PAGING_KEYS & set(summary)
+
+
+def test_history_runs_rejects_a_summary_asked_to_page(tmp_path, monkeypatch):
+    # The two contracts answer different questions and only the caller knows
+    # which it wanted, so mixing them is a 400 rather than a silent precedence.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    run_history_arc(client, spawner, repo, 2)
+
+    resp = client.get("/api/history/runs?limit=1&cursor=anything")
+
+    assert resp.status_code == 400
+    assert "cursor" in resp.json()["detail"]
 
 
 def test_history_runs_empty_history_reports_no_pages(tmp_path, monkeypatch):
@@ -1331,36 +1366,36 @@ def test_history_runs_empty_history_reports_no_pages(tmp_path, monkeypatch):
 
     assert payload["runs"] == []
     assert payload["page"] == 1
+    assert payload["page_size"] == 50
     assert payload["total_runs"] == 0
     assert payload["total_pages"] == 0
     assert (payload["has_prev"], payload["has_next"]) == (False, False)
 
 
-def test_history_runs_out_of_range_page_is_empty_and_navigable(tmp_path, monkeypatch):
+def test_history_runs_cursor_past_the_end_is_empty_and_navigable(
+    tmp_path, monkeypatch
+):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
-    run_history_arc(client, spawner, repo, 3)
+    newest_first = list(reversed(run_history_arc(client, spawner, repo, 3)))
 
-    beyond = client.get("/api/history/runs?limit=2&page=9")
-    below = client.get("/api/history/runs?limit=2&page=0").json()
+    beyond = client.get("/api/history/runs?cursor=0")  # below every run id
 
-    # Past the last page is a 200 with an empty window and honest totals, not an
-    # error and not a silent wrap to page 1 — with Previous still offered.
+    # A window whose runs are gone (pruned between two requests, or a hand-typed
+    # cursor) is a 200 with an empty window and honest totals — not an error and
+    # not a silent wrap — anchoring Previous on the last page that does exist.
     assert beyond.status_code == 200
-    assert beyond.json()["runs"] == []
-    assert beyond.json()["page"] == 9
-    assert beyond.json()["total_pages"] == 2
-    assert (beyond.json()["has_prev"], beyond.json()["has_next"]) == (True, False)
-    # Below the first page normalizes to it, and says so.
-    assert below["page"] == 1
-    assert len(below["runs"]) == 2
-    assert below["has_prev"] is False
+    payload = beyond.json()
+    assert payload["runs"] == []
+    assert (payload["page"], payload["total_pages"]) == (2, 1)
+    assert (payload["has_prev"], payload["has_next"]) == (True, False)
+    assert payload["prev_cursor"] == newest_first[0]
 
 
-def test_history_runs_batches_evaluation_state_for_the_returned_page_only(
+def test_history_runs_batches_evaluation_state_for_the_returned_window_only(
     tmp_path, monkeypatch
 ):
     # Batched evaluation state covers the task groups a client can actually see
-    # on this page — it must not fan out over the whole history.
+    # in this window — it must not fan out over the whole history.
     repo_a = make_run_repo(tmp_path, "repo-a")
     repo_b = make_run_repo(tmp_path, "repo-b")
     manager, spawner = make_run_manager(tmp_path)
@@ -1368,13 +1403,18 @@ def test_history_runs_batches_evaluation_state_for_the_returned_page_only(
     client = TestClient(api.create_app(run_config(tmp_path), run_manager=manager))
     client.headers["Authorization"] = f"Bearer {TOKEN}"
     start_a_run(client, repo_a)
+    older = client.get("/api/history/runs").json()["runs"][-1]["run_id"]
     start_a_run(client, repo_b)  # a different repo may run concurrently
 
-    first = client.get("/api/history/runs?limit=1&page=1").json()
-    second = client.get("/api/history/runs?limit=1&page=2").json()
+    whole = client.get("/api/history/runs").json()
+    tail = client.get("/api/history/runs?cursor=" + older).json()
 
-    assert [state["repo_name"] for state in first["evaluation_states"]] == ["repo-b"]
-    assert [state["repo_name"] for state in second["evaluation_states"]] == ["repo-a"]
+    assert [state["repo_name"] for state in whole["evaluation_states"]] == [
+        "repo-b",
+        "repo-a",
+    ]
+    assert [run["run_id"] for run in tail["runs"]] == [older]
+    assert [state["repo_name"] for state in tail["evaluation_states"]] == ["repo-a"]
 
 
 def test_history_runs_batches_three_level_evaluation_state(tmp_path, monkeypatch):
