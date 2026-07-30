@@ -1270,6 +1270,90 @@ def test_history_runs_returns_recent_runs_with_events(tmp_path, monkeypatch):
     assert first["run_id"] not in {run["run_id"] for run in runs}
 
 
+def test_history_runs_batches_three_level_evaluation_state(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    first = start_a_run(client, repo)
+    spawner.procs[0].returncode = 0
+    client.get("/api/runs")  # observe the end and allow a second run of the task
+    start_a_run(client, repo)
+
+    calls = []
+    original = EvaluationService.list_evaluations
+
+    def counted_list(service, target_repo, task_id):
+        calls.append((target_repo.path, task_id))
+        return original(service, target_repo, task_id)
+
+    monkeypatch.setattr(EvaluationService, "list_evaluations", counted_list)
+
+    # Evidence alone is not an evaluation report, so it stays at the lowest
+    # level. The one task has two runs but is structurally listed only once.
+    evaluation = EvaluationService(run_config(tmp_path))
+    evaluation_id = "20260730T010000Z"
+    artifact_dir = evaluation.artifact_dir(repo, RUN_TASK_ID, evaluation_id)
+    artifact_dir.mkdir(parents=True)
+    (artifact_dir / "evidence.json").write_text("{}", encoding="utf-8")
+
+    payload = client.get("/api/history/runs").json()
+    assert payload["evaluation_enabled"] is True
+    assert payload["evaluation_states"] == [
+        {
+            "repo_name": repo.name,
+            "repo_path": str(repo.path),
+            "task_id": RUN_TASK_ID,
+            "latest_evaluation_id": evaluation_id,
+            "level": "none",
+        }
+    ]
+    assert calls == [(repo.path, RUN_TASK_ID)]
+
+    # The same batched entry advances through L1 and L1+L2 from the newest
+    # evaluation's artifact set.
+    (artifact_dir / "static_metrics.json").write_text("{}", encoding="utf-8")
+    assert client.get("/api/history/runs").json()["evaluation_states"][0]["level"] == "l1"
+    (artifact_dir / "semantic_report.json").write_text("{}", encoding="utf-8")
+    assert (
+        client.get("/api/history/runs").json()["evaluation_states"][0]["level"]
+        == "l1_l2"
+    )
+
+
+def test_history_runs_evaluation_state_degrades_without_hiding_runs(
+    tmp_path, monkeypatch
+):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+
+    def unreadable(_service, _repo, _task_id):
+        raise OSError("evaluation tree unavailable")
+
+    monkeypatch.setattr(EvaluationService, "list_evaluations", unreadable)
+    payload = client.get("/api/history/runs").json()
+
+    assert [run["run_id"] for run in payload["runs"]] == [started["run_id"]]
+    assert payload["evaluation_enabled"] is True
+    assert payload["evaluation_states"] == []
+
+
+def test_history_runs_disabled_evaluation_skips_state_reads(tmp_path, monkeypatch):
+    repo = make_run_repo(tmp_path)
+    manager, spawner = make_run_manager(tmp_path)
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+
+    def should_not_read(_service, _repo, _task_id):
+        raise AssertionError("disabled evaluation state was read")
+
+    monkeypatch.setattr(EvaluationService, "list_evaluations", should_not_read)
+    disabled = replace(run_config(tmp_path), evaluation_enabled=False)
+    client = TestClient(api.create_app(disabled, run_manager=manager))
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+    start_a_run(client, repo)
+
+    payload = client.get("/api/history/runs").json()
+    assert payload["evaluation_enabled"] is False
+    assert payload["evaluation_states"] == []
+
+
 def test_get_run_returns_status_and_unknown_is_404(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     started = start_a_run(client, repo)

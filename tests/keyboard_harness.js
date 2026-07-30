@@ -1082,9 +1082,8 @@ var EVAL_DETAIL_SEMANTIC = {
 
 // The (repo, task) evaluation-list payload: one newest evaluation whose artifact
 // flags the caller varies. The default is the deterministic Layer 1 fixture —
-// evidence + static metrics, no semantic report. Both the eval view (history
-// picker) and task detail (entry-level hint) read this shape, so it is built in
-// one place and overridden per case.
+// evidence + static metrics, no semantic report. The evaluation sidecar view's
+// history picker reads this shape.
 function evalListPayload(over) {
   var summary = {
     evaluation_id: EVAL_ID,
@@ -2158,8 +2157,8 @@ async function scenarioTaskEval() {
   // Leave the running view so its poll is torn down before the restore below.
   await navigate("#/tasks/" + REPO + "/" + TASK);
 
-  // Restore the default list + report-less detail + idle (no) job so later
-  // scenarios (and the doctor-gating branch below) see the default fixtures.
+  // Restore the default list + report-less detail + idle (no) job so the
+  // doctor-gating branch below sees the default fixtures.
   route("GET", jobPath, { job: null });
   route("GET", listPath, evalListPayload({}));
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
@@ -2169,168 +2168,6 @@ async function scenarioTaskEval() {
     semantic_report: null,
     report_md: null,
   });
-
-  // The entry point from task detail appears when the subsystem is enabled.
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  var entry = doc.querySelector(".eval-entry a");
-  check("eval: task detail links to the evaluation view", !!entry, "no task-detail eval link");
-  eq(
-    "eval: the entry link targets the eval route",
-    entry && entry.getAttribute("href"),
-    evalPath
-  );
-
-  // The entry carries a state hint for what the destination actually holds, so
-  // the three levels read without navigating in and back. The restored fixture's
-  // newest evaluation has Layer 1 metrics and no semantic report, so the pill
-  // says static — in words, not by hue alone.
-  var hint = doc.querySelector(".eval-entry .badge");
-  check("eval: the entry states its level in words", !!hint, "no state pill beside the eval link");
-  eq(
-    "eval: a Layer-1-only evaluation reads static",
-    hint && hint.textContent.trim(),
-    "static"
-  );
-
-  // A semantic-carrying newest evaluation reads as both layers. (Each re-entry
-  // re-renders task detail, so the hint is re-read from the current fixture.)
-  route("GET", listPath, evalListPayload({ has_semantic_report: true }));
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  eq(
-    "eval: a semantic-carrying evaluation reads static + semantic",
-    (doc.querySelector(".eval-entry .badge") || {}).textContent,
-    "static + semantic"
-  );
-
-  // A never-evaluated task: an empty history with no latest id → no report.
-  route("GET", listPath, {
-    repo: REPO,
-    task_id: TASK,
-    enabled: true,
-    target: { present: true, source: "active" },
-    latest_evaluation_id: null,
-    evaluations: [],
-  });
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  eq(
-    "eval: a never-evaluated task reads no report",
-    (doc.querySelector(".eval-entry .badge") || {}).textContent,
-    "no report"
-  );
-
-  // Evidence generated but never scored is a fourth persisted state that folds
-  // into the same lowest pill (the reader's question is "is there a report"),
-  // distinguished only in the link's title.
-  route(
-    "GET",
-    listPath,
-    evalListPayload({ has_static_metrics: false, has_semantic_report: false })
-  );
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  eq(
-    "eval: an evidence-only evaluation folds into no report",
-    (doc.querySelector(".eval-entry .badge") || {}).textContent,
-    "no report"
-  );
-  check(
-    "eval: the link title distinguishes evidence-only from nothing",
-    (doc.querySelector(".eval-entry a").getAttribute("title") || "").indexOf(
-      "evidence pack"
-    ) !== -1,
-    "title: " + doc.querySelector(".eval-entry a").getAttribute("title")
-  );
-
-  // Degrade: an evaluation-list failure (here a 404 from an unrouted GET) must
-  // leave the link and the rest of the task view intact — a hint is never worth
-  // hiding the entry point or blanking the task file.
-  route("GET", listPath, undefined);
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  var degraded = doc.querySelector(".eval-entry a");
-  check("eval: a failed hint fetch keeps the entry link", !!degraded, "the eval link vanished");
-  check(
-    "eval: a failed hint fetch shows no level at all",
-    doc.querySelector(".eval-entry .badge") === null,
-    "a level pill was rendered from a failed list read"
-  );
-  check(
-    "eval: a failed hint fetch leaves the task file rendered",
-    !!doc.querySelector(".task-content"),
-    "the task file went missing when the hint failed"
-  );
-  route("GET", listPath, evalListPayload({})); // restore the default fixture
-
-  // Degrade, part two — the SLOW read, which a completed 404 cannot reach: the
-  // list route is held open, so the hint request is still in flight when the
-  // view is due. It must cost the view nothing. `api()` has no timeout, so
-  // awaiting this before the paint would park the whole route on "Loading task…"
-  // indefinitely: no task file, not even the plain entry link.
-  var releaseList = defer("GET", listPath);
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  check(
-    "eval: a pending hint read still paints the task file",
-    !!doc.querySelector(".task-content"),
-    "the task file was held back by an unanswered evaluation history"
-  );
-  var pendingEntry = doc.querySelector(".eval-entry a");
-  check(
-    "eval: a pending hint read still paints the entry link",
-    !!pendingEntry,
-    "the entry link was held back by an unanswered evaluation history"
-  );
-  eq(
-    "eval: the pending entry link still targets the eval route",
-    pendingEntry && pendingEntry.getAttribute("href"),
-    evalPath
-  );
-  check(
-    "eval: a pending hint read claims no level",
-    doc.querySelector(".eval-entry .badge") === null,
-    "a level pill was rendered before the list answered"
-  );
-  // The route must also *land* — an awaited hint would leave the handler unfinished,
-  // so the router would never sync the title or move focus onto the new page.
-  activeIs("eval: a pending hint read still lands the route", pageHeading());
-  // ...and the pill fills in on its own once the read finally answers, with no
-  // second navigation.
-  await releaseList();
-  eq(
-    "eval: the level fills in when the slow read answers",
-    (doc.querySelector(".eval-entry .badge") || {}).textContent,
-    "static"
-  );
-
-  // The same late answer, after the user has moved on: the completion is guarded
-  // by the route generation, so it stays inert instead of writing into a view it
-  // no longer owns.
-  var releaseStale = defer("GET", listPath);
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  await navigate("#/repos");
-  await releaseStale();
-  check(
-    "eval: a stale hint answer stays out of the newer view",
-    doc.querySelector(".eval-entry") === null && !!doc.querySelector(".card.repo"),
-    "the late hint answer touched the repo list"
-  );
-
-  // A rejected token is the one hint failure that is NOT swallowed: the handler
-  // no longer rethrows it (the read happens after the paint, off the handler's
-  // path), so the re-gate has to come from api() itself — drop the token, show
-  // the login gate. A decoration must never be the reason a dead session keeps
-  // rendering data views.
-  routeError("GET", listPath, 401, { detail: "unauthorized" });
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  check(
-    "eval: a 401 from the hint read still re-gates",
-    !!doc.getElementById("token-input"),
-    "the rejected token left the dashboard on a data view"
-  );
-  eq(
-    "eval: the re-gate drops the stored token",
-    localStorage.getItem("orch-hub-token"),
-    null
-  );
-  localStorage.setItem("orch-hub-token", "secret-token"); // re-auth for the rest
-  route("GET", listPath, evalListPayload({}));
 
   // Doctor gating: the subsystem is enabled but the Layer 2 backend is
   // unconfigured (available:false). The semantic trigger is disabled with an
@@ -2389,18 +2226,17 @@ async function scenarioTaskEval() {
     doc.getElementById("view").textContent.indexOf("disabled") !== -1,
     "no disabled explanation"
   );
-  // Disabled task detail hides the entry link entirely — and asks for no
-  // evaluation history: the list route 404s while disabled, so the hint costs a
-  // disabled hub nothing and leaves its task view exactly as it was.
+  // Active task detail has no evaluation entry or list request in either mode;
+  // evaluation state belongs to the completed-task Run history surface.
   var listCallsBefore = countCalls("GET", listPath);
   await navigate("#/tasks/" + REPO + "/" + TASK);
   check(
-    "eval: task detail hides the link when disabled",
+    "eval: task detail has no evaluation entry",
     doc.querySelector(".eval-entry") === null,
-    "the eval entry link showed on a disabled hub"
+    "an evaluation entry rendered on active task detail"
   );
   eq(
-    "eval: a disabled hub fetches no evaluation history",
+    "eval: task detail fetches no evaluation history",
     countCalls("GET", listPath),
     listCallsBefore
   );
@@ -2630,11 +2466,11 @@ async function scenarioStaleRoute() {
 }
 
 // Run history: the per-task Evaluation action rides the est-vs-actual rollup row
-// inline (compact, right-aligned) rather than a standalone vertical row, and
-// activating it navigates WITHOUT collapsing the group — while the group header
-// still toggles. Also the eval-disabled branch: no action, no leftover row. The
-// default /api/history/runs stub is empty, so this scenario supplies one run to
-// get a real (repo, task) group with a rollup to place the action against.
+// with a compact three-state newest-evaluation light (grey / amber / green),
+// all batched into the history response. The exact state remains in the hover
+// title and screen-reader text. Activating the link navigates WITHOUT collapsing
+// the group, while the group header still toggles. Also the eval-disabled branch:
+// no action, no leftover row.
 async function scenarioRunHistory() {
   installRoutes({ waiting: false });
   var histRun = {
@@ -2687,10 +2523,36 @@ async function scenarioRunHistory() {
       sources: { "dev.model": "profile:standard" },
     },
   });
-  route("GET", "/api/history/runs", { runs: [histRun, legacyRun] });
+  var historyPayload = function (level, enabled) {
+    return {
+      runs: [histRun, legacyRun],
+      evaluation_enabled: enabled !== false,
+      evaluation_states:
+        enabled === false
+          ? []
+          : [
+              {
+                repo_name: REPO,
+                repo_path: "/repos/" + REPO,
+                task_id: TASK,
+                latest_evaluation_id:
+                  level === "none" ? null : "20260730T010000Z",
+                level: level,
+              },
+            ],
+    };
+  };
+  route("GET", "/api/history/runs", historyPayload("l1"));
+  var evalListUrl = "/api/repos/" + REPO + "/evaluations/" + TASK;
+  var evalListCallsBeforeHistory = countCalls("GET", evalListUrl);
 
   await navigate("#/runs");
   checkOutline("run history");
+  eq(
+    "run history: batched state issues no per-task evaluation request",
+    countCalls("GET", evalListUrl),
+    evalListCallsBeforeHistory
+  );
 
   // Both role selections are retained and summarized independently; a legacy
   // snapshot collapses to the one label its run-wide profile carried.
@@ -2750,6 +2612,66 @@ async function scenarioRunHistory() {
     evalLink.getAttribute("href"),
     "#/evaluations/" + REPO + "/" + TASK
   );
+  var evalDot = evalLink.querySelector(".eval-state-dot");
+  eq(
+    "run history: L1 uses the amber indicator class",
+    evalDot && evalDot.className,
+    "eval-state-dot l1"
+  );
+  eq(
+    "run history: the indicator itself carries no visible text",
+    evalDot && evalDot.textContent,
+    ""
+  );
+  eq(
+    "run history: L1 remains available as hover text",
+    evalLink.getAttribute("title"),
+    "Evaluation status: L1"
+  );
+  check(
+    "run history: L1 remains available to screen readers",
+    evalLink.getAttribute("aria-label") === "Evaluation, status: L1",
+    evalLink.getAttribute("aria-label")
+  );
+
+  // Re-entering the view consumes a new batch and advances the same group's
+  // light without any per-task request.
+  route("GET", "/api/history/runs", historyPayload("l1_l2"));
+  await navigate("#/overview");
+  await navigate("#/runs");
+  evalLink = doc.querySelector(".task-rollup .tg-eval");
+  evalDot = evalLink && evalLink.querySelector(".eval-state-dot");
+  eq(
+    "run history: both evaluation layers use the green indicator class",
+    evalDot && evalDot.className,
+    "eval-state-dot l1-l2"
+  );
+  eq(
+    "run history: L1 + L2 remains available as hover text",
+    evalLink && evalLink.getAttribute("title"),
+    "Evaluation status: L1 + L2"
+  );
+
+  route("GET", "/api/history/runs", historyPayload("none"));
+  await navigate("#/overview");
+  await navigate("#/runs");
+  evalLink = doc.querySelector(".task-rollup .tg-eval");
+  evalDot = evalLink && evalLink.querySelector(".eval-state-dot");
+  eq(
+    "run history: a task with no report uses the grey indicator class",
+    evalDot && evalDot.className,
+    "eval-state-dot none"
+  );
+  eq(
+    "run history: not-evaluated remains available as hover text",
+    evalLink && evalLink.getAttribute("title"),
+    "Evaluation status: not evaluated"
+  );
+  eq(
+    "run history: all three states still use no per-task evaluation request",
+    countCalls("GET", evalListUrl),
+    evalListCallsBeforeHistory
+  );
 
   // Non-toggle contract: activating the Evaluation link must NOT collapse the
   // group (the delegated header toggle matches only `.task-group-head`).
@@ -2792,9 +2714,9 @@ async function scenarioRunHistory() {
     "the eval action vanished on collapse"
   );
 
-  // Eval-disabled hub: the availability probe says off, so no action renders and
-  // no empty row is left behind — the rollup still paints its metrics.
-  route("GET", "/api/evaluation", { enabled: false });
+  // Eval-disabled hub: the same batch says off, so no action renders and no
+  // empty row is left behind — the rollup still paints its metrics.
+  route("GET", "/api/history/runs", historyPayload("none", false));
   await navigate("#/overview");
   await navigate("#/runs");
   check(

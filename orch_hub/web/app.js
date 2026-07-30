@@ -484,8 +484,8 @@
     let tab = "/repos";
     if (path.startsWith("/overview")) tab = "/overview";
     else if (path.startsWith("/tasks")) tab = "/tasks";
-    // Task evaluation is task-scoped and primarily reached from task detail, so
-    // it keeps the Tasks tab current (like task detail itself).
+    // Task evaluation is task-scoped and reached from a Run-history task group,
+    // but the sidecar itself stays under the Tasks information architecture.
     else if (path.startsWith("/evaluations")) tab = "/tasks";
     else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
@@ -2385,101 +2385,6 @@
     }
   }
 
-  // What the evaluation entry link's destination actually holds, read from ONE
-  // evaluation: the newest — the one renderTaskEval selects when the link
-  // carries no explicit id (`latest_evaluation_id`). Deliberately not a union
-  // across the task's evaluation history, which would advertise a semantic
-  // report the destination does not open on arrival. Resolving by the
-  // destination's own selection key also keeps a contradictory payload
-  // (`latest_evaluation_id` absent from the list) on the conservative side: it
-  // reads as "no report" rather than claiming one.
-  //
-  // The levels are really four, not three: `has_evidence` without
-  // `has_static_metrics` is a real persisted state (a pack generated, never
-  // scored). It folds into the lowest pill because the reader's question is "is
-  // there a report", and is distinguished in the link title instead — a fourth
-  // pill would split the glance into a taxonomy lesson.
-  //
-  // Returns null when the list is unavailable (fetch failed/refused), which
-  // renders the bare pre-hint link rather than a misleading "no report".
-  function evalEntryHint(list) {
-    if (!list) return null;
-    const evals = list.evaluations || [];
-    const latest =
-      evals.find((e) => e.evaluation_id === list.latest_evaluation_id) || null;
-    if (!latest || !latest.has_static_metrics)
-      return {
-        label: "no report",
-        kind: "", // neutral: nothing generated yet is not a failure
-        title:
-          latest && latest.has_evidence
-            ? "An evidence pack exists for this task, but no Layer 1 metrics have been computed from it yet."
-            : "No evaluation has been generated for this task yet.",
-      };
-    if (latest.has_semantic_report)
-      return {
-        label: "static + semantic",
-        kind: "ok",
-        title:
-          "The newest evaluation carries Layer 1 static metrics and a Layer 2 semantic report.",
-      };
-    return {
-      label: "static",
-      kind: "ok",
-      title:
-        "The newest evaluation carries Layer 1 static metrics; no Layer 2 semantic report yet.",
-    };
-  }
-
-  // The task-detail evaluation entry: the link, plus a labelled pill naming its
-  // level. A labelled pill, not the bare coloured dot the repo cards use — that
-  // treatment is reserved for run activity, and colour alone would not answer
-  // "is there a report" for a reader who cannot separate the hues.
-  //
-  // Split from its <p> so the hint can be filled in after the view has painted
-  // (paintEvalEntryHint) through the same renderer that produced the hintless
-  // link — one place decides the href, so the two paints cannot drift apart.
-  function evalEntryLink(repoName, taskId, list) {
-    const hint = evalEntryHint(list);
-    return (
-      `<a class="text-link" href="${evalHash(repoName, taskId)}"${
-        hint ? ` title="${escapeHtml(hint.title)}"` : ""
-      }>Task evaluation →</a>` +
-      (hint ? " " + badge(hint.label, hint.kind) : "")
-    );
-  }
-
-  function evalEntrySection(repoName, taskId, list) {
-    return `<p class="eval-entry">${evalEntryLink(repoName, taskId, list)}</p>`;
-  }
-
-  // Fill the entry's level pill in AFTER the task view has painted.
-  //
-  // The evaluation history is the one task-detail overlay whose payload merely
-  // decorates a control the view already shows, so it is the one overlay that
-  // must not be awaited before the paint: `api()` has no timeout, and a list
-  // read that never answers would otherwise hold the whole route on
-  // "Loading task…" — costing the task file itself for a decoration. The other
-  // overlays (run, readiness, intake, availability) decide what is rendered at
-  // all, so they stay pre-paint.
-  //
-  // Unawaited by its handler, like rerender()'s continuation and for the same
-  // reason: the handler returns after painting, so the router lands the view
-  // (title, focus) on schedule instead of waiting on a decoration. That makes
-  // staleness and failure this function's own to handle — `superseded` is the
-  // route guard captured at handler entry.
-  function paintEvalEntryHint(repoName, taskId, superseded) {
-    api(evalListPath(repoName, taskId))
-      .then((list) => {
-        if (superseded()) return; // a newer route owns the view
-        const host = view().querySelector(".eval-entry");
-        if (host) host.innerHTML = evalEntryLink(repoName, taskId, list);
-      })
-      // Any failure keeps the hintless link that is already on screen — a 401
-      // has already dropped the token and painted the login gate inside api().
-      .catch(() => {});
-  }
-
   async function renderTaskDetail(repoName, taskId) {
     const superseded = routeGuard();
     view().innerHTML = loadingView(taskId, "Loading task…");
@@ -2555,18 +2460,6 @@
       }
     }
 
-    // Best-effort: surface the task-evaluation entry only when the optional
-    // evaluation subsystem is enabled, so a disabled hub shows no dead control.
-    // A probe failure degrades to hiding the link — it must never block the task
-    // view (the sidecar is never load-bearing for run control).
-    let evalEnabled = false;
-    try {
-      const avail = await api("/api/evaluation");
-      evalEnabled = !!(avail && avail.enabled);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) throw err;
-    }
-
     if (superseded()) return; // a newer route owns the view
 
     const blockers =
@@ -2608,18 +2501,10 @@
         inflightIntake
       )}
       ${answerSection(run ? run.run_id : "", questions)}
-      ${evalEnabled ? evalEntrySection(repoName, detail.task_id, null) : ""}
       ${contentSection}`;
 
     wireAnswerForms();
     wireRunControls();
-
-    // The entry link's level hint, read and filled in after this paint. Asked
-    // only on an enabled hub — every evaluation route but availability 404s
-    // while disabled, so a disabled hub issues no extra request and its task
-    // view stays exactly what it was before the hint existed. Deliberately not
-    // awaited: see paintEvalEntryHint.
-    if (evalEnabled) paintEvalEntryHint(repoName, detail.task_id, superseded);
   }
 
   // ---- run history ----
@@ -2893,6 +2778,22 @@
       </li>`;
   }
 
+  // The newest evaluation opened by the group's link, expressed as one compact
+  // status light: grey for no report, amber for Layer 1, green for both layers.
+  // Visible words would crowd and misalign this already-dense summary row, so
+  // the exact state rides the link title and aria-label instead.
+  // A missing batch entry means its best-effort server read failed; keep the
+  // link but claim no state.
+  function historyEvalSignal(state) {
+    if (!state) return null;
+    if (state.level === "l1_l2")
+      return { label: "L1 + L2", kind: "l1-l2" };
+    if (state.level === "l1") return { label: "L1", kind: "l1" };
+    if (state.level === "none")
+      return { label: "not evaluated", kind: "none" };
+    return null;
+  }
+
   // One task group: a collapse-toggle header (task id + repo + run count), the
   // est-vs-actual rollup, then the group's run cards newest-first via the shared
   // card builder. The header is a real <button> (aria-expanded) so collapse is
@@ -2914,12 +2815,24 @@
     // header) never fires on an Evaluation click, so activating it navigates
     // without collapsing the group. It stays visible when the group collapses,
     // giving archived/completed tasks a reachable evaluation entry point.
+    const evalSignal = historyEvalSignal(historyEvalStates.get(key) || null);
+    const evalMarker = evalSignal
+      ? `<span class="eval-state-dot ${evalSignal.kind}" aria-hidden="true"></span>`
+      : "";
     const evalAction =
       historyEvalEnabled && group.repo_name && group.task_id
         ? `<a class="text-link tg-eval" href="${evalHash(
             group.repo_name,
             group.task_id
-          )}">Evaluation →</a>`
+          )}"${
+            evalSignal
+              ? ` title="Evaluation status: ${escapeHtml(
+                  evalSignal.label
+                )}" aria-label="Evaluation, status: ${escapeHtml(
+                  evalSignal.label
+                )}"`
+              : ""
+          }>${evalMarker}Evaluation →</a>`
         : "";
     return (
       `<section class="task-group${collapsed ? " collapsed" : ""}" ` +
@@ -2955,11 +2868,11 @@
   // Collapsed groups persist across filter re-renders (and view re-entry), keyed
   // by the stable group key; a stale key for a group no longer present is inert.
   const collapsedGroups = new Set();
-  // Whether the optional evaluation subsystem is enabled, probed once per run
-  // history load and read by taskGroupCard so the per-task Evaluation link only
-  // appears on an eval-enabled hub. It survives the filter re-renders (which do
-  // not refetch), like runFilters.
+  // Evaluation enablement + one newest-evaluation state per task group arrive
+  // in the same /api/history/runs response. Keeping the group-keyed map here
+  // lets filter-only re-renders reuse the batch with no network fan-out.
   let historyEvalEnabled = false;
+  let historyEvalStates = new Map();
 
   // Canonical run-state order for the state dropdown (live states first, then end
   // classifications); any unknown state (forward compat) sorts after, mirroring
@@ -3044,18 +2957,11 @@
     const superseded = routeGuard();
     view().innerHTML = loadingView("Run history", "Loading runs…");
     const data = await api("/api/history/runs");
-    // Best-effort: gate the per-task Evaluation link on the subsystem being
-    // enabled. A probe failure just hides the link — run history must render
-    // regardless (the evaluation sidecar is never load-bearing here).
-    let evalEnabled = false;
-    try {
-      const avail = await api("/api/evaluation");
-      evalEnabled = !!(avail && avail.enabled);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) throw err;
-    }
     if (superseded()) return; // a newer route owns the view
-    historyEvalEnabled = evalEnabled;
+    historyEvalEnabled = !!data.evaluation_enabled;
+    historyEvalStates = new Map(
+      (data.evaluation_states || []).map((state) => [groupKey(state), state])
+    );
     const runs = data.runs || [];
     if (!runs.length) {
       view().innerHTML =

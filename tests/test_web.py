@@ -2066,68 +2066,42 @@ def test_evaluation_history_picker_compares_by_evaluator_model():
     assert 'e.evaluator.schema_version ? "v" + e.evaluator.schema_version : ""' in body
 
 
-def test_task_detail_links_to_evaluation_only_when_enabled():
+def test_task_detail_has_no_evaluation_entry_or_fetch():
     body = app_js()
-    # The entry point is gated on a best-effort availability probe, so a disabled
-    # hub shows no dead control; the probe never blocks the task view.
-    assert "let evalEnabled = false;" in body
-    assert 'const avail = await api("/api/evaluation");' in body
-    assert 'class="eval-entry"' in body
-    assert "Task evaluation " in body
+    # Evaluation state belongs to completed-task Run history, not the active task
+    # control page. The detail renderer carries neither an entry nor a sidecar
+    # availability/list request.
+    task_detail = body[body.index("async function renderTaskDetail") :]
+    task_detail = task_detail[: task_detail.index("// ---- run history ----")]
+    assert "eval-entry" not in task_detail
+    assert "Task evaluation" not in task_detail
+    assert 'api("/api/evaluation")' not in task_detail
+    assert "evalListPath" not in task_detail
 
 
-def test_task_detail_evaluation_entry_states_its_level():
+def test_run_history_links_show_batched_three_level_evaluation_signal():
     body = app_js()
-    # The entry link carries a level pill so "is there a report" is answerable
-    # without navigating into the sidecar and back. The level comes from the ONE
-    # evaluation the link's destination lands on (`latest_evaluation_id`), never
-    # a union across history, which would advertise a report the destination does
-    # not open. Evidence without static metrics folds into the lowest pill and is
-    # distinguished in the link title instead of a fourth level.
-    assert "function evalEntryHint(list) {" in body
-    assert "evals.find((e) => e.evaluation_id === list.latest_evaluation_id)" in body
-    assert "!latest || !latest.has_static_metrics" in body
-    assert 'label: "no report"' in body
-    assert 'label: "static"' in body
-    assert 'label: "static + semantic"' in body
-    # Fetched best-effort and only on an enabled hub (every other evaluation
-    # route 404s while disabled); a failed read renders the pre-hint bare link
-    # rather than a misleading level.
-    assert (
-        "if (evalEnabled) paintEvalEntryHint(repoName, detail.task_id, superseded);"
-        in body
-    )
-    assert "if (!list) return null;" in body
-
-
-def test_task_detail_evaluation_hint_is_painted_after_the_view():
-    body = app_js()
-    # The hint decorates a control the view already shows, so it is read AFTER
-    # the paint and never awaited by the handler: api() has no timeout, and an
-    # unanswered list read awaited before the paint would hold the whole route on
-    # "Loading task…" — no task file, not even the plain link. The unawaited
-    # continuation therefore owns its own staleness guard and failure handling.
-    assert "function paintEvalEntryHint(repoName, taskId, superseded) {" in body
-    assert "api(evalListPath(repoName, taskId))\n      .then((list) => {" in body
-    assert "if (superseded()) return; // a newer route owns the view" in body
-    assert 'const host = view().querySelector(".eval-entry");' in body
-    assert "if (host) host.innerHTML = evalEntryLink(repoName, taskId, list);" in body
-    assert ".catch(() => {});" in body
-    # The base paint renders the same link through the same renderer, hintless.
-    assert "evalEntrySection(repoName, detail.task_id, null)" in body
-
-
-def test_run_history_links_to_evaluation_only_when_enabled():
-    body = app_js()
-    # Run-history task groups (where archived/completed tasks appear) get a
-    # per-task Evaluation link, gated on the same availability probe. It is handed
-    # to taskRollup so it rides the est-vs-actual summary row inline (compact,
-    # right-aligned) rather than a standalone vertical row, and stays outside the
-    # collapse <button> so it is a real navigable link that does not toggle.
+    # Run-history task groups get one of three compact signal colours from the
+    # history payload, with the exact state retained in title/screen-reader text
+    # and no per-group evaluation-list request or second availability probe.
     assert "let historyEvalEnabled = false;" in body
+    assert "let historyEvalStates = new Map();" in body
+    assert "data.evaluation_enabled" in body
+    assert "data.evaluation_states" in body
+    assert 'api("/api/history/runs")' in body
     assert "historyEvalEnabled && group.repo_name && group.task_id" in body
     assert 'class="text-link tg-eval"' in body
+    assert 'return { label: "not evaluated", kind: "none" }' in body
+    assert 'return { label: "L1", kind: "l1" }' in body
+    assert 'return { label: "L1 + L2", kind: "l1-l2" }' in body
+    assert 'class="eval-state-dot ${evalSignal.kind}"' in body
+    assert "Evaluation status:" in body
+    assert 'aria-label="Evaluation, status:' in body
     assert "Evaluation " in body
+    render_runs = body[body.index("async function renderRuns()") :]
+    render_runs = render_runs[: render_runs.index("// ---- run-scoped task view")]
+    assert 'api("/api/evaluation")' not in render_runs
+    assert "evalListPath" not in render_runs
     # Placement contract: the action goes into the rollup (a `.roll-top` flex row
     # with the metrics), not a separate `.tg-actions` row between button and
     # rollup.
@@ -2153,12 +2127,17 @@ def test_evaluation_styles_are_present():
         ".eval-copy",
         ".eval-warnings",
         ".eval-flags",
-        ".eval-entry",
         # The run-history Evaluation link now rides the rollup summary row,
         # right-aligned inline, instead of a standalone `.tg-actions` row.
         ".roll-top .tg-eval",
+        ".eval-state-dot",
+        ".eval-state-dot.l1",
+        ".eval-state-dot.l1-l2",
     ):
         assert selector in css, selector
+    assert "display: inline-flex" in css
+    assert "align-items: center" in css
+    assert ".eval-entry" not in css
 
 
 def test_semantic_layer_styles_are_present():

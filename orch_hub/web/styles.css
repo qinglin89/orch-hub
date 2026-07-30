@@ -1605,13 +1605,35 @@ code {
   word-break: break-word;
 }
 
-/* The run-history Evaluation link inline in the rollup row: pinned to the right
-   edge, and the shared .text-link top margin reset so it sits on the summary
-   baseline rather than dropping a row. */
+/* The run-history Evaluation link + compact state light inline in the rollup
+   row: pinned to the right edge, vertically centered as one flex item, and the
+   shared .text-link top margin reset so it never drops a row. */
 .roll-top .tg-eval {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   flex: 0 0 auto;
   margin-top: 0;
   margin-left: auto;
+}
+
+.eval-state-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.eval-state-dot.l1 {
+  background: var(--warn-fg);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--warn-fg) 55%, transparent);
+}
+
+.eval-state-dot.l1-l2 {
+  background: var(--ok-fg);
+  box-shadow: 0 0 7px color-mix(in srgb, var(--ok-fg) 55%, transparent);
 }
 
 /* Used more dev sessions than estimated: flag it, matching the over-budget cue. */
@@ -1621,13 +1643,6 @@ code {
 }
 
 /* ---- task evaluation (deterministic Layer 1 sidecar) ---- */
-
-/* The task-detail entry line: a plain secondary link, spaced clear of the
-   surrounding controls. (The run-history per-task Evaluation link is styled
-   inline in the rollup row above, via `.roll-top .tg-eval`.) */
-.eval-entry {
-  margin: 14px 0 0;
-}
 
 /* The static-vs-semantic disclaimer under the title: this is deterministic
    Layer 1, and semantic evaluation is a separate, future layer. */

@@ -45,8 +45,8 @@ subsystem is off:
 - every other evaluation route — list, detail, evidence/metrics/semantic-job
   generation/status, and the doctor — fails closed with `404`;
 - no `<data_dir>/evaluations` tree is created;
-- the dashboard hides the "Task evaluation" entry links on task detail and in
-  run history, and the evaluation route itself renders a short disabled note.
+- Run history hides its per-task `Evaluation →` actions and state lights, while
+  the evaluation route itself renders a short disabled note.
 
 This boundary is covered by tests
 (`tests/test_api.py::test_disabling_evaluation_leaves_core_run_control_intact`
@@ -141,9 +141,13 @@ backend is surfaced up front instead of as an error after a click.
 
 ## Using it from the dashboard
 
-Open a task's evaluation view from the "Task evaluation" link on task detail
-(active tasks) or the per-task "Evaluation" link in run history (archived tasks).
-The view:
+Open a task's evaluation view from the per-task `Evaluation →` link in Run
+history. The adjacent status light shows the newest evaluation at a glance:
+grey means not evaluated, amber means L1, and green means L1 + L2; the exact
+state is also exposed in the link's hover title and screen-reader label. These
+states are batched into `GET /api/history/runs`; the dashboard does not fan out
+one evaluation request per task group. Active Task detail deliberately has no
+evaluation entry. The evaluation view:
 
 - resolves the task active-then-archive, so a completed/archived task stays
   evaluable;
@@ -167,6 +171,7 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
+| `GET /api/history/runs` | Run history plus batched newest-evaluation state (`none`/`l1`/`l1_l2`) per distinct task group. |
 | `GET /api/repos/{repo}/evaluations/{task}` | List a task's evaluations (newest-first) + resolved target state. |
 | `GET /api/repos/{repo}/evaluations/{task}/{id}` | Read one evaluation's evidence/static/semantic/`report.md`. |
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |

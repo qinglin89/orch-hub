@@ -353,6 +353,62 @@ def _evaluation_summary(stored, evaluator: dict | None = None) -> dict:
     }
 
 
+def _history_evaluation_states(entries, evaluation: EvaluationService) -> list[dict]:
+    """Return one newest-evaluation level per distinct run-history task group.
+
+    The history client groups runs by ``(repo_path, task_id)``. Mirror that key
+    here, preserving the first-seen (newest-run) order and reading each task's
+    evaluation directory once even when it has several runs. This is the HTTP
+    batching boundary: one history response carries every visible group's state,
+    so the browser never fans out one evaluation request per card.
+
+    Evidence-only (or an empty history) is ``none`` because no report exists;
+    static metrics are ``l1``; static metrics plus a semantic report are
+    ``l1_l2``. A malformed/inaccessible task evaluation path is omitted
+    best-effort rather than making run history load-bearing on the optional
+    sidecar; the link can still render without a state marker.
+    """
+    if not evaluation.enabled:
+        return []
+
+    states: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for entry in entries:
+        record = entry.status.record
+        repo = record.managed_repo()
+        if repo is None or not record.task_id:
+            continue
+        key = (str(repo.path), record.task_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            stored = evaluation.list_evaluations(repo, record.task_id)
+        except (OSError, ValueError):
+            continue
+
+        latest = stored[0] if stored else None
+        level = "none"
+        if latest is not None and STATIC_METRICS_NAME in latest.artifacts:
+            level = (
+                "l1_l2"
+                if SEMANTIC_REPORT_NAME in latest.artifacts
+                else "l1"
+            )
+        states.append(
+            {
+                "repo_name": record.repo_name,
+                "repo_path": str(record.repo_path),
+                "task_id": record.task_id,
+                "latest_evaluation_id": (
+                    latest.evaluation_id if latest is not None else None
+                ),
+                "level": level,
+            }
+        )
+    return states
+
+
 def create_app(
     config: Config | None = None,
     *,
@@ -926,8 +982,20 @@ def create_app(
 
     @app.get("/api/history/runs")
     def list_run_history(limit: int = 50) -> dict:
-        """Return recent runs newest-first with persisted audit events."""
-        return {"runs": [entry.to_dict() for entry in manager.recent_runs(limit=limit)]}
+        """Return recent runs plus batched newest-evaluation state per task.
+
+        Evaluation state is folded into this one response rather than fetched
+        once per client-side task group. The optional subsystem's enablement is
+        explicit so the dashboard needs no second availability probe. Disabled
+        mode returns an empty state list; a per-task sidecar read failure omits
+        only that marker and never blanks run history.
+        """
+        entries = manager.recent_runs(limit=limit)
+        return {
+            "runs": [entry.to_dict() for entry in entries],
+            "evaluation_enabled": evaluation.enabled,
+            "evaluation_states": _history_evaluation_states(entries, evaluation),
+        }
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:

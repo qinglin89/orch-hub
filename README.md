@@ -233,10 +233,14 @@ Current views:
   an inline answer box that writes the answer via
   `POST /api/runs/{run_id}/escalations/{seq}/answer` (`"stop"` ends the run).
 - **Run history** — recent runs newest-first from `GET /api/history/runs`,
-  grouped per task with est-vs-actual rollups; each run carries its lifecycle
-  state, timestamps, and the authoritative `effective-config:` launch snapshot
-  (each role's profile, backend, resolved models/efforts, config/effective
-  revisions, provenance). Tap through to its log tail.
+  grouped per task with est-vs-actual rollups and a compact evaluation light
+  beside `Evaluation →` (grey = not evaluated, amber = L1, green = L1 + L2,
+  derived from the newest evaluation; the exact state remains available on
+  hover and to assistive technology). The states arrive batched in the history
+  response rather than through one request per task. Each run carries its lifecycle state,
+  timestamps, and the authoritative `effective-config:` launch snapshot (each
+  role's profile, backend, resolved models/efforts, config/effective revisions,
+  provenance). Tap through to its log tail.
 - **Log tail** — one run's orchestrator log. A finished run shows a bounded
   recent tail (`GET /api/runs/{run_id}/logs`); a live run follows the
   bearer-authenticated SSE stream (`GET /api/runs/{run_id}/logs/stream`) via
