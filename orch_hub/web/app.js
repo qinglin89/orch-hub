@@ -2986,6 +2986,14 @@
   // drift apart. The status line carries the scope the page-local filters do
   // not: which page this is and how many runs the whole history holds.
   //
+  // "Page N of M" is rendered verbatim because both count the windows of *this*
+  // traversal: a run persisted mid-walk makes the walk one window longer than the
+  // page grid, and the server counts that window rather than handing back a
+  // position past its own page count. The exception is a window with no runs —
+  // there `page` is deliberately one past everything that exists, so pairing the
+  // two would read as a contradiction; that state's own line names its position
+  // and the real page count, leaving the pager just the whole-history total.
+  //
   // Arrows are decorative (aria-hidden); the visually-hidden " page" makes each
   // accessible name "Previous page" / "Next page" while the visible label stays
   // short enough for a phone.
@@ -2993,6 +3001,9 @@
     const page = Number(data.page) || 1;
     const totalPages = Number(data.total_pages) || 0;
     const total = Number(data.total_runs) || 0;
+    const position = (data.runs || []).length
+      ? `Page ${page} of ${totalPages} · `
+      : "";
     const button = (id, label, arrow, enabled, leading) =>
       `<button id="${id}" class="pager-btn" type="button"${
         enabled ? "" : " disabled"
@@ -3002,7 +3013,7 @@
     return (
       `<nav class="pager" aria-label="Run history pages">` +
       button("rp-prev", "Previous", "←", !!data.prev_cursor, true) +
-      `<span class="pager-status">Page ${page} of ${totalPages} · ${total} run${
+      `<span class="pager-status">${position}${total} run${
         total === 1 ? "" : "s"
       } total</span>` +
       button("rp-next", "Next", "→", !!data.next_cursor, false) +

@@ -1329,6 +1329,12 @@ def test_history_runs_walks_persisted_runs_by_cursor(tmp_path, monkeypatch):
     assert rest["has_prev"] is True
     assert [run["run_id"] for run in back["runs"]] == newest_first[:1]
     assert (back["page"], back["has_prev"]) == (1, False)
+    # Both windows of that walk report a position inside their own page count,
+    # even though neither sits on the snapshot's runs-over-page-size grid: the
+    # count is of the traversal's windows, so a client can render "Page N of M"
+    # verbatim instead of guarding against N > M.
+    assert (rest["page"], rest["total_pages"]) == (2, 2)
+    assert (back["page"], back["total_pages"]) == (1, 2)
     # And its own Next closes the round trip on the window it came from.
     forward = client.get("/api/history/runs?cursor=" + back["next_cursor"]).json()
     assert [run["run_id"] for run in forward["runs"]] == newest_first[1:]

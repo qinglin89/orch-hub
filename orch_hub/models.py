@@ -491,12 +491,12 @@ class RunHistoryPage:
     empty-window state below.
 
     ``offset`` (not serialized) is where this window begins in the ordering *as
-    read for this response*, and ``page``/``total_pages`` derive from it for the
-    "Page N of M" indicator. Those are display data, not navigation inputs: with
-    history mutating between requests a position is a description, while the
-    cursor is the contract. A window past the last run — its cursor's
-    neighbourhood was pruned — carries no entries and reports ``total_pages + 1``,
-    so it reads as past the end rather than as a real page.
+    read for this response*, and ``page``/``total_pages`` count this traversal's
+    windows from it for the "Page N of M" indicator. Those are display data, not
+    navigation inputs: with history mutating between requests a position is a
+    description, while the cursor is the contract. A window past the last run —
+    its cursor's neighbourhood was pruned — carries no entries and reports
+    ``total_pages + 1``, so it reads as past the end rather than as a real page.
 
     ``total_runs`` counts every persisted run dir, not just this page: the pager's
     status line and the "page-local results are not global results" contract both
@@ -512,28 +512,58 @@ class RunHistoryPage:
 
     @property
     def page(self) -> int:
-        """1-based position of this window; ``total_pages + 1`` past the end.
+        """1-based position of this window in the traversal it belongs to.
 
-        Counted as *windows above this one, plus one* (a ceiling), not
+        Counted as *the windows above this one, plus one* (a ceiling), not
         ``offset // page_size``: a mutation mid-traversal can leave a window off
         the page grid — its anchor's position no longer a multiple of the size —
         and the floor form would then report page 1 for a window that does have a
         Previous, the indicator contradicting the controls beside it. The ceiling
         keeps "page 1" and "no Previous" the same fact.
 
-        An empty history is page 1 of 0 pages — the view has a position even
-        when there is nothing at it.
+        An empty window has no runs to be the page *of*, so this count lands at
+        ``total_pages + 1``: a position past everything that exists, which is what
+        makes the past-the-end state read as past the end. An empty history is
+        page 1 of 0 pages — the view has a position even with nothing at it.
         """
-        if self.offset >= self.total_runs:
-            return self.total_pages + 1
-        return -(-self.offset // self.page_size) + 1
+        return self._windows_above + 1
 
     @property
     def total_pages(self) -> int:
-        """Number of pages the current total spans; 0 for an empty history."""
+        """How many windows this traversal holds: above, this one, and below.
+
+        Windows of the walk, not ``total_runs / page_size`` slots of the
+        snapshot. The two agree for every traversal that sits on the snapshot's
+        page grid — which is every traversal nothing was persisted or pruned in
+        the middle of. When something was, the walk genuinely has a window the
+        grid does not: reverse windows realign from the bottom (each is bounded
+        *up* from a real run), so a run added mid-walk ends up alone in a ragged
+        partial window at the top. Counting the walk's own windows is what keeps
+        the pair honest there — ``1 <= page <= total_pages`` for every non-empty
+        window, from either direction — where a grid count would pair a
+        legitimate third window with "of 2".
+
+        An empty window counts for nothing, so an empty history is 0 pages and a
+        past-the-end window reports the pages that do exist (its ``page`` being
+        one past them).
+        """
+        return self._windows_above + (1 if self.entries else 0) + self._windows_below
+
+    @property
+    def _windows_above(self) -> int:
+        """Windows between the newest run and this one — the Previous chain."""
+        return self._window_count(self.offset)
+
+    @property
+    def _windows_below(self) -> int:
+        """Windows between this one and the oldest run — the Next chain."""
+        return self._window_count(self.total_runs - self.offset - len(self.entries))
+
+    def _window_count(self, runs: int) -> int:
+        """Windows that ``runs`` consecutive runs fill, the last one partial."""
         if self.page_size <= 0:
             return 0
-        return -(-self.total_runs // self.page_size)
+        return -(-max(0, runs) // self.page_size)
 
     @property
     def has_prev(self) -> bool:

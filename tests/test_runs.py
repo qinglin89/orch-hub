@@ -874,9 +874,9 @@ def test_history_page_steps_back_without_overlap_after_a_prune(tmp_path):
     assert not set(page_ids(back)) & set(page_ids(second))
     assert page_ids(back) + page_ids(second) == surviving
     # The prune moved the window off the page grid; the indicator must not then
-    # claim page 1 while offering a Previous.
-    assert (second.page, second.has_prev) == (2, True)
-    assert (back.page, back.has_prev) == (1, False)
+    # claim page 1 while offering a Previous, nor a position past its own count.
+    assert (second.page, second.total_pages, second.has_prev) == (2, 2, True)
+    assert (back.page, back.total_pages, back.has_prev) == (1, 2, False)
 
 
 def test_history_page_steps_back_without_overlap_after_an_insert(tmp_path):
@@ -902,10 +902,42 @@ def test_history_page_steps_back_without_overlap_after_an_insert(tmp_path):
     assert page_ids(top) + page_ids(back) + page_ids(second) == newest_first
     assert (top.page, top.has_prev) == (1, False)
     assert page_ids(manager.history_page(cursor=top.next_cursor)) == page_ids(back)
-    # The traversal genuinely has one window more than the snapshot's page grid,
-    # and the indicator says so rather than rounding it into the grid: `page`
-    # counts the windows above this one, so it stays consistent with Previous.
-    assert (second.page, second.total_pages, second.has_prev) == (3, 2, True)
+    # The traversal genuinely has one window more than the snapshot's page grid
+    # (the ragged top one), and every window of it agrees on that: `page` counts
+    # the windows above — so it never contradicts Previous — and `total_pages`
+    # counts the walk's windows rather than the grid's slots, so no window reports
+    # a position past its own page count.
+    assert [(p.page, p.total_pages) for p in (top, back, second)] == [
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    assert (second.has_prev, second.has_next) == (True, False)
+
+
+def test_history_page_indicator_counts_the_windows_of_its_own_traversal(tmp_path):
+    # Raggedness is not only a mutation story: any cursor between two grid slots
+    # (a stale one, a hand-typed one) starts a window that the snapshot's
+    # runs-over-page-size arithmetic has no slot for. What the metadata must never
+    # do is put the position outside its own count — "page 3 of 2" — so the count
+    # is of the windows this traversal holds, and every step of the walk agrees on
+    # it however the walk is entered.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 52)))
+
+    last = manager.history_page(cursor=newest_first[51])  # one run, off the grid
+    middle = manager.history_page(cursor=last.prev_cursor)
+    top = manager.history_page(cursor=middle.prev_cursor)
+
+    assert [(p.page, p.total_pages) for p in (top, middle, last)] == [
+        (1, 3),
+        (2, 3),
+        (3, 3),
+    ]
+    # And the three windows the count claims are exactly the history, once each.
+    assert page_ids(top) + page_ids(middle) + page_ids(last) == newest_first
+    assert (top.has_prev, last.has_next) == (False, False)
 
 
 def test_history_page_reads_only_its_own_windows_runs(tmp_path, monkeypatch):

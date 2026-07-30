@@ -2803,11 +2803,39 @@ async function scenarioRunHistoryPaging() {
     "newer:run-b": { runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)], page: 1 },
     "older:run-b": { runs: [mkRun("run-b", TASK), mkRun("run-a", TASK2)], page: 2 },
   };
+  // The same history after a fifth, newer run is persisted mid-walk. Reverse
+  // windows realign from the bottom, so `run-e` ends up alone in a ragged partial
+  // window at the top and the traversal is one window longer than the four-run
+  // grid: three, which is what `total_pages` counts (the grid's arithmetic would
+  // still say two, and this window would then call itself page 3 of 2). Real
+  // server payloads for that state, so the indicator is asserted against what the
+  // pager is actually handed.
+  var GROWN = {
+    "older:run-b": {
+      runs: [mkRun("run-b", TASK), mkRun("run-a", TASK2)],
+      page: 3,
+      prev_cursor: "newer:run-b",
+      next_cursor: null,
+    },
+    "newer:run-b": {
+      runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)],
+      page: 2,
+      prev_cursor: "newer:run-d",
+      next_cursor: "older:run-b",
+    },
+    "newer:run-d": {
+      runs: [mkRun("run-e", TASK)],
+      page: 1,
+      prev_cursor: null,
+      next_cursor: "older:run-d",
+    },
+  };
   var cursorOf = function (url) {
     var m = /[?&]cursor=([^&]*)/.exec(url);
     return m ? decodeURIComponent(m[1]) : ""; // "" = the client sent no cursor
   };
   var shrunk = false;
+  var grown = false;
   route("GET", "/api/history/runs", function (url) {
     var cursor = cursorOf(url);
     // The race the vanished-window state exists for: the newest window still
@@ -2826,6 +2854,16 @@ async function scenarioRunHistoryPaging() {
         prev_cursor: "newer:run-b",
         next_cursor: null,
       };
+    if (grown && GROWN[cursor])
+      return Object.assign({}, GROWN[cursor], {
+        page_size: 2,
+        total_runs: 5,
+        total_pages: 3, // windows of this walk, not runs/page_size slots
+        has_prev: !!GROWN[cursor].prev_cursor,
+        has_next: !!GROWN[cursor].next_cursor,
+        evaluation_enabled: false,
+        evaluation_states: [],
+      });
     var window = WINDOWS[cursor] || { runs: [], page: 3 };
     return {
       runs: window.runs,
@@ -2973,6 +3011,21 @@ async function scenarioRunHistoryPaging() {
     doc.getElementById("rp-next").disabled === true,
     "Next is offered past the end of history"
   );
+  // A window with no runs is a position past everything that exists, so the pager
+  // drops the "Page N of M" pairing there rather than rendering a page number past
+  // its own count; the state's own line carries the position and the real count.
+  eq(
+    "run history: a vanished page's pager states the total, not a page of it",
+    doc.querySelector(".pager-status").textContent.trim(),
+    "2 runs total"
+  );
+  check(
+    "run history: the vanished page names its position and the real page count",
+    doc.getElementById("view").textContent.indexOf(
+      "No runs on page 2. History holds 2 runs on 1 page."
+    ) !== -1,
+    doc.getElementById("view").textContent.slice(0, 200)
+  );
   pressEnter(doc.getElementById("rp-prev"));
   await flush();
   eq(
@@ -2980,6 +3033,57 @@ async function scenarioRunHistoryPaging() {
     cursorOf(lastCall("GET", "/api/history/runs").url),
     "newer:run-b"
   );
+
+  // A run persisted mid-walk (the insert race), now walked at the rendered
+  // boundary: the traversal has a window the page grid does not, and the indicator
+  // must stay a true "Page N of M" through every step of it rather than reporting
+  // a position past its own count.
+  shrunk = false;
+  grown = true;
+  pressEnter(doc.getElementById("rp-next"));
+  await flush();
+  eq(
+    "run history: a window off the page grid renders a coherent indicator",
+    doc.querySelector(".pager-status").textContent.trim(),
+    "Page 3 of 3 · 5 runs total"
+  );
+  check(
+    "run history: the ragged last window still offers Previous",
+    doc.getElementById("rp-prev").disabled === false,
+    "Previous is disabled on a window that has one"
+  );
+  check(
+    "run history: the ragged last window offers no Next",
+    doc.getElementById("rp-next").disabled === true,
+    "Next is offered past the last run"
+  );
+  pressEnter(doc.getElementById("rp-prev"));
+  await flush();
+  eq(
+    "run history: stepping back through the grown walk keeps the count",
+    doc.querySelector(".pager-status").textContent.trim(),
+    "Page 2 of 3 · 5 runs total"
+  );
+  pressEnter(doc.getElementById("rp-prev"));
+  await flush();
+  eq(
+    "run history: the grown walk's top window is its first page",
+    doc.querySelector(".pager-status").textContent.trim(),
+    "Page 1 of 3 · 5 runs total"
+  );
+  eq(
+    "run history: the run persisted mid-walk is the ragged top window",
+    doc.querySelectorAll(".card.run").map(function (c) {
+      return c.querySelector(".run-id").textContent;
+    }).join(","),
+    "run-e"
+  );
+  check(
+    "run history: the grown walk's first page offers no Previous",
+    doc.getElementById("rp-prev").disabled === true,
+    "Previous is offered above the newest run"
+  );
+  grown = false;
 
   // Empty history stays its own state: no pager, no filters, just the note.
   route("GET", "/api/history/runs", {
