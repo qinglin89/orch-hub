@@ -171,7 +171,7 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
-| `GET /api/history/runs` | Run history plus batched newest-evaluation state (`none`/`l1`/`l1_l2`) per distinct task group. |
+| `GET /api/history/runs` | One page of run history plus batched newest-evaluation state (`none`/`l1`/`l1_l2`) per distinct task group on that page. |
 | `GET /api/repos/{repo}/evaluations/{task}` | List a task's evaluations (newest-first) + resolved target state. |
 | `GET /api/repos/{repo}/evaluations/{task}/{id}` | Read one evaluation's evidence/static/semantic/`report.md`. |
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |

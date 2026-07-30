@@ -71,12 +71,15 @@ from .history import (
     read_events,
 )
 from .models import (
+    HISTORY_PAGE_MAX,
+    HISTORY_PAGE_SIZE,
     ManagedRepo,
     Question,
     ReadinessReport,
     RepoTaskInventory,
     RunEvent,
     RunHistoryEntry,
+    RunHistoryPage,
     RunRecord,
     RunStatus,
     SessionEst,
@@ -602,9 +605,10 @@ class RunManager:
                 for run_dir in self._run_dirs()
             ]
 
-    def recent_runs(self, limit: int = 50) -> list[RunHistoryEntry]:
-        """Return recent runs newest-first with audit events, session summary,
-        and each run task's session estimate.
+    def recent_runs(
+        self, limit: int = HISTORY_PAGE_SIZE, page: int = 1
+    ) -> RunHistoryPage:
+        """Return one newest-first page of run history plus the pager's totals.
 
         Each entry embeds the run's persisted per-session context snapshot so the
         history view renders context strips without a per-run follow-up request,
@@ -615,12 +619,31 @@ class RunManager:
         per ``(repo, task)`` within the call — a task with many runs reads its
         frontmatter once — and fully isolated so a target-repo read failure
         degrades that task's est to unknown without touching history.
+
+        Paging is positional over the same stable ordering the whole class uses
+        (``_run_dirs`` sorts by the timestamped run id), reversed to newest-first:
+        page N is the window ``[(N-1)*size, N*size)``, so adjacent pages of one
+        snapshot neither duplicate nor skip a run. ``total_runs`` counts every
+        persisted run dir so a client can size the pager without walking it.
+
+        Only the page's runs are read. That bounds a history request to a fixed
+        cost as history grows — which is the point of paging — and it means this
+        read is no longer an every-run refresh sweep: an off-page (older) run's
+        live->ended transition is observed by :meth:`list_runs` (the documented
+        rescan/reattach path, which ``GET /api/runs`` drives) or when that run's
+        page is viewed, not here. Nothing depends on history for that: the end
+        observation, its event, its snapshots, and its notification stay exactly
+        once-per-run wherever they are first seen.
         """
-        bounded = max(0, min(limit, 200))
+        page_size = max(0, min(limit, HISTORY_PAGE_MAX))
+        index = max(1, page)
         with self._lock:
+            run_dirs = self._run_dirs()
+            start = (index - 1) * page_size
+            window = run_dirs[::-1][start : start + page_size] if page_size else []
             entries: list[RunHistoryEntry] = []
             est_cache: dict[tuple[str, str], SessionEst | None] = {}
-            for run_dir in reversed(self._run_dirs()):
+            for run_dir in window:
                 record = self._refresh(run_dir, _load_record(run_dir))
                 entries.append(
                     RunHistoryEntry(
@@ -631,7 +654,12 @@ class RunManager:
                         effective_config=self._history_effective_config(run_dir),
                     )
                 )
-            return entries[:bounded]
+            return RunHistoryPage(
+                entries=tuple(entries),
+                page=index,
+                page_size=page_size,
+                total_runs=len(run_dirs),
+            )
 
     @staticmethod
     def _history_session_est(

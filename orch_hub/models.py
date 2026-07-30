@@ -451,6 +451,70 @@ class RunHistoryEntry:
         }
 
 
+HISTORY_PAGE_SIZE = 50
+"""Run-history page size: how many runs one ``GET /api/history/runs`` page holds.
+
+The dashboard's Run history always pages at this size; the route's ``limit``
+exists only so a summary caller (the Overview's recent-outcomes strip) can ask
+for a smaller window of the same newest-first ordering."""
+
+HISTORY_PAGE_MAX = 200
+"""Upper clamp on a caller-supplied run-history page size."""
+
+
+@dataclass(frozen=True)
+class RunHistoryPage:
+    """One page of run history: its entries plus the totals a pager needs.
+
+    Pagination is positional over the manager's stable newest-first run ordering
+    (run dirs sort by their timestamped id), so page N is always the same window
+    for a given set of persisted runs — no cursor state and no duplicate or
+    skipped run between two adjacent pages of one snapshot.
+
+    ``page`` is 1-based and echoes the *normalized* request (below 1 clamps to 1),
+    so a client can trust it as the page it is looking at. ``total_runs`` counts
+    every persisted run dir, not just this page — the pager's scope line and the
+    "page-local results are not global results" contract both depend on it.
+    A page past the last one is not an error: it carries no entries, reports
+    ``has_next: False`` and ``has_prev: True``, and so navigates back.
+    """
+
+    entries: tuple[RunHistoryEntry, ...] = ()
+    page: int = 1
+    page_size: int = HISTORY_PAGE_SIZE
+    total_runs: int = 0
+
+    @property
+    def total_pages(self) -> int:
+        """Number of pages the current total spans; 0 for an empty history.
+
+        A zero page size (``limit=0``, a caller explicitly asking for nothing)
+        spans no pages rather than dividing by zero.
+        """
+        if self.page_size <= 0:
+            return 0
+        return -(-self.total_runs // self.page_size)
+
+    @property
+    def has_prev(self) -> bool:
+        return self.page > 1
+
+    @property
+    def has_next(self) -> bool:
+        return self.page < self.total_pages
+
+    def to_dict(self) -> dict:
+        return {
+            "runs": [entry.to_dict() for entry in self.entries],
+            "page": self.page,
+            "page_size": self.page_size,
+            "total_runs": self.total_runs,
+            "total_pages": self.total_pages,
+            "has_prev": self.has_prev,
+            "has_next": self.has_next,
+        }
+
+
 CONTEXT_BUDGET_TOKENS = 200_000
 """Soft display reference for per-session context: one effective context window
 (~200k tokens, the protocol's ``session-est`` sizing). It is a line the dashboard

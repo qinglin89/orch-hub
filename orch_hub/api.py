@@ -63,7 +63,13 @@ from .intake import (
 )
 from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
-from .models import LaunchSpec, ManagedRepo, repos_payload, tasks_payload
+from .models import (
+    HISTORY_PAGE_SIZE,
+    LaunchSpec,
+    ManagedRepo,
+    repos_payload,
+    tasks_payload,
+)
 from .monitor import RunMonitor
 from .notifications import build_notifier
 from .orch_config import (
@@ -981,20 +987,29 @@ def create_app(
         return {"runs": [status.to_dict() for status in manager.list_runs()]}
 
     @app.get("/api/history/runs")
-    def list_run_history(limit: int = 50) -> dict:
-        """Return recent runs plus batched newest-evaluation state per task.
+    def list_run_history(limit: int = HISTORY_PAGE_SIZE, page: int = 1) -> dict:
+        """Return one page of run history plus batched newest-evaluation state.
+
+        ``page`` walks the manager's stable newest-first ordering in ``limit``-run
+        windows, so every persisted run is reachable without the response growing
+        with history. The payload carries its own pagination metadata
+        (``page``/``page_size``/``total_runs``/``total_pages``/``has_prev``/
+        ``has_next``) so a client never has to infer boundaries from a short page.
 
         Evaluation state is folded into this one response rather than fetched
-        once per client-side task group. The optional subsystem's enablement is
-        explicit so the dashboard needs no second availability probe. Disabled
-        mode returns an empty state list; a per-task sidecar read failure omits
-        only that marker and never blanks run history.
+        once per client-side task group, and covers exactly the task groups on
+        the returned page. The optional subsystem's enablement is explicit so the
+        dashboard needs no second availability probe. Disabled mode returns an
+        empty state list; a per-task sidecar read failure omits only that marker
+        and never blanks run history.
         """
-        entries = manager.recent_runs(limit=limit)
+        result = manager.recent_runs(limit=limit, page=page)
         return {
-            "runs": [entry.to_dict() for entry in entries],
+            **result.to_dict(),
             "evaluation_enabled": evaluation.enabled,
-            "evaluation_states": _history_evaluation_states(entries, evaluation),
+            "evaluation_states": _history_evaluation_states(
+                result.entries, evaluation
+            ),
         }
 
     @app.get("/api/runs/{run_id}")
