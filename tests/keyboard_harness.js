@@ -2791,15 +2791,17 @@ async function scenarioRunHistoryPaging() {
       session_est: { current: 1, total: 2 },
     };
   };
-  // Four runs over two windows of two, keyed the way the server anchors them: by
-  // the run id each window starts at ("" = no cursor, i.e. the newest). The FIRST
-  // task spans both windows (so an expansion has a same-key group to survive
-  // onto), the second appears only on the older one (so a first sighting
-  // mid-paging still starts collapsed).
+  // Four runs over two windows of two, keyed by the cursors the server hands
+  // back: an anchor run id plus the direction it is read in ("" = no cursor, i.e.
+  // the newest). Going older starts a window at its anchor; going newer ends one
+  // just above it — which is why stepping back to page 1 is `newer:run-b` rather
+  // than page 1's own start. The FIRST task spans both windows (so an expansion
+  // has a same-key group to survive onto), the second appears only on the older
+  // one (so a first sighting mid-paging still starts collapsed).
   var WINDOWS = {
     "": { runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)], page: 1 },
-    "run-d": { runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)], page: 1 },
-    "run-b": { runs: [mkRun("run-b", TASK), mkRun("run-a", TASK2)], page: 2 },
+    "newer:run-b": { runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)], page: 1 },
+    "older:run-b": { runs: [mkRun("run-b", TASK), mkRun("run-a", TASK2)], page: 2 },
   };
   var cursorOf = function (url) {
     var m = /[?&]cursor=([^&]*)/.exec(url);
@@ -2812,7 +2814,7 @@ async function scenarioRunHistoryPaging() {
     // advertised an older one, but by the time Next is pressed those run dirs
     // are pruned, so the anchored window comes back empty — with Previous still
     // anchored on the last window that does exist.
-    if (shrunk && cursor === "run-b")
+    if (shrunk && cursor === "older:run-b")
       return {
         runs: [],
         page: 2,
@@ -2821,7 +2823,7 @@ async function scenarioRunHistoryPaging() {
         total_pages: 1,
         has_prev: true,
         has_next: false,
-        prev_cursor: "run-d",
+        prev_cursor: "newer:run-b",
         next_cursor: null,
       };
     var window = WINDOWS[cursor] || { runs: [], page: 3 };
@@ -2833,8 +2835,8 @@ async function scenarioRunHistoryPaging() {
       total_pages: 2,
       has_prev: window.page > 1,
       has_next: window.page < 2,
-      prev_cursor: window.page > 1 ? "run-d" : null,
-      next_cursor: window.page < 2 ? "run-b" : null,
+      prev_cursor: window.page > 1 ? "newer:run-b" : null,
+      next_cursor: window.page < 2 ? "older:run-b" : null,
       evaluation_enabled: false,
       evaluation_states: [],
     };
@@ -2902,7 +2904,7 @@ async function scenarioRunHistoryPaging() {
   eq(
     "run history: Next requests the window the server anchored for it",
     cursorOf(lastCall("GET", "/api/history/runs").url),
-    "run-b"
+    "older:run-b"
   );
   eq(
     "run history: page 2 renders the rest of the history",
@@ -2939,13 +2941,15 @@ async function scenarioRunHistoryPaging() {
     "a newly encountered group rendered expanded"
   );
 
-  // Previous walks back to the window it came from, again at the server's anchor.
+  // Previous walks back to the window it came from, again at the server's anchor
+  // — a newer-direction cursor, so the window it selects cannot include the run
+  // it was handed however history mutated in between.
   pressEnter(doc.getElementById("rp-prev"));
   await flush();
   eq(
     "run history: Previous requests the preceding window's anchor",
     cursorOf(lastCall("GET", "/api/history/runs").url),
-    "run-d"
+    "newer:run-b"
   );
   check(
     "run history: Previous lands back on the first page",
@@ -2974,7 +2978,7 @@ async function scenarioRunHistoryPaging() {
   eq(
     "run history: Previous from a vanished page lands on the last real window",
     cursorOf(lastCall("GET", "/api/history/runs").url),
-    "run-d"
+    "newer:run-b"
   );
 
   // Empty history stays its own state: no pager, no filters, just the note.

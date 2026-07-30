@@ -1311,6 +1311,7 @@ def test_history_runs_walks_persisted_runs_by_cursor(tmp_path, monkeypatch):
 
     first = client.get("/api/history/runs").json()
     rest = client.get("/api/history/runs?cursor=" + newest_first[1]).json()
+    back = client.get("/api/history/runs?cursor=" + rest["prev_cursor"]).json()
 
     # No cursor starts at the newest run; a cursor anchors the window at the run
     # it names, so a step is a position in the ordering rather than an offset
@@ -1322,9 +1323,15 @@ def test_history_runs_walks_persisted_runs_by_cursor(tmp_path, monkeypatch):
     assert (first["total_runs"], rest["total_runs"]) == (3, 3)
     assert (first["prev_cursor"], first["next_cursor"]) == (None, None)
     assert (first["has_prev"], first["has_next"]) == (False, False)
-    # Off the newest window, Previous is anchored back at the newest run.
-    assert rest["prev_cursor"] == newest_first[0]
+    # Off the newest window the response carries a Previous cursor, which the
+    # client echoes back: it resolves to the runs strictly newer than this window,
+    # so a round trip never re-serves a run the pager was already showing.
     assert rest["has_prev"] is True
+    assert [run["run_id"] for run in back["runs"]] == newest_first[:1]
+    assert (back["page"], back["has_prev"]) == (1, False)
+    # And its own Next closes the round trip on the window it came from.
+    forward = client.get("/api/history/runs?cursor=" + back["next_cursor"]).json()
+    assert [run["run_id"] for run in forward["runs"]] == newest_first[1:]
 
 
 def test_history_runs_page_size_is_fixed_and_a_summary_is_not_a_page(
@@ -1382,13 +1389,15 @@ def test_history_runs_cursor_past_the_end_is_empty_and_navigable(
 
     # A window whose runs are gone (pruned between two requests, or a hand-typed
     # cursor) is a 200 with an empty window and honest totals — not an error and
-    # not a silent wrap — anchoring Previous on the last page that does exist.
+    # not a silent wrap — and its Previous carries a cursor back to the last runs
+    # that do exist, so the pager is never a dead end.
     assert beyond.status_code == 200
     payload = beyond.json()
     assert payload["runs"] == []
     assert (payload["page"], payload["total_pages"]) == (2, 1)
     assert (payload["has_prev"], payload["has_next"]) == (True, False)
-    assert payload["prev_cursor"] == newest_first[0]
+    back = client.get("/api/history/runs?cursor=" + payload["prev_cursor"]).json()
+    assert [run["run_id"] for run in back["runs"]] == newest_first
 
 
 def test_history_runs_batches_evaluation_state_for_the_returned_window_only(

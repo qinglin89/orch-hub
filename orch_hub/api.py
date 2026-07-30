@@ -993,7 +993,9 @@ def create_app(
           by echoing ``cursor`` back from the response's
           ``prev_cursor``/``next_cursor``, so every persisted run is reachable
           without the response growing with history and without a run persisted
-          or pruned mid-traversal shifting a window. The page size is not a query
+          or pruned mid-traversal shifting a window in either direction. A cursor
+          is opaque — it carries the anchor *and* the direction, so a client
+          echoes one rather than constructing it. The page size is not a query
           parameter: it is the traversal's invariant, not a caller preference.
           The payload carries its own pagination metadata
           (``page``/``page_size``/``total_runs``/``total_pages``/``has_prev``/

@@ -838,15 +838,74 @@ def test_history_page_window_survives_runs_pruned_mid_walk(tmp_path):
     manager, _, _ = make_manager(tmp_path)
     newest_first = list(reversed(seed_ended_runs(manager, repo, 52)))
     first = manager.history_page()
-    assert first.next_cursor == newest_first[50]
+    anchor = newest_first[50]  # the next window's first run
+    assert first.next_cursor == runs_module._cursor(runs_module._OLDER, anchor)
 
     shutil.rmtree(manager.runs_dir / newest_first[0])  # a run on page 1
 
     assert page_ids(manager.history_page(cursor=first.next_cursor)) == newest_first[50:]
 
-    shutil.rmtree(manager.runs_dir / first.next_cursor)  # the anchor itself
+    shutil.rmtree(manager.runs_dir / anchor)  # the anchor itself
 
     assert page_ids(manager.history_page(cursor=first.next_cursor)) == newest_first[51:]
+
+
+def test_history_page_steps_back_without_overlap_after_a_prune(tmp_path):
+    # Why Previous is a direction, not a position: derived from the current
+    # window's offset, a prune above that window pulls the previous window down
+    # over it, so stepping back re-served a run the pager was already showing.
+    # A newer-direction cursor is anchored on this window's own first run, so the
+    # window above is whatever is strictly newer than it — never itself.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 52)))
+    first = manager.history_page()
+
+    shutil.rmtree(manager.runs_dir / newest_first[10])  # a run on page 1
+    surviving = [run_id for run_id in newest_first if run_id != newest_first[10]]
+
+    second = manager.history_page(cursor=first.next_cursor)
+    back = manager.history_page(cursor=second.prev_cursor)
+
+    assert page_ids(second) == newest_first[50:]
+    # Stepping back lands on the surviving page 1 — one run shorter, no run of the
+    # window it came from, and the two windows still cover the history exactly.
+    assert page_ids(back) == [r for r in newest_first[:50] if r != newest_first[10]]
+    assert not set(page_ids(back)) & set(page_ids(second))
+    assert page_ids(back) + page_ids(second) == surviving
+    # The prune moved the window off the page grid; the indicator must not then
+    # claim page 1 while offering a Previous.
+    assert (second.page, second.has_prev) == (2, True)
+    assert (back.page, back.has_prev) == (1, False)
+
+
+def test_history_page_steps_back_without_overlap_after_an_insert(tmp_path):
+    # The insertion mirror: a positional Previous offered an extra step above the
+    # window it came from that re-served most of it. Anchored on a real run, each
+    # step back is the bounded set of runs strictly newer than the last, so the
+    # walk stays a partition — the runs added mid-walk are the ragged top window.
+    repo = make_repo(tmp_path)
+    manager, _, _ = make_manager(tmp_path)
+    newest_first = list(reversed(seed_ended_runs(manager, repo, 52)))
+    first = manager.history_page()
+
+    added = seed_ended_runs(manager, repo, 1, first=500)  # newer, above page 1
+    newest_first = added + newest_first
+
+    second = manager.history_page(cursor=first.next_cursor)
+    back = manager.history_page(cursor=second.prev_cursor)
+    top = manager.history_page(cursor=back.prev_cursor)
+
+    assert page_ids(second) == newest_first[51:]
+    assert page_ids(back) == newest_first[1:51]
+    assert page_ids(top) == added  # the run persisted mid-walk, reachable, once
+    assert page_ids(top) + page_ids(back) + page_ids(second) == newest_first
+    assert (top.page, top.has_prev) == (1, False)
+    assert page_ids(manager.history_page(cursor=top.next_cursor)) == page_ids(back)
+    # The traversal genuinely has one window more than the snapshot's page grid,
+    # and the indicator says so rather than rounding it into the grid: `page`
+    # counts the windows above this one, so it stays consistent with Previous.
+    assert (second.page, second.total_pages, second.has_prev) == (3, 2, True)
 
 
 def test_history_page_reads_only_its_own_windows_runs(tmp_path, monkeypatch):
@@ -894,12 +953,13 @@ def test_history_page_past_the_end_stays_navigable(tmp_path):
     page = manager.history_page(cursor="0")  # below every run id
 
     # Past the end is not an error: an empty window that still reports the real
-    # totals and anchors Previous on the last page that does exist, so a client
-    # navigates back rather than stranding where its runs used to be.
+    # totals and anchors Previous on the last runs that do exist, so a client
+    # navigates back rather than stranding where its runs used to be. There is no
+    # entry to anchor on, so the requested anchor names that edge itself.
     assert page.entries == ()
     assert (page.page, page.total_runs, page.total_pages) == (2, 3, 1)
     assert page.next_cursor is None
-    assert page.prev_cursor == newest_first[0]
+    assert page_ids(manager.history_page(cursor=page.prev_cursor)) == newest_first
 
 
 def test_history_page_resolves_an_unknown_cursor_by_position(tmp_path):
@@ -907,16 +967,22 @@ def test_history_page_resolves_an_unknown_cursor_by_position(tmp_path):
     # (a stale id from a pruned newest run) starts at the newest run instead of
     # erroring or emptying the view. It is only ever *compared*, never used to
     # reach the filesystem, so a path-shaped one is just a string below every id.
+    # An unprefixed value keeps meaning what a bare run id meant — the older
+    # direction — so a hand-typed cursor stays usable.
     repo = make_repo(tmp_path)
     manager, _, _ = make_manager(tmp_path)
     newest_first = list(reversed(seed_ended_runs(manager, repo, 3)))
 
     above = manager.history_page(cursor="9999-later-than-every-run")
     escaping = manager.history_page(cursor="../../etc")
+    bare = manager.history_page(cursor=newest_first[1])
 
     assert page_ids(above) == newest_first
     assert (above.page, above.has_prev) == (1, False)
     assert (escaping.entries, escaping.total_runs) == ((), 3)
+    assert page_ids(bare) == newest_first[1:]
+    prefixed = runs_module._cursor(runs_module._OLDER, newest_first[1])
+    assert page_ids(bare) == page_ids(manager.history_page(cursor=prefixed))
 
 
 def test_recent_runs_summary_is_bounded_and_not_a_page(tmp_path):

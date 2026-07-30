@@ -289,22 +289,53 @@ def _slug(value: str) -> str:
     return _SLUG.sub("-", value).strip("-") or "x"
 
 
-def _cursor_offset(newest_first: list[Path], cursor: str | None) -> int:
-    """Index of the first run at or below ``cursor`` in newest-first order.
+# The two directions a run-history cursor can name. A cursor carries its
+# direction because a window's two neighbours are not symmetric: the older one
+# starts *at* the run the cursor names (inclusive, so nothing falls between two
+# windows), while the newer one ends just *above* it (exclusive, so it cannot
+# repeat the run it was handed). Encoding the direction is what keeps both
+# neighbours anchored on a real run id: a direction-free cursor can only express
+# the newer window as a position, which any run persisted or pruned above it
+# moves. Cursors are opaque to clients — they echo back what a response carried
+# and never build one.
+_OLDER = "older"
+_NEWER = "newer"
+
+
+def _cursor(direction: str, run_id: str) -> str:
+    """Build the cursor a response hands back for one adjacent window."""
+    return f"{direction}:{run_id}"
+
+
+def _parse_cursor(cursor: str | None) -> tuple[str, str]:
+    """Split a cursor into its direction and its run-id anchor.
+
+    An unprefixed value is read as an older-direction anchor — what a bare run id
+    already meant — so a hand-typed cursor keeps working and no client-supplied
+    string can fail to parse. Run ids carry no ``:``, so the prefix is
+    unambiguous.
+    """
+    for direction in (_OLDER, _NEWER):
+        prefix = f"{direction}:"
+        if cursor and cursor.startswith(prefix):
+            return direction, cursor[len(prefix) :]
+    return _OLDER, cursor or ""
+
+
+def _anchor_offset(newest_first: list[Path], anchor: str) -> int:
+    """Index of the first run at or below ``anchor`` in newest-first order.
 
     The anchor is resolved by *comparing* run ids, never by locating a directory:
-    the cursor is client-supplied, so it must not reach the filesystem, and the
-    run it names may already have been pruned. ``<=`` makes it an inclusive
-    window start, so the id one page hands to the next is exactly the next
-    window's first run and nothing falls between two windows. No cursor (or an
-    id above every run) starts at the newest; one below every run returns the
-    length — an empty window past the end, which the pager renders as a state
-    rather than an error.
+    it is client-supplied, so it must not reach the filesystem, and the run it
+    names may already have been pruned — in which case this is the next run below
+    it, which is what keeps a stale cursor navigable. An empty anchor (no cursor)
+    is the newest edge, 0; an anchor below every run returns the length — one past
+    the end, which the pager renders as a state rather than an error.
     """
-    if not cursor:
+    if not anchor:
         return 0
     for offset, run_dir in enumerate(newest_first):
-        if run_dir.name <= cursor:
+        if run_dir.name <= anchor:
             return offset
     return len(newest_first)
 
@@ -644,19 +675,24 @@ class RunManager:
         """Return one fixed-size newest-first page of run history and its cursors.
 
         Ordering is the stable one the whole class uses (``_run_dirs`` sorts by
-        the timestamped run id), reversed to newest-first. A page starts at the
-        newest run at or below ``cursor`` (``None`` = the newest run) and holds
-        :data:`HISTORY_PAGE_SIZE` runs; the response carries the cursors of the
-        adjacent windows, which is how a client steps.
+        the timestamped run id), reversed to newest-first. ``cursor`` (``None`` =
+        the newest runs) names a run id *and* a direction: an older-direction
+        cursor starts the window at the newest run at or below that id, a
+        newer-direction one ends it just above. Either way the window holds at most
+        :data:`HISTORY_PAGE_SIZE` runs, and the response carries the cursor for
+        each adjacent window — which is how a client steps.
 
-        Anchoring on a run id — rather than an offset into a list re-read on every
-        request — is what makes the traversal stable while history keeps growing
-        underneath it. Positional paging would shift every window below a run
-        persisted since the last request (page 2 repeating page 1's last run, and
-        with enough insertions older runs never reachable) and above a pruned one
-        (page 2 skipping its own first run). Here the anchor is a value in the
-        ordering, so neither mutation moves it: only ``page``/``total_*``, which
-        are descriptions of the current snapshot, change.
+        Anchoring *both* neighbours on a real run id — rather than on an offset
+        into a list re-read on every request — is what makes the traversal stable
+        in both directions while history mutates underneath it. Positional paging
+        shifts every window below a run persisted since the last request (the next
+        page repeating the previous one's last run, and with enough insertions
+        older runs never reachable) and above a pruned one (the next page skipping
+        its own first run); deriving *Previous* from the current window's position
+        has the same failure mirrored — after a prune above the window, stepping
+        back returns a window overlapping the one it came from. Here every step is
+        a value in the ordering, so no mutation moves it: only ``page``/
+        ``total_*``, which describe the snapshot just read, change.
 
         Only the page's runs are read. That bounds a history request to a fixed
         cost as history grows — which is the point of paging — and it means this
@@ -670,20 +706,39 @@ class RunManager:
         size = HISTORY_PAGE_SIZE
         with self._lock:
             newest_first = self._run_dirs()[::-1]
-            offset = _cursor_offset(newest_first, cursor)
-            end = offset + size
+            total = len(newest_first)
+            direction, anchor = _parse_cursor(cursor)
+            at = _anchor_offset(newest_first, anchor)
+            # Inclusive start going older, exclusive end going newer: the two
+            # halves of "no run falls between two adjacent windows, and no run is
+            # in both".
+            start, stop = (
+                (max(0, at - size), at) if direction == _NEWER else (at, at + size)
+            )
+            entries = tuple(self._history_entries(newest_first[start:stop]))
+            end = start + len(entries)
             return RunHistoryPage(
-                entries=tuple(self._history_entries(newest_first[offset:end])),
-                offset=offset,
+                entries=entries,
+                offset=start,
                 page_size=size,
-                total_runs=len(newest_first),
+                total_runs=total,
                 # Boundaries are the absence of an adjacent run, never a count:
-                # a client is told where it can go, not asked to compute it.
+                # a client is told where it can go, not asked to compute it. Going
+                # back anchors on this window's own first run — the runs strictly
+                # newer than it are the window above, whatever mutated in between.
+                # With no entry to anchor on (a window past the end) the requested
+                # anchor still names that far edge, so Previous lands on the last
+                # runs that do exist instead of dead-ending.
                 prev_cursor=(
-                    newest_first[max(0, offset - size)].name if offset > 0 else None
+                    _cursor(
+                        _NEWER,
+                        entries[0].status.record.run_id if entries else anchor,
+                    )
+                    if start > 0
+                    else None
                 ),
                 next_cursor=(
-                    newest_first[end].name if end < len(newest_first) else None
+                    _cursor(_OLDER, newest_first[end].name) if end < total else None
                 ),
             )
 

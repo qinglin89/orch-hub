@@ -471,19 +471,24 @@ caller-chosen size here can never become a page size."""
 class RunHistoryPage:
     """One cursor-anchored page of run history: entries plus what a pager needs.
 
-    Paging is anchored, not positional. A page starts at the newest run at or
-    below its cursor (a run id) in the manager's stable newest-first ordering and
-    hands back the cursors of the adjacent windows. Because a step is expressed
-    as a real run id rather than an offset into a list that is re-read on every
-    request, a run persisted or pruned between two requests cannot shift a window
-    under the pager: the next page never repeats the previous page's last run and
-    never skips its own first one, and no run can be pushed past the traversal by
-    later insertions. A cursor whose run has since been pruned still resolves —
-    the window simply starts at the next run below it.
+    Paging is anchored, not positional, in *both* directions. Each cursor names a
+    run id and a direction in the manager's stable newest-first ordering: the
+    older-direction one the response hands back starts the next window at that run
+    (inclusive), the newer-direction one ends the window above at it (exclusive).
+    Because every step is a real run id rather than an offset into a list re-read
+    on every request, a run persisted or pruned between two requests cannot shift
+    a window under the pager: the next page never repeats the previous page's last
+    run and never skips its own first one, stepping back never returns a window
+    overlapping the one it came from, and no run can be pushed past the traversal
+    by later insertions. A cursor whose run has since been pruned still resolves —
+    the ordering position is what is anchored, not the directory.
 
     ``prev_cursor``/``next_cursor`` are ``None`` exactly at the boundaries, which
     is what ``has_prev``/``has_next`` report; a client navigates by echoing a
-    cursor back, never by computing one.
+    cursor back, never by computing one. Either is handed back only when a run
+    exists that way, so a control never offers a step into nothing — unless that
+    neighbourhood is pruned before the step is taken, which is the explicit
+    empty-window state below.
 
     ``offset`` (not serialized) is where this window begins in the ordering *as
     read for this response*, and ``page``/``total_pages`` derive from it for the
@@ -509,12 +514,19 @@ class RunHistoryPage:
     def page(self) -> int:
         """1-based position of this window; ``total_pages + 1`` past the end.
 
+        Counted as *windows above this one, plus one* (a ceiling), not
+        ``offset // page_size``: a mutation mid-traversal can leave a window off
+        the page grid — its anchor's position no longer a multiple of the size —
+        and the floor form would then report page 1 for a window that does have a
+        Previous, the indicator contradicting the controls beside it. The ceiling
+        keeps "page 1" and "no Previous" the same fact.
+
         An empty history is page 1 of 0 pages — the view has a position even
         when there is nothing at it.
         """
         if self.offset >= self.total_runs:
             return self.total_pages + 1
-        return self.offset // self.page_size + 1
+        return -(-self.offset // self.page_size) + 1
 
     @property
     def total_pages(self) -> int:

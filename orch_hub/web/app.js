@@ -2868,12 +2868,13 @@
   // Two layers, deliberately different. PAGING is a server window: each page is
   // its own /api/history/runs request, because the whole point is that the
   // response never grows with history. A step is a cursor the server handed
-  // back, never a page number this side computes — the server anchors each
-  // window on a real run id so a run started or pruned mid-traversal cannot
-  // shift the next page under us. FILTERS are client-side over whatever page is
-  // loaded — no refetch on change, mirroring the task-list filters — which means
-  // they are page-local, and every count/empty state below says so rather than
-  // implying it searched the whole history.
+  // back, never a page number this side computes — each cursor is opaque here
+  // (the server anchors it on a real run id and a direction), so a run started or
+  // pruned mid-traversal cannot shift the window either Previous or Next lands on.
+  // FILTERS are client-side over whatever page is loaded — no refetch on change,
+  // mirroring the task-list filters — which means they are page-local, and every
+  // count/empty state below says so rather than implying it searched the whole
+  // history.
   //
   // Filters compose as AND — repo (exact name), run state (exact), and a
   // case-insensitive task-id substring. Filtering the flat, newest-first list
@@ -3035,8 +3036,8 @@
 
   // Run history: one newest-first page of runs from the history endpoint,
   // filtered/grouped client-side into collapsible per-task cards, each run
-  // tapping through to its log tail. `cursor` is a run id the server handed back
-  // as an adjacent window's anchor; the router calls this with nothing, so
+  // tapping through to its log tail. `cursor` is an opaque value the server handed
+  // back for an adjacent window; the router calls this with nothing, so
   // entering the view always lands on the newest page, and only the pager
   // navigates off it. Empty history, a page whose runs are gone, and a no-match
   // filter are three distinct states.
