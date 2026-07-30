@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-30
+verified-against: cb9704c785b793422aa0119459ffe4dfab042951
 ---
 
 # Modules: Web UI
@@ -152,11 +152,18 @@ Tasks tab active. It probes availability first, distinguishes disabled,
 never-generated, evidence-only, static-metrics, and semantic-report states,
 renders target active/archive state plus deterministic score/run/protocol/
 evidence-warning rollups, and offers raw evidence/static/semantic JSON plus
-semantic `report.md` only as Copy/Download artifacts. Task detail links and
-run-history inline rollup links appear only when availability reports enabled;
-run-history links stay outside collapse toggles so activation navigates without
-toggling. Generate posts `/metrics` and re-renders to the latest deterministic
-Layer 1 report without mutating target task or run state. Run semantic
+semantic `report.md` only as Copy/Download artifacts. When availability is
+enabled, the task-detail entry link gains a labelled state pill for the
+evaluation selected by `latest_evaluation_id`: `no report`, `static`, or
+`static + semantic`; evidence-only remains `no report` and is distinguished in
+the link title. The list read is an unawaited, route-guarded decoration started
+after the base task view and plain link paint, so pending/failed reads leave the
+task file, route landing, and entry intact; 401 still re-gates through `api()`.
+Disabled availability hides the entry and starts no list read. Run-history
+inline rollup links also appear only when enabled and stay outside collapse
+toggles so activation navigates without toggling. Generate posts `/metrics`
+and re-renders to the latest deterministic Layer 1 report without mutating
+target task or run state. Run semantic
 evaluation posts `/semantic/job`, reads the persisted current job on every view
 load, replaces the trigger with a running panel for `queued`/`running`, polls via
 a single chained timeout torn down on navigation, shows `failed`/`error`

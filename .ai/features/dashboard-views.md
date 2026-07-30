@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-30
+verified-against: cb9704c785b793422aa0119459ffe4dfab042951
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -98,10 +98,17 @@ Implemented behavior:
   `#/evaluations/{repo}/{task}[/{evaluation_id}]` probes `GET /api/evaluation`
   first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts
   for exact active-or-archived task ids. Task detail shows a gated "Task
-  evaluation" entry link for active tasks; run-history task groups show gated
-  "Evaluation" links inline in the rollup summary, outside the collapse toggle,
-  for archived/completed tasks. Disabled hubs hide entry links and the
-  evaluation route shows a concise disabled explanation.
+  evaluation" entry link for active tasks with a labelled newest-evaluation
+  pill: `no report`, `static`, or `static + semantic`, selected by
+  `latest_evaluation_id`; evidence-only folds into `no report` with its
+  distinction in the link title. The evaluation-list read starts only after
+  the base task view and plain link paint, then an unawaited route-guarded
+  continuation fills the pill; pending/failed reads never delay or replace the
+  base view, while 401 still re-gates through the shared API client. Disabled
+  hubs issue no list read and hide the entry. Run-history task groups show
+  gated "Evaluation" links inline in the rollup summary, outside the collapse
+  toggle, for archived/completed tasks; the evaluation route shows a concise
+  disabled explanation when gated off.
 - The evaluation view renders two visually distinct layers over the same
   evidence: deterministic Layer 1 static metrics and optional Layer 2 semantic
   model judgments. Generate posts `/metrics`; Run semantic evaluation posts
