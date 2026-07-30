@@ -2076,6 +2076,28 @@ def test_task_detail_links_to_evaluation_only_when_enabled():
     assert "Task evaluation " in body
 
 
+def test_task_detail_evaluation_entry_states_its_level():
+    body = app_js()
+    # The entry link carries a level pill so "is there a report" is answerable
+    # without navigating into the sidecar and back. The level comes from the ONE
+    # evaluation the link's destination lands on (`latest_evaluation_id`), never
+    # a union across history, which would advertise a report the destination does
+    # not open. Evidence without static metrics folds into the lowest pill and is
+    # distinguished in the link title instead of a fourth level.
+    assert "function evalEntryHint(list) {" in body
+    assert "evals.find((e) => e.evaluation_id === list.latest_evaluation_id)" in body
+    assert "!latest || !latest.has_static_metrics" in body
+    assert 'label: "no report"' in body
+    assert 'label: "static"' in body
+    assert 'label: "static + semantic"' in body
+    # Fetched best-effort and only on an enabled hub (every other evaluation
+    # route 404s while disabled); a failed read renders the pre-hint bare link
+    # rather than a misleading level.
+    assert "let evalList = null;\n    if (evalEnabled) {" in body
+    assert "evalList = await api(evalListPath(repoName, taskId));" in body
+    assert "if (!list) return null;" in body
+
+
 def test_run_history_links_to_evaluation_only_when_enabled():
     body = app_js()
     # Run-history task groups (where archived/completed tasks appear) get a

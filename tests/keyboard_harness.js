@@ -1080,6 +1080,30 @@ var EVAL_DETAIL_SEMANTIC = {
   report_md: SEM_REPORT_MD,
 };
 
+// The (repo, task) evaluation-list payload: one newest evaluation whose artifact
+// flags the caller varies. The default is the deterministic Layer 1 fixture —
+// evidence + static metrics, no semantic report. Both the eval view (history
+// picker) and task detail (entry-level hint) read this shape, so it is built in
+// one place and overridden per case.
+function evalListPayload(over) {
+  var summary = {
+    evaluation_id: EVAL_ID,
+    has_evidence: true,
+    has_static_metrics: true,
+    has_semantic_report: false,
+    evaluator: null,
+  };
+  for (var k in over) summary[k] = over[k];
+  return {
+    repo: REPO,
+    task_id: TASK,
+    enabled: true,
+    target: { present: true, source: "active" },
+    latest_evaluation_id: EVAL_ID,
+    evaluations: [summary],
+  };
+}
+
 function installRoutes(opts) {
   ROUTES = {};
   var waiting = opts && opts.waiting;
@@ -1182,21 +1206,7 @@ function installRoutes(opts) {
       detail: "claude resolved at /usr/local/bin/claude",
     },
   });
-  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
-    repo: REPO,
-    task_id: TASK,
-    enabled: true,
-    target: { present: true, source: "active" },
-    latest_evaluation_id: EVAL_ID,
-    evaluations: [
-      {
-        evaluation_id: EVAL_ID,
-        has_evidence: true,
-        has_static_metrics: true,
-        has_semantic_report: false,
-      },
-    ],
-  });
+  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, evalListPayload({}));
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
     evaluation_id: EVAL_ID,
     evidence: EVAL_EVIDENCE,
@@ -1861,8 +1871,9 @@ async function scenarioViewLayout() {
 async function scenarioTaskEval() {
   installRoutes({ waiting: false });
   var evalPath = "#/evaluations/" + REPO + "/" + TASK;
-  var metricsPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/metrics";
-  var jobPath = "/api/repos/" + REPO + "/evaluations/" + TASK + "/semantic/job";
+  var listPath = "/api/repos/" + REPO + "/evaluations/" + TASK;
+  var metricsPath = listPath + "/metrics";
+  var jobPath = listPath + "/semantic/job";
 
   await navigate(evalPath);
   var heading = pageHeading();
@@ -2025,22 +2036,14 @@ async function scenarioTaskEval() {
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, EVAL_DETAIL_SEMANTIC);
   // The list now reports this evaluation carries a semantic report with a known
   // evaluator, so the history picker surfaces the model/version for comparison.
-  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
-    repo: REPO,
-    task_id: TASK,
-    enabled: true,
-    target: { present: true, source: "active" },
-    latest_evaluation_id: EVAL_ID,
-    evaluations: [
-      {
-        evaluation_id: EVAL_ID,
-        has_evidence: true,
-        has_static_metrics: true,
-        has_semantic_report: true,
-        evaluator: { backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1" },
-      },
-    ],
-  });
+  route(
+    "GET",
+    listPath,
+    evalListPayload({
+      has_semantic_report: true,
+      evaluator: { backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1" },
+    })
+  );
   // The job settles to completed, linking that fresh evaluation. Firing the
   // scheduled poll tick observes the terminal status and re-renders to select the
   // evaluation, so the Layer 2 report paints without a manual navigation.
@@ -2158,22 +2161,7 @@ async function scenarioTaskEval() {
   // Restore the default list + report-less detail + idle (no) job so later
   // scenarios (and the doctor-gating branch below) see the default fixtures.
   route("GET", jobPath, { job: null });
-  route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK, {
-    repo: REPO,
-    task_id: TASK,
-    enabled: true,
-    target: { present: true, source: "active" },
-    latest_evaluation_id: EVAL_ID,
-    evaluations: [
-      {
-        evaluation_id: EVAL_ID,
-        has_evidence: true,
-        has_static_metrics: true,
-        has_semantic_report: false,
-        evaluator: null,
-      },
-    ],
-  });
+  route("GET", listPath, evalListPayload({}));
   route("GET", "/api/repos/" + REPO + "/evaluations/" + TASK + "/" + EVAL_ID, {
     evaluation_id: EVAL_ID,
     evidence: EVAL_EVIDENCE,
@@ -2191,6 +2179,85 @@ async function scenarioTaskEval() {
     entry && entry.getAttribute("href"),
     evalPath
   );
+
+  // The entry carries a state hint for what the destination actually holds, so
+  // the three levels read without navigating in and back. The restored fixture's
+  // newest evaluation has Layer 1 metrics and no semantic report, so the pill
+  // says static — in words, not by hue alone.
+  var hint = doc.querySelector(".eval-entry .badge");
+  check("eval: the entry states its level in words", !!hint, "no state pill beside the eval link");
+  eq(
+    "eval: a Layer-1-only evaluation reads static",
+    hint && hint.textContent.trim(),
+    "static"
+  );
+
+  // A semantic-carrying newest evaluation reads as both layers. (Each re-entry
+  // re-renders task detail, so the hint is re-read from the current fixture.)
+  route("GET", listPath, evalListPayload({ has_semantic_report: true }));
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  eq(
+    "eval: a semantic-carrying evaluation reads static + semantic",
+    (doc.querySelector(".eval-entry .badge") || {}).textContent,
+    "static + semantic"
+  );
+
+  // A never-evaluated task: an empty history with no latest id → no report.
+  route("GET", listPath, {
+    repo: REPO,
+    task_id: TASK,
+    enabled: true,
+    target: { present: true, source: "active" },
+    latest_evaluation_id: null,
+    evaluations: [],
+  });
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  eq(
+    "eval: a never-evaluated task reads no report",
+    (doc.querySelector(".eval-entry .badge") || {}).textContent,
+    "no report"
+  );
+
+  // Evidence generated but never scored is a fourth persisted state that folds
+  // into the same lowest pill (the reader's question is "is there a report"),
+  // distinguished only in the link's title.
+  route(
+    "GET",
+    listPath,
+    evalListPayload({ has_static_metrics: false, has_semantic_report: false })
+  );
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  eq(
+    "eval: an evidence-only evaluation folds into no report",
+    (doc.querySelector(".eval-entry .badge") || {}).textContent,
+    "no report"
+  );
+  check(
+    "eval: the link title distinguishes evidence-only from nothing",
+    (doc.querySelector(".eval-entry a").getAttribute("title") || "").indexOf(
+      "evidence pack"
+    ) !== -1,
+    "title: " + doc.querySelector(".eval-entry a").getAttribute("title")
+  );
+
+  // Degrade: an evaluation-list failure (here a 404 from an unrouted GET) must
+  // leave the link and the rest of the task view intact — a hint is never worth
+  // hiding the entry point or blanking the task file.
+  route("GET", listPath, undefined);
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var degraded = doc.querySelector(".eval-entry a");
+  check("eval: a failed hint fetch keeps the entry link", !!degraded, "the eval link vanished");
+  check(
+    "eval: a failed hint fetch shows no level at all",
+    doc.querySelector(".eval-entry .badge") === null,
+    "a level pill was rendered from a failed list read"
+  );
+  check(
+    "eval: a failed hint fetch leaves the task file rendered",
+    !!doc.querySelector(".task-content"),
+    "the task file went missing when the hint failed"
+  );
+  route("GET", listPath, evalListPayload({})); // restore the default fixture
 
   // Doctor gating: the subsystem is enabled but the Layer 2 backend is
   // unconfigured (available:false). The semantic trigger is disabled with an
@@ -2249,12 +2316,20 @@ async function scenarioTaskEval() {
     doc.getElementById("view").textContent.indexOf("disabled") !== -1,
     "no disabled explanation"
   );
-  // Disabled task detail hides the entry link entirely.
+  // Disabled task detail hides the entry link entirely — and asks for no
+  // evaluation history: the list route 404s while disabled, so the hint costs a
+  // disabled hub nothing and leaves its task view exactly as it was.
+  var listCallsBefore = countCalls("GET", listPath);
   await navigate("#/tasks/" + REPO + "/" + TASK);
   check(
     "eval: task detail hides the link when disabled",
     doc.querySelector(".eval-entry") === null,
     "the eval entry link showed on a disabled hub"
+  );
+  eq(
+    "eval: a disabled hub fetches no evaluation history",
+    countCalls("GET", listPath),
+    listCallsBefore
   );
   route("GET", "/api/evaluation", { enabled: true }); // restore for later scenarios
 }

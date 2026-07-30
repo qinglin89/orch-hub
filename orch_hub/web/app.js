@@ -2385,6 +2385,67 @@
     }
   }
 
+  // What the evaluation entry link's destination actually holds, read from ONE
+  // evaluation: the newest — the one renderTaskEval selects when the link
+  // carries no explicit id (`latest_evaluation_id`). Deliberately not a union
+  // across the task's evaluation history, which would advertise a semantic
+  // report the destination does not open on arrival. Resolving by the
+  // destination's own selection key also keeps a contradictory payload
+  // (`latest_evaluation_id` absent from the list) on the conservative side: it
+  // reads as "no report" rather than claiming one.
+  //
+  // The levels are really four, not three: `has_evidence` without
+  // `has_static_metrics` is a real persisted state (a pack generated, never
+  // scored). It folds into the lowest pill because the reader's question is "is
+  // there a report", and is distinguished in the link title instead — a fourth
+  // pill would split the glance into a taxonomy lesson.
+  //
+  // Returns null when the list is unavailable (fetch failed/refused), which
+  // renders the bare pre-hint link rather than a misleading "no report".
+  function evalEntryHint(list) {
+    if (!list) return null;
+    const evals = list.evaluations || [];
+    const latest =
+      evals.find((e) => e.evaluation_id === list.latest_evaluation_id) || null;
+    if (!latest || !latest.has_static_metrics)
+      return {
+        label: "no report",
+        kind: "", // neutral: nothing generated yet is not a failure
+        title:
+          latest && latest.has_evidence
+            ? "An evidence pack exists for this task, but no Layer 1 metrics have been computed from it yet."
+            : "No evaluation has been generated for this task yet.",
+      };
+    if (latest.has_semantic_report)
+      return {
+        label: "static + semantic",
+        kind: "ok",
+        title:
+          "The newest evaluation carries Layer 1 static metrics and a Layer 2 semantic report.",
+      };
+    return {
+      label: "static",
+      kind: "ok",
+      title:
+        "The newest evaluation carries Layer 1 static metrics; no Layer 2 semantic report yet.",
+    };
+  }
+
+  // The task-detail evaluation entry: the link, plus a labelled pill naming its
+  // level. A labelled pill, not the bare coloured dot the repo cards use — that
+  // treatment is reserved for run activity, and colour alone would not answer
+  // "is there a report" for a reader who cannot separate the hues.
+  function evalEntrySection(repoName, taskId, list) {
+    const hint = evalEntryHint(list);
+    return (
+      `<p class="eval-entry"><a class="text-link" href="${evalHash(
+        repoName,
+        taskId
+      )}"${hint ? ` title="${escapeHtml(hint.title)}"` : ""}>` +
+      `Task evaluation →</a>${hint ? " " + badge(hint.label, hint.kind) : ""}</p>`
+    );
+  }
+
   async function renderTaskDetail(repoName, taskId) {
     const superseded = routeGuard();
     view().innerHTML = loadingView(taskId, "Loading task…");
@@ -2471,6 +2532,23 @@
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) throw err;
     }
+
+    // Best-effort evaluation history, for the entry link's state hint: whether
+    // the link lands on nothing, a Layer 1 report, or one carrying Layer 2 too.
+    // Only asked on an enabled hub — every evaluation route but availability
+    // 404s while disabled, so a disabled hub issues no extra request and its
+    // view stays exactly what it was before this hint existed. It costs one more
+    // sequential round trip (these overlays are awaited in series); a failure or
+    // a slow hub degrades to the bare link, which is never hidden and never
+    // blocks the task file from rendering.
+    let evalList = null;
+    if (evalEnabled) {
+      try {
+        evalList = await api(evalListPath(repoName, taskId));
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) throw err;
+      }
+    }
     if (superseded()) return; // a newer route owns the view
 
     const blockers =
@@ -2512,14 +2590,7 @@
         inflightIntake
       )}
       ${answerSection(run ? run.run_id : "", questions)}
-      ${
-        evalEnabled
-          ? `<p class="eval-entry"><a class="text-link" href="${evalHash(
-              repoName,
-              detail.task_id
-            )}">Task evaluation →</a></p>`
-          : ""
-      }
+      ${evalEnabled ? evalEntrySection(repoName, detail.task_id, evalList) : ""}
       ${contentSection}`;
 
     wireAnswerForms();
