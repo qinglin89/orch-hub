@@ -1204,6 +1204,55 @@ code {
   font-size: 12px;
 }
 
+/* Run history filters act on the loaded page only; the note sits tight under
+   the filter row so the scope is read with the controls, not after the results. */
+.filters-scope {
+  margin: -6px 0 12px;
+  font-size: 12px;
+}
+
+/* ---- pager: Previous / page status / Next ---- */
+
+.pager {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.pager-btn {
+  background: var(--surface);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  min-height: 40px; /* stays a comfortable phone tap target */
+  padding: 9px 12px;
+  font-size: 14px;
+  cursor: pointer;
+}
+
+.pager-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+/* A boundary control stays visible (the pager keeps its shape across pages)
+   but reads and behaves as unavailable. */
+.pager-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Console voice for the position readout, like the other operational figures. */
+.pager-status {
+  flex: 1;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
 /* ---- states: login, loading, empty, error ---- */
 
 .center {

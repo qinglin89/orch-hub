@@ -561,6 +561,10 @@ var ROUTES = {};   // "METHOD path" (query stripped) -> payload
 var CALLS = [];    // every request, for assertions
 var DEFERRED = {}; // "METHOD path" -> a promise holding that route's response open
 
+// `payload` is normally a fixed object. A FUNCTION payload is called with the
+// full request url (query included) and the parsed body, and its return value is
+// the response — the only way to stub an endpoint whose answer depends on the
+// query, i.e. a paged route serving a different window per `?page=`.
 function route(method, path, payload) {
   ROUTES[method + " " + path] = payload;
 }
@@ -596,6 +600,7 @@ globalThis.fetch = function (path, init) {
   // there); `bare` is the query-stripped route key the ROUTES table matches on.
   CALLS.push({ method: method, path: bare, url: String(path), body: body, init: init });
   var payload = ROUTES[method + " " + bare];
+  if (typeof payload === "function") payload = payload(String(path), body);
   var refusal = payload && payload.__status ? payload : null;
   var response =
     payload === undefined
@@ -2526,6 +2531,12 @@ async function scenarioRunHistory() {
   var historyPayload = function (level, enabled) {
     return {
       runs: [histRun, legacyRun],
+      page: 1,
+      page_size: 50,
+      total_runs: 2,
+      total_pages: 1,
+      has_prev: false,
+      has_next: false,
       evaluation_enabled: enabled !== false,
       evaluation_states:
         enabled === false
@@ -2673,14 +2684,43 @@ async function scenarioRunHistory() {
     evalListCallsBeforeHistory
   );
 
-  // Non-toggle contract: activating the Evaluation link must NOT collapse the
-  // group (the delegated header toggle matches only `.task-group-head`).
+  // Collapsed is the default for a freshly encountered group, and a collapsed
+  // group keeps its rollup + inline action visible (only the card list hides,
+  // via CSS).
   check(
-    "run history: the group starts expanded",
-    !doc.querySelector(".task-group").classList.contains("collapsed"),
+    "run history: the group starts collapsed",
+    doc.querySelector(".task-group").classList.contains("collapsed"),
     doc.querySelector(".task-group").className
   );
-  pressEnter(evalLink);
+  eq(
+    "run history: the collapsed header reports it",
+    doc.querySelector(".task-group-head").getAttribute("aria-expanded"),
+    "false"
+  );
+  check(
+    "run history: the eval action stays visible when collapsed",
+    !!doc.querySelector(".task-rollup .tg-eval"),
+    "the eval action vanished on collapse"
+  );
+
+  // The header toggles the group open (collapse contract preserved in both
+  // directions).
+  pressEnter(doc.querySelector(".task-group-head"));
+  await flush();
+  check(
+    "run history: the header expands the group",
+    !doc.querySelector(".task-group").classList.contains("collapsed"),
+    "the header no longer toggles"
+  );
+  eq(
+    "run history: the expanded header reports it",
+    doc.querySelector(".task-group-head").getAttribute("aria-expanded"),
+    "true"
+  );
+
+  // Non-toggle contract: activating the Evaluation link must NOT change the
+  // group's state (the delegated header toggle matches only `.task-group-head`).
+  pressEnter(doc.querySelector(".task-rollup .tg-eval"));
   await flush();
   check(
     "run history: activating Evaluation does not collapse the group",
@@ -2693,25 +2733,13 @@ async function scenarioRunHistory() {
     "true"
   );
 
-  // The header itself still toggles the group (collapse contract preserved), and
-  // a collapsed group keeps its rollup + inline action visible (only the card
-  // list hides, via CSS).
+  // Collapsing again returns it to the default state.
   pressEnter(doc.querySelector(".task-group-head"));
   await flush();
   check(
-    "run history: the header still collapses the group",
+    "run history: the header collapses the group again",
     doc.querySelector(".task-group").classList.contains("collapsed"),
-    "the header no longer toggles"
-  );
-  eq(
-    "run history: the collapsed header reports it",
-    doc.querySelector(".task-group-head").getAttribute("aria-expanded"),
-    "false"
-  );
-  check(
-    "run history: the eval action stays visible when collapsed",
-    !!doc.querySelector(".task-rollup .tg-eval"),
-    "the eval action vanished on collapse"
+    "the header no longer toggles closed"
   );
 
   // Eval-disabled hub: the same batch says off, so no action renders and no
@@ -2734,6 +2762,232 @@ async function scenarioRunHistory() {
     !!doc.querySelector(".task-rollup .roll-line"),
     "the rollup vanished when eval is disabled"
   );
+}
+
+// Run-history paging: every persisted run is reachable through Previous/Next
+// over server pages, boundary controls disable themselves, the page-local scope
+// of the filters/counts is stated rather than implied, task groups start
+// collapsed, and an explicit expansion survives a page trip while a
+// newly-encountered group on the next page still starts collapsed. Also the two
+// no-cards states: an empty history and a page that no longer exists.
+async function scenarioRunHistoryPaging() {
+  installRoutes({ waiting: false });
+  var TASK2 = "2026-07-29-second";
+  var mkRun = function (id, task) {
+    return {
+      run_id: id,
+      repo_name: REPO,
+      repo_path: "/repos/" + REPO,
+      task_id: task,
+      state: "completed",
+      started_ts: "2026-07-20T08:00:00Z",
+      ended_ts: "2026-07-20T08:30:00Z",
+      exit_code: 0,
+      sessions: [],
+      context_budget: 200000,
+      session_est: { current: 1, total: 2 },
+    };
+  };
+  // Four runs over two pages of two. The FIRST task spans both pages (so an
+  // expansion has a same-key group to survive onto), the second appears only on
+  // page 2 (so a first sighting mid-paging still starts collapsed).
+  var PAGES = {
+    1: [mkRun("run-d", TASK), mkRun("run-c", TASK)],
+    2: [mkRun("run-b", TASK), mkRun("run-a", TASK2)],
+  };
+  var pageOf = function (url) {
+    var m = /[?&]page=(\d+)/.exec(url);
+    return m ? Number(m[1]) : 0; // 0 = the client sent no page at all
+  };
+  var shrunk = false;
+  route("GET", "/api/history/runs", function (url) {
+    var page = pageOf(url);
+    // The race the out-of-range state exists for: page 1 still advertised a
+    // second page, but by the time Next is pressed the history has been pruned
+    // down to one page, so page 2 comes back empty.
+    if (shrunk && page > 1)
+      return {
+        runs: [],
+        page: page,
+        page_size: 2,
+        total_runs: 2,
+        total_pages: 1,
+        has_prev: true,
+        has_next: false,
+      };
+    return {
+      runs: PAGES[page] || [],
+      page: page,
+      page_size: 2,
+      total_runs: 4,
+      total_pages: 2,
+      has_prev: page > 1,
+      has_next: page < 2,
+      evaluation_enabled: false,
+      evaluation_states: [],
+    };
+  });
+
+  await navigate("#/runs");
+  checkOutline("run history paging");
+  eq(
+    "run history: entering the view asks for the first page",
+    pageOf(lastCall("GET", "/api/history/runs").url),
+    1
+  );
+  eq(
+    "run history: the page indicator names the position and the whole-history total",
+    doc.querySelector(".pager-status").textContent.trim(),
+    "Page 1 of 2 · 4 runs total"
+  );
+  check(
+    "run history: Previous is unavailable on the first page",
+    doc.getElementById("rp-prev").disabled === true,
+    "Previous is enabled on page 1"
+  );
+  check(
+    "run history: Next is available while pages remain",
+    doc.getElementById("rp-next").disabled === false,
+    "Next is disabled on page 1 of 2"
+  );
+  eq(
+    "run history: the pager controls name themselves for screen readers",
+    doc.getElementById("rp-prev").textContent.replace(/\s+/g, " ").trim(),
+    "← Previous page"
+  );
+  // The filters ran over this page only, and both the note and the count say so
+  // rather than reading as a search across all of history.
+  check(
+    "run history: the filter scope is stated",
+    doc.querySelector(".filters-scope").textContent.indexOf("this page") !== -1,
+    doc.querySelector(".filters-scope").textContent
+  );
+  eq(
+    "run history: the count is scoped to the loaded page",
+    doc.getElementById("run-count").textContent.trim(),
+    "1 group · 2 runs on this page"
+  );
+  eq("run history: page 1 renders its two runs", doc.querySelectorAll(".card.run").length, 2);
+
+  // Every group starts collapsed; expanding one is an explicit choice.
+  eq(
+    "run history: page 1 groups start collapsed",
+    doc.querySelectorAll(".task-group.collapsed").length,
+    1
+  );
+  pressEnter(doc.querySelector(".task-group-head"));
+  await flush();
+  check(
+    "run history: the group expands on request",
+    !doc.querySelector(".task-group").classList.contains("collapsed"),
+    "the group did not expand"
+  );
+
+  // Next: a real refetch of the next server window.
+  pressEnter(doc.getElementById("rp-next"));
+  await flush();
+  eq(
+    "run history: Next requests the following page",
+    pageOf(lastCall("GET", "/api/history/runs").url),
+    2
+  );
+  eq(
+    "run history: page 2 renders the rest of the history",
+    doc.querySelectorAll(".card.run").map(function (c) {
+      return c.querySelector(".run-id").textContent;
+    }).join(","),
+    "run-b,run-a"
+  );
+  eq(
+    "run history: the indicator follows the page",
+    doc.querySelector(".pager-status").textContent.trim(),
+    "Page 2 of 2 · 4 runs total"
+  );
+  check(
+    "run history: Next is unavailable on the last page",
+    doc.getElementById("rp-next").disabled === true,
+    "Next is enabled on the last page"
+  );
+  check(
+    "run history: Previous is available off the first page",
+    doc.getElementById("rp-prev").disabled === false,
+    "Previous is disabled on page 2"
+  );
+  var groups = doc.querySelectorAll(".task-group");
+  eq("run history: page 2 shows both of its task groups", groups.length, 2);
+  check(
+    "run history: an expanded group stays expanded across a page trip",
+    !groups[0].classList.contains("collapsed"),
+    "the carried-over group re-collapsed on page 2"
+  );
+  check(
+    "run history: a group first seen on the new page starts collapsed",
+    groups[1].classList.contains("collapsed"),
+    "a newly encountered group rendered expanded"
+  );
+
+  // Previous walks back to the page it came from.
+  pressEnter(doc.getElementById("rp-prev"));
+  await flush();
+  eq(
+    "run history: Previous requests the preceding page",
+    pageOf(lastCall("GET", "/api/history/runs").url),
+    1
+  );
+  check(
+    "run history: Previous lands back on the first page",
+    doc.getElementById("rp-prev").disabled === true,
+    "page 1 still offers Previous"
+  );
+
+  // A page that no longer exists (history pruned between two requests): explicit,
+  // and Previous snaps to the last page that does exist instead of dead-ending.
+  shrunk = true;
+  pressEnter(doc.getElementById("rp-next"));
+  await flush();
+  check(
+    "run history: a vanished page says so instead of showing an empty list",
+    doc.getElementById("view").textContent.indexOf("No runs on page 2") !== -1,
+    doc.getElementById("view").textContent.slice(0, 200)
+  );
+  check(
+    "run history: the vanished page keeps Next unavailable",
+    doc.getElementById("rp-next").disabled === true,
+    "Next is offered past the end of history"
+  );
+  pressEnter(doc.getElementById("rp-prev"));
+  await flush();
+  eq(
+    "run history: Previous from a vanished page snaps to the last real page",
+    pageOf(lastCall("GET", "/api/history/runs").url),
+    1
+  );
+
+  // Empty history stays its own state: no pager, no filters, just the note.
+  route("GET", "/api/history/runs", {
+    runs: [],
+    page: 1,
+    page_size: 50,
+    total_runs: 0,
+    total_pages: 0,
+    has_prev: false,
+    has_next: false,
+    evaluation_enabled: false,
+    evaluation_states: [],
+  });
+  await navigate("#/runs");
+  check(
+    "run history: an empty history reads as empty, not as a missing page",
+    doc.getElementById("view").textContent.indexOf("No runs recorded yet.") !== -1,
+    doc.getElementById("view").textContent.slice(0, 200)
+  );
+  check(
+    "run history: an empty history renders no pager",
+    doc.querySelector(".pager") === null,
+    "a pager rendered over an empty history"
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
 // Live-run readiness display: a repo whose ONLY raw readiness failure is a dirty
@@ -3612,6 +3866,7 @@ async function scenarioRepoAdmission() {
     await scenarioTaskEval();
     await scenarioStaleRoute();
     await scenarioRunHistory();
+    await scenarioRunHistoryPaging();
     await scenarioLiveRunReadiness();
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();

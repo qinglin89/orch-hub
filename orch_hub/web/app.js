@@ -2509,12 +2509,15 @@
 
   // ---- run history ----
   //
-  // Runs are grouped client-side by their (repo, task) so a completed or
-  // archived task's whole run arc reads as one unit: a header, an est-vs-actual
-  // rollup (dev sessions used vs the frontmatter session-est, peak per-session
-  // context, summed wall-clock), then each run's card with its context strips.
-  // The flat /api/history/runs list is already newest-first and embeds, per run,
-  // the persisted session snapshot and the task's typed session_est.
+  // One page of runs (50, server-windowed) grouped client-side by their
+  // (repo, task) so a completed or archived task's run arc reads as one unit: a
+  // header, an est-vs-actual rollup (dev sessions used vs the frontmatter
+  // session-est, peak per-session context, summed wall-clock), then each run's
+  // card with its context strips. The flat /api/history/runs list is already
+  // newest-first and embeds, per run, the persisted session snapshot and the
+  // task's typed session_est. Rollups therefore describe the runs of that task
+  // *on this page* — a task whose runs straddle a page boundary rolls up each
+  // part separately, which is the honest reading of a page-local group.
 
   function runMetaKv(run) {
     const rows = [];
@@ -2800,12 +2803,18 @@
   // keyboard-operable and screen-reader-legible; a collapsed group keeps its
   // header + rollup summary and only hides the run-card list — via the
   // `.collapsed` CSS, not by dropping the cards, and with no effect on ordering
-  // or the rollup. Collapsed state is keyed by the stable group key so it
-  // survives a filter re-render; the key rides `data-group-key` for the toggle.
+  // or the rollup.
+  //
+  // Collapsed is the DEFAULT: a page of 50 runs is only scannable if each task
+  // reads as one header + rollup line until asked to open. So the tracked state
+  // is the *expansion the user asked for*, keyed by the stable group key — a
+  // group not in the set renders collapsed, which is exactly what a group first
+  // seen on this page (or on a page just navigated to) is. The key rides
+  // `data-group-key` for the toggle.
   function taskGroupCard(group) {
     const runCount = group.runs.length;
     const key = groupKey(group.runs[0]); // group is non-empty; all runs share it
-    const collapsed = collapsedGroups.has(key);
+    const collapsed = !expandedGroups.has(key);
     const cards = group.runs.map(historyRunCard).join("");
     // A per-task Evaluation link (eval-enabled hubs only), handed to taskRollup
     // so it rides the rollup summary row inline and right-aligned instead of a
@@ -2854,20 +2863,29 @@
     );
   }
 
-  // ---- run-history navigation: compose-over-payload filters + collapse ----
+  // ---- run-history navigation: paging + compose-over-page filters + collapse ----
   //
-  // Discovery controls layered on the same /api/history/runs payload — no API
-  // change and no refetch on change: the flat list is fetched once per view
-  // entry and re-filtered client-side, mirroring the task-list filters. Filters
-  // compose as AND — repo (exact name), run state (exact), and a case-insensitive
-  // task-id substring. Filtering the flat, newest-first list *before* grouping
-  // keeps ordering intact and lets the per-group rollup and the count line
-  // describe exactly the runs shown. Held in the closure and applied client-side,
-  // so they persist across view re-entry like the task filters.
+  // Two layers, deliberately different. PAGING is a server window: each page is
+  // its own /api/history/runs request, because the whole point is that the
+  // response never grows with history. FILTERS are client-side over whatever
+  // page is loaded — no refetch on change, mirroring the task-list filters —
+  // which means they are page-local, and every count/empty state below says so
+  // rather than implying it searched the whole history.
+  //
+  // Filters compose as AND — repo (exact name), run state (exact), and a
+  // case-insensitive task-id substring. Filtering the flat, newest-first list
+  // *before* grouping keeps ordering intact and lets the per-group rollup and the
+  // count line describe exactly the runs shown. Held in the closure, so they
+  // persist across view re-entry like the task filters. The page does NOT: route
+  // entry always lands on page 1 (the newest runs), so no stale position can
+  // survive into a later visit.
   const runFilters = { repo: "", state: "", task: "" };
-  // Collapsed groups persist across filter re-renders (and view re-entry), keyed
-  // by the stable group key; a stale key for a group no longer present is inert.
-  const collapsedGroups = new Set();
+  // Groups the user explicitly expanded, keyed by the stable group key; absent =
+  // collapsed, which is the default for every newly encountered group. Held in
+  // the closure so an expansion survives a filter re-render and a page trip
+  // whenever the same group is still on screen; a stale key for a group no
+  // longer present is inert.
+  const expandedGroups = new Set();
   // Evaluation enablement + one newest-evaluation state per task group arrive
   // in the same /api/history/runs response. Keeping the group-keyed map here
   // lets filter-only re-renders reuse the batch with no network fan-out.
@@ -2922,15 +2940,20 @@
     const key = section.getAttribute("data-group-key");
     const collapsed = section.classList.toggle("collapsed");
     head.setAttribute("aria-expanded", collapsed ? "false" : "true");
-    if (collapsed) collapsedGroups.add(key);
-    else collapsedGroups.delete(key);
+    if (collapsed) expandedGroups.delete(key);
+    else expandedGroups.add(key);
   }
 
-  // Partial re-render: filter the fetched runs, regroup, and repaint only the
-  // count line + group list (the filter controls stay put, keeping focus/caret).
-  // Newest-first survives (filter preserves order; grouping keeps first-seen).
-  // Empty *history* is handled upstream in renderRuns; an empty result here means
-  // the filters excluded everything — a distinct no-match state.
+  // Partial re-render: filter the loaded page's runs, regroup, and repaint only
+  // the count line + group list (the filter controls and the pager stay put,
+  // keeping focus/caret). Newest-first survives (filter preserves order; grouping
+  // keeps first-seen). Empty *history* and an out-of-range page are handled
+  // upstream in renderRuns; an empty result here means the filters excluded
+  // everything on this page — a distinct no-match state.
+  //
+  // Both the count and the no-match line name their scope ("on this page"): the
+  // filters only ever saw the loaded window, so reporting a bare total would read
+  // as a search across all of history.
   function renderRunGroups(allRuns) {
     const groupsEl = document.getElementById("run-groups");
     const countEl = document.getElementById("run-count");
@@ -2938,41 +2961,120 @@
     const groups = groupRunsByTask(filtered);
     if (!groups.length) {
       countEl.textContent = "";
-      groupsEl.innerHTML = `<p class="center">No runs match these filters.</p>`;
+      groupsEl.innerHTML =
+        `<p class="center">No runs on this page match these filters.</p>`;
       return;
     }
     const g = groups.length;
     const r = filtered.length;
-    countEl.textContent = `${g} group${g === 1 ? "" : "s"} · ${r} run${
-      r === 1 ? "" : "s"
-    }`;
+    const scope =
+      r === allRuns.length
+        ? `${r} run${r === 1 ? "" : "s"}`
+        : `${r} of ${allRuns.length} runs`;
+    countEl.textContent = `${g} group${g === 1 ? "" : "s"} · ${scope} on this page`;
     groupsEl.innerHTML = groups.map(taskGroupCard).join("");
   }
 
-  // Run history: recent runs newest-first from the history endpoint. Fetched
-  // once, then filtered/grouped client-side into collapsible per-task cards, each
-  // run tapping through to its log tail. Empty payload and no-match are distinct
-  // states; a clear-filters button restores the full newest-first set.
-  async function renderRuns() {
+  // The Previous/Next pager for run history, rendered from the response's own
+  // pagination metadata — never inferred from a short page — so each boundary
+  // control is disabled exactly when the server says there is nothing that way.
+  // The status line carries the scope the page-local filters do not: which page
+  // this is and how many runs the whole history holds.
+  //
+  // Arrows are decorative (aria-hidden); the visually-hidden " page" makes each
+  // accessible name "Previous page" / "Next page" while the visible label stays
+  // short enough for a phone.
+  function historyPager(data) {
+    const page = Number(data.page) || 1;
+    const totalPages = Number(data.total_pages) || 0;
+    const total = Number(data.total_runs) || 0;
+    const button = (id, label, arrow, enabled, leading) =>
+      `<button id="${id}" class="pager-btn" type="button"${
+        enabled ? "" : " disabled"
+      }>${leading ? `<span aria-hidden="true">${arrow}</span> ` : ""}${label}${
+        leading ? "" : ` <span aria-hidden="true">${arrow}</span>`
+      }<span class="visually-hidden"> page</span></button>`;
+    return (
+      `<nav class="pager" aria-label="Run history pages">` +
+      button("rp-prev", "Previous", "←", !!data.has_prev, true) +
+      `<span class="pager-status">Page ${page} of ${totalPages} · ${total} run${
+        total === 1 ? "" : "s"
+      } total</span>` +
+      button("rp-next", "Next", "→", !!data.has_next, false) +
+      `</nav>`
+    );
+  }
+
+  // Page navigation refetches: a page is a server window, so unlike the filters
+  // it cannot be composed from what is already loaded. The repaint destroys the
+  // button that was pressed, so it lands like any action-driven full re-render
+  // (rerender -> document.title sync + focus at the page start).
+  //
+  // The handlers re-check the boundary themselves rather than trusting the
+  // disabled attribute alone, so a boundary control is inert however it is
+  // activated. Previous from an out-of-range page snaps to the last real page
+  // instead of walking back through empty windows; for an in-range page the
+  // clamp is a no-op.
+  function wireHistoryPager(data) {
+    const page = Number(data.page) || 1;
+    const lastPage = Number(data.total_pages) || 1;
+    const wire = (id, enabled, target) => {
+      const btn = document.getElementById(id);
+      if (!btn) return;
+      btn.addEventListener("click", () => {
+        if (!enabled) return;
+        rerender(renderRuns(target));
+      });
+    };
+    wire("rp-prev", !!data.has_prev, Math.min(page - 1, lastPage));
+    wire("rp-next", !!data.has_next, page + 1);
+  }
+
+  // Run history: one newest-first page of runs from the history endpoint,
+  // filtered/grouped client-side into collapsible per-task cards, each run
+  // tapping through to its log tail. `page` is 1-based; the router calls this
+  // with nothing, so entering the view always lands on the newest page, and only
+  // the pager navigates off it. Empty history, an out-of-range page, and a
+  // no-match filter are three distinct states.
+  async function renderRuns(page) {
     const superseded = routeGuard();
+    const requested = Math.max(1, Math.trunc(Number(page)) || 1);
     view().innerHTML = loadingView("Run history", "Loading runs…");
-    const data = await api("/api/history/runs");
+    const data = await api("/api/history/runs?page=" + requested);
     if (superseded()) return; // a newer route owns the view
     historyEvalEnabled = !!data.evaluation_enabled;
     historyEvalStates = new Map(
       (data.evaluation_states || []).map((state) => [groupKey(state), state])
     );
     const runs = data.runs || [];
-    if (!runs.length) {
+    const totalRuns = Number(data.total_runs) || 0;
+    if (!runs.length && !totalRuns) {
       view().innerHTML =
         pageTitle("Run history") + centerHtml("No runs recorded yet.");
       return;
     }
+    if (!runs.length) {
+      // History shrank under a page that was reachable a moment ago (pruned run
+      // dirs, or a hand-typed page). Say so plainly and keep the pager, whose
+      // Previous lands on the last page that does exist — never a dead end.
+      view().innerHTML =
+        pageTitle("Run history") +
+        historyPager(data) +
+        centerHtml(
+          `No runs on page ${Number(data.page) || requested}. History holds ` +
+            `${totalRuns} run${totalRuns === 1 ? "" : "s"} on ${
+              Number(data.total_pages) || 0
+            } page${(Number(data.total_pages) || 0) === 1 ? "" : "s"}.`
+        );
+      wireHistoryPager(data);
+      return;
+    }
     const repoNames = historyRepoNames(runs);
     const states = orderedRunStates(runs);
-    // Drop a persisted filter the current payload can no longer satisfy, so a
-    // stale value never yields a permanent phantom no-match (mirrors the task
-    // filters). The free-text task filter is left as typed.
+    // Drop a persisted filter this page can no longer satisfy, so a stale value
+    // never yields a permanent phantom no-match (mirrors the task filters). The
+    // free-text task filter is left as typed. The dropdown domains come from the
+    // loaded page, which is the same scope the filters act on.
     if (runFilters.repo && !repoNames.includes(runFilters.repo))
       runFilters.repo = "";
     if (runFilters.state && !states.includes(runFilters.state))
@@ -3001,8 +3103,11 @@
         <button id="rf-clear" class="filters-clear" type="button">Clear
           <span class="visually-hidden"> run filters</span></button>
       </div>
+      <p class="filters-scope muted">Filters apply to this page's runs.</p>
+      ${historyPager(data)}
       <p id="run-count" class="run-count muted" aria-live="polite"></p>
       <div id="run-groups"></div>`;
+    wireHistoryPager(data);
     document.getElementById("rf-repo").addEventListener("change", (ev) => {
       runFilters.repo = ev.target.value;
       renderRunGroups(runs);
