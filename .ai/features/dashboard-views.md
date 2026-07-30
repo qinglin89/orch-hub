@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-30
-verified-against: cb9704c785b793422aa0119459ffe4dfab042951
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -80,7 +80,10 @@ Implemented behavior:
   `effective_config` launch snapshot as an out-of-link disclosure. Snapshot
   rows use authoritative `profiles.dev`/`profiles.review`, identify Custom from
   CLI model provenance, and derive both roles from legacy top-level `profile`
-  when the additive fields are absent.
+  when the additive fields are absent. Evaluation-enabled history payloads also
+  carry one deduplicated newest-evaluation state per task group; the inline
+  `Evaluation →` action shows a compact grey/amber/green light for not
+  evaluated, L1, or L1 + L2, with the exact state only in title/ARIA text.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls
@@ -97,18 +100,14 @@ Implemented behavior:
 - A task-evaluation sidecar view at
   `#/evaluations/{repo}/{task}[/{evaluation_id}]` probes `GET /api/evaluation`
   first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts
-  for exact active-or-archived task ids. Task detail shows a gated "Task
-  evaluation" entry link for active tasks with a labelled newest-evaluation
-  pill: `no report`, `static`, or `static + semantic`, selected by
-  `latest_evaluation_id`; evidence-only folds into `no report` with its
-  distinction in the link title. The evaluation-list read starts only after
-  the base task view and plain link paint, then an unawaited route-guarded
-  continuation fills the pill; pending/failed reads never delay or replace the
-  base view, while 401 still re-gates through the shared API client. Disabled
-  hubs issue no list read and hide the entry. Run-history task groups show
-  gated "Evaluation" links inline in the rollup summary, outside the collapse
-  toggle, for archived/completed tasks; the evaluation route shows a concise
-  disabled explanation when gated off.
+  for exact active-or-archived task ids. Active Task detail deliberately has no
+  evaluation entry and issues no evaluation availability/list request.
+  Run-history task groups are the entry point: enabled history responses render
+  gated `Evaluation →` links inline in the rollup summary, outside the collapse
+  toggle, with a batched newest-evaluation light derived from the same newest id
+  the sidecar opens when no explicit id is in the route. Disabled hubs render no
+  history action or marker, and the evaluation route shows a concise disabled
+  explanation when gated off.
 - The evaluation view renders two visually distinct layers over the same
   evidence: deterministic Layer 1 static metrics and optional Layer 2 semantic
   model judgments. Generate posts `/metrics`; Run semantic evaluation posts

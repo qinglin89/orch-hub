@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-30
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # Modules: Service Surface
@@ -42,7 +42,11 @@ implemented escalation routes are
 `GET /api/usage`. `GET /api/repos` includes a best-effort
 `commit` field and display-only `housekeeping_pending` state shared with CLI
 JSON; recent commit lookup failures return `available:false` rather than
-raising. `GET /api/usage` returns fail-soft Claude/Codex subscription capacity
+raising. `GET /api/history/runs` also batches optional task-evaluation state
+per distinct `(repo_path, task_id)` as `none`/`l1`/`l1_l2`, returning the
+evaluation-enabled flag, skipping all sidecar reads when disabled, and omitting
+only a failed per-task marker rather than failing history. `GET /api/usage`
+returns fail-soft Claude/Codex subscription capacity
 from `UsageService` as display-only normalized provider windows, freshness,
 plan, and aggregate credit data, excluding credentials/account/reset-credit
 identifiers. The run-scoped task route reads active task content first and falls

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 4d04e3d949437dc103a2a6cb1572d13c1f657d7f
+last-updated: 2026-07-30
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # Features: Task Evaluation
@@ -22,7 +22,8 @@ git_meta, models.
 APIs: internal `EvaluationService.resolve_target`, `related_runs`,
 `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`,
 `read_text_artifact`, and `artifact_dir`; protected `GET /api/evaluation` and
-`/api/repos/{repo_id}/evaluations/{task_id}` evidence routes.
+`/api/repos/{repo_id}/evaluations/{task_id}` evidence routes; batched
+run-history newest-state in `GET /api/history/runs`.
 
 Implemented behavior:
 
@@ -56,6 +57,10 @@ Implemented behavior:
   detail readback, evidence generation, and the semantic doctor while preserving
   the same disabled fail-closed gate: only `GET /api/evaluation` returns 200
   while disabled; every other evaluation route 404s.
+- Run history folds newest persisted evaluation artifacts into one batched
+  state per returned task group (`none`, `l1`, `l1_l2`) so dashboard entry
+  lights do not need one list request per group; disabled mode returns no
+  history states.
 - Static and semantic reports are computed by separate downstream layers; no
   scoring or model calls are part of this foundation.
 

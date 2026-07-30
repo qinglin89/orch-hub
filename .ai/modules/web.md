@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-30
-verified-against: cb9704c785b793422aa0119459ffe4dfab042951
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # Modules: Web UI
@@ -40,9 +40,10 @@ route-level headings/focus/announcements, an Operations Overview default landing
 route, repo/task/detail/run views, repo/task run-state signals,
 searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
 run controls, live per-session context strips, waiting-question answer forms,
-filterable/counted/collapsible grouped run history with est-vs-actual rollups
-and effective-config disclosures, a run-scoped task-file view, task-evaluation
-Layer 1/Layer 2 sidecar view and entry points, remote intake start/review views,
+filterable/counted/collapsible grouped run history with est-vs-actual rollups,
+batched evaluation-state lights, and effective-config disclosures, a run-scoped
+task-file view, task-evaluation Layer 1/Layer 2 sidecar view reached from Run
+history, remote intake start/review views,
 and recent/live log views;
 `styles.css` holds the mobile-first responsive layout. The dashboard
 reads only HTTP payloads, uses `fetch` +
@@ -136,12 +137,17 @@ Discuss/Answer for ordinary escalations and Feedback/Confirm for `plan-gate`;
 plan-gate Confirm may post empty text for one-tap approval, while other empty
 replies are blocked locally and server-side guards still own correctness.
 Run history consumes the embedded `sessions`/`context_budget` and `session_est`
-fields from `GET /api/history/runs`, filters the already-fetched newest-first
-list by repo, run state, and task-id text before grouping by `(repo, task)`,
-shows filtered group/run counts plus distinct empty/no-match states, preserves
-log links on visible run cards, renders each run's embedded `effective_config`
-snapshot as a disclosure outside the log-link card, and lets each task group
-collapse without hiding its rollup. Effective-config rows prefer
+fields from `GET /api/history/runs` plus the response's batched
+`evaluation_enabled` / `evaluation_states` sidecar state. It filters the
+already-fetched newest-first list by repo, run state, and task-id text before
+grouping by `(repo, task)`, shows filtered group/run counts plus distinct
+empty/no-match states, preserves log links on visible run cards, renders each
+run's embedded `effective_config` snapshot as a disclosure outside the log-link
+card, and lets each task group collapse without hiding its rollup. Enabled task
+groups show an inline `Evaluation →` action with a grey/amber/green state light
+for not evaluated, L1, or L1 + L2; the state is from the same newest evaluation
+the sidecar route opens and is exposed through title/ARIA text, not a visible
+badge or per-group list request. Effective-config rows prefer
 `profiles.dev`/`profiles.review`, derive both from legacy top-level `profile`,
 and label Custom from CLI model provenance. Rollups show observed dev-session
 count vs estimate, peak context, and summed wall-clock from run-record ISO
@@ -152,18 +158,13 @@ Tasks tab active. It probes availability first, distinguishes disabled,
 never-generated, evidence-only, static-metrics, and semantic-report states,
 renders target active/archive state plus deterministic score/run/protocol/
 evidence-warning rollups, and offers raw evidence/static/semantic JSON plus
-semantic `report.md` only as Copy/Download artifacts. When availability is
-enabled, the task-detail entry link gains a labelled state pill for the
-evaluation selected by `latest_evaluation_id`: `no report`, `static`, or
-`static + semantic`; evidence-only remains `no report` and is distinguished in
-the link title. The list read is an unawaited, route-guarded decoration started
-after the base task view and plain link paint, so pending/failed reads leave the
-task file, route landing, and entry intact; 401 still re-gates through `api()`.
-Disabled availability hides the entry and starts no list read. Run-history
-inline rollup links also appear only when enabled and stay outside collapse
-toggles so activation navigates without toggling. Generate posts `/metrics`
-and re-renders to the latest deterministic Layer 1 report without mutating
-target task or run state. Run semantic
+semantic `report.md` only as Copy/Download artifacts. Active Task detail has no
+evaluation entry and performs no evaluation availability/list read. Run-history
+inline rollup links appear only when enabled and stay outside collapse toggles
+so activation navigates without toggling; their state lights are supplied by the
+history payload rather than by one list request per task group. Generate posts
+`/metrics` and re-renders to the latest deterministic Layer 1 report without
+mutating target task or run state. Run semantic
 evaluation posts `/semantic/job`, reads the persisted current job on every view
 load, replaces the trigger with a running panel for `queued`/`running`, polls via
 a single chained timeout torn down on navigation, shows `failed`/`error`

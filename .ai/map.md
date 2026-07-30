@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
+last-updated: 2026-07-30
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # Project Map
@@ -14,7 +14,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | implemented; ai-native-development registry = truth (absolute `aii-2` first, registry-file fallback); readiness JSON lists failed checks only; commit/housekeeping metadata display-only |
 | Task inventory | task_store, api, models | implemented; local parser only; index ids/summaries normalized (Markdown-link cells, five-column form); frontmatter authoritative status/blockers; reads index-gated + contained under `.ai-tasks`; exact-id archive + `session-est` reads |
-| Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | implemented; `ORCH_HUB_EVAL_ENABLED` gate + per-task `ORCH_HUB_EVAL_RETENTION`; exact active/archive ids; read-only `(repo_path, task_id)` run aggregation; bounded evidence + best-effort git window; hub-owned artifacts under `<data_dir>/evaluations/`; prune only after durable artifacts |
+| Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | implemented; `ORCH_HUB_EVAL_ENABLED` gate + per-task `ORCH_HUB_EVAL_RETENTION`; exact active/archive ids; read-only `(repo_path, task_id)` run aggregation; bounded evidence + best-effort git window; hub-owned artifacts under `<data_dir>/evaluations/`; prune only after durable artifacts; run-history state is batched from newest artifacts |
 | Task static metrics | static_metrics, evaluation, config, models, api, web | implemented; gated deterministic Layer 1 over `EvidencePack`; rollups, protocol facts, five score axes, confidence, warnings; `static_metrics.json` beside `evidence.json`; no model call |
 | Task semantic evaluator | semantic_jobs, semantic, static_metrics, evaluation, config, models, notifications, api, cli, web | implemented; gated Layer 2 model report over bounded evidence + static; persisted async job blocks duplicate in-flight calls, survives restart; fresh terminal outcomes emit metadata-only push; `semantic_report.json` + `report.md`; isolated Claude CLI backend (no tools/persistence/repo cwd; safe mode; plan-mode writes blocked); doctor probes without model call |
 | Agent subscription usage | usage, statusline, models, config, api, intake_agent, semantic, web | implemented; normalized Claude/Codex windows/percentages/resets/freshness/plan/credits; Codex = newest local rollout; Claude figures = operator statusLine sink, reset boundary may advance from percentage-less 2.1.220 stream event; rolled boundary = no active window; fail-soft display-only; never gates |
@@ -23,12 +23,12 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Run lifecycle | admission, runs, intake, orch_config, sessions, api, config, control_dir, models, readiness, task_store | implemented; shared per-repo run↔intake admission before readiness; detached `caffeinate` launch with explicit agent-CLI `PATH`; external run dirs; `run.json` + internal `spawn_out`; per-repo run serialization; reattach; live-only `stop_requested`; stop/end classification; split-role `--print-config` preview + legacy detection; split/legacy argv; session/effective-config snapshots from logs |
 | Human question relay | control_dir, runs, api, notifications, models, web | implemented over live control dirs; omitted mode = legacy verbatim; explicit answer/discuss fail-closed by question kind; metadata-only audit events carry mode; Bark push once per `(run_id, seq)`, compact plan-gate text |
 | Log viewing | logs, runs, api | implemented; locate from `RunRecord`; bounded recent tails; `spawn.out` diagnostic fallback; bearer-header SSE |
-| Mobile dashboard | api, web | implemented mobile-first SPA v1; public shell + localStorage bearer token; CSS-only theme with pre-paint Mode/Palette axes; Overview landing + display-only usage section; display-ready softening only for live runs with sole `git_clean` failure (raw gates unchanged); run↔intake admission pre-reflection with linked blockers and neutral readiness/state presentation; split DEV/REVIEW Start dialog; evaluation L1/L2 sidecar; details in features/dashboard.md + dashboard-views.md |
+| Mobile dashboard | api, web | implemented mobile-first SPA v1; public shell + localStorage bearer token; CSS-only theme with pre-paint Mode/Palette axes; Overview landing + display-only usage section; display-ready softening only for live runs with sole `git_clean` failure (raw gates unchanged); run↔intake admission pre-reflection with linked blockers and neutral readiness/state presentation; split DEV/REVIEW Start dialog; Run-history evaluation state lights; evaluation L1/L2 sidecar; details in features/dashboard.md + dashboard-views.md |
 | Remote intake-task | admission, intake, intake_agent, runs, api, web, models, readiness, task_store, notifications | implemented; shared per-repo run↔intake admission before readiness; hub-owned draft/audit state; off-lock transient turns + dashboard polling; recovered overlaps refuse revise/confirm but permit lifecycle-legal Cancel; Claude CLI backend; metadata-only intake-ready push; confirm verified via inventory `pending`/`blocked` |
 | Auth and private access | api, config | implemented pure-ASGI bearer middleware; Tailscale-only/private exposure still required; SSE header auth via fetch streams, no query tokens |
 | Notifications | notifications, config, runs, intake, semantic_jobs, monitor, launchd, api, cli | implemented Bark backend; `ORCH_HUB_BARK_URL`; owning managers trigger run/question, intake-ready, and semantic-job-outcome pushes; delivery isolated; `notify test` probe with plist fallback + URL redaction |
 | Launchd service | launchd, cli, config, api, docs, deploy | implemented resident Mac service packaging + ops CLI; plist template = source of truth; manages only the fixed service label, not orchestrator runs |
-| Run history and audit | history, runs, orch_config, sessions, api, models, control_dir, task_store | implemented; per-run `events.jsonl`; launch-time task status; metadata events with mode, never answer text; session/effective-config snapshots + `session-est` for history views; run-scoped reads reach archived/ended context without listing archive |
+| Run history and audit | history, runs, orch_config, sessions, api, models, control_dir, task_store, evaluation | implemented; per-run `events.jsonl`; launch-time task status; metadata events with mode, never answer text; session/effective-config snapshots + `session-est` for history views; batched newest evaluation state per task group; run-scoped reads reach archived/ended context without listing archive |
 
 ## Feature -> APIs
 
@@ -36,7 +36,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 |---|---|
 | Repo discovery and readiness | CLI `repos [--json]`; `GET /api/repos`; `GET /api/repos/{repo_id}/commits` |
 | Task inventory | `GET /api/tasks`; `GET /api/repos/{repo_id}/tasks[/{task_id}]` |
-| Task evaluation foundation | internal `EvaluationService` (target/evidence/generate/list/read/prune methods); `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; `POST .../evidence`; dashboard `#/evaluations/{repo}/{task}` |
+| Task evaluation foundation | internal `EvaluationService` (target/evidence/generate/list/read/prune methods); `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; `POST .../evidence`; `GET /api/history/runs` batched newest-state; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | internal `StaticEvaluator` (`run_metrics`, `build_report`, `generate_metrics`, `STATIC_METRICS_NAME`); `POST .../evaluations/{task_id}/metrics`; detail readback; dashboard Layer 1 |
 | Task semantic evaluator | internal `SemanticEvaluator.evaluate`/`doctor`, `SemanticJobManager`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; CLI `orch-hub eval doctor`; detail `semantic_report`/`report_md` readback |
 | Agent subscription usage | console script `orch-hub-statusline`; internal `UsageService`, `ClaudeUsageStore`, `WindowBoundary`, statusline/stream-boundary/codex parsers; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage`; Overview usage section |
@@ -50,7 +50,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | Auth and private access | `ORCH_HUB_TOKEN`; `Authorization: Bearer <token>`; public `GET /api/health`; protected docs/API routes |
 | Notifications | internal notifier interface; `ORCH_HUB_BARK_URL`; Bark POST backend; CLI `orch-hub notify test` |
 | Launchd service | CLI `orch-hub launchd deploy\|update\|start\|stop\|restart\|status`; `orch-hub-api`; `deploy/launchd/com.qinglin89.orch-hub.plist`; `docs/launchd.md` |
-| Run history and audit | `GET /api/history/runs`; `GET /api/runs/{run_id}/task`; run sessions/effective-config routes |
+| Run history and audit | `GET /api/history/runs` incl. optional batched evaluation state; `GET /api/runs/{run_id}/task`; run sessions/effective-config routes |
 
 ## Module -> Key Responsibilities
 

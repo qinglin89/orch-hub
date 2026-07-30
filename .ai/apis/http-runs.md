@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-30
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -45,7 +45,18 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
   persisted session snapshot fields (`sessions`, `context_budget`), and
   `session_est` (`{"current","total"}` or `null` when unknown), and
   `effective_config` (`null` when the run has no persisted startup snapshot).
+  The top-level payload also includes `evaluation_enabled` plus
+  `evaluation_states`, one entry per distinct run-history task group:
+  `{repo_name, repo_path, task_id, latest_evaluation_id, level}` where `level`
+  is `none`, `l1`, or `l1_l2`.
 - Query: `limit` defaults to 50 and is clamped to `0..200`.
+- Evaluation state: derived by deduplicating the returned runs by
+  `(repo_path, task_id)` and structurally listing each task's newest persisted
+  evaluation once. Empty/evidence-only folds to `none`, static metrics gives
+  `l1`, and static metrics plus semantic report gives `l1_l2`. Disabled
+  evaluation mode returns `evaluation_enabled:false` and no state reads; a
+  per-task state read failure omits only that marker and never hides run
+  history.
 
 ## `GET /api/runs/{run_id}`
 

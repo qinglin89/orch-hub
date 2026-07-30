@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: fa5cb8be1e638086950e46eab825ab9b06649c26
+last-updated: 2026-07-30
+verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 ---
 
 # Features: Run Observability
@@ -79,9 +79,12 @@ Implemented behavior:
 - `GET /api/history/runs` returns recent runs newest-first with the normal
   serialized run status plus embedded persisted events, per-run persisted
   session snapshots (`sessions`, `context_budget`), and the task's typed
-  `session_est` (`null` when unknown), and the persisted run
-  `effective_config` snapshot (`null` when absent); `limit` defaults to 50 and
-  is clamped to `0..200`.
+  `session_est` (`null` when unknown), the persisted run `effective_config`
+  snapshot (`null` when absent), and batched optional task-evaluation state.
+  Evaluation state is returned once per distinct `(repo_path, task_id)` group as
+  `none` / `l1` / `l1_l2`, skips all reads when evaluation is disabled, and
+  fails soft per task so history still renders if an evaluation sidecar read
+  fails; `limit` defaults to 50 and is clamped to `0..200`.
 - `GET /api/runs/{run_id}/task` reads the task file through the persisted run
   identity: active `.ai-tasks/<task_id>.md` first, then
   `.ai-tasks/archive/<task_id>.md`. It returns `source:
