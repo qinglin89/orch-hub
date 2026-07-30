@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
 ---
 
 # Modules: Web UI
@@ -40,10 +40,10 @@ route-level headings/focus/announcements, an Operations Overview default landing
 route, repo/task/detail/run views, repo/task run-state signals,
 searchable/counted all-tasks inventory, recent commits, task-detail Start/Stop
 run controls, live per-session context strips, waiting-question answer forms,
-filterable/counted/collapsible grouped run history with est-vs-actual rollups,
-batched evaluation-state lights, and effective-config disclosures, a run-scoped
-task-file view, task-evaluation Layer 1/Layer 2 sidecar view reached from Run
-history, remote intake start/review views,
+cursor-paged/filterable grouped run history whose task groups start collapsed,
+with est-vs-actual rollups, batched evaluation-state lights, and
+effective-config disclosures, a run-scoped task-file view, task-evaluation
+Layer 1/Layer 2 sidecar view reached from Run history, remote intake start/review views,
 and recent/live log views;
 `styles.css` holds the mobile-first responsive layout. The dashboard
 reads only HTTP payloads, uses `fetch` +
@@ -136,14 +136,17 @@ Waiting-question forms render two kind-aware explicit-mode buttons:
 Discuss/Answer for ordinary escalations and Feedback/Confirm for `plan-gate`;
 plan-gate Confirm may post empty text for one-tap approval, while other empty
 replies are blocked locally and server-side guards still own correctness.
-Run history consumes the embedded `sessions`/`context_budget` and `session_est`
-fields from `GET /api/history/runs` plus the response's batched
-`evaluation_enabled` / `evaluation_states` sidecar state. It filters the
-already-fetched newest-first list by repo, run state, and task-id text before
-grouping by `(repo, task)`, shows filtered group/run counts plus distinct
-empty/no-match states, preserves log links on visible run cards, renders each
-run's embedded `effective_config` snapshot as a disclosure outside the log-link
-card, and lets each task group collapse without hiding its rollup. Enabled task
+Run history enters on the newest fixed-50 window from `GET /api/history/runs`
+and refetches adjacent windows by echoing opaque server cursors; the pager uses
+the response's traversal-window position/count and cursor boundaries, including
+a navigable past-the-end state. It consumes embedded
+`sessions`/`context_budget`, `session_est`, and batched
+`evaluation_enabled`/`evaluation_states`; filters only the loaded window by
+repo, run state, and task-id text before grouping by `(repo, task)`, and labels
+counts/no-match text as page-local. Newly encountered groups start collapsed;
+the explicit expansion set survives filter repaints and page navigation where a
+group reappears. Visible cards preserve log links and render each run's embedded
+`effective_config` snapshot as a disclosure outside the link. Enabled task
 groups show an inline `Evaluation →` action with a grey/amber/green state light
 for not evaluated, L1, or L1 + L2; the state is from the same newest evaluation
 the sidecar route opens and is exposed through title/ARIA text, not a visible

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
 ---
 
 # Features: Run Observability
@@ -76,15 +76,23 @@ Implemented behavior:
 - Answer audit events record responder, optional answer `mode`, and question
   metadata (`seq`, question timestamp/kind/banner/message) but deliberately
   exclude the answer text.
-- `GET /api/history/runs` returns recent runs newest-first with the normal
-  serialized run status plus embedded persisted events, per-run persisted
-  session snapshots (`sessions`, `context_budget`), and the task's typed
-  `session_est` (`null` when unknown), the persisted run `effective_config`
-  snapshot (`null` when absent), and batched optional task-evaluation state.
-  Evaluation state is returned once per distinct `(repo_path, task_id)` group as
+- `GET /api/history/runs` has two newest-first contracts: the default is a
+  fixed-50-run traversal whose opaque direction-carrying cursors anchor both
+  Previous and Next across insert/prune races; `?limit=N` is a separate bounded
+  newest-runs summary, clamped to `0..200`, with no paging metadata. Mixing
+  `cursor` and `limit` is 400.
+- A paged response carries `page`, `page_size`, `total_runs`, `total_pages`,
+  boundary booleans, and the adjacent opaque cursors. `page`/`total_pages`
+  count that cursor traversal's windows, not snapshot grid slots, so ragged
+  windows remain internally coherent; an empty past-the-end window reports
+  `page == total_pages + 1` and keeps a Previous cursor.
+- Returned runs retain normal serialized status plus embedded persisted events,
+  per-run session snapshots (`sessions`, `context_budget`), typed `session_est`
+  (`null` when unknown), persisted `effective_config` (`null` when absent), and
+  batched optional task-evaluation state. Evaluation state is returned once per
+  distinct `(repo_path, task_id)` group in the returned window/summary as
   `none` / `l1` / `l1_l2`, skips all reads when evaluation is disabled, and
-  fails soft per task so history still renders if an evaluation sidecar read
-  fails; `limit` defaults to 50 and is clamped to `0..200`.
+  fails soft per task.
 - `GET /api/runs/{run_id}/task` reads the task file through the persisted run
   identity: active `.ai-tasks/<task_id>.md` first, then
   `.ai-tasks/archive/<task_id>.md`. It returns `source:

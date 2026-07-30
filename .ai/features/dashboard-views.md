@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -69,11 +69,17 @@ Implemented behavior:
   and links to intake review. Structured admission 409s repaint into the same
   linked explanation. These branches precede readiness, but do not change
   READY/NOT READY, Needs attention, or run-state signals.
-- Run history uses `GET /api/history/runs` newest-first, grouped client-side by
-  `(repo, task)`. Repo/state/task-id filters compose client-side over the
-  fetched payload before grouping; the view shows filtered group/run counts,
-  distinguishes empty history from no matches, and lets task groups collapse
-  while keeping each group's header and rollup visible. Each task group shows
+- Run history enters on the newest fixed-50 window from
+  `GET /api/history/runs`; Previous/Next refetch by echoing the server's opaque
+  direction-carrying cursors, so insert/prune races do not create overlap or
+  gaps. The pager shows the server's traversal-window position/count, disables
+  unavailable boundaries, and gives empty history and navigable past-the-end
+  windows distinct states.
+- Repo/state/task-id filters compose client-side over only the loaded window
+  before grouping by `(repo, task)`; count/no-match text explicitly names that
+  page-local scope. Every newly encountered task group starts collapsed, while
+  explicit expansion choices survive filter repaints and page navigation for
+  groups encountered again; each header and rollup stays visible. Each group shows
   per-run session strips from persisted snapshots plus a rollup of observed dev
   sessions vs frontmatter `session-est`, peak per-session context, summed run
   wall-clock from `started_ts`/`ended_ts`, and each run's embedded

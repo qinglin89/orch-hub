@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -36,20 +36,35 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 
 ## `GET /api/history/runs`
 
-- Purpose: list recent runs newest-first with computed run status and persisted
-  audit/history events.
-- Source: delegates to `RunManager.recent_runs(limit=...)`, which refreshes
-  run state and reads each run's `events.jsonl`.
-- Shape: `{"runs": [RunHistoryEntry.to_dict(), ...]}` where each entry embeds
-  the normal `RunStatus` fields, including `stop_requested`, plus `events`,
-  persisted session snapshot fields (`sessions`, `context_budget`), and
-  `session_est` (`{"current","total"}` or `null` when unknown), and
-  `effective_config` (`null` when the run has no persisted startup snapshot).
-  The top-level payload also includes `evaluation_enabled` plus
-  `evaluation_states`, one entry per distinct run-history task group:
-  `{repo_name, repo_path, task_id, latest_evaluation_id, level}` where `level`
-  is `none`, `l1`, or `l1_l2`.
-- Query: `limit` defaults to 50 and is clamped to `0..200`.
+- Purpose: expose all persisted runs through stable newest-first pages, plus a
+  separate bounded newest-runs summary for Overview.
+- Source: paged mode delegates to `RunManager.history_page(cursor=...)`;
+  summary mode delegates to `RunManager.recent_runs(limit=...)`. Both refresh
+  and read only the returned window/summary, including each run's
+  `events.jsonl`.
+- Paged query/shape: no `limit` means fixed 50-run windows. Omit `cursor` for
+  the newest window; thereafter echo opaque `prev_cursor`/`next_cursor` values
+  (their direction + run-id anchor is server-owned). The payload has `runs`,
+  `page`, `page_size`, `total_runs`, `total_pages`, `has_prev`, `has_next`,
+  `prev_cursor`, and `next_cursor`. Anchored directions keep adjacent windows
+  disjoint and complete across insert/prune races.
+- Page metadata: `page`/`total_pages` count the current cursor traversal's
+  windows, so a ragged walk can be longer than `ceil(total_runs / page_size)`
+  without rendering `page > total_pages`. A non-empty window is always within
+  its count; an empty past-the-end window is HTTP 200 with
+  `page == total_pages + 1`, no Next, and a Previous back to real runs. Empty
+  history is page 1 of 0.
+- Summary query/shape: `?limit=N` returns only `runs` plus evaluation sidecar
+  fields; `N` is clamped to `0..200`. Summary responses have no totals or
+  cursors. Sending both `limit` and `cursor` is HTTP 400.
+- Every run entry embeds the normal `RunStatus` fields, including
+  `stop_requested`, plus `events`, persisted session snapshot fields
+  (`sessions`, `context_budget`), `session_est`
+  (`{"current","total"}` or `null`), and `effective_config` (`null` when no
+  startup snapshot exists). Both top-level contracts also include
+  `evaluation_enabled` plus `evaluation_states`, one entry per distinct
+  returned task group: `{repo_name, repo_path, task_id, latest_evaluation_id,
+  level}` where `level` is `none`, `l1`, or `l1_l2`.
 - Evaluation state: derived by deduplicating the returned runs by
   `(repo_path, task_id)` and structurally listing each task's newest persisted
   evaluation once. Empty/evidence-only folds to `none`, static metrics gives
