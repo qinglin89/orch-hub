@@ -834,14 +834,16 @@ def test_run_history_distinguishes_empty_history_from_no_match():
 # (`scenarioRunHistoryPaging`); these are the served-asset guarantees.
 
 
-def test_run_history_requests_a_page_and_defaults_to_the_first():
+def test_run_history_requests_a_page_by_cursor_and_defaults_to_the_newest():
     body = app_js()
-    # The page is a server window, so navigating pages refetches with ?page=N.
-    assert 'api("/api/history/runs?page=" + requested)' in body
-    # 1-based and normalized, and the router's no-argument call lands on page 1
-    # (so re-entering the view always shows the newest runs).
-    assert "async function renderRuns(page)" in body
-    assert "Math.max(1, Math.trunc(Number(page)) || 1)" in body
+    # A page is a server window, so navigating refetches — anchored on a cursor
+    # the server handed back, never on a page number computed here, so a run
+    # started or pruned mid-walk cannot shift the next window.
+    assert '"/api/history/runs" +' in body
+    assert '(cursor ? "?cursor=" + encodeURIComponent(cursor) : "")' in body
+    # The router's no-argument call lands on the newest page (so re-entering the
+    # view always shows the newest runs, with no stale position).
+    assert "async function renderRuns(cursor)" in body
 
 
 def test_run_history_pager_renders_from_server_metadata():
@@ -852,15 +854,16 @@ def test_run_history_pager_renders_from_server_metadata():
     assert 'button("rp-prev", "Previous"' in body
     assert 'button("rp-next", "Next"' in body
     assert 'wire("rp-prev"' in body and 'wire("rp-next"' in body
-    assert "data.has_prev" in body
-    assert "data.has_next" in body
+    assert "data.prev_cursor" in body
+    assert "data.next_cursor" in body
     assert "data.total_pages" in body
     assert "data.total_runs" in body
     assert "Page ${page} of ${totalPages}" in body
-    # Boundary controls are disabled, and the handlers re-check the boundary so an
-    # activated boundary control is inert whatever route it came through.
+    # A control is enabled exactly when it has somewhere to go, and the handler
+    # re-checks that, so a boundary control is inert whatever route it came
+    # through and can never offer a step it cannot take.
     assert 'enabled ? "" : " disabled"' in body
-    assert "if (!enabled) return;" in body
+    assert "if (!cursor) return;" in body
     # Accessible names: decorative arrows, real per-button labels.
     assert '<span aria-hidden="true">${arrow}</span>' in body
     assert '<span class="visually-hidden"> page</span>' in body
@@ -885,13 +888,15 @@ def test_run_history_counts_state_their_page_scope():
 
 def test_run_history_distinguishes_empty_history_from_a_vanished_page():
     body = app_js()
-    # Empty history and a page past the end are different: the first has no
-    # pager, the second keeps one so Previous can get back.
+    # Empty history and a window whose runs are gone are different: the first has
+    # no pager, the second keeps one so Previous can get back.
     assert "No runs recorded yet." in body
-    assert "No runs on page ${Number(data.page) || requested}" in body
+    assert "No runs on page ${Number(data.page) || 1}" in body
     assert "if (!runs.length && !totalRuns)" in body
-    # Previous from a vanished page snaps to the last page that still exists.
-    assert "Math.min(page - 1, lastPage)" in body
+    # Previous from a vanished page lands on the last page that still exists —
+    # the server anchored that cursor when it found the window empty, so the
+    # client does no clamping of its own.
+    assert 'wire("rp-prev", data.prev_cursor);' in body
 
 
 def test_run_history_task_groups_start_collapsed():
@@ -2171,7 +2176,7 @@ def test_run_history_links_show_batched_three_level_evaluation_signal():
     assert "let historyEvalStates = new Map();" in body
     assert "data.evaluation_enabled" in body
     assert "data.evaluation_states" in body
-    assert 'api("/api/history/runs?page=" + requested)' in body
+    assert '(cursor ? "?cursor=" + encodeURIComponent(cursor) : "")' in body
     assert "historyEvalEnabled && group.repo_name && group.task_id" in body
     assert 'class="text-link tg-eval"' in body
     assert 'return { label: "not evaluated", kind: "none" }' in body
@@ -2181,7 +2186,7 @@ def test_run_history_links_show_batched_three_level_evaluation_signal():
     assert "Evaluation status:" in body
     assert 'aria-label="Evaluation, status:' in body
     assert "Evaluation " in body
-    render_runs = body[body.index("async function renderRuns(page)") :]
+    render_runs = body[body.index("async function renderRuns(cursor)") :]
     render_runs = render_runs[: render_runs.index("// ---- run-scoped task view")]
     assert 'api("/api/evaluation")' not in render_runs
     assert "evalListPath" not in render_runs

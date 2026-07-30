@@ -564,7 +564,7 @@ var DEFERRED = {}; // "METHOD path" -> a promise holding that route's response o
 // `payload` is normally a fixed object. A FUNCTION payload is called with the
 // full request url (query included) and the parsed body, and its return value is
 // the response — the only way to stub an endpoint whose answer depends on the
-// query, i.e. a paged route serving a different window per `?page=`.
+// query, i.e. a paged route serving a different window per `?cursor=`.
 function route(method, path, payload) {
   ROUTES[method + " " + path] = payload;
 }
@@ -2537,6 +2537,8 @@ async function scenarioRunHistory() {
       total_pages: 1,
       has_prev: false,
       has_next: false,
+      prev_cursor: null,
+      next_cursor: null,
       evaluation_enabled: enabled !== false,
       evaluation_states:
         enabled === false
@@ -2765,11 +2767,12 @@ async function scenarioRunHistory() {
 }
 
 // Run-history paging: every persisted run is reachable through Previous/Next
-// over server pages, boundary controls disable themselves, the page-local scope
-// of the filters/counts is stated rather than implied, task groups start
-// collapsed, and an explicit expansion survives a page trip while a
+// over server windows, each step anchored on a cursor the server handed back
+// (never a page number computed here), boundary controls disable themselves, the
+// page-local scope of the filters/counts is stated rather than implied, task
+// groups start collapsed, and an explicit expansion survives a page trip while a
 // newly-encountered group on the next page still starts collapsed. Also the two
-// no-cards states: an empty history and a page that no longer exists.
+// no-cards states: an empty history and a window whose runs are gone.
 async function scenarioRunHistoryPaging() {
   installRoutes({ waiting: false });
   var TASK2 = "2026-07-29-second";
@@ -2788,41 +2791,50 @@ async function scenarioRunHistoryPaging() {
       session_est: { current: 1, total: 2 },
     };
   };
-  // Four runs over two pages of two. The FIRST task spans both pages (so an
-  // expansion has a same-key group to survive onto), the second appears only on
-  // page 2 (so a first sighting mid-paging still starts collapsed).
-  var PAGES = {
-    1: [mkRun("run-d", TASK), mkRun("run-c", TASK)],
-    2: [mkRun("run-b", TASK), mkRun("run-a", TASK2)],
+  // Four runs over two windows of two, keyed the way the server anchors them: by
+  // the run id each window starts at ("" = no cursor, i.e. the newest). The FIRST
+  // task spans both windows (so an expansion has a same-key group to survive
+  // onto), the second appears only on the older one (so a first sighting
+  // mid-paging still starts collapsed).
+  var WINDOWS = {
+    "": { runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)], page: 1 },
+    "run-d": { runs: [mkRun("run-d", TASK), mkRun("run-c", TASK)], page: 1 },
+    "run-b": { runs: [mkRun("run-b", TASK), mkRun("run-a", TASK2)], page: 2 },
   };
-  var pageOf = function (url) {
-    var m = /[?&]page=(\d+)/.exec(url);
-    return m ? Number(m[1]) : 0; // 0 = the client sent no page at all
+  var cursorOf = function (url) {
+    var m = /[?&]cursor=([^&]*)/.exec(url);
+    return m ? decodeURIComponent(m[1]) : ""; // "" = the client sent no cursor
   };
   var shrunk = false;
   route("GET", "/api/history/runs", function (url) {
-    var page = pageOf(url);
-    // The race the out-of-range state exists for: page 1 still advertised a
-    // second page, but by the time Next is pressed the history has been pruned
-    // down to one page, so page 2 comes back empty.
-    if (shrunk && page > 1)
+    var cursor = cursorOf(url);
+    // The race the vanished-window state exists for: the newest window still
+    // advertised an older one, but by the time Next is pressed those run dirs
+    // are pruned, so the anchored window comes back empty — with Previous still
+    // anchored on the last window that does exist.
+    if (shrunk && cursor === "run-b")
       return {
         runs: [],
-        page: page,
+        page: 2,
         page_size: 2,
         total_runs: 2,
         total_pages: 1,
         has_prev: true,
         has_next: false,
+        prev_cursor: "run-d",
+        next_cursor: null,
       };
+    var window = WINDOWS[cursor] || { runs: [], page: 3 };
     return {
-      runs: PAGES[page] || [],
-      page: page,
+      runs: window.runs,
+      page: window.page,
       page_size: 2,
       total_runs: 4,
       total_pages: 2,
-      has_prev: page > 1,
-      has_next: page < 2,
+      has_prev: window.page > 1,
+      has_next: window.page < 2,
+      prev_cursor: window.page > 1 ? "run-d" : null,
+      next_cursor: window.page < 2 ? "run-b" : null,
       evaluation_enabled: false,
       evaluation_states: [],
     };
@@ -2831,9 +2843,9 @@ async function scenarioRunHistoryPaging() {
   await navigate("#/runs");
   checkOutline("run history paging");
   eq(
-    "run history: entering the view asks for the first page",
-    pageOf(lastCall("GET", "/api/history/runs").url),
-    1
+    "run history: entering the view asks for the newest window, unanchored",
+    cursorOf(lastCall("GET", "/api/history/runs").url),
+    ""
   );
   eq(
     "run history: the page indicator names the position and the whole-history total",
@@ -2883,13 +2895,14 @@ async function scenarioRunHistoryPaging() {
     "the group did not expand"
   );
 
-  // Next: a real refetch of the next server window.
+  // Next: a real refetch of the next server window, at the anchor the response
+  // carried for it — the client echoes a cursor back, it never computes one.
   pressEnter(doc.getElementById("rp-next"));
   await flush();
   eq(
-    "run history: Next requests the following page",
-    pageOf(lastCall("GET", "/api/history/runs").url),
-    2
+    "run history: Next requests the window the server anchored for it",
+    cursorOf(lastCall("GET", "/api/history/runs").url),
+    "run-b"
   );
   eq(
     "run history: page 2 renders the rest of the history",
@@ -2926,13 +2939,13 @@ async function scenarioRunHistoryPaging() {
     "a newly encountered group rendered expanded"
   );
 
-  // Previous walks back to the page it came from.
+  // Previous walks back to the window it came from, again at the server's anchor.
   pressEnter(doc.getElementById("rp-prev"));
   await flush();
   eq(
-    "run history: Previous requests the preceding page",
-    pageOf(lastCall("GET", "/api/history/runs").url),
-    1
+    "run history: Previous requests the preceding window's anchor",
+    cursorOf(lastCall("GET", "/api/history/runs").url),
+    "run-d"
   );
   check(
     "run history: Previous lands back on the first page",
@@ -2940,8 +2953,9 @@ async function scenarioRunHistoryPaging() {
     "page 1 still offers Previous"
   );
 
-  // A page that no longer exists (history pruned between two requests): explicit,
-  // and Previous snaps to the last page that does exist instead of dead-ending.
+  // A window whose runs are gone (pruned between two requests): explicit, and
+  // Previous carries the server's anchor for the last window that does exist
+  // instead of dead-ending.
   shrunk = true;
   pressEnter(doc.getElementById("rp-next"));
   await flush();
@@ -2958,9 +2972,9 @@ async function scenarioRunHistoryPaging() {
   pressEnter(doc.getElementById("rp-prev"));
   await flush();
   eq(
-    "run history: Previous from a vanished page snaps to the last real page",
-    pageOf(lastCall("GET", "/api/history/runs").url),
-    1
+    "run history: Previous from a vanished page lands on the last real window",
+    cursorOf(lastCall("GET", "/api/history/runs").url),
+    "run-d"
   );
 
   // Empty history stays its own state: no pager, no filters, just the note.
@@ -2972,6 +2986,8 @@ async function scenarioRunHistoryPaging() {
     total_pages: 0,
     has_prev: false,
     has_next: false,
+    prev_cursor: null,
+    next_cursor: null,
     evaluation_enabled: false,
     evaluation_states: [],
   });

@@ -2867,18 +2867,21 @@
   //
   // Two layers, deliberately different. PAGING is a server window: each page is
   // its own /api/history/runs request, because the whole point is that the
-  // response never grows with history. FILTERS are client-side over whatever
-  // page is loaded — no refetch on change, mirroring the task-list filters —
-  // which means they are page-local, and every count/empty state below says so
-  // rather than implying it searched the whole history.
+  // response never grows with history. A step is a cursor the server handed
+  // back, never a page number this side computes — the server anchors each
+  // window on a real run id so a run started or pruned mid-traversal cannot
+  // shift the next page under us. FILTERS are client-side over whatever page is
+  // loaded — no refetch on change, mirroring the task-list filters — which means
+  // they are page-local, and every count/empty state below says so rather than
+  // implying it searched the whole history.
   //
   // Filters compose as AND — repo (exact name), run state (exact), and a
   // case-insensitive task-id substring. Filtering the flat, newest-first list
   // *before* grouping keeps ordering intact and lets the per-group rollup and the
   // count line describe exactly the runs shown. Held in the closure, so they
-  // persist across view re-entry like the task filters. The page does NOT: route
-  // entry always lands on page 1 (the newest runs), so no stale position can
-  // survive into a later visit.
+  // persist across view re-entry like the task filters. The position does NOT:
+  // route entry always requests the newest page, so no stale cursor can survive
+  // into a later visit.
   const runFilters = { repo: "", state: "", task: "" };
   // Groups the user explicitly expanded, keyed by the stable group key; absent =
   // collapsed, which is the default for every newly encountered group. Held in
@@ -2976,10 +2979,11 @@
   }
 
   // The Previous/Next pager for run history, rendered from the response's own
-  // pagination metadata — never inferred from a short page — so each boundary
-  // control is disabled exactly when the server says there is nothing that way.
-  // The status line carries the scope the page-local filters do not: which page
-  // this is and how many runs the whole history holds.
+  // pagination metadata — never inferred from a short page. Each control is
+  // enabled exactly when the server handed back a cursor for that direction, so
+  // what the button offers and where it would go are the same fact and cannot
+  // drift apart. The status line carries the scope the page-local filters do
+  // not: which page this is and how many runs the whole history holds.
   //
   // Arrows are decorative (aria-hidden); the visually-hidden " page" makes each
   // accessible name "Previous page" / "Next page" while the visible label stays
@@ -2996,11 +3000,11 @@
       }<span class="visually-hidden"> page</span></button>`;
     return (
       `<nav class="pager" aria-label="Run history pages">` +
-      button("rp-prev", "Previous", "←", !!data.has_prev, true) +
+      button("rp-prev", "Previous", "←", !!data.prev_cursor, true) +
       `<span class="pager-status">Page ${page} of ${totalPages} · ${total} run${
         total === 1 ? "" : "s"
       } total</span>` +
-      button("rp-next", "Next", "→", !!data.has_next, false) +
+      button("rp-next", "Next", "→", !!data.next_cursor, false) +
       `</nav>`
     );
   }
@@ -3010,37 +3014,39 @@
   // button that was pressed, so it lands like any action-driven full re-render
   // (rerender -> document.title sync + focus at the page start).
   //
-  // The handlers re-check the boundary themselves rather than trusting the
-  // disabled attribute alone, so a boundary control is inert however it is
-  // activated. Previous from an out-of-range page snaps to the last real page
-  // instead of walking back through empty windows; for an in-range page the
-  // clamp is a no-op.
+  // Each direction navigates to the cursor the response carried for it, so the
+  // client never computes a position: no cursor means the boundary, and the
+  // handler re-checks that rather than trusting the disabled attribute alone, so
+  // a boundary control is inert however it is activated. It also means Previous
+  // from a page that no longer exists lands on the last page that does — the
+  // server anchored that cursor when it found the window empty.
   function wireHistoryPager(data) {
-    const page = Number(data.page) || 1;
-    const lastPage = Number(data.total_pages) || 1;
-    const wire = (id, enabled, target) => {
+    const wire = (id, cursor) => {
       const btn = document.getElementById(id);
       if (!btn) return;
       btn.addEventListener("click", () => {
-        if (!enabled) return;
-        rerender(renderRuns(target));
+        if (!cursor) return;
+        rerender(renderRuns(cursor));
       });
     };
-    wire("rp-prev", !!data.has_prev, Math.min(page - 1, lastPage));
-    wire("rp-next", !!data.has_next, page + 1);
+    wire("rp-prev", data.prev_cursor);
+    wire("rp-next", data.next_cursor);
   }
 
   // Run history: one newest-first page of runs from the history endpoint,
   // filtered/grouped client-side into collapsible per-task cards, each run
-  // tapping through to its log tail. `page` is 1-based; the router calls this
-  // with nothing, so entering the view always lands on the newest page, and only
-  // the pager navigates off it. Empty history, an out-of-range page, and a
-  // no-match filter are three distinct states.
-  async function renderRuns(page) {
+  // tapping through to its log tail. `cursor` is a run id the server handed back
+  // as an adjacent window's anchor; the router calls this with nothing, so
+  // entering the view always lands on the newest page, and only the pager
+  // navigates off it. Empty history, a page whose runs are gone, and a no-match
+  // filter are three distinct states.
+  async function renderRuns(cursor) {
     const superseded = routeGuard();
-    const requested = Math.max(1, Math.trunc(Number(page)) || 1);
     view().innerHTML = loadingView("Run history", "Loading runs…");
-    const data = await api("/api/history/runs?page=" + requested);
+    const data = await api(
+      "/api/history/runs" +
+        (cursor ? "?cursor=" + encodeURIComponent(cursor) : "")
+    );
     if (superseded()) return; // a newer route owns the view
     historyEvalEnabled = !!data.evaluation_enabled;
     historyEvalStates = new Map(
@@ -3054,14 +3060,15 @@
       return;
     }
     if (!runs.length) {
-      // History shrank under a page that was reachable a moment ago (pruned run
-      // dirs, or a hand-typed page). Say so plainly and keep the pager, whose
-      // Previous lands on the last page that does exist — never a dead end.
+      // Everything at and below this cursor was pruned since the page that
+      // offered it (or the cursor was hand-typed). Say so plainly and keep the
+      // pager, whose Previous carries the server's anchor for the last page that
+      // does exist — never a dead end.
       view().innerHTML =
         pageTitle("Run history") +
         historyPager(data) +
         centerHtml(
-          `No runs on page ${Number(data.page) || requested}. History holds ` +
+          `No runs on page ${Number(data.page) || 1}. History holds ` +
             `${totalRuns} run${totalRuns === 1 ? "" : "s"} on ${
               Number(data.total_pages) || 0
             } page${(Number(data.total_pages) || 0) === 1 ? "" : "s"}.`
