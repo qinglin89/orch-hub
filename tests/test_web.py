@@ -2093,9 +2093,28 @@ def test_task_detail_evaluation_entry_states_its_level():
     # Fetched best-effort and only on an enabled hub (every other evaluation
     # route 404s while disabled); a failed read renders the pre-hint bare link
     # rather than a misleading level.
-    assert "let evalList = null;\n    if (evalEnabled) {" in body
-    assert "evalList = await api(evalListPath(repoName, taskId));" in body
+    assert (
+        "if (evalEnabled) paintEvalEntryHint(repoName, detail.task_id, superseded);"
+        in body
+    )
     assert "if (!list) return null;" in body
+
+
+def test_task_detail_evaluation_hint_is_painted_after_the_view():
+    body = app_js()
+    # The hint decorates a control the view already shows, so it is read AFTER
+    # the paint and never awaited by the handler: api() has no timeout, and an
+    # unanswered list read awaited before the paint would hold the whole route on
+    # "Loading task…" — no task file, not even the plain link. The unawaited
+    # continuation therefore owns its own staleness guard and failure handling.
+    assert "function paintEvalEntryHint(repoName, taskId, superseded) {" in body
+    assert "api(evalListPath(repoName, taskId))\n      .then((list) => {" in body
+    assert "if (superseded()) return; // a newer route owns the view" in body
+    assert 'const host = view().querySelector(".eval-entry");' in body
+    assert "if (host) host.innerHTML = evalEntryLink(repoName, taskId, list);" in body
+    assert ".catch(() => {});" in body
+    # The base paint renders the same link through the same renderer, hintless.
+    assert "evalEntrySection(repoName, detail.task_id, null)" in body
 
 
 def test_run_history_links_to_evaluation_only_when_enabled():

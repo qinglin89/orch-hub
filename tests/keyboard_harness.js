@@ -2259,6 +2259,79 @@ async function scenarioTaskEval() {
   );
   route("GET", listPath, evalListPayload({})); // restore the default fixture
 
+  // Degrade, part two — the SLOW read, which a completed 404 cannot reach: the
+  // list route is held open, so the hint request is still in flight when the
+  // view is due. It must cost the view nothing. `api()` has no timeout, so
+  // awaiting this before the paint would park the whole route on "Loading task…"
+  // indefinitely: no task file, not even the plain entry link.
+  var releaseList = defer("GET", listPath);
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check(
+    "eval: a pending hint read still paints the task file",
+    !!doc.querySelector(".task-content"),
+    "the task file was held back by an unanswered evaluation history"
+  );
+  var pendingEntry = doc.querySelector(".eval-entry a");
+  check(
+    "eval: a pending hint read still paints the entry link",
+    !!pendingEntry,
+    "the entry link was held back by an unanswered evaluation history"
+  );
+  eq(
+    "eval: the pending entry link still targets the eval route",
+    pendingEntry && pendingEntry.getAttribute("href"),
+    evalPath
+  );
+  check(
+    "eval: a pending hint read claims no level",
+    doc.querySelector(".eval-entry .badge") === null,
+    "a level pill was rendered before the list answered"
+  );
+  // The route must also *land* — an awaited hint would leave the handler unfinished,
+  // so the router would never sync the title or move focus onto the new page.
+  activeIs("eval: a pending hint read still lands the route", pageHeading());
+  // ...and the pill fills in on its own once the read finally answers, with no
+  // second navigation.
+  await releaseList();
+  eq(
+    "eval: the level fills in when the slow read answers",
+    (doc.querySelector(".eval-entry .badge") || {}).textContent,
+    "static"
+  );
+
+  // The same late answer, after the user has moved on: the completion is guarded
+  // by the route generation, so it stays inert instead of writing into a view it
+  // no longer owns.
+  var releaseStale = defer("GET", listPath);
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  await navigate("#/repos");
+  await releaseStale();
+  check(
+    "eval: a stale hint answer stays out of the newer view",
+    doc.querySelector(".eval-entry") === null && !!doc.querySelector(".card.repo"),
+    "the late hint answer touched the repo list"
+  );
+
+  // A rejected token is the one hint failure that is NOT swallowed: the handler
+  // no longer rethrows it (the read happens after the paint, off the handler's
+  // path), so the re-gate has to come from api() itself — drop the token, show
+  // the login gate. A decoration must never be the reason a dead session keeps
+  // rendering data views.
+  routeError("GET", listPath, 401, { detail: "unauthorized" });
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check(
+    "eval: a 401 from the hint read still re-gates",
+    !!doc.getElementById("token-input"),
+    "the rejected token left the dashboard on a data view"
+  );
+  eq(
+    "eval: the re-gate drops the stored token",
+    localStorage.getItem("orch-hub-token"),
+    null
+  );
+  localStorage.setItem("orch-hub-token", "secret-token"); // re-auth for the rest
+  route("GET", listPath, evalListPayload({}));
+
   // Doctor gating: the subsystem is enabled but the Layer 2 backend is
   // unconfigured (available:false). The semantic trigger is disabled with an
   // explanation, while the free deterministic Layer 1 control stays usable — the

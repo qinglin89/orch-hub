@@ -2435,15 +2435,49 @@
   // level. A labelled pill, not the bare coloured dot the repo cards use — that
   // treatment is reserved for run activity, and colour alone would not answer
   // "is there a report" for a reader who cannot separate the hues.
-  function evalEntrySection(repoName, taskId, list) {
+  //
+  // Split from its <p> so the hint can be filled in after the view has painted
+  // (paintEvalEntryHint) through the same renderer that produced the hintless
+  // link — one place decides the href, so the two paints cannot drift apart.
+  function evalEntryLink(repoName, taskId, list) {
     const hint = evalEntryHint(list);
     return (
-      `<p class="eval-entry"><a class="text-link" href="${evalHash(
-        repoName,
-        taskId
-      )}"${hint ? ` title="${escapeHtml(hint.title)}"` : ""}>` +
-      `Task evaluation →</a>${hint ? " " + badge(hint.label, hint.kind) : ""}</p>`
+      `<a class="text-link" href="${evalHash(repoName, taskId)}"${
+        hint ? ` title="${escapeHtml(hint.title)}"` : ""
+      }>Task evaluation →</a>` +
+      (hint ? " " + badge(hint.label, hint.kind) : "")
     );
+  }
+
+  function evalEntrySection(repoName, taskId, list) {
+    return `<p class="eval-entry">${evalEntryLink(repoName, taskId, list)}</p>`;
+  }
+
+  // Fill the entry's level pill in AFTER the task view has painted.
+  //
+  // The evaluation history is the one task-detail overlay whose payload merely
+  // decorates a control the view already shows, so it is the one overlay that
+  // must not be awaited before the paint: `api()` has no timeout, and a list
+  // read that never answers would otherwise hold the whole route on
+  // "Loading task…" — costing the task file itself for a decoration. The other
+  // overlays (run, readiness, intake, availability) decide what is rendered at
+  // all, so they stay pre-paint.
+  //
+  // Unawaited by its handler, like rerender()'s continuation and for the same
+  // reason: the handler returns after painting, so the router lands the view
+  // (title, focus) on schedule instead of waiting on a decoration. That makes
+  // staleness and failure this function's own to handle — `superseded` is the
+  // route guard captured at handler entry.
+  function paintEvalEntryHint(repoName, taskId, superseded) {
+    api(evalListPath(repoName, taskId))
+      .then((list) => {
+        if (superseded()) return; // a newer route owns the view
+        const host = view().querySelector(".eval-entry");
+        if (host) host.innerHTML = evalEntryLink(repoName, taskId, list);
+      })
+      // Any failure keeps the hintless link that is already on screen — a 401
+      // has already dropped the token and painted the login gate inside api().
+      .catch(() => {});
   }
 
   async function renderTaskDetail(repoName, taskId) {
@@ -2533,22 +2567,6 @@
       if (err instanceof ApiError && err.status === 401) throw err;
     }
 
-    // Best-effort evaluation history, for the entry link's state hint: whether
-    // the link lands on nothing, a Layer 1 report, or one carrying Layer 2 too.
-    // Only asked on an enabled hub — every evaluation route but availability
-    // 404s while disabled, so a disabled hub issues no extra request and its
-    // view stays exactly what it was before this hint existed. It costs one more
-    // sequential round trip (these overlays are awaited in series); a failure or
-    // a slow hub degrades to the bare link, which is never hidden and never
-    // blocks the task file from rendering.
-    let evalList = null;
-    if (evalEnabled) {
-      try {
-        evalList = await api(evalListPath(repoName, taskId));
-      } catch (err) {
-        if (err instanceof ApiError && err.status === 401) throw err;
-      }
-    }
     if (superseded()) return; // a newer route owns the view
 
     const blockers =
@@ -2590,11 +2608,18 @@
         inflightIntake
       )}
       ${answerSection(run ? run.run_id : "", questions)}
-      ${evalEnabled ? evalEntrySection(repoName, detail.task_id, evalList) : ""}
+      ${evalEnabled ? evalEntrySection(repoName, detail.task_id, null) : ""}
       ${contentSection}`;
 
     wireAnswerForms();
     wireRunControls();
+
+    // The entry link's level hint, read and filled in after this paint. Asked
+    // only on an enabled hub — every evaluation route but availability 404s
+    // while disabled, so a disabled hub issues no extra request and its task
+    // view stays exactly what it was before the hint existed. Deliberately not
+    // awaited: see paintEvalEntryHint.
+    if (evalEnabled) paintEvalEntryHint(repoName, detail.task_id, superseded);
   }
 
   // ---- run history ----
