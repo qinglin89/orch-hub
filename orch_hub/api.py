@@ -97,7 +97,7 @@ from .task_store import (
     read_archived_task_content,
     read_task_content,
 )
-from .usage import UsageService
+from .usage import ClaudeUsageCollector, UsageService
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 """Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
@@ -476,25 +476,35 @@ def create_app(
         if intake_manager is not None
         else RepoAdmission()
     )
+    # Read-only, display-only agent-subscription-usage sidecar (Claude + Codex).
+    # Built before every Claude consumer below, because two of them feed it: the
+    # hub-driven ``claude -p`` backends call its best-effort stream observer once per
+    # turn, and the run manager asks it for a refresh when a run ends. Its primary
+    # Claude carrier is the concrete ``ClaudeUsageCollector``, constructed here like
+    # the other concrete Claude backends (intake agent, semantic backend) rather than
+    # inside the service — a live collector reads the operator's real ``~/.claude.json``
+    # and can launch the CLI, so a service built without one stays inert and every
+    # test that injects a ``usage_service`` is hermetic by construction. Building it
+    # starts no subprocess and no Claude turn; a refresh runs the CLI's local
+    # ``/usage`` command, which reaches no model. Every failure degrades to an
+    # *unavailable* card rather than erroring; it is not gated by evaluation and never
+    # participates in readiness/attention/run decisions.
+    usage = (
+        usage_service
+        if usage_service is not None
+        else UsageService(resolved, claude_collector=ClaudeUsageCollector())
+    )
+    claude_usage_observer = usage.claude_observer()
     manager = (
         run_manager
         if run_manager is not None
         else RunManager(
-            resolved, notifier=build_notifier(resolved), admission=admission
+            resolved,
+            notifier=build_notifier(resolved),
+            usage_refresh=usage.request_claude_refresh,
+            admission=admission,
         )
     )
-    # Read-only, display-only agent-subscription-usage sidecar (Claude + Codex).
-    # Built here — before the hub-driven Claude backends — so its best-effort observer
-    # can be wired into them: each intake/semantic ``claude -p`` turn feeds its
-    # stream-json to ``usage``, so Claude's 5h/7d subscription usage is captured
-    # without ever starting a probe turn (Codex is read separately from its own local
-    # rollouts). Building it starts no subprocess and no Claude turn, a read only ever
-    # touches Codex's local rollouts and the hub-owned Claude store, and every failure
-    # degrades to an *unavailable* card rather than erroring. It is not gated by
-    # evaluation and never participates in readiness/attention/run decisions. Tests
-    # inject one over a fake store / temp Codex home.
-    usage = usage_service if usage_service is not None else UsageService(resolved)
-    claude_usage_observer = usage.claude_observer()
     intake = (
         intake_manager
         if intake_manager is not None

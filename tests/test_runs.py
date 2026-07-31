@@ -153,6 +153,7 @@ def make_manager(
     pid_probe=None,
     clock: FakeClock | None = None,
     notifier=None,
+    usage_refresh=None,
 ) -> tuple[RunManager, FakeSpawner, FakeClock]:
     spawner = spawner if spawner is not None else FakeSpawner()
     clock = clock if clock is not None else FakeClock()
@@ -167,6 +168,7 @@ def make_manager(
         # Deliver inline (not on the production daemon thread) so notification
         # assertions are deterministic; it is only invoked when a notifier is set.
         notify_dispatch=lambda deliver: deliver(),
+        usage_refresh=usage_refresh,
     )
     return manager, spawner, clock
 
@@ -1321,6 +1323,73 @@ def test_no_notifier_configured_is_a_silent_no_op(tmp_path):
     status = only_status(manager)  # no notifier, no error
 
     assert status.state == "ended"
+
+
+# -- usage-refresh hook at the terminal transition ---------------------------------
+# A finished run has just stopped spending agent subscription quota, so the run
+# manager asks the display-only usage sidecar for a fresh reading. It is a plain
+# callable (no usage import here) and is isolated exactly like notification
+# delivery: once per run, never twice, and never able to touch run state.
+
+
+def test_run_end_asks_for_a_usage_refresh(tmp_path):
+    repo = make_repo(tmp_path)
+    asked: list[int] = []
+    manager, spawner, _ = make_manager(tmp_path, usage_refresh=lambda: asked.append(1))
+    manager.start_run(repo, TASK_ID)
+
+    manager.list_runs()  # still live -> nothing to refresh for yet
+    assert asked == []
+
+    end_run(spawner, 0)
+    manager.list_runs()  # the live->ended transition
+
+    assert asked == [1]
+
+
+def test_usage_refresh_is_asked_exactly_once_across_rescans(tmp_path):
+    repo = make_repo(tmp_path)
+    asked: list[int] = []
+    manager, spawner, _ = make_manager(tmp_path, usage_refresh=lambda: asked.append(1))
+    record = manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # transition observed here
+    manager.list_runs()  # settled record: no re-ask
+    manager.get_run(record.run_id)
+    manager.recent_runs(limit=10)
+
+    assert asked == [1]
+
+
+def test_usage_refresh_failure_does_not_corrupt_run_state(tmp_path):
+    repo = make_repo(tmp_path)
+
+    def boom() -> None:
+        raise OSError("usage sidecar unavailable")
+
+    manager, spawner, _ = make_manager(tmp_path, usage_refresh=boom)
+    record = manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    status = only_status(manager)  # must not raise despite the hook failing
+
+    assert status.state == "ended"
+    data = read_record(manager, record.run_id)
+    assert data["ended_ts"] is not None
+    assert data["exit_code"] == 0
+    events = read_events(manager.runs_dir / record.run_id)
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_RUN_ENDED]
+
+
+def test_no_usage_hook_configured_is_a_silent_no_op(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)  # usage_refresh=None
+
+    manager.start_run(repo, TASK_ID)
+    end_run(spawner, 0)
+
+    assert only_status(manager).state == "ended"
 
 
 # -- pending-question notifications ----------------------------------------------

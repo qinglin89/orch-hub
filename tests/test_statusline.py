@@ -1,9 +1,10 @@
 """Tests for the Claude Code statusLine usage writer.
 
-The writer is the only local carrier of Claude's 5h/7d subscription windows, so
-these cover both halves of its contract: it captures the CLI's rate-limit payload
-into the hub sink, and it stays *invisible* — the operator's own statusLine
-command receives the same stdin and its stdout/exit code are relayed untouched.
+The writer is a transitional fallback carrier of Claude's 5h/7d subscription
+windows (the CLI's own utilization cache is the primary one), so these cover both
+halves of its contract: it captures the CLI's rate-limit payload into the hub
+sink, and it stays *invisible* — the operator's own statusLine command receives
+the same stdin and its stdout/exit code are relayed untouched.
 
 Nothing here launches Claude: the payload is a fixture on stdin and the wrapped
 command is a small Python script written into ``tmp_path``. No account,
@@ -16,24 +17,17 @@ import datetime as dt
 import io
 import json
 import os
-import shlex
 import sys
 from pathlib import Path
 
 from orch_hub.config import DATA_DIR_ENV, DEFAULT_DATA_DIR
 from orch_hub.statusline import (
     MAX_SINK_BYTES,
-    SETUP_DOC,
-    StatuslineSetup,
     build_record,
     capture,
-    detect_statusline_setup,
     main,
     passthrough,
-    references_wrapper,
     resolve_sink,
-    setup_guidance_lines,
-    suggested_statusline_command,
 )
 from orch_hub.usage import CLAUDE_STATUSLINE_NAME, USAGE_DIR_NAME, read_claude_statusline
 
@@ -261,134 +255,3 @@ def test_main_never_writes_claude_config(tmp_path: Path, monkeypatch, capfd) -> 
     capfd.readouterr()
     assert sorted(p.name for p in (home / ".claude").iterdir()) == before
     assert os.path.exists(tmp_path / "s.json")
-
-
-# -- deploy-time setup detection ----------------------------------------------
-
-
-def write_settings(directory: Path, name: str, statusline_command: object) -> None:
-    """Write a Claude settings file; ``None`` command writes no statusLine block."""
-    directory.mkdir(parents=True, exist_ok=True)
-    data: dict = {"model": "opus"}
-    if statusline_command is not None:
-        data["statusLine"] = {"type": "command", "command": statusline_command}
-    (directory / name).write_text(json.dumps(data), encoding="utf-8")
-
-
-WRAPPER = Path("/hub/.venv/bin/orch-hub-statusline")
-
-
-def test_detect_no_settings_is_not_configured(tmp_path: Path) -> None:
-    setup = detect_statusline_setup(settings_dir=tmp_path / "absent")
-    assert setup == StatuslineSetup(configured=False, existing_command=None)
-
-
-def test_detect_wrapper_by_absolute_path_is_configured(tmp_path: Path) -> None:
-    write_settings(tmp_path, "settings.json", f"{WRAPPER} -- sh /x/line.sh")
-    assert detect_statusline_setup(settings_dir=tmp_path).configured is True
-
-
-def test_detect_wrapper_by_bare_name_is_configured(tmp_path: Path) -> None:
-    write_settings(tmp_path, "settings.json", "orch-hub-statusline")
-    assert detect_statusline_setup(settings_dir=tmp_path).configured is True
-
-
-def test_detect_existing_non_wrapper_command_is_preserved(tmp_path: Path) -> None:
-    write_settings(tmp_path, "settings.json", "sh ~/.claude/line.sh")
-    setup = detect_statusline_setup(settings_dir=tmp_path)
-    assert setup.configured is False
-    assert setup.existing_command == "sh ~/.claude/line.sh"
-
-
-def test_detect_local_settings_take_precedence(tmp_path: Path) -> None:
-    # settings.local.json overrides settings.json when both define statusLine.
-    write_settings(tmp_path, "settings.json", "orch-hub-statusline")
-    write_settings(tmp_path, "settings.local.json", "sh /x/other.sh")
-    setup = detect_statusline_setup(settings_dir=tmp_path)
-    assert setup.configured is False
-    assert setup.existing_command == "sh /x/other.sh"
-
-
-def test_detect_local_without_statusline_falls_through_to_base(tmp_path: Path) -> None:
-    # A local file that omits statusLine does not shadow the base file's block.
-    write_settings(tmp_path, "settings.local.json", None)
-    write_settings(tmp_path, "settings.json", f"{WRAPPER}")
-    assert detect_statusline_setup(settings_dir=tmp_path).configured is True
-
-
-def test_detect_malformed_settings_fail_soft(tmp_path: Path) -> None:
-    (tmp_path).mkdir(parents=True, exist_ok=True)
-    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
-    setup = detect_statusline_setup(settings_dir=tmp_path)
-    assert setup == StatuslineSetup(configured=False, existing_command=None)
-
-
-def test_detect_blank_or_missing_command_is_not_configured(tmp_path: Path) -> None:
-    write_settings(tmp_path, "settings.json", "   ")
-    assert detect_statusline_setup(settings_dir=tmp_path).configured is False
-    write_settings(tmp_path, "settings.json", None)
-    assert detect_statusline_setup(settings_dir=tmp_path).configured is False
-
-
-def test_references_wrapper_matches_any_invocation() -> None:
-    assert references_wrapper("/a/b/orch-hub-statusline -- sh x") is True
-    assert references_wrapper("orch-hub-statusline") is True
-    assert references_wrapper("sh /x/statusline.sh") is False
-
-
-# -- suggested command and guidance -------------------------------------------
-
-
-def test_suggested_command_default_data_dir_omits_flag() -> None:
-    setup = StatuslineSetup(configured=False)
-    command = suggested_statusline_command(
-        setup, wrapper_path=WRAPPER, data_dir=DEFAULT_DATA_DIR
-    )
-    assert command == str(WRAPPER)
-    assert "--data-dir" not in command
-
-
-def test_suggested_command_non_default_data_dir_adds_flag(tmp_path: Path) -> None:
-    setup = StatuslineSetup(configured=False)
-    command = suggested_statusline_command(
-        setup, wrapper_path=WRAPPER, data_dir=tmp_path
-    )
-    assert command == f"{WRAPPER} --data-dir {tmp_path}"
-
-
-def test_suggested_command_preserves_existing_via_shell() -> None:
-    # A command with `~` and a quote must survive: bare argv-append would drop the
-    # `~` expansion, so it is routed through `/bin/sh -c` with POSIX quoting that
-    # shlex (like a shell) decodes back to the exact original string.
-    existing = "sh ~/.claude/line.sh && echo \"a'b\""
-    setup = StatuslineSetup(configured=False, existing_command=existing)
-    command = suggested_statusline_command(
-        setup, wrapper_path=WRAPPER, data_dir=DEFAULT_DATA_DIR
-    )
-    assert " -- /bin/sh -c " in command
-    argv = shlex.split(command)
-    assert argv[:4] == [str(WRAPPER), "--", "/bin/sh", "-c"]
-    assert argv[4] == existing  # round-trips byte-for-byte
-
-
-def test_guidance_empty_when_configured() -> None:
-    setup = StatuslineSetup(configured=True)
-    assert setup_guidance_lines(setup, wrapper_path=WRAPPER, data_dir=DEFAULT_DATA_DIR) == []
-
-
-def test_guidance_for_fresh_setup_shows_wrapper_and_doc() -> None:
-    setup = StatuslineSetup(configured=False)
-    lines = setup_guidance_lines(setup, wrapper_path=WRAPPER, data_dir=DEFAULT_DATA_DIR)
-    text = "\n".join(lines)
-    assert str(WRAPPER) in text
-    assert "~/.claude" in text
-    assert SETUP_DOC in text
-    assert "preserved after `--`" not in text  # nothing existing to preserve
-
-
-def test_guidance_for_existing_command_notes_preservation() -> None:
-    setup = StatuslineSetup(configured=False, existing_command="sh /x/line.sh")
-    lines = setup_guidance_lines(setup, wrapper_path=WRAPPER, data_dir=DEFAULT_DATA_DIR)
-    text = "\n".join(lines)
-    assert "/bin/sh -c 'sh /x/line.sh'" in text
-    assert "preserved after `--`" in text

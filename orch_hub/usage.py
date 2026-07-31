@@ -23,22 +23,26 @@ differently:
   this module never opens).
 
 - **Claude** — the latest observation is retained in a hub-owned store
-  (:class:`ClaudeUsageStore`), fed by two carriers:
+  (:class:`ClaudeUsageStore`), fed by three carriers of decreasing authority:
 
-  1. *The statusLine sink* — the one local channel that actually carries the
-     five-hour / seven-day windows. Claude Code pipes them to a configured
-     statusLine command's stdin, so the operator-installed writer
-     (:mod:`orch_hub.statusline`) persists that payload to
-     :data:`CLAUDE_STATUSLINE_NAME` and :func:`read_claude_statusline` ingests it
-     into the same store on read. Because every concurrent Claude Code session
-     writes this one sink last-write-wins from its *own* last API response,
-     ingestion merges it into the store *per window* (:func:`merge_observations`) —
-     keyed on each figure's window instant, ties by ``max(used_percent)`` — rather
-     than trusting write recency, so an idle session's stale figure cannot lower a
-     current one. This is the Codex pattern applied to Claude: read what the
-     operator's own sessions already wrote. Uninstalled, the sink is simply absent
-     and Claude reads *unavailable* exactly as before.
-  2. *Hub-driven turns* — the hub also drives Claude (intake, semantic eval), and
+  1. *The CLI's own utilization cache* — the primary carrier, and the only one
+     that works with nobody watching. Claude Code keeps its authenticated
+     utilization fetch in ``~/.claude.json``; :func:`read_claude_usage_cache`
+     reads the whitelisted rate-limit fields out of it, and
+     :class:`ClaudeUsageCollector` refreshes that file by running the CLI's own
+     ``/usage`` command in print mode — a local command handled inside the CLI,
+     verified per run to reach no model (section note below). It is the Codex
+     pattern in its strongest form: read what the CLI itself wrote down, and ask
+     it to write it down again when nobody else has.
+  2. *The statusLine sink* — a transitional, opportunistic fallback. Claude Code
+     pipes the five-hour / seven-day windows to a configured statusLine command's
+     stdin, so an operator-installed writer (:mod:`orch_hub.statusline`) persists
+     that payload to :data:`CLAUDE_STATUSLINE_NAME` and
+     :func:`read_claude_statusline` ingests it into the same store on read. It is
+     no longer required for Claude usage to work — carrier 1 covers an operator who
+     never installs it — but an existing installation keeps feeding the store for
+     free, and its figures merge with carrier 1's rather than competing (below).
+  3. *Hub-driven turns* — the hub also drives Claude (intake, semantic eval), and
      :meth:`UsageService.claude_observer` is the best-effort seam those backends
      feed each turn's ``stream-json`` stdout into. No verified version puts a
      *used-percentage* there (2.1.218: no rate-limit field at all; 2.1.220: a
@@ -47,14 +51,17 @@ differently:
      never originates Claude usage. What 2.1.220 does give is a free *boundary*
      refresh: a turn the hub already runs can move a stored window's
      ``resets_at`` forward (:func:`parse_claude_stream_boundaries`,
-     :func:`merge_window_boundaries`) without touching the percentages carrier 1
-     observed. Figures come only from the sink; this keeps their window boundary
-     current between status-line renders.
+     :func:`merge_window_boundaries`) without touching the percentages the figure
+     carriers observed.
 
-  Both share one store and one read path. No Claude turn is ever started just to
-  refresh usage, and no interactive UI or private OAuth endpoint is scraped —
-  including the CLI's own ``/usage`` command, which fetches from a private
-  endpoint and spends a ``quota_check`` API call.
+  All three share one store and one read path, and every figure merges *per
+  window* (:func:`merge_observations`) keyed on the window instant it was measured
+  against, ties by ``max(used_percent)``. That is what lets two figure carriers
+  coexist without racing: a sink write and a cache read of the same window are one
+  window, an idle writer cannot lower a current figure, and a genuine rollover
+  still replaces. No Claude turn is ever started just to refresh usage — the
+  refresh runs the CLI's local ``/usage`` command, which reaches no model — and no
+  interactive UI or private OAuth endpoint is scraped.
 
 :class:`UsageService` aggregates both behind a small bounded cache so a burst of
 Overview refreshes does not re-scan rollout files every time, and degrades each
@@ -924,10 +931,17 @@ def merge_window_boundaries(
 
 # -- Claude: read the operator-installed statusLine sink ----------------------
 #
-# THE CARRIER THAT ACTUALLY WORKS. Everything above establishes that no hub-driven
-# turn can observe Claude's subscription windows; the CLI publishes them only to a
-# statusLine command's stdin. :mod:`orch_hub.statusline` is the operator-installed
-# writer that persists that payload; this is the read half.
+# THE TRANSITIONAL FALLBACK CARRIER. Everything above establishes that no hub-driven
+# turn can observe Claude's subscription windows; for a long time the CLI published
+# them only to a statusLine command's stdin, which made this the only figure source
+# there was. :mod:`orch_hub.statusline` is the operator-installed writer that
+# persists that payload; this is the read half.
+#
+# The section below supersedes it as the PRIMARY carrier: the CLI's own utilization
+# cache needs nothing installed and works with nobody watching. This one stays
+# because an existing installation should keep contributing — both feed the same
+# store through the same per-window merge, so the sink is an extra reading rather
+# than a competitor, and it is the only carrier that also names the plan tier.
 #
 # The sink is deliberately shaped so the *verified* mapping above parses it
 # unchanged — ``rate_limits`` at the top level, ``subscription_type`` beside it —
@@ -1244,14 +1258,22 @@ The CLI already re-fetches on its own schedule and serves the cache in between
 (measured: a second ``/usage`` a minute later left ``fetchedAtMs`` untouched), so
 polling harder cannot produce fresher data — it only spends quota-check calls. Well
 inside :data:`USAGE_STALE_AFTER_SECONDS`, so a skipped refresh never leaves the card
-reading stale."""
+reading stale.
+
+It is also the threshold :meth:`UsageService._read_claude` asks for a refresh at,
+deliberately the same number: a read that requested one any sooner would be asking
+for work this gate would refuse, and any later would leave the card older than it
+needs to be. Kept an internal constant rather than an environment setting (like
+:data:`USAGE_CACHE_TTL_SECONDS` and the run monitor's interval) — it is derived from
+the CLI's own measured refresh behavior, not from operator preference."""
 
 USAGE_POLL_MIN_INTERVAL_SECONDS = 300
 """Floor between two refresh *attempts*, whatever their outcome.
 
 Distinct from the freshness gate above, which only skips when there is fresh data to
 reuse: when the CLI is missing, unauthenticated, or hanging, there is none, and this
-is what stops every Overview load from re-running a doomed subprocess."""
+is what stops every Overview load from re-running a doomed subprocess. Internal for
+the same reason as the gate above — a bound on hub behavior, not a preference."""
 
 USAGE_POLL_TIMEOUT_SECONDS = 60
 """Hard bound on one refresh turn (measured ~2.3s, so this is headroom for a cold
@@ -1729,6 +1751,21 @@ def _safe(provider: str, fn: Callable[[], ProviderUsage]) -> ProviderUsage:
         return ProviderUsage.unavailable(provider, f"usage read failed: {type(exc).__name__}")
 
 
+UsageRefreshDispatch = Callable[[Callable[[], None]], None]
+"""Runs one background Claude usage refresh. The default detaches it onto a daemon
+thread; tests inject a synchronous dispatch for deterministic assertions."""
+
+
+def _thread_dispatch(refresh: Callable[[], None]) -> None:
+    """Default dispatch: run the refresh on a short-lived daemon thread.
+
+    A refresh is a bounded subprocess (:data:`USAGE_POLL_TIMEOUT_SECONDS`), and the
+    two things that ask for one — an Overview read finding stale figures, a run
+    reaching its terminal state — must not wait on it. Detaching is what makes the
+    trigger non-blocking; the thread is daemon so it never holds up shutdown."""
+    threading.Thread(target=refresh, daemon=True, name="orch-hub-usage").start()
+
+
 ClaudeUsageObserver = Callable[[str], None]
 """Best-effort seam: given one hub-driven ``claude -p`` turn's raw stdout, update
 Claude usage from whatever that stream supports.
@@ -1752,17 +1789,28 @@ class UsageService:
     for :data:`USAGE_CACHE_TTL_SECONDS` to keep rollout scans and store reads off
     a burst of Overview refreshes; :meth:`record_claude_observation` writes a new
     observation and invalidates the cache. Nothing here gates any operation — it
-    is a display-only sidecar over the two CLIs' own signals."""
+    is a display-only sidecar over the two CLIs' own signals.
+
+    ``claude_collector`` is the primary Claude carrier (:class:`ClaudeUsageCollector`)
+    and is deliberately NOT default-constructed: a live collector reads the
+    operator's real ``~/.claude.json`` and can launch a subprocess, so it is wired
+    by the app layer (:func:`orch_hub.api.create_app`) alongside the other concrete
+    Claude backends, and a service built without one is inert — it reads the store
+    and the statusLine sink and asks for nothing."""
 
     def __init__(
         self,
         config: Config,
         *,
         claude_store: ClaudeUsageStore | None = None,
+        claude_collector: ClaudeUsageCollector | None = None,
+        refresh_dispatch: UsageRefreshDispatch = _thread_dispatch,
         clock: Callable[[], dt.datetime] = _utc_now,
     ):
         self._config = config
         self._store = claude_store if claude_store is not None else ClaudeUsageStore(config.data_dir)
+        self._collector = claude_collector
+        self._refresh_dispatch = refresh_dispatch
         self._clock = clock
         self._cache: tuple[dt.datetime, SubscriptionUsage] | None = None
         # Serializes this process's writes to the Claude store. Two of them are
@@ -1788,6 +1836,67 @@ class UsageService:
         """Persist a fresh Claude observation and drop the cached snapshot."""
         with self._claude_write_lock:
             self._store.record(observation)
+        self._cache = None
+
+    def request_claude_refresh(self) -> None:
+        """Ask for a Claude usage refresh in the background; returns immediately.
+
+        The trigger the whole poller exists for, and it is *non-blocking by
+        construction*: the work is handed to :data:`UsageRefreshDispatch` (a daemon
+        thread in production) and this returns without waiting, so neither an
+        Overview read nor a run reaching its terminal state ever waits on a
+        subprocess. Whether a refresh is worth running at all is the collector's
+        decision, not this one's (freshness, attempt floor, single-flight), so
+        calling this too often is cheap rather than wrong.
+
+        Wired to nothing when no collector was injected, and swallowing even a
+        failure to *start* the worker: this is display bookkeeping, and its caller
+        is always doing something more important."""
+        if self._collector is None:
+            return
+        try:
+            self._refresh_dispatch(self._refresh_claude)
+        except Exception:  # noqa: BLE001 — display-only; never disturb the caller
+            pass
+
+    def _refresh_claude(self) -> None:
+        """Run one refresh and merge whatever the cache holds afterwards.
+
+        The whole body of the background worker. A failed, shed, or skipped refresh
+        still returns the observation currently on disk with its own ``fetchedAtMs``
+        (:class:`UsageRefreshResult`), which merges to *no change* — so a failure
+        cannot re-date old figures as newly observed, and the card degrades to
+        stale rather than to unavailable."""
+        collector = self._collector
+        if collector is None:
+            return
+        try:
+            result = collector.refresh()
+        except Exception:  # noqa: BLE001 — display-only; a failed poll changes nothing
+            return
+        self._merge_claude_observation(result.observation)
+
+    def _merge_claude_observation(self, observation: ClaudeObservation | None) -> None:
+        """Merge one carrier's observation into the store, per window.
+
+        The shared write path for both figure carriers (the utilization cache and
+        the statusLine sink): each merges into the store rather than replacing it,
+        so two carriers reading the same window contribute one window instead of
+        racing (:func:`merge_observations`). The lock is held across read-merge-write
+        because a concurrent boundary merge is also a read-modify-write and would
+        otherwise interleave and drop this carrier's figures. Nothing changed means
+        nothing is written, and the stored observation time stands."""
+        if observation is None:
+            return
+        with self._claude_write_lock:
+            current = self._store.latest()
+            if current is None:
+                self._store.record(observation)
+            else:
+                merged = merge_observations(current, observation)
+                if merged is None:
+                    return
+                self._store.record(merged)
         self._cache = None
 
     def refresh_claude_boundaries(self, boundaries: Iterable[WindowBoundary]) -> None:
@@ -1855,43 +1964,62 @@ class UsageService:
         yield _safe(PROVIDER_CODEX, lambda: read_codex_usage(self._config.codex_home, now=now))
 
     def _read_claude(self, now: dt.datetime) -> ProviderUsage:
-        """Ingest the statusLine sink, then read the store — the single Claude path.
+        """Ingest both figure carriers, read the store, then ask for a refresh if due.
 
-        Ingestion is a read-path step rather than a background watcher: the sink is
-        written by the operator's own sessions at their own cadence, so there is
-        nothing to subscribe to, and the aggregate cache already bounds how often
-        this runs. It is also isolated — an unreadable sink or a failing store write
-        must still yield whatever was observed before, so the card degrades to
-        *stale*, never to *unavailable*, on an ingest problem."""
-        try:
-            self._ingest_statusline()
-        except Exception:  # noqa: BLE001 — display-only; the stored observation still reads
-            pass
-        return claude_usage(self._store, now=now)
+        Ingestion is a read-path step rather than a background watcher: both carriers
+        are files somebody else writes at their own cadence, so there is nothing to
+        subscribe to, and the aggregate cache already bounds how often this runs.
+        Each is isolated — an unreadable file or a failing store write must still
+        yield whatever was observed before, so the card degrades to *stale*, never to
+        *unavailable*, on an ingest problem.
+
+        The refresh request comes last and blocks nothing: this read returns what is
+        on disk *now*, and a refresh it triggers lands in the store for the next one.
+        Its threshold is deliberately the collector's freshness horizon
+        (:data:`USAGE_CACHE_FRESH_SECONDS`) and not the display's
+        :data:`USAGE_STALE_AFTER_SECONDS`: waiting for the card to *look* stale would
+        keep it an hour behind when a refresh could keep it minutes behind, and the
+        collector re-checks the same horizon against the file itself, so a request it
+        cannot improve on costs nothing. An unknown observation time (the empty store
+        — no session has ever run, which is the case this carrier exists for) counts
+        as due."""
+        for ingest in (self._ingest_cache, self._ingest_statusline):
+            try:
+                ingest()
+            except Exception:  # noqa: BLE001 — display-only; the stored observation still reads
+                pass
+        usage = claude_usage(self._store, now=now)
+        if _older_than(usage.observed_ts, now, USAGE_CACHE_FRESH_SECONDS):
+            self.request_claude_refresh()
+        return usage
+
+    def _ingest_cache(self) -> None:
+        """Merge the CLI's own utilization cache into the store, per window.
+
+        The primary carrier's read half, and it stands on its own: the CLI refreshes
+        that file during the operator's ordinary interactive sessions too, so reading
+        it every time is worthwhile whether or not this hub ever polls. Polling only
+        covers the gap when nothing else has (:meth:`request_claude_refresh`)."""
+        if self._collector is None:
+            return
+        self._merge_claude_observation(self._collector.read_cache())
 
     def _ingest_statusline(self) -> None:
         """Merge the statusLine sink's observation into the store, per window.
 
-        Routing the sink *through the store* (rather than reading it as a parallel
-        source) keeps one read path, one payload shape, and one staleness rule for
-        both carriers, and persists the last-known figures so a rotated, deleted, or
-        newly-uninstalled sink still shows them as stale rather than losing them.
-        The sink is merged per window (:func:`merge_observations`), not accepted
-        wholesale on write recency: concurrent Claude Code sessions each write the
-        one sink from their own last API response, so a newer *write* stamp is not a
-        newer *measurement*. Merging by each figure's window instant (ties broken by
+        The transitional fallback carrier. Since the utilization cache became the
+        primary source the sink is no longer required for Claude usage to work, but
+        an existing operator installation still publishes real figures, so it keeps
+        being read: routing it *through the store* keeps one read path, one payload
+        shape, and one staleness rule for both carriers, and persists the last-known
+        figures so a rotated, deleted, or newly-uninstalled sink still shows them as
+        stale rather than losing them.
+
+        Merged per window (:func:`merge_observations`), not accepted wholesale on
+        write recency: concurrent Claude Code sessions each write the one sink from
+        their own last API response, so a newer *write* stamp is not a newer
+        *measurement*. Merging by each figure's window instant (ties broken by
         ``max(used_percent)``) stops an idle session's stale figure from lowering a
-        current one, while a genuine rollover still replaces. The write lock is held
-        across the read-merge-write so a concurrent boundary merge (also a
-        read-modify-write) cannot interleave and drop this sink's figures."""
-        observation = read_claude_statusline(self.statusline_sink)
-        if observation is None:
-            return
-        with self._claude_write_lock:
-            current = self._store.latest()
-            if current is None:
-                self._store.record(observation)
-                return
-            merged = merge_observations(current, observation)
-            if merged is not None:
-                self._store.record(merged)
+        current one — including one the cache carrier just contributed — while a
+        genuine rollover still replaces."""
+        self._merge_claude_observation(read_claude_statusline(self.statusline_sink))

@@ -378,6 +378,13 @@ class RunManager:
     live-run probe on the coordinator it is given, and a standalone manager
     (every run-only test) gets a private one whose intake side is unbound — a
     process with no intake manager has no intake to conflict with.
+
+    ``usage_refresh`` is an optional display-only hook called once per run, at
+    the live->ended transition — the moment an orchestrator run has finished
+    spending agent subscription quota. It is a plain ``Callable[[], None]`` (the
+    usage sidecar is never imported here) and is isolated exactly like
+    notification delivery: it must return promptly and its failure can never
+    touch run state.
     """
 
     def __init__(
@@ -391,6 +398,7 @@ class RunManager:
         clock: Callable[[], dt.datetime] = _utc_now,
         notifier: Notifier | None = None,
         notify_dispatch: NotifyDispatch = _thread_dispatch,
+        usage_refresh: Callable[[], None] | None = None,
         admission: RepoAdmission | None = None,
     ):
         self._config = config
@@ -401,6 +409,7 @@ class RunManager:
         self._clock = clock
         self._notifier = notifier
         self._notify_dispatch = notify_dispatch
+        self._usage_refresh = usage_refresh
         self._lock = threading.Lock()
         self._procs: dict[str, ProcessHandle] = {}
         # In-memory (run_id, seq) set of questions already pushed, so a pending
@@ -977,7 +986,30 @@ class RunManager:
         # verdict the dashboard shows.
         state, detail = self._classify_end(updated)
         self._emit(run_end_notification(updated, state, detail))
+        # Same once-per-run transition: the run has just stopped spending agent
+        # subscription quota, so this is when a refreshed usage reading is worth
+        # asking for — and asking here, rather than on a timer, means the figures
+        # are current whether or not anybody has the Overview open.
+        self._request_usage_refresh(updated.run_id)
         return updated
+
+    def _request_usage_refresh(self, run_id: str) -> None:
+        """Ask the usage sidecar to refresh, best-effort; never raise into run state.
+
+        Isolated exactly like :meth:`_emit`: the hook is display bookkeeping over a
+        run that has already ended and been persisted, so a failure is logged (run
+        id only — nothing on this path carries a secret) and dropped. The hook
+        itself is expected to return immediately; it is not dispatched off-thread
+        here because the usage sidecar owns that decision, and duplicating the
+        detachment would put two thread policies on one call.
+        """
+        request = self._usage_refresh
+        if request is None:
+            return
+        try:
+            request()
+        except Exception:
+            _log.warning("usage refresh request failed for run %s", run_id)
 
     @staticmethod
     def _history_sessions(run_dir: Path) -> SessionsSnapshot:

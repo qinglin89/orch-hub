@@ -5344,9 +5344,10 @@
   // Is a window's stored percentage still the CURRENT window's figure?
   //
   // `resets_at` closes the window that is open now and `window_minutes` gives its
-  // length, so `resets_at - window_minutes` is when that window opened. The
-  // carrier that supplies Claude's percentage (an operator statusLine render)
-  // only writes while an interactive session is on screen, so a figure routinely
+  // length, so `resets_at - window_minutes` is when that window opened. A stored
+  // percentage is only as new as the last carrier reading (the CLI's own cached
+  // utilization fetch, refreshed on its schedule and by the hub's poller; an
+  // operator statusLine render if one is installed), so a figure routinely
   // outlives the window it was taken in — and the five-hour window is anchored to
   // the first call OF THAT WINDOW, not to a clock grid, so a boundary that has
   // passed does NOT mean "a fresh window carrying the same figures":

@@ -12,6 +12,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import URLError
 
+import pytest
+
 from orch_hub import cli
 from orch_hub.config import (
     BARK_URL_ENV,
@@ -242,11 +244,10 @@ def test_launchd_status_cli_error(monkeypatch, capsys):
     assert "error: launchctl unavailable" in capsys.readouterr().err
 
 
-def _fake_deployment(tmp_path: Path) -> SimpleNamespace:
+def _fake_deployment() -> SimpleNamespace:
     return SimpleNamespace(
         plist_path=Path("/tmp/com.qinglin89.orch-hub.plist"),
         api_bin=Path("/tmp/.venv/bin/orch-hub-api"),
-        statusline_bin=tmp_path / ".venv" / "bin" / "orch-hub-statusline",
         data_dir=DEFAULT_DATA_DIR,
         dashboard_url="http://127.0.0.1:8765/",
         token="generated",
@@ -255,24 +256,8 @@ def _fake_deployment(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-def _fake_home_with_statusline(monkeypatch, tmp_path: Path, command: object) -> None:
-    """Point $HOME at a tmp dir; write ~/.claude/settings.json when a command is
-    given, so the Claude-usage guidance detection never reads the real home."""
-    home = tmp_path / "home"
-    claude = home / ".claude"
-    claude.mkdir(parents=True)
-    if command is not None:
-        (claude / "settings.json").write_text(
-            json.dumps({"statusLine": {"type": "command", "command": command}}),
-            encoding="utf-8",
-        )
-    monkeypatch.setenv("HOME", str(home))
-
-
-def test_launchd_deploy_cli(monkeypatch, capsys, tmp_path):
-    deployment = _fake_deployment(tmp_path)
-    # Already wired: the deploy summary shows, and no usage nag is printed.
-    _fake_home_with_statusline(monkeypatch, tmp_path, "orch-hub-statusline")
+def test_launchd_deploy_cli(monkeypatch, capsys):
+    deployment = _fake_deployment()
     monkeypatch.setattr(
         cli,
         "deploy_service",
@@ -288,69 +273,34 @@ def test_launchd_deploy_cli(monkeypatch, capsys, tmp_path):
     assert "launchd deploy ok" in out
     assert "generated ORCH_HUB_TOKEN: generated" in out
     assert "bark push: disabled" in out
-    assert "claude usage" not in out  # configured wrapper -> no repeated guidance
 
 
-def test_launchd_deploy_cli_prints_claude_usage_guidance(monkeypatch, capsys, tmp_path):
-    deployment = _fake_deployment(tmp_path)
-    # No statusLine configured at all: deploy prints copy-ready setup guidance.
-    _fake_home_with_statusline(monkeypatch, tmp_path, None)
+@pytest.mark.parametrize("action", ["deploy", "update"])
+def test_launchd_deploy_asks_for_no_claude_usage_setup(monkeypatch, capsys, tmp_path, action):
+    """Deploy/update no longer nag about the statusLine wrapper.
+
+    Claude usage now comes from the CLI's own utilization cache, which needs
+    nothing installed into ``~/.claude`` — so an unconfigured wrapper is not a
+    setup gap to report, and the deploy summary must not mention one. $HOME is
+    redirected at an empty dir to prove the absence is not merely the developer's
+    own wrapper being detected as configured.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     monkeypatch.setattr(
         cli,
         "deploy_service",
-        lambda options: SimpleNamespace(deployment=deployment, generated_token=True),
+        lambda options: SimpleNamespace(
+            deployment=_fake_deployment(), generated_token=True
+        ),
     )
 
-    rc = cli.main(["launchd", "update", "--skip-install"])
+    rc = cli.main(["launchd", action, "--skip-install"])
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "claude usage: no orch-hub statusLine wrapper detected" in out
-    assert str(deployment.statusline_bin) in out
-    assert "docs/claude-usage-statusline.md" in out
-
-
-def test_launchd_deploy_cli_preserves_existing_statusline(monkeypatch, capsys, tmp_path):
-    deployment = _fake_deployment(tmp_path)
-    _fake_home_with_statusline(monkeypatch, tmp_path, "sh /x/line.sh")
-    monkeypatch.setattr(
-        cli,
-        "deploy_service",
-        lambda options: SimpleNamespace(deployment=deployment, generated_token=True),
-    )
-
-    rc = cli.main(["launchd", "deploy", "--skip-install"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert f"{deployment.statusline_bin} -- /bin/sh -c 'sh /x/line.sh'" in out
-    assert "preserved after `--`" in out
-
-
-def test_launchd_deploy_cli_guidance_is_fail_soft(monkeypatch, capsys, tmp_path):
-    # A deployment object missing the new fields must never surface a traceback:
-    # the deploy already ran, so guidance is best-effort and silently skipped.
-    deployment = SimpleNamespace(
-        plist_path=Path("/tmp/com.qinglin89.orch-hub.plist"),
-        api_bin=Path("/tmp/.venv/bin/orch-hub-api"),
-        dashboard_url="http://127.0.0.1:8765/",
-        token="t",
-        token_source="generated",
-        bark_url=None,
-    )
-    _fake_home_with_statusline(monkeypatch, tmp_path, None)
-    monkeypatch.setattr(
-        cli,
-        "deploy_service",
-        lambda options: SimpleNamespace(deployment=deployment, generated_token=True),
-    )
-
-    rc = cli.main(["launchd", "deploy", "--skip-install"])
-
-    assert rc == 0
-    out = capsys.readouterr().out
-    assert "launchd deploy ok" in out
-    assert "claude usage" not in out  # detection could not run -> no partial nag
+    assert f"launchd {action} ok" in out
+    assert "statusline" not in out.lower()
+    assert "claude usage" not in out.lower()
 
 
 # -- notify test ---------------------------------------------------------------

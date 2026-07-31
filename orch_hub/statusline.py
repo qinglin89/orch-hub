@@ -1,29 +1,31 @@
-"""Claude Code statusLine writer: capture the CLI's own subscription usage.
+"""Claude Code statusLine writer: a transitional fallback carrier for Claude usage.
 
-Claude Code publishes the five-hour / seven-day subscription *figures* to exactly
-one local channel: the JSON payload it pipes to a configured statusLine
-command's stdin, as ``rate_limits.{five_hour,seven_day}.{used_percentage,
-resets_at}`` ("only present for subscribers after first API response"). Its
-``claude -p`` stream-json stdout carries no used-percentage on any verified
-version — nothing at all on Claude Code 2.1.218, and on 2.1.220 a
-``rate_limit_event`` naming one window and its reset instant but no figure (see
-the two Claude section notes in :mod:`orch_hub.usage`). A hub-driven turn can
-therefore keep a window's *boundary* current, but only this channel can say how
-much of it is used.
+Claude Code pipes the five-hour / seven-day subscription figures to a configured
+statusLine command's stdin, as ``rate_limits.{five_hour,seven_day}.{used_percentage,
+resets_at}`` ("only present for subscribers after first API response"). This module
+is the small writer that reads that payload and persists the rate-limit part to a
+hub-readable sink; :mod:`orch_hub.usage` reads it back into the ordinary
+observation store, so the read path, cache, ``GET /api/usage`` payload, and
+Overview cards are unchanged.
 
-This module is the small writer that reads that payload and persists the
-rate-limit part to a hub-readable sink, applying the *Codex pattern* to Claude:
-consume what the operator's own sessions already write, with no probe turn, no
-private endpoint, and no UI scrape. :mod:`orch_hub.usage` reads the sink back
-into the ordinary observation store, so the read path, cache, ``GET /api/usage``
-payload, and Overview cards are unchanged.
+**It is no longer required, and no longer the primary carrier.** When this was
+written the statusLine payload was the only local channel carrying the figures at
+all, which made Claude usage depend on somebody rendering a status line — it went
+quiet on an idle Mac or a stretch of headless orchestrator runs, exactly when the
+operator most wants the number. :class:`orch_hub.usage.ClaudeUsageCollector` now
+reads the CLI's own authenticated utilization cache and refreshes it by running the
+CLI's local ``/usage`` command, so Claude usage works with nobody watching and with
+nothing installed into ``~/.claude``. This writer remains because an existing
+installation should keep working and keep contributing: both carriers merge into
+one store per window, so the sink is an opportunistic extra reading rather than a
+competing source. New installations do not need it (``docs/claude-usage.md``).
 
 Two properties make installing it safe:
 
 - **Operator-installed, never hub-installed.** The hub does not write
   ``~/.claude/**``; the operator points their own ``statusLine.command`` at this
-  script (``docs/claude-usage-statusline.md``). Uninstalled, Claude usage reads
-  exactly as unavailable as it does today.
+  script, and removing it again is their edit to make — nothing in the hub adds,
+  edits, or nags about that setting.
 - **Invisible.** Anything after ``--`` is the operator's existing statusLine
   command: it receives the same stdin bytes and its stdout/stderr/exit code are
   relayed untouched, so the rendered status line is byte-identical to before.
@@ -46,7 +48,6 @@ import os
 import subprocess
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
 from pathlib import Path
 
 from .config import DATA_DIR_ENV, DEFAULT_DATA_DIR
@@ -174,166 +175,6 @@ def capture(raw: bytes, sink: Path, *, now: dt.datetime | None = None) -> bool:
         return write_sink(sink, record)
     except Exception:  # noqa: BLE001 — display-only bookkeeping; never break the status line
         return False
-
-
-# -- Deploy-time setup guidance -----------------------------------------------
-#
-# The writer above only matters once the operator points a Claude Code
-# statusLine at it. Nothing in the hub can do that — editing ``~/.claude/**`` is
-# off-limits — so ``orch-hub launchd deploy/update`` inspects the operator's
-# Claude settings read-only and, when the wrapper is not in the effective
-# statusLine command, prints copy-ready guidance. This is the detection half;
-# the CLI prints what :func:`setup_guidance_lines` returns.
-
-CLAUDE_SETTINGS_DIRNAME = ".claude"
-"""User-level Claude Code config dir, relative to ``$HOME`` (matches the doc)."""
-
-CLAUDE_SETTINGS_FILENAMES = ("settings.local.json", "settings.json")
-"""Settings files in precedence order: ``settings.local.json`` overrides
-``settings.json`` when both define ``statusLine``. A file that omits
-``statusLine`` does not shadow the next one — the first file with a statusLine
-command is the effective one, mirroring Claude Code's per-key merge."""
-
-SETUP_DOC = "docs/claude-usage-statusline.md"
-"""Operator guide the deploy nudge points at for the full walkthrough."""
-
-_STATUSLINE_KEY = "statusLine"
-_COMMAND_KEY = "command"
-
-
-@dataclass(frozen=True)
-class StatuslineSetup:
-    """Read-only view of whether the operator's Claude statusLine feeds the hub.
-
-    ``configured`` is true when the effective statusLine command already routes
-    through :data:`orch-hub-statusline <CLAUDE_STATUSLINE_NAME>` (any path or bare
-    name), so no guidance is due. ``existing_command`` is the operator's current
-    statusLine command when one is set but does not use the wrapper — the value to
-    preserve after ``--`` in the suggested command; ``None`` when nothing is set."""
-
-    configured: bool
-    existing_command: str | None = None
-
-
-def default_claude_settings_dir() -> Path:
-    return Path.home() / CLAUDE_SETTINGS_DIRNAME
-
-
-def references_wrapper(command: str) -> bool:
-    """Whether a statusLine command already routes through ``orch-hub-statusline``.
-
-    Matches the console-script name as a substring, so an absolute venv path, a
-    bare name on ``PATH``, or a wrapper from a different checkout all count as
-    "already wired" — any of them feeds the same sink, so nagging would be noise.
-    The name is distinctive enough that a false positive is not a real risk."""
-    return "orch-hub-statusline" in command
-
-
-def _statusline_command_in(path: Path) -> str | None:
-    """The ``statusLine.command`` string in one settings file, or ``None``.
-
-    Fail-soft on untrusted external input: a missing/unreadable file, non-JSON,
-    a non-object root, a missing/blank ``statusLine.command``, or an unexpected
-    shape all yield ``None`` rather than raising."""
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return None
-    try:
-        data = json.loads(text)
-    except ValueError:
-        return None
-    if not isinstance(data, dict):
-        return None
-    status_line = data.get(_STATUSLINE_KEY)
-    if not isinstance(status_line, dict):
-        return None
-    command = status_line.get(_COMMAND_KEY)
-    if isinstance(command, str) and command.strip():
-        return command.strip()
-    return None
-
-
-def _effective_statusline_command(settings_dir: Path) -> str | None:
-    for name in CLAUDE_SETTINGS_FILENAMES:
-        command = _statusline_command_in(settings_dir / name)
-        if command is not None:
-            return command
-    return None
-
-
-def detect_statusline_setup(*, settings_dir: Path | None = None) -> StatuslineSetup:
-    """Inspect the operator's Claude settings read-only for the wrapper.
-
-    Never writes and never raises. ``settings_dir`` defaults to
-    ``~/.claude``; it is injectable so tests need not touch a real home."""
-    directory = settings_dir if settings_dir is not None else default_claude_settings_dir()
-    command = _effective_statusline_command(directory)
-    if command is None:
-        return StatuslineSetup(configured=False)
-    if references_wrapper(command):
-        return StatuslineSetup(configured=True)
-    return StatuslineSetup(configured=False, existing_command=command)
-
-
-def _shell_single_quote(value: str) -> str:
-    """POSIX single-quote ``value`` so a shell reproduces it byte-for-byte."""
-    return "'" + value.replace("'", "'\\''") + "'"
-
-
-def _is_non_default_data_dir(data_dir: Path) -> bool:
-    """Whether the hub's data dir differs from the wrapper's built-in default.
-
-    An interactive shell does not inherit the launchd service's environment, so
-    a non-default ``ORCH_HUB_DATA_DIR`` must be passed to the wrapper explicitly
-    or it writes to the wrong sink; only then is the ``--data-dir`` flag added."""
-    try:
-        return data_dir.expanduser().resolve() != DEFAULT_DATA_DIR.expanduser().resolve()
-    except OSError:  # resolve() should not raise for missing paths, but stay total
-        return str(data_dir) != str(DEFAULT_DATA_DIR)
-
-
-def suggested_statusline_command(
-    setup: StatuslineSetup, *, wrapper_path: Path, data_dir: Path
-) -> str:
-    """The copy-ready ``statusLine.command`` value tailored to this deployment.
-
-    Uses the deployed wrapper's absolute path, adds ``--data-dir`` only for a
-    non-default hub data dir, and preserves any existing operator command after
-    ``--`` by running it through ``/bin/sh -c`` — which keeps shell features and
-    ``~`` expansion that a bare argv append would silently drop."""
-    parts: list[str] = [str(wrapper_path)]
-    if _is_non_default_data_dir(data_dir):
-        parts += ["--data-dir", str(data_dir)]
-    if setup.existing_command:
-        parts += ["--", "/bin/sh", "-c", _shell_single_quote(setup.existing_command)]
-    return " ".join(parts)
-
-
-def setup_guidance_lines(
-    setup: StatuslineSetup, *, wrapper_path: Path, data_dir: Path
-) -> list[str]:
-    """Advisory lines nudging Claude-usage setup, or ``[]`` when already wired.
-
-    Read-only guidance: it never edits ``~/.claude`` — the operator sets
-    ``statusLine`` themselves. The lines are display-only and carry no hub secret
-    (no token, no Bark URL); only paths and the operator's own command appear."""
-    if setup.configured:
-        return []
-    command = suggested_statusline_command(
-        setup, wrapper_path=wrapper_path, data_dir=data_dir
-    )
-    lines = [
-        "claude usage: no orch-hub statusLine wrapper detected in ~/.claude",
-        '  the Overview Claude subscription card stays "unavailable" until a Claude',
-        "  Code session routes its statusLine through the wrapper. orch-hub never",
-        "  edits ~/.claude; set statusLine.command in ~/.claude/settings.json to:",
-        f"    {command}",
-    ]
-    if setup.existing_command:
-        lines.append("  (your existing statusLine command is preserved after `--`)")
-    lines.append(f"  setup guide: {SETUP_DOC}")
-    return lines
 
 
 def _split_argv(argv: Sequence[str]) -> tuple[list[str], list[str]]:

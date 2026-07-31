@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import re
 import threading
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from orch_hub import api
 from orch_hub.config import Config
 from orch_hub.models import PROVIDER_CLAUDE, PROVIDER_CODEX, UsageWindow
 from orch_hub.usage import (
+    DEFAULT_CLAUDE_CONFIG,
     MAX_CLAUDE_CONFIG_BYTES,
     MAX_STATUSLINE_BYTES,
     REFRESH_BACKOFF,
@@ -1018,11 +1020,13 @@ def test_claude_usage_available_with_staleness(tmp_path: Path) -> None:
     assert claude_usage(store, now=NOW).stale is True
 
 
-# -- Claude statusLine sink (the carrier that actually works) -----------------
+# -- Claude statusLine sink (the transitional fallback carrier) ---------------
 #
 # The operator-installed writer (orch_hub.statusline) publishes the CLI's own
-# rate-limit payload here; the hub ingests it into the same store, so an
-# uninstalled/broken hook is indistinguishable from today's unavailable card.
+# rate-limit payload here; the hub ingests it into the same store. Since the
+# utilization cache became the primary carrier this is no longer required — an
+# uninstalled hook costs nothing (the section at the end of this file covers the
+# wrapper-free path), and an existing one keeps contributing figures.
 
 
 def write_sink(path: Path, *, five: float = 41.0, observed_ts: str | None = "2026-07-24T00:59:00Z", plan: str | None = "max") -> Path:
@@ -2042,3 +2046,306 @@ def test_collector_read_cache_does_not_launch_anything(tmp_path: Path) -> None:
     obs = c.read_cache()
     assert obs is not None and obs.observed_ts == CACHE_FETCHED_ISO
     assert runner.calls == []
+
+
+# -- UsageService with the poller: wrapper-free, non-blocking, fail-soft --------
+# The service-level half of the same carrier: the Overview must be able to show
+# Claude figures with no statusLine wrapper installed and no interactive session
+# ever having run, and asking for a refresh must never make the read wait on a
+# subprocess. Dispatch is injected here (the production default detaches a daemon
+# thread) so "what the read triggered" and "what the refresh then wrote" are two
+# separate, deterministic steps.
+
+
+class FakeDispatch:
+    """Captures background refreshes instead of threading them.
+
+    `run()` executes what was queued — so a test can assert both that the read
+    returned *without* the refresh having happened (non-blocking) and what the
+    refresh does once it lands."""
+
+    def __init__(self):
+        self.queued: list = []
+
+    def __call__(self, refresh) -> None:
+        self.queued.append(refresh)
+
+    def run(self) -> int:
+        pending, self.queued = self.queued, []
+        for refresh in pending:
+            refresh()
+        return len(pending)
+
+
+def poll_service(
+    tmp_path: Path,
+    *,
+    runner=None,
+    cache: object = None,
+    now: dt.datetime = CACHE_NOW,
+    dispatch: FakeDispatch | None = None,
+    **collector_kw,
+) -> tuple[UsageService, FakeDispatch, Path]:
+    """A service whose Claude carrier is a fixture cache plus a fake runner.
+
+    Nothing here reads the operator's real ~/.claude.json or launches the CLI; the
+    Codex home is an empty tmp dir, so the Claude card is the only live one."""
+    config = make_config(tmp_path)
+    path = write_cache(tmp_path / "claude-config.json", cache)
+    dispatch = dispatch if dispatch is not None else FakeDispatch()
+    service = UsageService(
+        config,
+        claude_collector=collector(path, runner, now=now, **collector_kw),
+        refresh_dispatch=dispatch,
+        clock=lambda: now,
+    )
+    return service, dispatch, path
+
+
+def claude_of(service: UsageService):
+    return {p.provider: p for p in service.get_usage().providers}[PROVIDER_CLAUDE]
+
+
+def test_service_serves_claude_from_the_cache_with_no_wrapper_installed(tmp_path: Path) -> None:
+    # The acceptance this whole task exists for: no statusLine sink, no hub-driven
+    # turn, no interactive session -- and the Claude card still has real figures.
+    service, dispatch, _ = poll_service(tmp_path, cache=usage_cache())
+
+    claude = claude_of(service)
+
+    assert service.statusline_sink.exists() is False
+    assert claude.available is True
+    assert {w.key: w.used_percent for w in claude.windows} == {
+        "five_hour": 8.0,
+        "seven_day": 43.0,
+    }
+    # The cache's own fetch stamp dates the reading, not the read's clock.
+    assert claude.observed_ts == CACHE_FETCHED_ISO
+
+
+def test_service_read_asks_for_a_refresh_without_waiting_for_it(tmp_path: Path) -> None:
+    # An hour-old cache (CACHE_NOW) is past the collector's freshness horizon, so
+    # the read asks for a refresh -- and returns the on-disk figures immediately,
+    # before that refresh has run. The next read serves what it wrote.
+    runner = FakeRunner()
+    service, dispatch, path = poll_service(tmp_path, runner=runner, cache=usage_cache())
+    runner.effect = lambda: write_cache(
+        path, usage_cache(fetched_at_ms=CACHE_FETCHED_MS + 3_000_000, five=11)
+    )
+
+    first = claude_of(service)
+
+    assert first.windows[0].used_percent == 8.0  # the pre-refresh reading
+    assert runner.calls == []  # nothing ran on the read path
+    assert len(dispatch.queued) == 1
+
+    assert dispatch.run() == 1
+    assert len(runner.calls) == 1
+    assert claude_of(service).windows[0].used_percent == 11.0
+
+
+def test_service_does_not_ask_when_the_cli_just_fetched(tmp_path: Path) -> None:
+    # A cache the CLI refreshed moments ago cannot be improved on: no request, so
+    # an Overview left open does not spend a quota-check call every read.
+    fresh = dt.datetime.fromisoformat(CACHE_FETCHED_ISO) + dt.timedelta(seconds=30)
+    service, dispatch, _ = poll_service(tmp_path, cache=usage_cache(), now=fresh)
+
+    assert claude_of(service).available is True
+    assert dispatch.queued == []
+
+
+def test_service_asks_for_a_refresh_when_nothing_has_ever_been_observed(tmp_path: Path) -> None:
+    # The empty-store case: unknown observation time counts as due, which is what
+    # makes the first Overview load on a fresh install fetch something.
+    service, dispatch, _ = poll_service(tmp_path)  # no cache in the config file
+
+    assert claude_of(service).available is False
+    assert len(dispatch.queued) == 1
+
+
+def test_service_run_end_hook_refreshes_off_the_read_path(tmp_path: Path) -> None:
+    # request_claude_refresh is the callable the run manager holds: it returns
+    # immediately and the work lands in the store without any Overview read.
+    runner = FakeRunner()
+    service, dispatch, path = poll_service(tmp_path, runner=runner, cache=usage_cache())
+    runner.effect = lambda: write_cache(
+        path, usage_cache(fetched_at_ms=CACHE_FETCHED_MS + 3_000_000, five=61)
+    )
+
+    service.request_claude_refresh()
+
+    assert runner.calls == []  # dispatched, not run inline
+    dispatch.run()
+    assert len(runner.calls) == 1
+    assert service.store.latest().windows[0].used_percent == 61.0
+
+
+def test_service_failed_refresh_keeps_the_previous_figures_and_their_stamp(tmp_path: Path) -> None:
+    # Every failure mode is non-destructive: the turn fails, the cache file is
+    # untouched, and the stored reading keeps its own fetchedAtMs -- a failed
+    # refresh can never present old figures as newly observed.
+    runner = FakeRunner(UsageRunResult(returncode=1, stderr="Invalid API key"))
+    service, dispatch, _ = poll_service(tmp_path, runner=runner, cache=usage_cache())
+
+    before = claude_of(service)
+    dispatch.run()
+    after = claude_of(service)
+
+    assert len(runner.calls) == 1
+    assert after.observed_ts == before.observed_ts == CACHE_FETCHED_ISO
+    assert [w.used_percent for w in after.windows] == [8.0, 43.0]
+
+
+def test_service_refresh_survives_a_collector_that_raises(tmp_path: Path) -> None:
+    class BoomCollector:
+        def read_cache(self):
+            return None
+
+        def refresh(self):
+            raise RuntimeError("boom")
+
+    config = make_config(tmp_path)
+    store = ClaudeUsageStore(config.data_dir)
+    store.record(make_observation(used=20.0))
+    dispatch = FakeDispatch()
+    service = UsageService(
+        config,
+        claude_store=store,
+        claude_collector=BoomCollector(),
+        refresh_dispatch=dispatch,
+        clock=lambda: NOW,
+    )
+
+    assert claude_of(service).windows[0].used_percent == 20.0
+    dispatch.run()  # must not raise
+    assert store.latest().windows[0].used_percent == 20.0
+
+
+def test_service_refresh_request_survives_a_dispatch_that_cannot_start(tmp_path: Path) -> None:
+    # Thread creation can fail (interpreter shutdown); display bookkeeping must
+    # never surface that to the caller -- an Overview read, or a run ending.
+    def cannot_start(refresh) -> None:
+        raise RuntimeError("can't start new thread")
+
+    config = make_config(tmp_path)
+    service = UsageService(
+        config,
+        claude_collector=collector(write_cache(tmp_path / "c.json", usage_cache())),
+        refresh_dispatch=cannot_start,
+        clock=lambda: CACHE_NOW,
+    )
+
+    assert claude_of(service).available is True  # the read still returns figures
+    service.request_claude_refresh()  # and the explicit hook does not raise
+
+
+def test_service_without_a_collector_asks_for_nothing(tmp_path: Path) -> None:
+    # A service built with no collector (every hermetic test, and any surface that
+    # does not want a poller) is inert: it still reads the store and the sink.
+    config = make_config(tmp_path)
+    write_sink(config.data_dir / "usage" / "claude-statusline.json", five=41.0)
+    service = UsageService(config, clock=lambda: NOW)
+
+    claude = claude_of(service)
+
+    assert claude.available is True and claude.windows[0].used_percent == 41.0
+    service.request_claude_refresh()  # no collector -> no-op, no error
+
+
+def test_service_merges_the_cache_with_an_installed_wrapper_per_window(tmp_path: Path) -> None:
+    # Both figure carriers feed one store, merged per window by the instant each
+    # figure was measured against -- so an existing wrapper install keeps
+    # contributing without the two racing. This sink exercises both directions at
+    # once: its five_hour names an older window (2026-07-29) than the cache's, so
+    # it is ignored and cannot lower a current figure; its seven_day names a later
+    # one (2026-08-03) than the cache's, so it reads as a genuine rollover and
+    # replaces even though the number drops.
+    service, _, _ = poll_service(tmp_path, cache=usage_cache())
+    write_sink(
+        service.statusline_sink, five=2.0, observed_ts="2026-07-31T04:00:00Z"
+    )
+
+    claude = claude_of(service)
+    by_key = {w.key: w for w in claude.windows}
+
+    assert by_key["five_hour"].used_percent == 8.0
+    assert by_key["five_hour"].resets_at == CACHE_5H_RESET
+    assert by_key["seven_day"].used_percent == 9.5
+    assert by_key["seven_day"].resets_at == "2026-08-03T20:53:20+00:00"
+    assert claude.plan == "max"  # only the sink names a tier
+
+
+def test_service_ingest_failure_on_one_carrier_still_serves_the_other(tmp_path: Path) -> None:
+    # A corrupt cache file degrades to nothing, not to an error: the sink's
+    # figures still reach the card (and vice versa).
+    config = make_config(tmp_path)
+    write_sink(config.data_dir / "usage" / "claude-statusline.json", five=41.0)
+    bad = tmp_path / "broken.json"
+    bad.write_text("{not json", encoding="utf-8")
+    service = UsageService(
+        config,
+        claude_collector=collector(bad),
+        refresh_dispatch=FakeDispatch(),
+        clock=lambda: NOW,
+    )
+
+    claude = claude_of(service)
+
+    assert claude.available is True and claude.windows[0].used_percent == 41.0
+
+
+def test_operator_docs_the_package_points_at_exist() -> None:
+    # The wrapper-free rewrite renamed the Claude usage guide, and the only thing
+    # that can silently break is a pointer left behind in the package. Assert the
+    # paths resolve rather than the prose: the text is reviewed, the link is not.
+    root = Path(__file__).resolve().parents[1]
+    referenced = {
+        match
+        for path in (root / "orch_hub").rglob("*.py")
+        for match in re.findall(r"docs/[a-z0-9-]+\.md", path.read_text(encoding="utf-8"))
+    }
+    assert "docs/claude-usage.md" in referenced
+    assert sorted(rel for rel in referenced if not (root / rel).is_file()) == []
+
+
+def test_app_wires_the_poller_and_hands_its_refresh_to_the_run_manager(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # The one line that makes the feature work in production: the app builds the
+    # usage sidecar with a live collector and gives the run manager its refresh
+    # callable, so a run ending anywhere refreshes Claude usage. Asserted by
+    # capturing the manager's construction -- building the app launches nothing
+    # (the collector only stores a path) and no route is called here.
+    captured: dict = {}
+
+    class RecordingRunManager(api.RunManager):
+        def __init__(self, config, **kw):
+            captured.update(kw)
+            super().__init__(config, **kw)
+
+    monkeypatch.setattr(api, "RunManager", RecordingRunManager)
+
+    api.create_app(make_config(tmp_path))
+
+    refresh = captured["usage_refresh"]
+    service = refresh.__self__
+    assert isinstance(service, UsageService)
+    assert refresh.__func__ is UsageService.request_claude_refresh
+    # Private read on purpose: a service built without a collector is inert, so
+    # this is what distinguishes a wired app from a silently pollerless one.
+    assert service._collector is not None
+    assert service._collector.cache_path == DEFAULT_CLAUDE_CONFIG
+
+
+def test_service_usage_route_never_gates_and_never_leaks(tmp_path: Path) -> None:
+    # The cache carrier reads the CLI's whole config file, so the route payload is
+    # re-checked for the identifiers sitting beside the whitelisted fields.
+    service, _, _ = poll_service(tmp_path, cache=usage_cache())
+    client = TestClient(api.create_app(make_config(tmp_path), usage_service=service))
+    client.headers.update({"Authorization": f"Bearer {TOKEN}"})
+
+    body = client.get("/api/usage").text
+
+    assert "8.0" in body  # the figure did reach the payload
+    for secret in ("SECRET", "accountUuid", "12500fbb", "private-repo", "oauthAccount"):
+        assert secret not in body
