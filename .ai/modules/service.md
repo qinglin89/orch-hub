@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Modules: Service Surface
@@ -79,13 +79,15 @@ Mutating intake routes return transient records
 The default intake backend is `ClaudeIntakeAgent`, constructed with
 `Config.intake_model` / `Config.intake_effort`; the default semantic backend is
 `ClaudeSemanticBackend`, constructed at app startup but only launched by the
-semantic job manager. The default `UsageService` ingests the opt-in Claude
-statusLine sink on the read path and is constructed before those Claude backends
-so one shared best-effort stream observer can still record a supported Claude
-usage observation without probe turns if that carrier appears. Current Claude
-Code stream-json does not carry the 5h/7d windows, so unsupported output records
-nothing. Default run and intake managers are
-both built with
+semantic job manager. The default `UsageService` is composed with a live
+`ClaudeUsageCollector` before the Claude backends. It ingests the CLI's local
+utilization cache first, retains the opt-in statusLine sink as a fallback,
+shares its stream observer with intake/semantic backends, and supplies its
+non-blocking refresh request to the default `RunManager` for terminal
+transitions. Constructing the app launches nothing; stale usage reads or run
+ends dispatch the bounded collector. Current Claude stream-json carries no
+5h/7d percentage, so unsupported output records nothing. Default run and
+intake managers are both built with
 `build_notifier(config)`; run-ended /
 pending-question and intake-ready delivery failures stay isolated in the owning
 manager and never become route errors. The recent-log route adds a nested

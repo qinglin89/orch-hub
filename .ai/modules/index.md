@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Modules
@@ -24,11 +24,11 @@ Full responsibilities live in the detail files below.
 | Static metrics | `orch_hub/static_metrics.py` | deterministic metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation; backend isolation; doctor |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
-| Usage | `orch_hub/usage.py` | read-only Claude/Codex usage normalization; sink ingestion; fail-soft |
-| StatusLine writer | `orch_hub/statusline.py` | operator statusLine wrapper feeding the usage sink |
+| Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
+| StatusLine writer | `orch_hub/statusline.py` | legacy optional statusLine fallback feeding the usage sink |
 | Intake manager | `orch_hub/intake.py` | remote intake lifecycle/audit; off-lock turns; verified confirm |
 | Intake agent | `orch_hub/intake_agent.py` | Claude CLI `/intake-task` backend with envelopes/resume |
-| Run manager | `orch_hub/runs.py` | subprocess lifecycle/state/stop; per-repo serialization |
+| Run manager | `orch_hub/runs.py` | subprocess lifecycle/state/stop; per-repo serialization; terminal side-effect hooks |
 | Orchestrator launch config | `orch_hub/orch_config.py` | `--print-config` query/parse; split/legacy argv; config snapshots |
 | Run monitor | `orch_hub/monitor.py` | resident status scanner for proactive notifications |
 | History | `orch_hub/history.py` | per-run JSONL event storage/readback |
@@ -39,7 +39,7 @@ Full responsibilities live in the detail files below.
 | Notifications | `orch_hub/notifications.py` | notifier interface; Bark backend; formatters |
 | Web UI | `orch_hub/web/` | mobile-first dashboard SPA assets |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | launchd user-agent template |
-| Operator docs | `docs/` | launchd/evaluation/statusLine operator docs |
+| Operator docs | `docs/` | launchd/evaluation/Claude usage operator docs |
 | Tests | `tests/` | pytest coverage with fake repos and mocked subprocesses |
 
 ## Detail Files
@@ -72,10 +72,11 @@ Full responsibilities live in the detail files below.
 - Semantic evaluation reads only the bounded evidence/static prompt; writes
   only `semantic_report.json` + `report.md` under the evaluation dir; backends
   enforce read isolation structurally.
-- Usage reads only provider-owned local signals plus the hub-owned Claude
-  store; the statusLine writer captures only whitelisted capacity fields and
-  passes the operator command through; neither starts probe turns, spends
-  reset credits, or gates readiness/attention/run/launch/intake.
+- Usage reads provider-owned local signals plus the hub-owned Claude store and
+  may run Claude's local `/usage` command only when its envelope proves zero
+  model activity. The legacy statusLine writer captures only whitelisted
+  capacity fields and passes the operator command through; neither directly
+  opens credentials/endpoints, spends reset credits, or gates operations.
 - Intake manager owns intake state, intake-ready trigger timing, and the
   confirmation postcondition; API/web neither treat drafts as tasks nor decide
   confirm outcomes.

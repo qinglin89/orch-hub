@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Project Overview
@@ -39,9 +39,12 @@ plus `report.md`, and expose evaluation evidence/static/semantic artifacts
 through protected HTTP routes. The dashboard renders Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
 Codex is read from local session rollout `rate_limits`; Claude reads a
-hub-owned observation store whose figures come from the operator-installed
-statusLine sink. Hub-driven Claude Code 2.1.220 stream events can refresh a
-stored window's reset boundary without creating a window or changing figures;
+hub-owned observation store primarily fed from Claude Code's structured local
+utilization cache. Stale reads and terminal runs request an asynchronous,
+single-flight, timeout-bounded `claude -p "/usage"` refresh whose JSON envelope
+must prove zero model turns/cost; the operator-installed statusLine sink remains
+an optional fallback. Hub-driven Claude Code 2.1.220 stream events can refresh
+a stored window's reset boundary without creating a window or changing figures;
 no verified stream carries a used-percentage. Rolled-over windows render as no
 active window rather than presenting retained figures as current. Missing,
 stale, or failing data is explicit display state that never affects readiness,
@@ -88,11 +91,13 @@ control.
   files outside the prompt.
 - Show Claude and Codex subscription usage as display-only capacity data:
   provider windows, used/remaining percentages, reset time, freshness, and
-  unavailable/stale reasons, without starting probe turns, consuming reset
-  credits, scraping private endpoints/UI, or influencing operational gates.
-  Codex is local rollout data; Claude's verified local carrier is statusLine
-  stdin captured by the opt-in `orch-hub-statusline` wrapper into the hub store;
-  percentage-less 2.1.220 stream events may refresh stored reset boundaries.
+  unavailable/stale reasons, without starting model turns, directly opening
+  credentials/provider endpoints, scraping UI, consuming reset credits, or
+  influencing operational gates. Codex is local rollout data; Claude's primary
+  carrier is the CLI's whitelisted structured utilization cache, refreshed by
+  its local `/usage` command only when the turn reports zero model activity.
+  The opt-in statusLine sink remains compatible, and percentage-less 2.1.220
+  stream events may refresh stored reset boundaries.
 - Expose task evaluation as a sidecar HTTP workflow: availability, evidence
   generation/readback, static metrics generation/readback, semantic generation/
   readback, semantic doctor readiness, active or archived task targeting,
@@ -129,8 +134,9 @@ control.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
 - Notifications: Bark is the implemented v1 push path; IM bots are later.
 - External command/data sources: `aii-2` from ai-native-development; Claude CLI
-  for remote intake and semantic evaluation backends; local Codex session
-  rollout files for read-only rate-limit display.
+  for remote intake, semantic evaluation, and model-free local `/usage`
+  refreshes; Claude's local utilization cache; local Codex session rollout
+  files for read-only rate-limit display.
 
 ## Repository Structure
 

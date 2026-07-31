@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-29
-verified-against: fa9930065ae3d9050dac426640151657d71fe3a2
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -135,22 +135,28 @@ bookkeeping cannot change semantic-evaluation outcomes.
 
 ## Usage Service
 
-Input: config with `codex_home`, optional `ClaudeUsageStore`, and injectable
-clock.
+Input: config with `codex_home`, optional `ClaudeUsageStore` /
+`ClaudeUsageCollector`, injectable refresh dispatch, and clock.
 
 Output: `SubscriptionUsage`, `ProviderUsage`, `UsageWindow`, `WindowBoundary`,
 and optional `UsageCredits` values; `UsageService.claude_observer()` callback
-for hub-driven Claude stdout.
+for hub-driven Claude stdout; non-blocking
+`UsageService.request_claude_refresh()` callable for read/run triggers.
 
 Behavior: `read_codex_usage(codex_home)` scans the newest bounded Codex session
 rollout files for `rate_limits`, normalizes dynamic buckets plus optional
 primary/secondary windows and aggregate credits, and never invokes Codex or
-opens credential/reset-credit identifiers. `ClaudeUsageStore` persists the
-latest Claude observation under `<data_dir>/usage/claude.json` with per-writer
-temp files plus `os.replace`; `read_claude_statusline(path)` reads the bounded
-operator-installed sink `<data_dir>/usage/claude-statusline.json` and
-`UsageService` merges it into the store per window, not by whole-record write
-recency. Merge identity is store-internal `UsageWindow.figure_instant`; same
+opens credential/reset-credit identifiers. `parse_claude_usage_cache` reads
+only `fetchedAtMs`, reset instants, and `limits[].percent` figures paired by
+kind/reset from the CLI's structured cache. `ClaudeUsageCollector` refreshes
+that cache via timeout/backoff/freshness/single-flight-bounded
+`claude -p "/usage"` and fails closed unless the JSON envelope proves zero
+turns/cost; failures keep the previous source timestamp.
+
+`ClaudeUsageStore` persists the latest observation under
+`<data_dir>/usage/claude.json`; `UsageService` ingests the cache first, then
+merges the bounded optional statusLine sink per window. Merge identity is
+store-internal `UsageWindow.figure_instant`; same
 window instants take the higher `used_percent`, newer instants replace as a
 rollover, older instants are ignored, candidate-only windows are added, and
 omitted stored windows are retained. Pre-`figure_instant` store windows keep an
@@ -166,12 +172,14 @@ a used-percentage there (2.1.218 has no rate-limit signal; 2.1.220 adds a
 percentage-less `rate_limit_event`). `parse_claude_stream_boundaries` and
 `merge_window_boundaries` advance only the reset instant of an already-stored
 known window, never its figures/plan/`observed_ts`, and never create a window.
-Claude figure parsers accept only verified statusLine-shaped
+StatusLine/stream figure parsers accept only verified
 `rate_limits.five_hour/seven_day.used_percentage` windows. `UsageService`
-serializes Claude store writes, aggregates Claude then Codex behind a 30s
-cache, and returns fail-soft unavailable provider snapshots on missing or
-failed sources. All usage data is display-only and must not affect readiness,
-attention, run state, launch, or intake.
+serializes store writes, asynchronously requests refresh when its stored Claude
+observation is older than the collector horizon, aggregates behind a 30s cache,
+and returns fail-soft unavailable snapshots. The app gives the same request
+callable to `RunManager` for terminal transitions. All usage data is
+display-only and must not affect readiness, attention, run state, launch, or
+intake.
 
 ## API Conventions
 

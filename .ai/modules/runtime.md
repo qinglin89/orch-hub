@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Modules: Runtime
@@ -96,6 +96,10 @@ question pushes keep the same trigger path but use compact notification text so
 the full plan report does not enter the Bark/APNs payload. Delivery goes through
 `_emit`, which dispatches best-effort work off the lock by default and swallows
 backend exceptions so notification failures cannot corrupt run state.
+The same once-only live-to-ended branch invokes an optional plain
+`usage_refresh` callable after persistence/notification classification. The
+app supplies `UsageService.request_claude_refresh`, which returns immediately;
+hook failures are logged by run id and cannot alter run state.
 
 ## Orchestrator Launch Config
 
@@ -125,11 +129,11 @@ Location: `orch_hub/monitor.py`
 
 Responsibility: run one resident daemon thread that periodically calls a
 scanner's `list_runs()` method, normally the app's single `RunManager`, so
-run-ended and pending-question notifications fire without dashboard/API
-polling. `RunMonitor.start()` and `stop()` are idempotent; `stop()` uses a
-bounded join, and scan failures are logged and swallowed so the service keeps
-running. The default interval is 30 seconds and intentionally not an
-environment setting.
+run-ended notifications, pending-question notifications, and terminal usage
+refresh requests fire without dashboard/API polling. `RunMonitor.start()` and
+`stop()` are idempotent; `stop()` uses a bounded join, and scan failures are
+logged and swallowed so the service keeps running. The default interval is 30
+seconds and intentionally not an environment setting.
 
 The monitor owns no run state, event state, notification formatting, or
 de-duplication; it only schedules the existing run-manager status scan.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2b0557d66cbd0540494311b00efaf7e75cb09216
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # APIs: HTTP — Core
@@ -78,14 +78,15 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
 
 - Purpose: report display-only Claude and Codex subscription capacity for the
   Overview without affecting readiness, attention, run state, launch, or intake.
-- Source: delegates to `UsageService`, which ingests the opt-in Claude
-  statusLine sink into the latest hub-owned observation store, then reads Claude
-  from that store and Codex from local Codex rollout `rate_limits` snapshots
-  under `ORCH_HUB_CODEX_HOME`. The wired Claude stream-json observer sees no
-  used-percentage on verified versions; Claude Code 2.1.220's
-  percentage-less `rate_limit_event` may advance only the reset instant of an
-  already-stored window. It never starts probe turns, calls provider endpoints,
-  opens credential files, edits `~/.claude/**`, or consumes reset credits.
+- Source: delegates to `UsageService`, which ingests Claude Code's whitelisted
+  local utilization cache, then the optional statusLine sink, into one hub-owned
+  store; Codex comes from local rollout `rate_limits` under
+  `ORCH_HUB_CODEX_HOME`. Stale/empty Claude reads asynchronously request the
+  bounded collector for the next read. The collector runs the CLI's local
+  `/usage` command only when its JSON envelope proves zero model turns/cost;
+  failures retain the cache's real timestamp. The stream observer remains a
+  boundary-only fallback on verified versions. No direct credential/endpoint
+  read, settings edit, reset-credit spend, or operational gate occurs.
 - Shape: `{"providers": [ProviderUsage...]}`. Each provider is
   `{provider, available, plan, windows, credits, observed_ts, stale, detail}`;
   windows carry `key`, optional `label`/`window_minutes`, `used_percent`,
@@ -122,8 +123,9 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   captures `Config.from_env()` by default, is testable with explicit/injected
   services, and holds one `RunManager` for run, run-task, escalation, log, and
   background-monitor scans plus one `IntakeManager` for remote intake routes and
-  one `UsageService` for the protected usage route, Claude statusLine sink
-  ingestion, and Claude stream observation feed. The run and intake managers
+  one `UsageService` for the protected usage route, Claude cache/statusLine
+  ingestion, bounded poll dispatch, and stream observation feed. The default
+  run manager receives its terminal refresh request. The run and intake managers
   are placed on one shared `RepoAdmission` coordinator even when both were
   independently injected; the run manager's coordinator is adopted when both
   are supplied.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # APIs: Internal — Runtime
@@ -87,7 +87,9 @@ an explicit subprocess `PATH` for user-installed agent CLIs, persists
 appends `run_started`, and records stdout/stderr in `spawn.out`.
 `list_runs` and `get_run` refresh
 live/end state and support reattach from disk by pid probe; observed ends append
-`run_ended`. `stop_run` delegates to `control_dir.request_stop`, appends
+`run_ended`, fire the isolated terminal notification path, and invoke an
+optional plain `usage_refresh` callable once after persistence. `stop_run`
+delegates to `control_dir.request_stop`, appends
 `stop_requested` only on the first idempotent write, and refuses ended or
 broken runs so a post-mortem flag cannot rewrite end classification.
 `audit_answer` appends responder/question metadata plus optional answer `mode`

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 5b9035236a5c892c44f182f178d8e101a49c800d
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # APIs: CLI
@@ -60,13 +60,9 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   failures. Rendering still happens before install/write; required leftovers
   fail before side effects, while unknown optional placeholders render empty for
   old-CLI/new-template compatibility.
-- Post-success output: deploy/update print the launchd summary and then, when
-  `~/.claude/settings.local.json` / `settings.json` do not effectively route
-  `statusLine.command` through `orch-hub-statusline`, advisory Claude usage
-  setup guidance with the deployed wrapper path, `--data-dir` for non-default
-  hub data dirs, and any existing command preserved after `-- /bin/sh -c`.
-  The check is read-only, silent when already configured, and swallowed on
-  settings/parsing/guidance failures so deployment remains successful.
+- Post-success output: deploy/update print only the launchd/Bark/token summary;
+  they do not inspect Claude settings or request statusLine setup. Claude usage
+  is supplied by the CLI cache poller without an operator configuration change.
 - Configuration precedence: CLI flag, environment, default for paths/host/port;
   bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
   installed plist token, then generated token printed once. Bark URL resolves
@@ -126,8 +122,8 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 
 ## `orch-hub-statusline`
 
-- Purpose: operator-installed Claude Code `statusLine.command` wrapper that
-  captures the CLI's local subscription `rate_limits` payload for the Overview.
+- Purpose: legacy optional Claude Code `statusLine.command` wrapper that can
+  still contribute the CLI's local subscription `rate_limits` payload.
 - Options: `--sink <path>` overrides the sink file; `--data-dir <dir>` writes
   under `<dir>/usage/claude-statusline.json`; `--print-sink` prints the resolved
   sink and reads no stdin. Everything after `--` is the operator's own statusline
@@ -138,4 +134,5 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   wrapped command prints nothing and exits 0; an unrunnable wrapped command exits
   127 without a partial status line.
 - Non-goal: does not edit `~/.claude/**`, start Claude turns, call provider
-  endpoints, read credentials/accounts, or gate any hub operation.
+  endpoints, read credentials/accounts, or gate any hub operation; new
+  installations do not require it.

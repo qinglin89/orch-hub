@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-29
-verified-against: fa9930065ae3d9050dac426640151657d71fe3a2
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Architecture
@@ -84,7 +84,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
-| Agent subscription usage | Codex local rollouts + Claude statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; never probes, spends credits, or gates; statusLine sink = only Claude figure carrier |
+| Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback; never gates |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
 | Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
 | Startup diagnostics | hub-owned run dir capture | scoped to the persisted run record |
@@ -151,22 +151,22 @@ startup reconciliation stays silent. The dashboard doctor-gates the semantic
 trigger, polls persisted job state, and keeps raw artifacts behind
 Copy/Download.
 
-Subscription usage is a sidecar display flow: `UsageService` reads Claude from
-the hub-owned observation store (merging the statusLine sink per window first)
-and Codex from recent local rollout `rate_limits` under the Codex home. Claude
-figures are keyed by store-internal `figure_instant`, so idle statusLine writers
+Subscription usage is a sidecar display flow: `UsageService` reads Claude
+Code's whitelisted structured utilization cache first, then merges the optional
+statusLine sink, serves the hub-owned observation store, and reads Codex from
+recent local rollout `rate_limits`. A stale/empty Claude read dispatches a
+background collector; the same request is made once when `RunManager` observes
+a live-to-ended transition. The collector is single-flight, freshness/backoff/
+timeout bounded, runs `claude -p "/usage"` from an empty cwd, and accepts the
+turn only when its JSON envelope reports zero model turns and zero cost. Cache
+figures retain the CLI's real `fetchedAtMs` and come only from
+`limits[].percent` entries paired to window-map resets by kind and instant.
+Claude figures are keyed by store-internal `figure_instant`, so fallback writers
 cannot lower same-window usage, genuine rollovers replace old figures, legacy
-pre-`figure_instant` store windows self-heal by yielding to identified
-candidates, and partial payload merges floor the single provider-level
-`observed_ts` to the older source moment. The Claude stream-json observer stays
-wired but sees no used-percentage on verified versions: 2.1.218 has no
-rate-limit signal; 2.1.220's percentage-less `rate_limit_event` advances only
-`resets_at` on an already-stored known window, without changing figures or their
-observation timestamp. Protected `GET /api/usage` returns both providers
-fail-soft with normalized windows/percentages/resets/freshness/plan/credits;
-passed boundaries render as no active window, and missing/stale/failed sources
-remain explicit display states that never feed attention, readiness, run state,
-or launch/intake gates.
+stores self-heal, and partial merges do not overstate freshness. The stream-json
+observer remains a boundary-only fallback on verified versions. Protected
+`GET /api/usage` returns both providers fail-soft; missing/stale/failed sources
+never feed attention, readiness, run state, or launch/intake gates.
 
 ## Component Boundaries
 
@@ -201,9 +201,11 @@ or launch/intake gates.
 - History stores run/answer-audit metadata; it does not decide event timing.
 - Logs are located from run records only; callers never pass local paths.
 - Notification delivery is isolated from run/intake state persistence.
-- Usage collection owns only display capacity data; it never starts agent
-  turns, calls private endpoints or UI scraping, spends reset credits, or
-  influences readiness/attention/run/intake decisions.
+- Usage collection owns only display capacity data; it may run the Claude CLI's
+  local `/usage` command only with per-turn zero-model accounting, but never
+  starts a model turn, directly opens provider endpoints/credentials, scrapes
+  UI, spends reset credits, or influences readiness/attention/run/intake
+  decisions.
 - API, CLI, dashboard, launchd, and future bot surfaces stay adapters over
   shared services.
 
@@ -216,10 +218,11 @@ or launch/intake gates.
 - Python venv inside each target repo's deployed orchestrator directory.
 - FastAPI and uvicorn; launchd for resident operation.
 - Optional Bark push endpoint.
-- Claude CLI for the intake and semantic evaluator backends.
-- Claude Code statusLine stdin as the opt-in figure carrier via
-  `orch-hub-statusline`; 2.1.220 stream `rate_limit_event` as a passive stored
-  boundary refresh.
+- Claude CLI for intake, semantic evaluation, and model-free local `/usage`
+  cache refreshes; Claude Code's structured utilization cache is the primary
+  figure carrier.
+- Claude Code statusLine stdin via legacy `orch-hub-statusline` as an optional
+  fallback; 2.1.220 stream `rate_limit_event` as a passive boundary refresh.
 - Codex local session rollouts for read-only rate-limit display; Codex is
   never invoked for usage.
 - Tailscale or an equivalent private network.
@@ -248,9 +251,9 @@ or launch/intake gates.
 - Bark URLs embed device-key secrets and must not be logged.
 - Subscription usage is display-only: unavailable/stale data is shown as such,
   never as zero usage, never as a launch or health gate.
-- The Claude statusLine usage hook is operator-installed; orch-hub never
-  edits `~/.claude/**`, and the wrapper preserves the operator's visible
-  statusline behavior.
+- Claude usage requires no statusLine setup. A legacy statusLine hook remains
+  operator-installed; orch-hub never edits `~/.claude/**`, and the wrapper
+  preserves the operator's visible statusline behavior.
 
 ## Related Memory
 

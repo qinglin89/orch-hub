@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Features
@@ -12,7 +12,7 @@ verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
 | Task evaluation foundation | implemented | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | internal `EvaluationService` evidence build/generate/list/read/prune; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET/POST /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; batched newest-state in `GET /api/history/runs`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | implemented | static_metrics, evaluation, config, models, api, web | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; persists and displays `static_metrics.json` beside `evidence.json`; no model call |
 | Task semantic evaluator | implemented | semantic_jobs, semantic, static_metrics, evaluation, config, models, api, cli, web | internal `SemanticEvaluator.evaluate/doctor`, `SemanticJobManager`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `ClaudeSemanticBackend`; `POST`/`GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `orch-hub eval doctor`; dashboard Layer 2 running/failed/completed job states plus report/history rendering; persists `semantic_report.json` and `report.md` beside evidence/static artifacts |
-| Agent subscription usage | implemented | usage, statusline, models, config, api, intake_agent, semantic, web | console script `orch-hub-statusline`; internal `UsageService`, `ClaudeUsageStore`, `parse_claude_stream_usage`, `parse_claude_statusline`, `read_claude_statusline`, `read_codex_usage`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage`; Overview Subscription usage section; display-only, fail-soft, no probe turns or gates |
+| Agent subscription usage | implemented | usage, statusline, runs, models, config, api, intake_agent, semantic, web, docs | primary Claude utilization-cache parser + bounded model-free `ClaudeUsageCollector`; stale-read and run-end refresh triggers; per-window cache/statusLine merge; Codex rollout reader; legacy `orch-hub-statusline`; protected `GET /api/usage`; display-only, fail-soft, no gates |
 | HTTP API foundation | implemented | api, config, registry, readiness, task_store, models | public shell routes, `GET /api/health`, repo/task/run/escalation/log/history/intake/evaluation/usage APIs |
 | Control-dir file channel | implemented | control_dir, models | internal file-channel functions |
 | Run lifecycle | implemented | admission, runs, intake, orch_config, sessions, api, config, control_dir, models, readiness, task_store | one per-repo run↔intake admission section before readiness; internal `RunManager`; `GET /api/repos/{repo_id}/orchestrator-config`; `POST /api/runs`, `GET /api/runs`, `GET /api/runs/{id}`, `GET /api/runs/{id}/sessions`, `GET /api/runs/{id}/effective-config`, `POST /api/runs/{id}/stop` |

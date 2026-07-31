@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-29
-verified-against: fa9930065ae3d9050dac426640151657d71fe3a2
+last-updated: 2026-07-31
+verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -105,40 +105,34 @@ Responsibility: produce provider-normalized, read-only Claude/Codex
 subscription usage for display. Codex usage is read from the newest local
 `rate_limits` snapshots in `<codex_home>/sessions/**/rollout-*.jsonl`, bounded
 by file count and size, with optional primary/secondary windows and aggregate
-credits sanitized by whitelist. Claude usage is read from
-`<data_dir>/usage/claude.json`; `UsageService` first reads the operator-installed
-`<data_dir>/usage/claude-statusline.json` sink and merges it into the same store
-per window, then serves the store so the HTTP payload and staleness rules stay
-unchanged. The sink stamp is write/capture time, not proof that all figures are
-newer than stored ones: concurrent Claude Code sessions publish their own last
-API response to one last-write-wins file. `merge_observations` therefore keys
-each figure by store-internal `UsageWindow.figure_instant`, ignores older-window
-snapshots, replaces on genuine rollovers even when used% drops, and takes
-`max(used_percent)` within one window so an idle writer cannot lower current
-usage. `figure_instant` is persisted only in `claude.json`, not exposed by
-`GET /api/usage`; legacy pre-`figure_instant` windows deserialize with unknown
-identity and yield once to an identified candidate so upgraded stores self-heal
-instead of freezing a boundary-advanced stale figure. A single provider-level
-`observed_ts` remains the freshness stamp: coherent same-window-set payloads
-advance it to the later stamp, while partial payloads with omitted/new windows
-floor it to the older stamp so no retained figure is dated newer than its source
-observation. No verified `claude -p --output-format stream-json` version carries
-a used-percentage: 2.1.218 emits no rate-limit signal; 2.1.220 emits a
-percentage-less `rate_limit_event`. `parse_claude_stream_boundaries` normalizes
-the latter to `WindowBoundary`; `merge_window_boundaries` advances only
-`resets_at` on a matching stored window, never creating a window or changing
-figures, plan, or `observed_ts`. `parse_claude_stream_usage` and
-`parse_claude_statusline` accept only verified statusLine-shaped
-`rate_limits.five_hour/seven_day` windows with `used_percentage` and optional
-`resets_at`, reject reset-only quota frames and ambiguous `utilization`, and
-never raise into driving/read paths.
+credits sanitized by whitelist. Claude's primary carrier is the CLI's
+`~/.claude.json.cachedUsageUtilization`: `parse_claude_usage_cache` retains only
+`fetchedAtMs`, the two window reset instants, and `limits[].percent` figures
+paired by kind and equal normalized reset; ambiguous window-map
+`utilization`, account ids, credentials, projects, and machine fields are
+ignored. `ClaudeUsageCollector` reads that cache and refreshes it through
+`claude -p "/usage"` from an empty cwd. Its non-blocking lock, five-minute
+freshness/attempt floors, 60s timeout, and mandatory zero-turn/zero-cost JSON
+envelope make refresh bounded, single-flight, and model-free; failures return
+the old observation with its original timestamp.
+
+`UsageService` ingests this cache first and the optional
+`<data_dir>/usage/claude-statusline.json` fallback second, merging both into
+`<data_dir>/usage/claude.json` per window. `merge_observations` keys each figure
+by store-internal `UsageWindow.figure_instant`, ignores older windows, replaces
+genuine rollovers, and takes `max(used_percent)` within one window. Legacy
+stores self-heal and partial merges floor provider freshness to the older
+source. Stale/empty reads dispatch a background collector refresh for the next
+read; the app also gives `RunManager` this request callable for each observed
+terminal transition. No verified stream-json version carries a percentage;
+2.1.220's percentage-less event may advance only a stored reset boundary.
 `ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
 so concurrent observations cannot collide; `UsageService` serializes Claude
 store read-modify-write paths. It aggregates Claude then Codex behind a 30s
 cache and returns fail-soft
 `ProviderUsage.unavailable(...)` snapshots on missing/failed sources. It never
-starts a model turn, calls provider endpoints, opens credential files, spends
-Codex reset credits, or participates in readiness/attention/run/intake gates.
+starts a model turn, directly calls provider endpoints, opens credential files,
+spends Codex reset credits, or participates in operational gates.
 
 `SemanticJobManager` in `orch_hub/semantic_jobs.py` persists one current
 `job.json` per `(repo, task)` under
@@ -155,16 +149,14 @@ is retired.
 
 Location: `orch_hub/statusline.py`
 
-Responsibility: expose console script `orch-hub-statusline` for operator-owned
-Claude Code `statusLine.command` installation. It reads the CLI's stdin payload,
+Responsibility: retain legacy console script `orch-hub-statusline` for an
+operator-owned Claude Code `statusLine.command` installation. It reads stdin,
 persists only the `rate_limits` container plus `subscription_type` to
 `<data_dir>/usage/claude-statusline.json`, then runs everything after `--` as
 the operator's wrapped statusline argv with the same stdin and inherited
 stdout/stderr/exit code. It deliberately avoids `Config.from_env()` validation,
 never edits `~/.claude/**`, never starts Claude or calls provider endpoints, and
 drops session id, transcript path, cwd, model, workspace, and cost fields before
-writing the sink.
-The same module owns read-only setup detection/guidance helpers for
-`~/.claude/settings.local.json` then `settings.json`; the CLI uses them after
-successful `launchd deploy|update` to print fail-soft wrapper setup guidance
-without moving settings reads into the launchd mutation path.
+writing the sink. It owns no setup detection or guidance; deploy/update do not
+inspect Claude settings, and the wrapper is optional because the cache carrier
+is primary.
