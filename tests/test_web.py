@@ -444,14 +444,70 @@ def test_run_task_view_resolves_task_through_the_run_record():
 
 def test_log_view_task_link_splits_live_detail_from_archived_fallback():
     body = app_js()
-    # The log view's task back-link is liveness-aware. A live (active/waiting) run
-    # with repo+task attribution opens the full task detail (taskHash), so run
-    # controls, pending answers, and session/context strips are reachable. Every
-    # other case — an ended run, or a live run missing attribution — keeps the
-    # run-scoped task view (runTaskHash), which resolves active-then-archive so an
-    # archived task stays readable instead of 404-ing on the index-gated detail.
-    assert "live && run.repo_name && run.task_id" in body
-    assert "runTaskHash(" in body
+    # The log view's task back-link is liveness-aware, resolved through the one
+    # shared run destination rule (runTaskDestination): a live (active/waiting)
+    # run with repo+task attribution opens the full task detail, so run controls,
+    # pending answers, and session/context strips are reachable; an ended run, or
+    # a live run missing attribution, keeps the run-scoped task view, which
+    # resolves active-then-archive so an archived task stays readable instead of
+    # 404-ing on the index-gated detail. Only the no-task-id fallback is the log
+    # view's own — the logs are already on screen, so it offers the Runs list.
+    assert "const taskDest = runTaskDestination(run);" in body
+    assert '"#/runs">← Runs' in body
+
+
+# ---- task-first run navigation (2026-07-31-task-detail-first-run-navigation) --
+#
+# Selecting a run from a run surface (Overview current activity, Run history)
+# opens the run's TASK rather than its log tail: a run is a dev/review loop over
+# one task file, so the task is the unit of work, and both task destinations link
+# onward to the logs. One shared rule serves every run surface, so the liveness
+# split is stated once. Asserted at the served-asset boundary (no JS runtime in
+# this suite); the destinations themselves are driven end-to-end in the jsc
+# harness (`run nav:` checks in tests/keyboard_harness.js).
+
+
+def test_run_destination_rule_is_shared_and_liveness_aware():
+    body = app_js()
+    # One helper owns the rule for every run surface...
+    assert "function runTaskDestination(run) {" in body
+    # ...splitting on liveness plus attribution: a live run with a repo goes to
+    # the index-gated active task detail, anything else to the run-scoped
+    # active-then-archive view...
+    assert "if (LIVE_STATES.has(run.state) && run.repo_name)" in body
+    assert "return taskHash(run.repo_name, run.task_id);" in body
+    assert "return runTaskHash(run.run_id);" in body
+    # ...and a run with no task id has no task destination at all, leaving the
+    # fallback to each caller rather than inventing a broken link.
+    assert "if (!run || !run.task_id) return null;" in body
+
+
+def test_run_surfaces_open_the_task_and_fall_back_to_logs():
+    body = app_js()
+    # Both run-card surfaces — the Overview's current activity and Run history —
+    # resolve the same destination and fall back to the run's logs only when the
+    # run carries no task attribution.
+    assert body.count("runTaskDestination(run) || logsHash(run.run_id)") == 2
+    for func in ("function activityCard(run) {", "function historyRunCard(run) {"):
+        assert func in body
+        section = body[body.index(func) :]
+        assert "runTaskDestination(run) || logsHash(run.run_id)" in section.split(
+            "\n  function "
+        )[0]
+
+
+def test_recent_outcomes_and_attention_keep_their_destinations():
+    body = app_js()
+    # Out of scope and unchanged: a recent outcome still deep-links to its log
+    # tail, and a waiting attention row still opens the task detail whose answer
+    # form resolves it.
+    assert "function recentOutcomeCard(run) {" in body
+    outcomes = body[body.index("function recentOutcomeCard(run) {") :].split(
+        "\n  function "
+    )[0]
+    assert 'href="${logsHash(run.run_id)}"' in outcomes
+    assert "? taskHash(w.repo_name, w.task_id)" in body
+    assert ": logsHash(w.run_id)" in body
 
 
 # ---- remote intake (draft → review → confirm / cancel) -----------------------

@@ -3114,6 +3114,167 @@ async function scenarioRunHistoryPaging() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// Selecting a run opens its TASK, not its log tail. The run surfaces (Overview
+// current activity, Run history) share one destination rule: a live run with
+// repo+task attribution goes to the full task detail, an ended run to the
+// run-scoped task view (its task may already be archived), and a run with no
+// task id keeps its logs. Both task destinations carry "View logs" onward, so
+// the log tail stays one step away rather than being the only reachable thing.
+// The panels deliberately left alone — Needs attention and Recent outcomes —
+// are pinned here too, since this task changed their neighbours.
+async function scenarioRunNavigation() {
+  // The Overview's lower panels carry no distinguishing class of their own, so
+  // find one by its heading rather than by paint order.
+  var overviewPanel = function (title) {
+    var sections = doc.querySelectorAll(".overview-panels .section");
+    for (var i = 0; i < sections.length; i++) {
+      var h2 = sections[i].querySelectorAll("h2")[0];
+      if (h2 && h2.textContent.trim() === title) return sections[i];
+    }
+    return null;
+  };
+  var hrefs = function (root) {
+    return (root ? root.querySelectorAll("a.card-link") : []).map(function (a) {
+      return a.getAttribute("href");
+    });
+  };
+
+  var ENDED_RUN = "run-ended";
+  var ORPHAN_RUN = "run-orphan";
+  var liveRun = {
+    run_id: RUN,
+    repo_name: REPO,
+    repo_path: "/repos/" + REPO,
+    task_id: TASK,
+    state: "waiting",
+    started_ts: "2026-07-20T08:00:00Z",
+    pending_questions: 1,
+    stop_requested: false,
+  };
+  // A live run the hub could not attribute to a task: there is no task to open,
+  // so its card must still reach the logs.
+  var orphanLiveRun = {
+    run_id: ORPHAN_RUN,
+    repo_name: REPO,
+    repo_path: "/repos/" + REPO,
+    task_id: "",
+    state: "active",
+    started_ts: "2026-07-20T09:00:00Z",
+    stop_requested: false,
+  };
+  var endedRun = {
+    run_id: ENDED_RUN,
+    repo_name: REPO,
+    repo_path: "/repos/" + REPO,
+    task_id: TASK,
+    state: "completed",
+    started_ts: "2026-07-19T08:00:00Z",
+    ended_ts: "2026-07-19T08:30:00Z",
+    exit_code: 0,
+  };
+
+  installRoutes({ waiting: true });
+  route("GET", "/api/runs", { runs: [liveRun, orphanLiveRun] });
+  route("GET", "/api/history/runs", {
+    runs: [liveRun, orphanLiveRun, endedRun],
+    page: 1,
+    page_size: 50,
+    total_runs: 3,
+    total_pages: 1,
+    has_prev: false,
+    has_next: false,
+    prev_cursor: null,
+    next_cursor: null,
+    evaluation_enabled: false,
+    evaluation_states: [],
+  });
+
+  await navigate("#/overview");
+  var activity = hrefs(overviewPanel("Current activity"));
+  eq("run nav: current activity lists both live runs", activity.length, 2);
+  eq(
+    "run nav: an attributed live run opens its active task detail",
+    activity[0],
+    "#/tasks/" + REPO + "/" + TASK
+  );
+  eq(
+    "run nav: an unattributed live run still opens its logs",
+    activity[1],
+    "#/runs/" + ORPHAN_RUN + "/logs"
+  );
+  // Recent outcomes is out of scope and stays a deep link to the log tail.
+  eq(
+    "run nav: recent outcomes still open the log tail",
+    hrefs(overviewPanel("Recent outcomes"))[0],
+    "#/runs/" + ENDED_RUN + "/logs"
+  );
+  // The waiting attention row already opened the task detail (its answer form
+  // lives there) and is unchanged by this task.
+  var attn = doc.querySelector(".overview-attention .attn-waiting a.card-link");
+  eq(
+    "run nav: the waiting attention row still opens the task detail",
+    attn && attn.getAttribute("href"),
+    "#/tasks/" + REPO + "/" + TASK
+  );
+
+  await navigate("#/runs");
+  var history = hrefs(doc.querySelector("#view"));
+  eq("run nav: run history renders every run card", history.length, 3);
+  eq(
+    "run nav: a live run in history opens its active task detail",
+    history[0],
+    "#/tasks/" + REPO + "/" + TASK
+  );
+  eq(
+    "run nav: an ended run opens the archived-safe run-scoped task view",
+    history[1],
+    "#/runs/" + ENDED_RUN + "/task"
+  );
+  eq(
+    "run nav: a history run with no task id keeps its logs",
+    history[2],
+    "#/runs/" + ORPHAN_RUN + "/logs"
+  );
+
+  // Both destinations keep the log tail one link away, pointed at the run the
+  // reader selected.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var detailLogs = doc.querySelectorAll("#view .section a.text-link").filter(
+    function (a) {
+      return a.textContent.indexOf("View logs") !== -1;
+    }
+  );
+  eq(
+    "run nav: task detail still links onward to the live run's logs",
+    detailLogs.length && detailLogs[0].getAttribute("href"),
+    "#/runs/" + RUN + "/logs"
+  );
+
+  route("GET", "/api/runs/" + ENDED_RUN + "/task", {
+    run_id: ENDED_RUN,
+    task_id: TASK,
+    source: "archive",
+    present: true,
+    content: "# Demo task\n",
+  });
+  await navigate("#/runs/" + ENDED_RUN + "/task");
+  var runTaskLogs = doc.querySelectorAll("#view a.text-link").filter(function (a) {
+    return a.textContent.indexOf("View logs") !== -1;
+  });
+  eq(
+    "run nav: the run-scoped task view still links onward to that run's logs",
+    runTaskLogs.length && runTaskLogs[0].getAttribute("href"),
+    "#/runs/" + ENDED_RUN + "/logs"
+  );
+  check(
+    "run nav: the run-scoped view names the archived source",
+    doc.getElementById("view").textContent.indexOf("archive") !== -1,
+    doc.getElementById("view").textContent.slice(0, 200)
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 // Live-run readiness display: a repo whose ONLY raw readiness failure is a dirty
 // working tree reads as READY *for display* while an active/waiting run is in
 // flight (the tree is dirty because the run is editing it), and reverts to NOT
@@ -3991,6 +4152,7 @@ async function scenarioRepoAdmission() {
     await scenarioStaleRoute();
     await scenarioRunHistory();
     await scenarioRunHistoryPaging();
+    await scenarioRunNavigation();
     await scenarioLiveRunReadiness();
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();

@@ -472,6 +472,31 @@
   const evalHash = (repo, taskId) =>
     "#/evaluations/" + encodeURIComponent(repo) + "/" + encodeURIComponent(taskId);
 
+  // Where selecting a run should land: its TASK, not its log tail. A run is a
+  // dev/review loop over one task file, so the task is the thing being worked
+  // on — controls, pending questions, session strips, the file itself — while
+  // the log tail is one detail of it, reachable onward from either task
+  // destination's "View logs" link. Every run surface (Overview current
+  // activity, Run history, the log view's own back-link) resolves the
+  // destination here so the rule is stated once.
+  //
+  // Which task route depends on liveness. A live (active/waiting) run with full
+  // repo+task attribution opens the complete task detail, which is index-gated
+  // (active tasks only) but carries the run controls and answer forms a live run
+  // needs. Anything else — an ended run, whose task close-out may already have
+  // archived, or a live run missing repo attribution — uses the run-scoped task
+  // view, which resolves the file through the run record active-then-archive and
+  // so keeps opening after archival instead of 404-ing.
+  //
+  // A run carrying no task id has no task destination at all: null, leaving each
+  // caller to fall back to what it can still show.
+  function runTaskDestination(run) {
+    if (!run || !run.task_id) return null;
+    if (LIVE_STATES.has(run.state) && run.repo_name)
+      return taskHash(run.repo_name, run.task_id);
+    return runTaskHash(run.run_id);
+  }
+
   function showChrome(authed) {
     document.getElementById("signout-btn").hidden = !authed;
     document.getElementById("nav").hidden = !authed;
@@ -2765,11 +2790,16 @@
     const strips = sessionStrips(run.sessions, run.context_budget);
     // The effective-config snapshot rides the history payload per run; render it
     // OUTSIDE the card-link — interactive content like <details>/<summary> is
-    // invalid inside an <a> and its click would fight the navigate-to-logs link.
+    // invalid inside an <a> and its click would fight the card's own link.
     const config = effectiveConfigBlock(run.effective_config);
+    // History spans live and ended runs, so the destination splits accordingly:
+    // a live run opens its active task detail, an ended one the run-scoped task
+    // view (the task may already be archived), and a run with no task id keeps
+    // its logs. Logs stay reachable from either task destination.
+    const href = runTaskDestination(run) || logsHash(run.run_id);
     return `
       <li class="card run">
-        <a class="card-link" href="${logsHash(run.run_id)}">
+        <a class="card-link" href="${href}">
           <div class="card-head">
             <span class="run-id">${escapeHtml(run.run_id)}</span>
             <span class="badges">${runBadge(run.state)}</span>
@@ -4860,25 +4890,17 @@
     // open a fresh SSE stream nothing tears down, feeding a detached <pre>.
     if (superseded()) return;
     const live = LIVE_STATES.has(run.state);
-    // Where the task back-link points depends on the run's liveness. A live run
-    // (active/waiting) with full repo+task attribution links to the complete
-    // task detail page (taskHash) — run controls, pending answers, and
-    // session/context strips for the run in progress. Anything else — an ended
-    // run, or a live run missing repo/task attribution — uses the run-scoped
-    // task view (runTaskHash), which resolves the task file through the run
-    // record (active then archive) and so survives close-out archiving the task
-    // instead of 404-ing on the index-gated task detail.
-    const back =
-      live && run.repo_name && run.task_id
-        ? `<a class="back-link" href="${taskHash(
-            run.repo_name,
-            run.task_id
-          )}">← ${escapeHtml(run.task_id)}</a>`
-        : run.task_id
-        ? `<a class="back-link" href="${runTaskHash(
-            run.run_id
-          )}">← ${escapeHtml(run.task_id)}</a>`
-        : `<a class="back-link" href="#/runs">← Runs</a>`;
+    // The task back-link resolves through the shared run destination rule (live
+    // run → full task detail, otherwise the run-scoped active-then-archive
+    // view). Only the no-task-id fallback differs from a run card's: the logs
+    // are already on screen, so there is nothing to fall back to but the Runs
+    // list.
+    const taskDest = runTaskDestination(run);
+    const back = taskDest
+      ? `<a class="back-link" href="${taskDest}">← ${escapeHtml(
+          run.task_id
+        )}</a>`
+      : `<a class="back-link" href="#/runs">← Runs</a>`;
     // The log body is `tabindex="0"` so its scroll region is keyboard-reachable,
     // and deliberately carries no live-region role — the ARIA log role implies
     // one, which would narrate every streamed line. The toolbar's status line
@@ -5208,15 +5230,19 @@
     );
   }
 
-  // One live run in the current-activity panel: a run-accented card linking to
-  // its logs (watching progress); the waiting ones also appear in the attention
-  // panel, where their task link answers the question.
+  // One live run in the current-activity panel: a run-accented card opening the
+  // run's task (runTaskDestination) — where its controls, pending question and
+  // session strips are, with the log tail one "View logs" link further — and
+  // falling back to the logs directly when the run carries no task attribution.
+  // The waiting ones also appear in the attention panel, where the same task
+  // link answers the question.
   function activityCard(run) {
     const accent = run.state === "waiting" ? " run-waiting" : " run-active";
     const meta = [run.repo_name, run.task_id].filter(Boolean).join(" · ");
+    const href = runTaskDestination(run) || logsHash(run.run_id);
     return (
       `<li class="card run${accent}">` +
-      `<a class="card-link" href="${logsHash(run.run_id)}">` +
+      `<a class="card-link" href="${href}">` +
       `<div class="card-head">` +
       `<span class="run-id">${escapeHtml(run.run_id)}</span>` +
       `<span class="badges">${runBadge(run.state)}</span>` +
