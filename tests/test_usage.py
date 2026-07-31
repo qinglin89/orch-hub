@@ -21,10 +21,22 @@ from orch_hub import api
 from orch_hub.config import Config
 from orch_hub.models import PROVIDER_CLAUDE, PROVIDER_CODEX, UsageWindow
 from orch_hub.usage import (
+    MAX_CLAUDE_CONFIG_BYTES,
     MAX_STATUSLINE_BYTES,
+    REFRESH_BACKOFF,
+    REFRESH_CACHE_FRESH,
+    REFRESH_IN_FLIGHT,
+    REFRESH_MODEL_CALL,
+    REFRESH_NO_CACHE,
+    REFRESH_OK,
+    REFRESH_TIMEOUT,
     USAGE_CACHE_TTL_SECONDS,
+    USAGE_POLL_TIMEOUT_SECONDS,
     ClaudeObservation,
+    ClaudeUsageCollector,
     ClaudeUsageStore,
+    UsageRefreshResult,
+    UsageRunResult,
     UsageService,
     WindowBoundary,
     claude_usage,
@@ -32,7 +44,9 @@ from orch_hub.usage import (
     merge_window_boundaries,
     parse_claude_stream_boundaries,
     parse_claude_stream_usage,
+    parse_claude_usage_cache,
     read_claude_statusline,
+    read_claude_usage_cache,
     read_codex_usage,
 )
 
@@ -1428,3 +1442,442 @@ def test_usage_route_excludes_secrets(tmp_path: Path) -> None:
     client = build_client(config)
     body = client.get("/api/usage").text
     assert "SECRET" not in body
+
+
+# -- Claude authenticated /usage cache (the primary carrier) -------------------
+# The carrier that needs nobody watching: the CLI keeps its own authenticated
+# utilization fetch in ~/.claude.json, and `claude -p "/usage"` refreshes it as a
+# local command with no model call. These tests pin the parser's whitelist and
+# timestamp rule, and drive the collector's whole gate order through a fake runner
+# — no real CLI is launched and the operator's real config is never read.
+
+# Verbatim shape observed on Claude Code 2.1.220. Kept as a literal fixture (rather
+# than assembled from parts) so a future CLI change shows up as a diff against the
+# real thing, including the sibling fields the whitelist must drop.
+CACHE_FETCHED_MS = 1785470888223  # 2026-07-31T04:08:08.223+00:00
+CACHE_FETCHED_ISO = "2026-07-31T04:08:08.223000+00:00"
+CACHE_5H_RESET = "2026-07-31T07:20:00.202915+00:00"
+CACHE_7D_RESET = "2026-07-31T22:00:00.202935+00:00"
+# The collector's frozen clock, an hour past that fetch — so the fixture cache
+# reads as stale by default and a test opts into freshness explicitly. Section-local
+# rather than the module's NOW, which predates this verbatim 2.1.220 capture.
+CACHE_NOW = dt.datetime(2026, 7, 31, 5, 8, 8, tzinfo=UTC)
+
+
+def usage_cache(
+    *,
+    fetched_at_ms: object = CACHE_FETCHED_MS,
+    five: object = 8,
+    seven: object = 43,
+) -> dict:
+    """The `cachedUsageUtilization` container as 2.1.220 writes it."""
+    return {
+        "fetchedAtMs": fetched_at_ms,
+        "accountUuid": "12500fbb-90c4-4d35-9dd7-be094ebb2bc8",
+        "utilization": {
+            "five_hour": {
+                "utilization": five,
+                "resets_at": CACHE_5H_RESET,
+                "limit_dollars": None,
+                "used_dollars": None,
+                "remaining_dollars": None,
+            },
+            "seven_day": {
+                "utilization": seven,
+                "resets_at": CACHE_7D_RESET,
+                "limit_dollars": None,
+                "used_dollars": None,
+                "remaining_dollars": None,
+            },
+            "seven_day_opus": None,
+            "seven_day_sonnet": None,
+            # `limits[].percent` mirrors the window figures under an unambiguous
+            # name — the in-payload corroboration that `utilization` is 0-100 here.
+            "limits": [
+                {"kind": "session", "group": "session", "percent": 8,
+                 "resets_at": CACHE_5H_RESET, "is_active": False},
+                {"kind": "weekly_all", "group": "weekly", "percent": 43,
+                 "resets_at": CACHE_7D_RESET, "is_active": True},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 6,
+                 "scope": {"model": {"id": None, "display_name": "Fable"}},
+                 "resets_at": CACHE_7D_RESET, "is_active": False},
+            ],
+            "extra_usage": {"is_enabled": False, "used_credits": None},
+            "spend": {"percent": 0, "enabled": False},
+        },
+    }
+
+
+def write_cache(path: Path, cache: object = None, *, extra: dict | None = None) -> Path:
+    """Write a ~/.claude.json fixture carrying (or omitting) the usage cache."""
+    config: dict = {
+        "userID": "user-SECRET",
+        "machineID": "machine-SECRET",
+        "oauthAccount": {"accountUuid": "acct-SECRET", "emailAddress": "a@b.c"},
+        "projects": {"/Users/x/private-repo": {"hasTrustDialogAccepted": True}},
+    }
+    if extra:
+        config.update(extra)
+    if cache is not None:
+        config["cachedUsageUtilization"] = cache
+    path.write_text(json.dumps(config), encoding="utf-8")
+    return path
+
+
+class FakeRunner:
+    """A recording stand-in for the `claude -p "/usage"` subprocess seam.
+
+    `effect` may refresh the fixture cache (what a real successful turn does),
+    letting a test assert the read-back rather than the call alone."""
+
+    def __init__(self, result: UsageRunResult | None = None, effect=None):
+        self.result = result if result is not None else UsageRunResult()
+        self.effect = effect
+        self.calls: list[tuple[list[str], Path, float]] = []
+
+    def __call__(self, argv, cwd: Path, timeout: float) -> UsageRunResult:
+        self.calls.append((list(argv), cwd, timeout))
+        if self.effect is not None:
+            self.effect()
+        return self.result
+
+
+def collector(path: Path, runner=None, *, now: dt.datetime = CACHE_NOW, **kw):
+    """A collector over a fixture cache with a frozen clock and no real subprocess."""
+    kw.setdefault("cache_fresh_after", 300)
+    kw.setdefault("min_interval", 300)
+    return ClaudeUsageCollector(
+        cache_path=path, runner=runner or FakeRunner(), clock=lambda: now, **kw
+    )
+
+
+# -- parser --------------------------------------------------------------------
+
+
+def test_cache_parses_both_windows_verbatim(tmp_path: Path) -> None:
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache()))
+    assert obs is not None
+    assert [(w.key, w.used_percent, w.remaining_percent) for w in obs.windows] == [
+        ("five_hour", 8.0, 92.0),
+        ("seven_day", 43.0, 57.0),
+    ]
+    five, seven = obs.windows
+    assert (five.label, five.window_minutes) == ("5h", 300)
+    assert (seven.label, seven.window_minutes) == ("7d", 10080)
+    # Percent-first like every other carrier: no message total is invented.
+    assert (five.used, five.limit) == (None, None)
+
+
+def test_cache_observation_time_is_the_cli_fetch_not_now(tmp_path: Path) -> None:
+    # The load-bearing timestamp rule: figures are dated by the CLI's own fetch, so
+    # a poll that reuses an old cache cannot present it as newly observed.
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache()))
+    assert obs is not None
+    assert obs.observed_ts == CACHE_FETCHED_ISO
+
+
+def test_cache_without_a_usable_fetch_stamp_is_rejected(tmp_path: Path) -> None:
+    # Rather than dating it "now" — an undated figure must not become a fresh one.
+    for bad in (None, "recently", True, [1]):
+        cache = usage_cache(fetched_at_ms=bad)
+        assert read_claude_usage_cache(write_cache(tmp_path / "c.json", cache)) is None
+    missing = usage_cache()
+    assert missing.pop("fetchedAtMs") == CACHE_FETCHED_MS  # the key is really there
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", missing)) is None
+
+
+def test_cache_excludes_account_and_credential_fields(tmp_path: Path) -> None:
+    # ~/.claude.json is the CLI's whole config: accountUuid sits INSIDE the parsed
+    # container, and the account/machine/project siblings are one level up.
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache()))
+    assert obs is not None
+    persisted = json.dumps(obs.to_dict())
+    assert "SECRET" not in persisted
+    assert "12500fbb" not in persisted
+    assert "private-repo" not in persisted
+    # This container names no tier, and none is invented from the account record.
+    assert obs.plan is None
+
+
+def test_cache_figure_instant_matches_the_window_reset(tmp_path: Path) -> None:
+    # Shared identity with the sink carrier, so the same window read from either
+    # source merges as one window instead of racing as two.
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache()))
+    assert obs is not None
+    assert obs.windows[0].figure_instant == obs.windows[0].resets_at == CACHE_5H_RESET
+
+
+def test_cache_rejects_out_of_range_and_missing_percentages(tmp_path: Path) -> None:
+    # The unit guard this field name cannot make on its own; and a window with no
+    # figure drops rather than becoming a stub the card would render as available.
+    for bad in (101, -1, None, "8", True):
+        cache = usage_cache(five=bad)
+        obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", cache))
+        assert obs is not None
+        assert [w.key for w in obs.windows] == ["seven_day"]
+
+
+def test_cache_partial_and_absent_windows(tmp_path: Path) -> None:
+    cache = usage_cache()
+    cache["utilization"]["seven_day"] = None
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", cache))
+    assert obs is not None and [w.key for w in obs.windows] == ["five_hour"]
+    empty = usage_cache()
+    empty["utilization"] = {"seven_day_opus": None}
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", empty)) is None
+
+
+def test_cache_malformed_never_raises(tmp_path: Path) -> None:
+    path = tmp_path / "c.json"
+    for text in ("", "not json", "[]", '"str"', "null", '{"cachedUsageUtilization": 5}',
+                 '{"cachedUsageUtilization": {"fetchedAtMs": 1, "utilization": 7}}'):
+        path.write_text(text, encoding="utf-8")
+        assert read_claude_usage_cache(path) is None
+    assert parse_claude_usage_cache("\x00\xff garbage") is None
+
+
+def test_cache_absent_or_oversized_file(tmp_path: Path) -> None:
+    assert read_claude_usage_cache(tmp_path / "missing.json") is None
+    assert read_claude_usage_cache(tmp_path) is None  # a directory
+    big = tmp_path / "big.json"
+    write_cache(big, usage_cache())
+    big.write_text(" " * (MAX_CLAUDE_CONFIG_BYTES + 1), encoding="utf-8")
+    assert read_claude_usage_cache(big) is None
+
+
+def test_cache_observation_merges_with_the_sink_per_window(tmp_path: Path) -> None:
+    # The point of returning a plain ClaudeObservation: the cache goes through the
+    # existing per-window merge, so an idle sink writer cannot lower a fresher cache
+    # figure, and the sink's plan (which this container lacks) is kept.
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache()))
+    assert obs is not None
+    stored = ClaudeObservation(
+        observed_ts="2026-07-31T03:00:00+00:00",
+        plan="max",
+        windows=(
+            UsageWindow(key="five_hour", label="5h", window_minutes=300,
+                        used_percent=3.0, remaining_percent=97.0,
+                        resets_at=CACHE_5H_RESET, figure_instant=CACHE_5H_RESET),
+        ),
+    )
+    merged = merge_observations(stored, obs)
+    assert merged is not None
+    assert merged.plan == "max"
+    assert {w.key: w.used_percent for w in merged.windows} == {
+        "five_hour": 8.0,
+        "seven_day": 43.0,
+    }
+
+
+# -- collector: argv and the no-model-prompt contract --------------------------
+
+
+def test_collector_argv_is_print_mode_and_isolated(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    collector(tmp_path / "c.json", runner, cache_fresh_after=0).refresh()
+    argv, cwd, timeout = runner.calls[0]
+    assert argv[:4] == ["claude", "-p", "--output-format", "json"]
+    assert argv[-1] == "/usage"
+    # Print mode is what skips the workspace-trust dialog and writes no projects
+    # entry for the scratch cwd; an interactive PTY session would do neither.
+    for flag in ("--safe-mode", "--no-session-persistence"):
+        assert flag in argv
+    assert argv[argv.index("--permission-mode") + 1] == "plan"
+    assert argv[argv.index("--tools") + 1] == ""
+    # The variadic --tools must never sit immediately before the positional prompt.
+    assert argv[argv.index("--tools") + 2].startswith("--")
+    assert "--dangerously-skip-permissions" not in argv
+    assert "--model" not in argv and "--effort" not in argv
+    assert timeout == USAGE_POLL_TIMEOUT_SECONDS
+    # A fresh scratch dir, never a managed repo, and removed after the turn.
+    assert not cwd.exists()
+
+
+def test_collector_flags_a_turn_that_reached_the_model(tmp_path: Path) -> None:
+    # /usage is handled inside the CLI today (num_turns/cost 0), but that is its
+    # behavior, not a contract owed to us — so every turn is checked.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    for report in ({"num_turns": 1}, {"total_cost_usd": 0.02}):
+        runner = FakeRunner(UsageRunResult(stdout=json.dumps(report)))
+        result = collector(path, runner, cache_fresh_after=0).refresh()
+        assert result.refreshed is False
+        assert result.detail == REFRESH_MODEL_CALL
+        # The real figures still read back — this is a display sidecar.
+        assert result.observation is not None
+
+
+def test_collector_accepts_the_real_model_free_report(tmp_path: Path) -> None:
+    # Verbatim success envelope from `claude -p "/usage" --output-format json`.
+    report = {"is_error": False, "subtype": "success", "num_turns": 0,
+              "total_cost_usd": 0, "duration_api_ms": 0, "result": "8% used"}
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    result = collector(path, FakeRunner(UsageRunResult(stdout=json.dumps(report))),
+                       cache_fresh_after=0).refresh()
+    assert result.refreshed is True
+    assert result.detail == REFRESH_OK
+
+
+# -- collector: gate order and failure modes -----------------------------------
+
+
+def test_collector_refreshes_a_stale_cache_and_reads_it_back(tmp_path: Path) -> None:
+    path = write_cache(tmp_path / "c.json", usage_cache(five=8))
+    runner = FakeRunner(effect=lambda: write_cache(path, usage_cache(five=41)))
+    # CACHE_NOW is an hour past the fixture's fetch stamp, so the cache is stale.
+    result = collector(path, runner).refresh()
+    assert len(runner.calls) == 1
+    assert result.refreshed is True and result.detail == REFRESH_OK
+    assert result.observation is not None
+    assert result.observation.windows[0].used_percent == 41.0
+
+
+def test_collector_reuses_a_cache_the_cli_just_fetched(tmp_path: Path) -> None:
+    # The CLI re-fetches on its own schedule and serves its cache in between, so
+    # polling harder cannot produce fresher data — only spend quota-check calls.
+    fresh = int((CACHE_NOW - dt.timedelta(seconds=30)).timestamp() * 1000)
+    path = write_cache(tmp_path / "c.json", usage_cache(fetched_at_ms=fresh))
+    runner = FakeRunner()
+    result = collector(path, runner).refresh()
+    assert runner.calls == []
+    assert result.refreshed is False and result.detail == REFRESH_CACHE_FRESH
+    assert result.observation is not None and result.observation.windows[0].used_percent == 8.0
+
+
+def test_collector_floors_repeat_attempts_when_there_is_no_fresh_cache(tmp_path: Path) -> None:
+    # Distinct from the freshness gate: a missing/broken CLI leaves nothing fresh to
+    # reuse, and this is what stops every Overview load re-running a doomed turn.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    runner = FakeRunner(UsageRunResult(returncode=1))
+    c = collector(path, runner)
+    first, second = c.refresh(), c.refresh()
+    assert len(runner.calls) == 1
+    assert first.detail == "usage refresh failed (exit 1)"
+    assert second.detail == REFRESH_BACKOFF
+    # Both still surface the last real figures, dated by the CLI's own fetch.
+    for result in (first, second):
+        assert result.observation is not None
+        assert result.observation.observed_ts == CACHE_FETCHED_ISO
+        assert result.refreshed is False
+
+
+def test_collector_retries_once_the_interval_elapses(tmp_path: Path) -> None:
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    runner = FakeRunner(UsageRunResult(returncode=1))
+    clock = {"now": CACHE_NOW}
+    c = ClaudeUsageCollector(cache_path=path, runner=runner, clock=lambda: clock["now"],
+                             cache_fresh_after=300, min_interval=300)
+    c.refresh()
+    clock["now"] = CACHE_NOW + dt.timedelta(seconds=301)
+    c.refresh()
+    assert len(runner.calls) == 2
+
+
+def test_collector_keeps_previous_figures_on_every_failure_mode(tmp_path: Path) -> None:
+    # Authentication failure, an unsupported command, a broken install and a hang
+    # all land here; none may erase or re-date the last real observation.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    cases = [
+        (UsageRunResult(returncode=1, stderr="Invalid API key"), "usage refresh failed (exit 1)"),
+        (UsageRunResult(timed_out=True), REFRESH_TIMEOUT),
+        (UsageRunResult(stdout=json.dumps({"is_error": True, "num_turns": 0})),
+         "usage refresh reported an error"),
+    ]
+    for run_result, detail in cases:
+        result = collector(path, FakeRunner(run_result)).refresh()
+        assert result.detail == detail
+        assert result.refreshed is False
+        assert result.observation is not None
+        assert result.observation.observed_ts == CACHE_FETCHED_ISO
+        assert result.observation.windows[0].used_percent == 8.0
+
+
+def test_collector_failure_detail_never_echoes_cli_output(tmp_path: Path) -> None:
+    # ~/.claude.json diagnostics can carry account context; stderr stays out.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    runner = FakeRunner(UsageRunResult(returncode=1, stderr="auth failed for acct-SECRET"))
+    assert "SECRET" not in collector(path, runner).refresh().detail
+
+
+def test_collector_survives_an_unrunnable_cli(tmp_path: Path) -> None:
+    def explode(argv, cwd, timeout):
+        raise FileNotFoundError("claude")
+
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    result = collector(path, explode).refresh()
+    assert result.refreshed is False
+    assert "FileNotFoundError" in result.detail
+    assert result.observation is not None
+
+
+def test_collector_reports_no_cache_when_nothing_lands(tmp_path: Path) -> None:
+    # A clean turn against a CLI that has never fetched utilization.
+    path = write_cache(tmp_path / "c.json")
+    result = collector(path, FakeRunner()).refresh()
+    assert result.observation is None
+    assert result.refreshed is False and result.detail == REFRESH_NO_CACHE
+
+
+def test_collector_is_single_flight_and_non_blocking(tmp_path: Path) -> None:
+    # A refresh triggered from a read path must never make one caller wait on
+    # another caller's subprocess: the loser returns immediately, not queued.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    entered, release = threading.Event(), threading.Event()
+
+    def blocking(argv, cwd, timeout):
+        entered.set()
+        release.wait(5)
+        return UsageRunResult()
+
+    c = collector(path, blocking)
+    outcomes: list[UsageRefreshResult] = []
+    worker = threading.Thread(target=lambda: outcomes.append(c.refresh()))
+    worker.start()
+    assert entered.wait(5)
+    contender = c.refresh()  # while the first turn is still running
+    assert contender.detail == REFRESH_IN_FLIGHT
+    assert contender.refreshed is False and contender.observation is None
+    release.set()
+    worker.join(5)
+    assert [o.detail for o in outcomes] == [REFRESH_OK]
+
+
+def test_collector_concurrent_callers_run_exactly_one_turn(tmp_path: Path) -> None:
+    # A burst of Overview readers must cost one subprocess, not six. Made
+    # deterministic rather than timing-dependent: the winner's turn is held open
+    # until all five other callers have been shed, so they genuinely contend.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    runner, shed, start = FakeRunner(), threading.Semaphore(0), threading.Barrier(6)
+
+    def held(argv, cwd, timeout):
+        result = runner(argv, cwd, timeout)
+        for _ in range(5):
+            assert shed.acquire(timeout=5)
+        return result
+
+    c = collector(path, held)
+    details: list[str] = []
+    lock = threading.Lock()
+
+    def worker() -> None:
+        start.wait(5)
+        result = c.refresh()
+        with lock:
+            details.append(result.detail)
+        if result.detail != REFRESH_OK:
+            shed.release()
+
+    threads = [threading.Thread(target=worker) for _ in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    assert len(runner.calls) == 1
+    assert sorted(details) == sorted([REFRESH_OK] + [REFRESH_IN_FLIGHT] * 5)
+
+
+def test_collector_read_cache_does_not_launch_anything(tmp_path: Path) -> None:
+    runner = FakeRunner()
+    c = collector(write_cache(tmp_path / "c.json", usage_cache()), runner)
+    obs = c.read_cache()
+    assert obs is not None and obs.observed_ts == CACHE_FETCHED_ISO
+    assert runner.calls == []

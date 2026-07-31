@@ -67,8 +67,11 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
+import subprocess
+import tempfile
 import threading
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -81,6 +84,7 @@ from .models import (
     UsageCredits,
     UsageWindow,
 )
+from .runs import _orchestrator_env
 
 USAGE_DIR_NAME = "usage"
 """Sub-dir of the hub data dir holding subscription-usage state."""
@@ -1114,6 +1118,502 @@ def merge_observations(
         plan=plan,
         windows=merged_windows,
     )
+
+
+# -- Claude: the authenticated ``/usage`` cache (the primary carrier) ----------
+#
+# VERIFIED ON CLAUDE CODE 2.1.220 — the carrier that does not depend on anybody
+# rendering a status line. Every section above reads a signal some *other* activity
+# happens to leave behind: the sink needs an interactive session drawing its status
+# line, the stream needs a hub-driven turn. Both go quiet exactly when the operator
+# most wants the number — an idle Mac, or a stretch of orchestrator runs launched
+# headless. The CLI, though, keeps its own authenticated utilization fetch on disk:
+#
+#     ~/.claude.json -> "cachedUsageUtilization": {
+#       "fetchedAtMs": 1785470888223,
+#       "utilization": {
+#         "five_hour":  {"utilization": 8,  "resets_at": "2026-07-31T07:20:00.202915+00:00"},
+#         "seven_day":  {"utilization": 43, "resets_at": "2026-07-31T22:00:00.202935+00:00"},
+#         "seven_day_opus": null, "seven_day_sonnet": null, ...,
+#         "limits": [{"kind": "session", "percent": 8, ...},
+#                    {"kind": "weekly_all", "percent": 43, ...},
+#                    {"kind": "weekly_scoped", "percent": 6,
+#                     "scope": {"model": {"display_name": "Fable"}}, ...}],
+#         "extra_usage": {...}, "spend": {...}},
+#       "accountUuid": "<uuid>"}
+#
+# ``utilization`` IS A PERCENTAGE HERE, and that is checkable rather than assumed.
+# The stream/sink parser above rejects the field by name because its unit is
+# source-dependent (a 0..1 fraction in the header-derived cache), so reading it here
+# needs its own justification: this container carries ``limits[].percent`` — a field
+# whose name admits only one unit — mirroring the same two numbers exactly (8 and
+# 43 above). Same payload, same values, unambiguous name. So the reading is
+# corroborated in-band, not inferred; :func:`_cache_percent` still range-guards it,
+# and the two mappings stay separate so neither carrier's unit question leaks into
+# the other.
+#
+# REFRESHED BY ``claude -p "/usage"``, NOT BY A PTY. The task scope proposed driving
+# an interactive CLI in a pseudo-terminal and typing the slash command. Print mode
+# turned out to run the same command with none of the machinery, and measurement on
+# 2.1.220 is what settled it:
+#
+#   * ``num_turns: 0``, ``total_cost_usd: 0``, ``duration_api_ms: 0`` — ``/usage`` is
+#     handled inside the CLI and never reaches the model. That is the scope's
+#     "sends no model prompt" rule, verifiable per run rather than argued, and
+#     :meth:`ClaudeUsageCollector._inspect` asserts it on every turn.
+#   * ~2.3s wall clock, exit 0, and it refreshes ``fetchedAtMs``.
+#   * No workspace-trust dialog (print mode skips it) and NO ``projects`` entry
+#     written for the scratch cwd. The PTY route failed both: the trust prompt ate
+#     the ``/usage`` keystroke, and answering it blind would have written the hub's
+#     throwaway directory into the user's own ``~/.claude.json`` — one accumulating
+#     entry per poll.
+#   * No PTY, so no terminal emulation, no ANSI scraping of a TUI whose layout is not
+#     a contract, and no orphaned interactive process to reap.
+#
+# The prose the command prints (session/skill analytics) is deliberately NOT parsed:
+# the structured cache is the source of truth, and the human render is not.
+#
+# WHAT IS READ. Only the whitelisted rate-limit fields — the two windows' percentage
+# and reset instant, plus ``fetchedAtMs``. ``~/.claude.json`` is the CLI's whole
+# config file, so the whitelist is doing real work: ``accountUuid`` sits inside the
+# very container being parsed, and ``oauthAccount``, ``userID``, ``machineID``,
+# ``projects`` (every path the operator has opened) and the rest are siblings. None
+# is read, none is persisted, and none is logged. No credential is touched: this
+# reads a file, and the CLI does its own authenticated fetch.
+#
+# WHY ``fetchedAtMs`` IS MANDATORY. It is the CLI's own record of when the figures
+# were fetched, so it — never the poll's wall clock — is the observation time. A
+# refresh that fails leaves the file untouched, and stamping the unchanged figures
+# with "now" would present them as freshly observed and silently reset the staleness
+# the Overview exists to show. So a cache with no usable ``fetchedAtMs`` yields no
+# observation at all, rather than one the reader has to date itself.
+#
+# The result is an ordinary :class:`ClaudeObservation` fed through the same store and
+# the same per-window :func:`merge_observations` as the sink — one read path, one
+# staleness rule, and a rollover/idle-writer race already solved. It carries no plan
+# (this container names no tier), which the merge already handles by keeping the
+# stored one.
+
+CLAUDE_CONFIG_NAME = ".claude.json"
+"""The Claude CLI's config file, in the user's home."""
+
+DEFAULT_CLAUDE_CONFIG = Path.home() / CLAUDE_CONFIG_NAME
+"""Default path of the CLI config carrying :data:`CLAUDE_USAGE_CACHE_KEY`.
+Injectable at the collector so tests never read the real operator file."""
+
+CLAUDE_USAGE_CACHE_KEY = "cachedUsageUtilization"
+"""Key under which the CLI stores its authenticated utilization fetch."""
+
+MAX_CLAUDE_CONFIG_BYTES = 16 * 1024 * 1024
+"""Defensive size guard on the CLI config, mirroring the sink/rollout bounds. It
+grows with the operator's project history, so this is far above any real file —
+refusing an implausible one keeps a corrupt/runaway config off the read path, where
+it degrades to *unavailable* like any other unusable source."""
+
+USAGE_CACHE_FRESH_SECONDS = 300
+"""How new the CLI's own cached fetch must be for a refresh to be skipped entirely.
+
+The CLI already re-fetches on its own schedule and serves the cache in between
+(measured: a second ``/usage`` a minute later left ``fetchedAtMs`` untouched), so
+polling harder cannot produce fresher data — it only spends quota-check calls. Well
+inside :data:`USAGE_STALE_AFTER_SECONDS`, so a skipped refresh never leaves the card
+reading stale."""
+
+USAGE_POLL_MIN_INTERVAL_SECONDS = 300
+"""Floor between two refresh *attempts*, whatever their outcome.
+
+Distinct from the freshness gate above, which only skips when there is fresh data to
+reuse: when the CLI is missing, unauthenticated, or hanging, there is none, and this
+is what stops every Overview load from re-running a doomed subprocess."""
+
+USAGE_POLL_TIMEOUT_SECONDS = 60
+"""Hard bound on one refresh turn (measured ~2.3s, so this is headroom for a cold
+start, not an expected wait). The turn is a display-only background refresh — it may
+never become an unbounded wait behind an Overview read."""
+
+REFRESH_IN_FLIGHT = "refresh already running"
+REFRESH_CACHE_FRESH = "cached usage still fresh"
+REFRESH_BACKOFF = "retry interval not elapsed"
+REFRESH_OK = "usage cache refreshed"
+REFRESH_NO_CACHE = "no usable usage cache"
+REFRESH_TIMEOUT = "usage refresh timed out"
+REFRESH_MODEL_CALL = "usage refresh made a model call"
+"""Stable outcome slugs for one :meth:`ClaudeUsageCollector.refresh` call. Named
+constants rather than inline strings so tests and any future display can assert on
+an outcome instead of matching prose."""
+
+_CLAUDE_CACHE_USED_KEYS = ("utilization",)
+"""The used figure inside :data:`CLAUDE_USAGE_CACHE_KEY`, as a 0-100 percentage —
+corroborated in-payload by ``limits[].percent`` (see the section note). Deliberately
+a separate tuple from :data:`_CLAUDE_USED_KEYS`: the stream/sink carrier must keep
+rejecting this field name, whose unit is ambiguous *there*."""
+
+_CLAUDE_CACHE_WINDOW_CONTAINER = "utilization"
+"""Sub-key holding the per-window map. Same name as the figure field one level down
+— the CLI nests ``utilization.five_hour.utilization`` — which is why the container
+and the figure are looked up by separate constants."""
+
+
+def _cache_percent(value: object) -> float | None:
+    """A used-percentage from the CLI's utilization cache, range-guarded to 0-100.
+
+    The extra guard over :func:`_percent` is the unit check this carrier's field name
+    cannot make on its own: a value outside 0-100 is not a percentage in any reading,
+    so it yields ``None`` (the window drops, the card degrades) rather than a figure
+    that would render as a wrong bar."""
+    percent = _percent(value)
+    if percent is None or not 0.0 <= percent <= 100.0:
+        return None
+    return percent
+
+
+def _cache_window(key: str, raw: object) -> UsageWindow | None:
+    """Normalize one window of the utilization cache into a :class:`UsageWindow`.
+
+    Same rules as the sink carrier (:func:`_claude_window`): a window without a usable
+    percentage yields ``None`` rather than a figure-less stub, ``used``/``limit`` stay
+    ``None`` because the provider reports percentages, and ``figure_instant`` is the
+    reset this figure was measured against — so a cache-sourced and a sink-sourced
+    reading of the same window share one identity and merge as the same window
+    instead of racing as two."""
+    if not isinstance(raw, dict):
+        return None
+    used = _cache_percent(_first(raw, _CLAUDE_CACHE_USED_KEYS))
+    if used is None:
+        return None
+    resets = _claude_reset(_first(raw, _CLAUDE_RESET_KEYS))
+    minutes = _CLAUDE_WINDOW_MINUTES.get(key)
+    return UsageWindow(
+        key=key,
+        label=_window_label(minutes),
+        window_minutes=minutes,
+        used_percent=used,
+        remaining_percent=_remaining(used),
+        resets_at=resets,
+        figure_instant=resets,
+    )
+
+
+def _fetched_at(value: object) -> str | None:
+    """The cache's ``fetchedAtMs`` (epoch **milliseconds**) as an ISO-8601 UTC instant.
+
+    Milliseconds, unlike every reset field on these carriers — hence its own
+    converter rather than :func:`_claude_reset`. ``None`` for a missing or
+    uninterpretable value, which the parser treats as fatal: see the section note on
+    why an undated cache must not be dated by the reader."""
+    if not _is_number(value):
+        return None
+    return _iso_from_epoch(float(value) / 1000.0)
+
+
+def parse_claude_usage_cache(text: str) -> ClaudeObservation | None:
+    """Parse the CLI config's utilization cache into an observation.
+
+    Reads only the whitelisted rate-limit fields of
+    :data:`CLAUDE_USAGE_CACHE_KEY` — the two windows' percentage and reset, stamped
+    with the cache's own ``fetchedAtMs``. Everything else in the file, including the
+    ``accountUuid`` sitting in the same container, is dropped by construction.
+
+    Returns ``None`` — no observation, so the store keeps whatever it had — for
+    anything unusable: not JSON, not an object, no cache container, no usable
+    ``fetchedAtMs``, or no window carrying a percentage. ``plan`` is always ``None``:
+    this container names no subscription tier, and inventing one from an account
+    record is exactly what the whitelist forbids. Never raises — this is a display
+    read path over a file another program owns."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    if not isinstance(data, dict):
+        return None
+    cache = data.get(CLAUDE_USAGE_CACHE_KEY)
+    if not isinstance(cache, dict):
+        return None
+    observed_ts = _fetched_at(cache.get("fetchedAtMs"))
+    if observed_ts is None:
+        return None
+    container = cache.get(_CLAUDE_CACHE_WINDOW_CONTAINER)
+    if not isinstance(container, dict):
+        return None
+    windows = tuple(
+        w
+        for key in _CLAUDE_WINDOW_KEYS
+        if (w := _cache_window(key, container.get(key))) is not None
+    )
+    if not windows:
+        return None
+    return ClaudeObservation(observed_ts=observed_ts, plan=None, windows=windows)
+
+
+def read_claude_usage_cache(path: Path) -> ClaudeObservation | None:
+    """Read the CLI config at ``path`` for its utilization cache, or ``None``.
+
+    ``None`` covers every no-feed case identically — the CLI is not installed, has
+    never fetched utilization, or the file is unreadable, oversized
+    (:data:`MAX_CLAUDE_CONFIG_BYTES`), or malformed — so each degrades to the same
+    *unavailable* card rather than to an error or to fabricated figures."""
+    try:
+        if path.stat().st_size > MAX_CLAUDE_CONFIG_BYTES:
+            return None
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+    return parse_claude_usage_cache(text)
+
+
+@dataclass(frozen=True)
+class UsageRunResult:
+    """One completed ``claude -p "/usage"`` turn: captured output and how it ended.
+
+    ``timed_out`` is a normal result rather than an exception so the injected seam
+    stays a plain function returning data — a test fake expresses a hang by setting
+    the flag, exactly as the real runner does when it kills the process."""
+
+    stdout: str = ""
+    stderr: str = ""
+    returncode: int = 0
+    timed_out: bool = False
+
+
+UsageRunner = Callable[[Sequence[str], Path, float], UsageRunResult]
+"""Runs one usage turn to completion in ``cwd``, bounded by a timeout in seconds.
+
+The injected subprocess seam, like the run manager's ``spawner`` and the semantic
+backend's ``runner``: tests inject a fake so every mechanic is deterministic, and
+the thin real implementation (:func:`_default_usage_runner`) stays untested."""
+
+
+def _default_usage_runner(argv: Sequence[str], cwd: Path, timeout: float) -> UsageRunResult:
+    """Run ``claude`` to completion under a hard timeout (the real runner).
+
+    Uses the augmented PATH shared with detached orchestrator, intake, and semantic
+    runs (:func:`orch_hub.runs._orchestrator_env`): the hub normally runs under
+    launchd with a sparse PATH while ``claude`` is installed under the user's home,
+    and this launches it by name. ``capture_output`` drains both pipes so the turn
+    cannot deadlock on a full one, and a timeout is reported as a result rather than
+    raised. Untested, like the sibling runners it mirrors."""
+    try:
+        proc = subprocess.run(
+            list(argv),
+            cwd=str(cwd),
+            env=_orchestrator_env(),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return UsageRunResult(timed_out=True)
+    return UsageRunResult(
+        stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode
+    )
+
+
+@dataclass(frozen=True)
+class UsageRefreshResult:
+    """The outcome of one :meth:`ClaudeUsageCollector.refresh` call.
+
+    ``observation`` is the best usage currently on disk — which is deliberately NOT
+    ``None`` just because the refresh failed: a stale-but-real reading, still dated
+    by its own ``fetchedAtMs``, is what the card should keep showing. The one
+    exception is :data:`REFRESH_IN_FLIGHT`, which sheds without reading anything,
+    since the caller holding the gate is already doing that work. ``refreshed`` says
+    whether a turn actually ran and succeeded, and ``detail`` which of the
+    ``REFRESH_*`` outcomes it was."""
+
+    observation: ClaudeObservation | None
+    refreshed: bool
+    detail: str
+
+
+class ClaudeUsageCollector:
+    """Refreshes Claude's authenticated utilization cache, bounded and single-flight.
+
+    The one carrier that works with nobody watching: :meth:`refresh` runs
+    ``claude -p "/usage"`` — a local CLI command, no model call (see the section
+    note) — and reads back the structured cache the CLI keeps in its config file.
+
+    Every way this could misbehave as a *display* sidecar is gated:
+
+    * **Single-flight.** The gate is taken non-blocking, so a second caller returns
+      :data:`REFRESH_IN_FLIGHT` immediately instead of queueing. A refresh triggered
+      from a read path must never make a caller wait on another caller's subprocess.
+    * **Cheap when it can be.** A cache the CLI itself refreshed recently is reused
+      (:data:`USAGE_CACHE_FRESH_SECONDS`) without launching anything.
+    * **Bounded when it cannot.** Attempts are floored by
+      :data:`USAGE_POLL_MIN_INTERVAL_SECONDS` and each turn by
+      :data:`USAGE_POLL_TIMEOUT_SECONDS`, so a missing, unauthenticated, or hanging
+      CLI costs one bounded subprocess per interval, not one per Overview load.
+    * **Never destructive.** Failure of any kind returns the previous observation
+      with its own timestamp intact; nothing is written to the CLI's config, and the
+      scratch cwd is removed after the turn.
+
+    It owns no store: it returns an observation and lets :class:`UsageService` merge
+    it, so the cache carrier goes through the same per-window merge as the sink."""
+
+    def __init__(
+        self,
+        *,
+        cache_path: Path | None = None,
+        runner: UsageRunner = _default_usage_runner,
+        clock: Callable[[], dt.datetime] = _utc_now,
+        cache_fresh_after: float = USAGE_CACHE_FRESH_SECONDS,
+        min_interval: float = USAGE_POLL_MIN_INTERVAL_SECONDS,
+        timeout: float = USAGE_POLL_TIMEOUT_SECONDS,
+    ):
+        self._cache_path = cache_path if cache_path is not None else DEFAULT_CLAUDE_CONFIG
+        self._runner = runner
+        self._clock = clock
+        self._cache_fresh_after = cache_fresh_after
+        self._min_interval = min_interval
+        self._timeout = timeout
+        # Non-reentrant and taken non-blocking (see the class note): this serializes
+        # turns, it does not queue callers behind one.
+        self._gate = threading.Lock()
+        self._last_attempt: dt.datetime | None = None
+
+    @property
+    def cache_path(self) -> Path:
+        return self._cache_path
+
+    def read_cache(self) -> ClaudeObservation | None:
+        """The current on-disk observation, without refreshing anything."""
+        return read_claude_usage_cache(self._cache_path)
+
+    def refresh(self) -> UsageRefreshResult:
+        """Refresh the utilization cache if it is worth it, and return what is on disk.
+
+        Gated in the order documented on the class: single-flight, then freshness,
+        then the attempt floor, then one bounded turn. Whatever happens, the returned
+        observation is a real read of the cache file — so a skipped or failed refresh
+        yields the previous figures with their own ``fetchedAtMs``, never a
+        re-dated copy."""
+        if not self._gate.acquire(blocking=False):
+            return UsageRefreshResult(None, False, REFRESH_IN_FLIGHT)
+        try:
+            cached = self.read_cache()
+            now = self._clock()
+            if cached is not None and not _older_than(
+                cached.observed_ts, now, self._cache_fresh_after
+            ):
+                return UsageRefreshResult(cached, False, REFRESH_CACHE_FRESH)
+            if self._last_attempt is not None and (
+                (now - self._last_attempt).total_seconds() < self._min_interval
+            ):
+                return UsageRefreshResult(cached, False, REFRESH_BACKOFF)
+            self._last_attempt = now
+            failure = self._run_turn()
+            # Read back regardless of the verdict: the cache is the source of truth,
+            # and a turn can refresh it even on a path we call a failure.
+            observation = self.read_cache() or cached
+            if failure is not None:
+                return UsageRefreshResult(observation, False, failure)
+            if observation is None:
+                return UsageRefreshResult(None, False, REFRESH_NO_CACHE)
+            return UsageRefreshResult(observation, True, REFRESH_OK)
+        finally:
+            self._gate.release()
+
+    def _run_turn(self) -> str | None:
+        """Run one usage turn; ``None`` on success, else the failing ``REFRESH_*`` slug.
+
+        The turn runs from a fresh empty scratch dir rather than any managed repo —
+        the same isolation the semantic backend uses, and here it also keeps the CLI
+        from attributing the poll to a real project. Print mode writes no workspace
+        entry for it (verified), so the directory leaves no trace once removed."""
+        sandbox = Path(tempfile.mkdtemp(prefix="orch-hub-usage-"))
+        try:
+            result = self._runner(self._argv(), sandbox, self._timeout)
+        except OSError as exc:
+            # The CLI is missing or unrunnable — an ordinary state (Claude need not be
+            # installed), so it degrades like any other absent source.
+            return f"usage refresh could not start: {type(exc).__name__}"
+        finally:
+            shutil.rmtree(sandbox, ignore_errors=True)
+        return self._inspect(result)
+
+    def _inspect(self, result: UsageRunResult) -> str | None:
+        """Classify a finished turn; ``None`` when it was a clean, model-free refresh.
+
+        The model-call check is the enforcement half of the scope's no-model-prompt
+        rule. ``/usage`` is handled inside the CLI today (``num_turns``/cost 0), but
+        that is the CLI's behavior, not a contract it owes us — so every turn is
+        checked, and a version that started routing it to the model would be reported
+        and then throttled by the attempt floor rather than quietly billing the
+        operator's subscription on a display refresh. Unparseable stdout is NOT read
+        as a model call: absence of proof is not proof, and the exit code already
+        covers a broken turn."""
+        if result.timed_out:
+            return REFRESH_TIMEOUT
+        if result.returncode != 0:
+            # Authentication failure, an unsupported command, a broken install: all
+            # arrive here as a nonzero exit. stderr is deliberately not echoed into
+            # the detail — this file's diagnostics can carry account context.
+            return f"usage refresh failed (exit {result.returncode})"
+        report = _json_object(result.stdout)
+        if report is None:
+            return None
+        if report.get("is_error") is True:
+            return "usage refresh reported an error"
+        if _is_number(report.get("num_turns")) and report["num_turns"] > 0:
+            return REFRESH_MODEL_CALL
+        if _is_number(report.get("total_cost_usd")) and report["total_cost_usd"] > 0:
+            return REFRESH_MODEL_CALL
+        return None
+
+    def _argv(self) -> list[str]:
+        """Build the argv for one local, model-free usage turn.
+
+        ``-p`` is what makes this work at all: print mode skips the workspace-trust
+        dialog and writes no ``projects`` entry for the scratch cwd, where an
+        interactive PTY session would do neither. ``/usage`` is passed as the prompt
+        positionally — the CLI resolves the slash command locally.
+
+        The isolation flags mirror :meth:`ClaudeSemanticBackend._argv` so a hub-driven
+        Claude turn means the same thing everywhere: ``--tools ""`` leaves the turn no
+        built-in tool, ``--safe-mode`` keeps operator/project customizations out,
+        ``--no-session-persistence`` leaves no transcript, and ``--permission-mode
+        plan`` blocks writes; ``--dangerously-skip-permissions`` is never added. No
+        ``--model`` / ``--effort``: nothing here reaches a model, so pinning one would
+        only invite the assumption that something does. ``--tools ""`` is followed by
+        another flag, never by the positional prompt, so the variadic option cannot
+        swallow ``/usage`` as a tool name."""
+        return [
+            "claude",
+            "-p",
+            "--output-format",
+            "json",
+            "--tools",
+            "",
+            "--safe-mode",
+            "--no-session-persistence",
+            "--permission-mode",
+            "plan",
+            "/usage",
+        ]
+
+
+def _json_object(text: str) -> dict | None:
+    """``text`` as a JSON object, or ``None`` when it is not one. Never raises."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _older_than(observed_ts: str | None, now: dt.datetime, seconds: float) -> bool:
+    """Whether ``observed_ts`` is more than ``seconds`` behind ``now``.
+
+    An unknown/unparseable stamp counts as old: it cannot be shown to be fresh, and
+    the refresh it triggers is bounded anyway. The mirror of :func:`_is_stale`, which
+    answers the display question against a fixed threshold; this one answers the
+    collector's, against a caller-supplied one."""
+    observed = _parse_iso(observed_ts)
+    if observed is None:
+        return True
+    return (now - observed).total_seconds() > seconds
 
 
 # -- aggregation service ------------------------------------------------------
