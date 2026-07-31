@@ -1474,10 +1474,11 @@ def usage_cache(
 ) -> dict:
     """The `cachedUsageUtilization` container as 2.1.220 writes it.
 
-    `limits` defaults to the CLI's own shape with the two window figures mirrored
-    into it — that is what a real payload carries, and it is the witness the parser
-    checks `utilization` against. Tests that need an unwitnessed, contradicting, or
-    differently-shaped list pass their own."""
+    `limits` defaults to the CLI's own shape: the two window figures under its
+    unambiguous `percent` name, stamped with the same reset instants as the map. That
+    is what a real payload carries, and it is where the published figure comes from.
+    Tests that need an unpaired, contradicting, or differently-shaped list pass their
+    own."""
     return {
         "fetchedAtMs": fetched_at_ms,
         "accountUuid": "12500fbb-90c4-4d35-9dd7-be094ebb2bc8",
@@ -1498,8 +1499,9 @@ def usage_cache(
             },
             "seven_day_opus": None,
             "seven_day_sonnet": None,
-            # `limits[].percent` mirrors the window figures under an unambiguous
-            # name — the in-payload corroboration that `utilization` is 0-100 here.
+            # `limits[].percent` carries the same usage under a name that admits one
+            # unit, keyed by kind and stamped with the map's own window instants —
+            # this is the figure the parser publishes, and the instant pairs it.
             "limits": [
                 {"kind": "session", "group": "session", "percent": five,
                  "resets_at": CACHE_5H_RESET, "is_active": False},
@@ -1627,8 +1629,9 @@ def test_cache_figure_instant_matches_the_window_reset(tmp_path: Path) -> None:
 
 
 def test_cache_rejects_out_of_range_and_missing_percentages(tmp_path: Path) -> None:
-    # The unit guard this field name cannot make on its own; and a window with no
-    # figure drops rather than becoming a stub the card would render as available.
+    # A range guard on a field this hub does not own; and a window whose figure is
+    # unusable drops rather than becoming a stub the card would render as available.
+    # (The fixture mirrors `five` into both halves, exactly as the CLI writes them.)
     for bad in (101, -1, None, "8", True):
         cache = usage_cache(five=bad)
         obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", cache))
@@ -1636,43 +1639,84 @@ def test_cache_rejects_out_of_range_and_missing_percentages(tmp_path: Path) -> N
         assert [w.key for w in obs.windows] == ["seven_day"]
 
 
-def test_cache_rejects_a_fraction_unit_reading_its_witness_contradicts(tmp_path: Path) -> None:
+def test_cache_publishes_the_unambiguous_figure_never_the_ambiguous_one(
+    tmp_path: Path,
+) -> None:
     # THE unit failure this carrier is exposed to: `utilization` names a field whose
-    # unit is source-dependent, and a 0..1 payload would render 8% as "0.08% used" —
-    # wrong by 100x, where an unrecognized shape must degrade to unavailable instead.
-    # The check is the payload's own `limits[].percent`, not the field name.
-    fraction = usage_cache(
-        five=0.08,
-        seven=0.43,
-        limits=[{"kind": "session", "percent": 8}, {"kind": "weekly_all", "percent": 43}],
-    )
-    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", fraction)) is None
+    # unit is source-dependent, so a 0..1 payload read there renders 1% as "0.01%
+    # used" — wrong by 100x. Checking it against its `limits[].percent` twin does not
+    # save it: at 1% used the fraction reading (0.01) sits within a point of the
+    # percentage one, so a slack that tolerates rounding also passes the 100x error.
+    # So the ambiguous field is not adjudicated against its twin; it is never read,
+    # and the published figure is the twin, whose name admits one unit.
+    for five, seven, five_pct, seven_pct in (
+        (0.01, 0.005, 1, 0.5),  # low usage: the fraction is within a point of it
+        (0.08, 0.43, 8, 43),  # the same payload, higher up the range
+        (99, 12, 8, 43),  # and a plain contradiction, in either direction
+    ):
+        cache = usage_cache(
+            five=five,
+            seven=seven,
+            limits=[
+                {"kind": "session", "percent": five_pct, "resets_at": CACHE_5H_RESET},
+                {"kind": "weekly_all", "percent": seven_pct, "resets_at": CACHE_7D_RESET},
+            ],
+        )
+        obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", cache))
+        assert obs is not None
+        assert [(w.key, w.used_percent) for w in obs.windows] == [
+            ("five_hour", five_pct),
+            ("seven_day", seven_pct),
+        ]
 
 
-def test_cache_drops_only_the_window_its_witness_contradicts(tmp_path: Path) -> None:
-    # Per window, not per payload: a disagreement is evidence about that figure.
-    mixed = usage_cache(
-        limits=[{"kind": "session", "percent": 8}, {"kind": "weekly_all", "percent": 5}],
+def test_cache_ignores_the_window_maps_own_figure_field(tmp_path: Path) -> None:
+    # The map contributes the shape and the reset instant, nothing else: its
+    # `utilization` is not a fallback figure, so neither an absent nor an unusable
+    # one changes what is published.
+    cache = usage_cache()
+    cache["utilization"]["five_hour"].pop("utilization")
+    cache["utilization"]["seven_day"]["utilization"] = "43%"
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", cache))
+    assert obs is not None
+    assert [(w.key, w.used_percent) for w in obs.windows] == [
+        ("five_hour", 8.0),
+        ("seven_day", 43.0),
+    ]
+
+
+def test_cache_pairs_a_figure_to_a_window_by_its_reset_instant(tmp_path: Path) -> None:
+    # Kind picks the entry; the shared window instant is what publishes its figure
+    # under that window. Per window, not per payload: a `limits` list gone stale
+    # against the map still names the previous boundary, and loses only the window it
+    # disagrees about.
+    stale = usage_cache(
+        limits=[
+            {"kind": "session", "percent": 8, "resets_at": CACHE_5H_RESET},
+            {"kind": "weekly_all", "percent": 43, "resets_at": "2026-07-24T22:00:00+00:00"},
+        ],
     )
-    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", mixed))
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", stale))
     assert obs is not None
     assert [(w.key, w.used_percent) for w in obs.windows] == [("five_hour", 8.0)]
-
-
-def test_cache_witness_tolerates_rounding_between_the_two_fields(tmp_path: Path) -> None:
-    # The two fields were identical in every capture, but they are separately
-    # computed; a percentage point of slack keeps ordinary rounding from blanking the
-    # card while staying ~99 points away from the fraction reading it must reject.
-    close = usage_cache(five=8.4, limits=[{"kind": "session", "percent": 8}])
-    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", close))
+    # An undated window cannot be paired with anything either.
+    undated = usage_cache()
+    assert undated["utilization"]["five_hour"].pop("resets_at") == CACHE_5H_RESET
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", undated))
     assert obs is not None
-    assert [(w.key, w.used_percent) for w in obs.windows] == [("five_hour", 8.4)]
+    assert [w.key for w in obs.windows] == ["seven_day"]
 
 
-def test_cache_publishes_nothing_without_a_usable_witness(tmp_path: Path) -> None:
-    # No witness is not "assume 0-100": an unrecognized schema degrades to the same
-    # unavailable card as an absent one.
-    for limits in ([], "nope", [{"percent": 8}], [{"kind": "session", "percent": "8"}]):
+def test_cache_publishes_nothing_without_a_usable_figure_entry(tmp_path: Path) -> None:
+    # No usable entry is not "fall back to the ambiguous field beside it": an
+    # unrecognized schema degrades to the same unavailable card as an absent one.
+    for limits in (
+        [],
+        "nope",
+        [{"percent": 8, "resets_at": CACHE_5H_RESET}],  # no kind to pair by
+        [{"kind": "session", "percent": "8", "resets_at": CACHE_5H_RESET}],  # not a number
+        [{"kind": "session", "percent": 8}],  # no instant to pair on
+    ):
         cache = usage_cache(limits=limits)
         assert read_claude_usage_cache(write_cache(tmp_path / "c.json", cache)) is None
     missing = usage_cache()
@@ -1680,11 +1724,12 @@ def test_cache_publishes_nothing_without_a_usable_witness(tmp_path: Path) -> Non
     assert read_claude_usage_cache(write_cache(tmp_path / "c.json", missing)) is None
 
 
-def test_cache_witness_is_matched_by_kind_never_by_position(tmp_path: Path) -> None:
+def test_cache_figure_is_matched_by_kind_never_by_position(tmp_path: Path) -> None:
     # The list is heterogeneous — it also carries per-model `weekly_scoped` entries —
-    # so a positional pairing would witness the 5h window with a Fable-scoped figure.
+    # so a positional pairing would publish a Fable-scoped figure as the 5h window.
+    # Not even naming that window's own instant promotes it.
     scoped_only = usage_cache(
-        limits=[{"kind": "weekly_scoped", "percent": 8,
+        limits=[{"kind": "weekly_scoped", "percent": 8, "resets_at": CACHE_5H_RESET,
                  "scope": {"model": {"display_name": "Fable"}}}],
     )
     assert read_claude_usage_cache(write_cache(tmp_path / "c.json", scoped_only)) is None
@@ -1699,9 +1744,10 @@ def test_cache_survives_a_number_no_float_can_hold(tmp_path: Path) -> None:
     assert read_claude_usage_cache(write_cache(tmp_path / "c.json", undated)) is None
     obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache(five=huge)))
     assert obs is not None and [w.key for w in obs.windows] == ["seven_day"]
-    witnessed = usage_cache(limits=[{"kind": "weekly_all", "percent": huge}])
-    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", witnessed))
-    assert obs is None
+    oversized = usage_cache(
+        limits=[{"kind": "weekly_all", "percent": huge, "resets_at": CACHE_7D_RESET}],
+    )
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", oversized)) is None
 
 
 def test_cache_partial_and_absent_windows(tmp_path: Path) -> None:

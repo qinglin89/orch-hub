@@ -1141,29 +1141,43 @@ def merge_observations(
 #     ~/.claude.json -> "cachedUsageUtilization": {
 #       "fetchedAtMs": 1785470888223,
 #       "utilization": {
-#         "five_hour":  {"utilization": 8,  "resets_at": "2026-07-31T07:20:00.202915+00:00"},
-#         "seven_day":  {"utilization": 43, "resets_at": "2026-07-31T22:00:00.202935+00:00"},
+#         "five_hour":  {"utilization": 9,  "resets_at": "2026-07-31T07:19:59.214956+00:00"},
+#         "seven_day":  {"utilization": 43, "resets_at": "2026-07-31T21:59:59.214980+00:00"},
 #         "seven_day_opus": null, "seven_day_sonnet": null, ...,
-#         "limits": [{"kind": "session", "percent": 8, ...},
-#                    {"kind": "weekly_all", "percent": 43, ...},
+#         "limits": [{"kind": "session",    "percent": 9,
+#                     "resets_at": "2026-07-31T07:19:59.214956+00:00", ...},
+#                    {"kind": "weekly_all", "percent": 43,
+#                     "resets_at": "2026-07-31T21:59:59.214980+00:00", ...},
 #                    {"kind": "weekly_scoped", "percent": 6,
+#                     "resets_at": "2026-07-31T22:00:00.215292+00:00",
 #                     "scope": {"model": {"display_name": "Fable"}}, ...}],
 #         "extra_usage": {...}, "spend": {...}},
 #       "accountUuid": "<uuid>"}
 #
-# ``utilization`` IS A PERCENTAGE HERE, and that is CHECKED PER PAYLOAD, not assumed.
-# The stream/sink parser above rejects the field by name because its unit is
-# source-dependent (a 0..1 fraction in the header-derived cache), so reading it here
-# needs its own justification: this container carries ``limits[].percent`` — a field
-# whose name admits only one unit — mirroring the same two numbers exactly (8 and 43
-# above). That witness is not left to this comment. :func:`_cache_limit_percents`
-# pairs each window with its ``limits[]`` twin by kind (``session`` -> ``five_hour``,
-# ``weekly_all`` -> ``seven_day``) and a window is published only if the two agree
-# (:data:`CLAUDE_CACHE_PERCENT_AGREEMENT`). A fraction-unit payload therefore
-# degrades to *unavailable* — the mandated graceful state — instead of rendering a
-# bar wrong by 100x, which is the whole reason the sink carrier refuses this field.
-# The two key mappings also stay separate, so neither carrier's unit question leaks
-# into the other, and :func:`_cache_percent` range-guards on top.
+# THE FIGURE IS READ FROM ``limits[].percent``, NEVER FROM ``utilization``. The
+# stream/sink parser above rejects ``utilization`` by name because its unit is
+# source-dependent — a 0..1 fraction in the header-derived cache (the statusLine
+# payload builds ``used_percentage`` as ``utilization * 100``), an already-0-100
+# number here. Adjudicating between the two units numerically, by checking the field
+# against its ``limits[].percent`` twin, is what this parser first did, and the low
+# end of the range is where that fails: at 1% used the two readings are 0.01 and 1, so
+# a slack wide enough for two separately-computed fields to round differently also
+# admits a reading wrong by 100x. So the ambiguity is not adjudicated, it is avoided —
+# ``percent`` is a name that admits one unit, and it carries the same numbers (9 and
+# 43 above), so the ambiguous field is simply never read.
+#
+# What the window map is still for: it is the shape this carrier iterates, and it
+# holds ``resets_at`` -> ``figure_instant``, which is what makes a cache reading and a
+# sink reading of the same window ONE window in :func:`merge_observations` rather than
+# two racing ones. So the two halves are paired: :func:`_cache_figures` keys each
+# ``limits[]`` entry by the CLI's own ``kind`` (``session`` -> ``five_hour``,
+# ``weekly_all`` -> ``seven_day``; never by position — the list is heterogeneous,
+# carrying per-model ``weekly_scoped`` entries too), and a window is published only
+# when both halves name the SAME reset instant. That pairing witness is
+# unit-independent, and it also catches a ``limits`` list that has gone stale against
+# the window map, since it would still name the previous boundary. Unpaired or
+# contradicted, the window drops and the card degrades to *unavailable* — the mandated
+# graceful state — instead of rendering a figure this file cannot vouch for.
 #
 # REFRESHED BY ``claude -p "/usage"``, NOT BY A PTY. The task scope proposed driving
 # an interactive CLI in a pseudo-terminal and typing the slash command. Print mode
@@ -1256,72 +1270,71 @@ REFRESH_UNSUPPORTED = "usage refresh returned an unsupported envelope"
 constants rather than inline strings so tests and any future display can assert on
 an outcome instead of matching prose."""
 
-_CLAUDE_CACHE_USED_KEYS = ("utilization",)
-"""The used figure inside :data:`CLAUDE_USAGE_CACHE_KEY`, as a 0-100 percentage —
-corroborated in-payload by ``limits[].percent`` (see the section note). Deliberately
-a separate tuple from :data:`_CLAUDE_USED_KEYS`: the stream/sink carrier must keep
-rejecting this field name, whose unit is ambiguous *there*."""
-
 _CLAUDE_CACHE_WINDOW_CONTAINER = "utilization"
-"""Sub-key holding the per-window map. Same name as the figure field one level down
-— the CLI nests ``utilization.five_hour.utilization`` — which is why the container
-and the figure are looked up by separate constants."""
+"""Sub-key holding the per-window map — the shape this carrier iterates, and the
+source of each window's reset instant.
+
+Confusingly the same name as the per-window figure field the CLI nests inside it
+(``utilization.five_hour.utilization``), which this carrier deliberately does not
+read: that field is the ambiguous one (section note)."""
 
 _CLAUDE_CACHE_LIMITS_KEY = "limits"
-"""Sibling of the per-window map, holding the same usage under an unambiguous field
-name (``percent``) — the in-payload witness for this carrier's unit."""
+"""Sibling of the per-window map, holding the same usage under a field name that
+admits one unit (``percent``) — this carrier's figure source."""
 
 _CLAUDE_CACHE_LIMIT_KINDS = {"five_hour": "session", "seven_day": "weekly_all"}
-"""Which ``limits[]`` entry witnesses which window, by the CLI's own ``kind``.
+"""Which ``limits[]`` entry carries which window's figure, by the CLI's own ``kind``.
 
 The list is heterogeneous — it also carries ``weekly_scoped`` per-model entries (6%
 for Fable in the capture above) — so the pairing is by kind, never by position, and
-an unrecognized kind witnesses nothing."""
-
-CLAUDE_CACHE_PERCENT_AGREEMENT = 1.0
-"""How far a window's ``utilization`` may sit from its ``limits[].percent`` twin and
-still count as the same figure.
-
-One percentage point: wide enough for the two fields to round differently (they were
-identical in every observed capture), narrow enough that the reading it exists to
-reject — a 0..1 fraction, which sits ~99% below its witness — never passes for any
-figure worth showing. Below ~1% used the two readings differ by less than the display
-rounds away, so nothing visible turns on it."""
+an unrecognized kind supplies nothing."""
 
 
 def _cache_percent(value: object) -> float | None:
     """A used-percentage from the CLI's utilization cache, range-guarded to 0-100.
 
-    The extra guard over :func:`_percent` is the unit check this carrier's field name
-    cannot make on its own: a value outside 0-100 is not a percentage in any reading,
-    so it yields ``None`` (the window drops, the card degrades) rather than a figure
-    that would render as a wrong bar."""
+    The extra guard over :func:`_percent` is cheap insurance on a field this hub does
+    not own: a value outside 0-100 is not a percentage in any reading, so it yields
+    ``None`` (the window drops, the card degrades) rather than a figure that would
+    render as a wrong bar."""
     percent = _percent(value)
     if percent is None or not 0.0 <= percent <= 100.0:
         return None
     return percent
 
 
-def _cache_limit_percents(container: dict) -> dict[str, float]:
-    """The corroborating ``limits[].percent`` figure for each window key it witnesses.
+@dataclass(frozen=True)
+class _CacheFigure:
+    """One ``limits[]`` entry reduced to what a window may be published from: the
+    unambiguously-named percentage, and the reset instant it was measured for — which
+    is what pairs it to a window of the map beside it."""
 
-    Missing entirely when the container carries no usable ``limits`` list, which
-    leaves every window unwitnessed and so unpublishable — an unrecognized schema
-    degrades to *unavailable* rather than to an unchecked reading of an ambiguous
-    field. The first usable entry of a kind wins; a later duplicate cannot displace
-    the witness a window was already checked against."""
+    used_percent: float
+    resets_at: str
+
+
+def _cache_figures(container: dict) -> dict[str, _CacheFigure]:
+    """The publishable ``limits[]`` figure for each window key it covers.
+
+    Empty when the container carries no usable ``limits`` list, which leaves every
+    window unpublishable — an unrecognized schema degrades to *unavailable* rather
+    than falling back to the ambiguous ``utilization`` beside it. An entry needs a
+    recognized ``kind``, an in-range ``percent``, and a reset instant to pair on;
+    without all three it supplies nothing. The first usable entry of a kind wins, so a
+    later duplicate cannot displace the figure a window was already published from."""
     entries = container.get(_CLAUDE_CACHE_LIMITS_KEY)
     if not isinstance(entries, list):
         return {}
-    by_kind: dict[str, float] = {}
+    by_kind: dict[str, _CacheFigure] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             continue
         kind = entry.get("kind")
-        percent = _percent(entry.get("percent"))
-        if not isinstance(kind, str) or percent is None or kind in by_kind:
+        percent = _cache_percent(entry.get("percent"))
+        resets = _claude_reset(_first(entry, _CLAUDE_RESET_KEYS))
+        if not isinstance(kind, str) or percent is None or resets is None:
             continue
-        by_kind[kind] = percent
+        by_kind.setdefault(kind, _CacheFigure(used_percent=percent, resets_at=resets))
     return {
         key: by_kind[kind]
         for key, kind in _CLAUDE_CACHE_LIMIT_KINDS.items()
@@ -1329,7 +1342,7 @@ def _cache_limit_percents(container: dict) -> dict[str, float]:
     }
 
 
-def _cache_window(key: str, raw: object, witness: float | None) -> UsageWindow | None:
+def _cache_window(key: str, raw: object, figure: _CacheFigure | None) -> UsageWindow | None:
     """Normalize one window of the utilization cache into a :class:`UsageWindow`.
 
     Same rules as the sink carrier (:func:`_claude_window`): a window without a usable
@@ -1339,17 +1352,18 @@ def _cache_window(key: str, raw: object, witness: float | None) -> UsageWindow |
     reading of the same window share one identity and merge as the same window
     instead of racing as two.
 
-    Plus the rule only this carrier needs: ``witness`` is the same usage read from the
-    unambiguously-named ``limits[].percent``, and the window is published only if the
-    two agree within :data:`CLAUDE_CACHE_PERCENT_AGREEMENT`. Unwitnessed or
-    disagreeing, ``utilization`` is just a name that admits two units 100x apart, and
-    the window drops (section note)."""
-    if not isinstance(raw, dict) or witness is None:
-        return None
-    used = _cache_percent(_first(raw, _CLAUDE_CACHE_USED_KEYS))
-    if used is None or abs(used - witness) > CLAUDE_CACHE_PERCENT_AGREEMENT:
+    Plus the pairing rule only this carrier needs (section note): the figure comes
+    from ``figure`` — the unambiguously-named ``limits[].percent`` of this window's
+    kind — and it is published here only when this window and that entry name the same
+    reset instant. The map supplies the shape and that instant; the ambiguous
+    ``utilization`` sitting inside it is never read, so no unit question reaches the
+    display. Unpaired or contradicted, the window drops."""
+    if not isinstance(raw, dict) or figure is None:
         return None
     resets = _claude_reset(_first(raw, _CLAUDE_RESET_KEYS))
+    if resets is None or resets != figure.resets_at:
+        return None
+    used = figure.used_percent
     minutes = _CLAUDE_WINDOW_MINUTES.get(key)
     return UsageWindow(
         key=key,
@@ -1391,8 +1405,8 @@ def parse_claude_usage_cache(text: str) -> ClaudeObservation | None:
 
     Returns ``None`` — no observation, so the store keeps whatever it had — for
     anything unusable: not JSON, not an object, no cache container, no usable
-    ``fetchedAtMs``, or no window whose percentage is carried *and* corroborated by
-    its ``limits[].percent`` twin. ``plan`` is always ``None``:
+    ``fetchedAtMs``, or no window paired with a ``limits[].percent`` entry of its kind
+    naming the same reset instant. ``plan`` is always ``None``:
     this container names no subscription tier, and inventing one from an account
     record is exactly what the whitelist forbids. Never raises — this is a display
     read path over a file another program owns."""
@@ -1411,11 +1425,11 @@ def parse_claude_usage_cache(text: str) -> ClaudeObservation | None:
     container = cache.get(_CLAUDE_CACHE_WINDOW_CONTAINER)
     if not isinstance(container, dict):
         return None
-    witnesses = _cache_limit_percents(container)
+    figures = _cache_figures(container)
     windows = tuple(
         w
         for key in _CLAUDE_WINDOW_KEYS
-        if (w := _cache_window(key, container.get(key), witnesses.get(key))) is not None
+        if (w := _cache_window(key, container.get(key), figures.get(key))) is not None
     )
     if not windows:
         return None
