@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-30
-verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
+last-updated: 2026-07-31
+verified-against: 232fa6cd1355cdc0ac2d7399d7b7563c588ee616
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -97,12 +97,15 @@ Implemented behavior:
   lines are preserved, `event: end` closes the stream, navigation/reload/pause
   aborts the active stream, and untrusted log content is appended as text nodes.
 - A run-scoped task view at `#/runs/{run_id}/task` fetches
-  `GET /api/runs/{run_id}/task` and shows the active/archived source. The log
-  view's task back-link is liveness-aware: live `active`/`waiting` runs with
-  repo+task attribution open the full task detail route for controls,
-  questions, and session strips; ended or attribution-incomplete runs keep the
-  run-scoped fallback so task files still open after close-out archival. The
-  Tasks page remains active-task-only.
+  `GET /api/runs/{run_id}/task` and shows the active/archived source. Overview
+  Current activity, Run history, and the log view's task back-link share one
+  destination rule: live `active`/`waiting` runs with repo+task attribution
+  open full task detail for controls, questions, and session strips; an ended
+  run with a task id (or a live run missing repo attribution) opens the
+  run-scoped active-then-archive view; cards without a task id retain direct-log
+  fallback, while the already-open log view falls back to Runs. Both task views
+  retain `View logs`; Recent outcomes, Needs attention, Repos, and Tasks are
+  unchanged, and Tasks remains active-task-only.
 - A task-evaluation sidecar view at
   `#/evaluations/{repo}/{task}[/{evaluation_id}]` probes `GET /api/evaluation`
   first, then lists and reads `/api/repos/{repo}/evaluations/{task}` artifacts

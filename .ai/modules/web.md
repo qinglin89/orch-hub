@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-30
-verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
+last-updated: 2026-07-31
+verified-against: 232fa6cd1355cdc0ac2d7399d7b7563c588ee616
 ---
 
 # Modules: Web UI
@@ -124,11 +124,13 @@ run's task controls. A raced 409 repaints into the same explanation. Admission
 notes precede readiness but never alter readiness badges, attention rows, or
 run-state signals. The log view renders the recent-log route's `spawn.out`
 diagnostic and falls back to it when a live stream ends before any orchestrator
-log line is seen; its task back-link sends live
-`active`/`waiting` runs with repo+task attribution to the full task detail
-route for controls/questions/session strips, while ended or
-attribution-incomplete runs use `#/runs/{run_id}/task` so archived task files
-stay reachable through run history and normal task views stay active-only.
+log line is seen. Overview Current activity, Run history, and the log view's
+task back-link share one task-first destination rule: live `active`/`waiting`
+runs with repo+task attribution open full task detail for
+controls/questions/session strips; other runs carrying a task id use
+`#/runs/{run_id}/task` so archived task files stay reachable; cards without a
+task id fall back to logs, while the log view falls back to Runs. Both task
+destinations retain `View logs`, and normal task views stay active-only.
 
 Task detail fetches `GET /api/runs/{run_id}/sessions` for live runs only and
 renders compact protocol-session strips against the returned context budget.
@@ -145,9 +147,11 @@ a navigable past-the-end state. It consumes embedded
 repo, run state, and task-id text before grouping by `(repo, task)`, and labels
 counts/no-match text as page-local. Newly encountered groups start collapsed;
 the explicit expansion set survives filter repaints and page navigation where a
-group reappears. Visible cards preserve log links and render each run's embedded
-`effective_config` snapshot as a disclosure outside the link. Enabled task
-groups show an inline `Evaluation →` action with a grey/amber/green state light
+group reappears. Visible cards open the run's task through the shared
+liveness-aware destination rule, with direct-log fallback only when no task id
+is available; each card renders its embedded `effective_config` snapshot as a
+disclosure outside the link. Enabled task groups show an inline `Evaluation →`
+action with a grey/amber/green state light
 for not evaluated, L1, or L1 + L2; the state is from the same newest evaluation
 the sidecar route opens and is exposed through title/ARIA text, not a visible
 badge or per-group list request. Effective-config rows prefer
