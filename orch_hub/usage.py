@@ -209,10 +209,19 @@ def _percent(value: object) -> float | None:
     """A used-percentage as a plain float, or ``None`` when the provider omits it.
 
     Kept ``None`` (not ``0.0``) on absence so a missing figure never reads as
-    "0% used" — the scope's explicit unavailable-not-zero rule."""
+    "0% used" — the scope's explicit unavailable-not-zero rule.
+
+    ``_is_number`` is not enough to make the conversion safe: JSON has no integer
+    bound, so a corrupt or hostile source can hold a perfectly valid number that no
+    float can represent (``float(10**400)`` raises ``OverflowError``). Every parser
+    above this promises not to raise into a display read, so an unrepresentable
+    figure degrades like an absent one."""
     if not _is_number(value):
         return None
-    return round(float(value), 2)
+    try:
+        return round(float(value), 2)
+    except (OverflowError, ValueError):
+        return None
 
 
 def _remaining(used_percent: float | None) -> float | None:
@@ -1142,15 +1151,19 @@ def merge_observations(
 #         "extra_usage": {...}, "spend": {...}},
 #       "accountUuid": "<uuid>"}
 #
-# ``utilization`` IS A PERCENTAGE HERE, and that is checkable rather than assumed.
+# ``utilization`` IS A PERCENTAGE HERE, and that is CHECKED PER PAYLOAD, not assumed.
 # The stream/sink parser above rejects the field by name because its unit is
 # source-dependent (a 0..1 fraction in the header-derived cache), so reading it here
 # needs its own justification: this container carries ``limits[].percent`` — a field
-# whose name admits only one unit — mirroring the same two numbers exactly (8 and
-# 43 above). Same payload, same values, unambiguous name. So the reading is
-# corroborated in-band, not inferred; :func:`_cache_percent` still range-guards it,
-# and the two mappings stay separate so neither carrier's unit question leaks into
-# the other.
+# whose name admits only one unit — mirroring the same two numbers exactly (8 and 43
+# above). That witness is not left to this comment. :func:`_cache_limit_percents`
+# pairs each window with its ``limits[]`` twin by kind (``session`` -> ``five_hour``,
+# ``weekly_all`` -> ``seven_day``) and a window is published only if the two agree
+# (:data:`CLAUDE_CACHE_PERCENT_AGREEMENT`). A fraction-unit payload therefore
+# degrades to *unavailable* — the mandated graceful state — instead of rendering a
+# bar wrong by 100x, which is the whole reason the sink carrier refuses this field.
+# The two key mappings also stay separate, so neither carrier's unit question leaks
+# into the other, and :func:`_cache_percent` range-guards on top.
 #
 # REFRESHED BY ``claude -p "/usage"``, NOT BY A PTY. The task scope proposed driving
 # an interactive CLI in a pseudo-terminal and typing the slash command. Print mode
@@ -1238,6 +1251,7 @@ REFRESH_OK = "usage cache refreshed"
 REFRESH_NO_CACHE = "no usable usage cache"
 REFRESH_TIMEOUT = "usage refresh timed out"
 REFRESH_MODEL_CALL = "usage refresh made a model call"
+REFRESH_UNSUPPORTED = "usage refresh returned an unsupported envelope"
 """Stable outcome slugs for one :meth:`ClaudeUsageCollector.refresh` call. Named
 constants rather than inline strings so tests and any future display can assert on
 an outcome instead of matching prose."""
@@ -1253,6 +1267,27 @@ _CLAUDE_CACHE_WINDOW_CONTAINER = "utilization"
 — the CLI nests ``utilization.five_hour.utilization`` — which is why the container
 and the figure are looked up by separate constants."""
 
+_CLAUDE_CACHE_LIMITS_KEY = "limits"
+"""Sibling of the per-window map, holding the same usage under an unambiguous field
+name (``percent``) — the in-payload witness for this carrier's unit."""
+
+_CLAUDE_CACHE_LIMIT_KINDS = {"five_hour": "session", "seven_day": "weekly_all"}
+"""Which ``limits[]`` entry witnesses which window, by the CLI's own ``kind``.
+
+The list is heterogeneous — it also carries ``weekly_scoped`` per-model entries (6%
+for Fable in the capture above) — so the pairing is by kind, never by position, and
+an unrecognized kind witnesses nothing."""
+
+CLAUDE_CACHE_PERCENT_AGREEMENT = 1.0
+"""How far a window's ``utilization`` may sit from its ``limits[].percent`` twin and
+still count as the same figure.
+
+One percentage point: wide enough for the two fields to round differently (they were
+identical in every observed capture), narrow enough that the reading it exists to
+reject — a 0..1 fraction, which sits ~99% below its witness — never passes for any
+figure worth showing. Below ~1% used the two readings differ by less than the display
+rounds away, so nothing visible turns on it."""
+
 
 def _cache_percent(value: object) -> float | None:
     """A used-percentage from the CLI's utilization cache, range-guarded to 0-100.
@@ -1267,7 +1302,34 @@ def _cache_percent(value: object) -> float | None:
     return percent
 
 
-def _cache_window(key: str, raw: object) -> UsageWindow | None:
+def _cache_limit_percents(container: dict) -> dict[str, float]:
+    """The corroborating ``limits[].percent`` figure for each window key it witnesses.
+
+    Missing entirely when the container carries no usable ``limits`` list, which
+    leaves every window unwitnessed and so unpublishable — an unrecognized schema
+    degrades to *unavailable* rather than to an unchecked reading of an ambiguous
+    field. The first usable entry of a kind wins; a later duplicate cannot displace
+    the witness a window was already checked against."""
+    entries = container.get(_CLAUDE_CACHE_LIMITS_KEY)
+    if not isinstance(entries, list):
+        return {}
+    by_kind: dict[str, float] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        kind = entry.get("kind")
+        percent = _percent(entry.get("percent"))
+        if not isinstance(kind, str) or percent is None or kind in by_kind:
+            continue
+        by_kind[kind] = percent
+    return {
+        key: by_kind[kind]
+        for key, kind in _CLAUDE_CACHE_LIMIT_KINDS.items()
+        if kind in by_kind
+    }
+
+
+def _cache_window(key: str, raw: object, witness: float | None) -> UsageWindow | None:
     """Normalize one window of the utilization cache into a :class:`UsageWindow`.
 
     Same rules as the sink carrier (:func:`_claude_window`): a window without a usable
@@ -1275,11 +1337,17 @@ def _cache_window(key: str, raw: object) -> UsageWindow | None:
     ``None`` because the provider reports percentages, and ``figure_instant`` is the
     reset this figure was measured against — so a cache-sourced and a sink-sourced
     reading of the same window share one identity and merge as the same window
-    instead of racing as two."""
-    if not isinstance(raw, dict):
+    instead of racing as two.
+
+    Plus the rule only this carrier needs: ``witness`` is the same usage read from the
+    unambiguously-named ``limits[].percent``, and the window is published only if the
+    two agree within :data:`CLAUDE_CACHE_PERCENT_AGREEMENT`. Unwitnessed or
+    disagreeing, ``utilization`` is just a name that admits two units 100x apart, and
+    the window drops (section note)."""
+    if not isinstance(raw, dict) or witness is None:
         return None
     used = _cache_percent(_first(raw, _CLAUDE_CACHE_USED_KEYS))
-    if used is None:
+    if used is None or abs(used - witness) > CLAUDE_CACHE_PERCENT_AGREEMENT:
         return None
     resets = _claude_reset(_first(raw, _CLAUDE_RESET_KEYS))
     minutes = _CLAUDE_WINDOW_MINUTES.get(key)
@@ -1300,10 +1368,17 @@ def _fetched_at(value: object) -> str | None:
     Milliseconds, unlike every reset field on these carriers — hence its own
     converter rather than :func:`_claude_reset`. ``None`` for a missing or
     uninterpretable value, which the parser treats as fatal: see the section note on
-    why an undated cache must not be dated by the reader."""
+    why an undated cache must not be dated by the reader. The millisecond scaling
+    has to be guarded here rather than left to :func:`_iso_from_epoch`'s own
+    boundary: a JSON integer too large for a float raises before that call, in a
+    parser that promises never to raise."""
     if not _is_number(value):
         return None
-    return _iso_from_epoch(float(value) / 1000.0)
+    try:
+        seconds = float(value) / 1000.0
+    except (OverflowError, ValueError):
+        return None
+    return _iso_from_epoch(seconds)
 
 
 def parse_claude_usage_cache(text: str) -> ClaudeObservation | None:
@@ -1316,7 +1391,8 @@ def parse_claude_usage_cache(text: str) -> ClaudeObservation | None:
 
     Returns ``None`` — no observation, so the store keeps whatever it had — for
     anything unusable: not JSON, not an object, no cache container, no usable
-    ``fetchedAtMs``, or no window carrying a percentage. ``plan`` is always ``None``:
+    ``fetchedAtMs``, or no window whose percentage is carried *and* corroborated by
+    its ``limits[].percent`` twin. ``plan`` is always ``None``:
     this container names no subscription tier, and inventing one from an account
     record is exactly what the whitelist forbids. Never raises — this is a display
     read path over a file another program owns."""
@@ -1335,10 +1411,11 @@ def parse_claude_usage_cache(text: str) -> ClaudeObservation | None:
     container = cache.get(_CLAUDE_CACHE_WINDOW_CONTAINER)
     if not isinstance(container, dict):
         return None
+    witnesses = _cache_limit_percents(container)
     windows = tuple(
         w
         for key in _CLAUDE_WINDOW_KEYS
-        if (w := _cache_window(key, container.get(key))) is not None
+        if (w := _cache_window(key, container.get(key), witnesses.get(key))) is not None
     )
     if not windows:
         return None
@@ -1541,9 +1618,18 @@ class ClaudeUsageCollector:
         that is the CLI's behavior, not a contract it owes us — so every turn is
         checked, and a version that started routing it to the model would be reported
         and then throttled by the attempt floor rather than quietly billing the
-        operator's subscription on a display refresh. Unparseable stdout is NOT read
-        as a model call: absence of proof is not proof, and the exit code already
-        covers a broken turn."""
+        operator's subscription on a display refresh.
+
+        Which is why *silence* is a failure here too. The turn is launched with
+        ``--output-format json``, so a supported CLI answers with an envelope
+        reporting its own model-call accounting; stdout that is not JSON, not an
+        object, or an object whose ``num_turns``/``total_cost_usd`` are absent or
+        non-numeric is a version whose turn we cannot show stayed local. Passing that
+        as a clean refresh would leave the check enforcing nothing on exactly the
+        versions it exists for, so it is :data:`REFRESH_UNSUPPORTED`: the figures on
+        disk still surface, and the attempt floor stops the hub re-running an
+        unverifiable turn per Overview load. Numeric accounting that is anything but
+        an explicit zero is read the other way — as a turn that did reach the model."""
         if result.timed_out:
             return REFRESH_TIMEOUT
         if result.returncode != 0:
@@ -1553,12 +1639,13 @@ class ClaudeUsageCollector:
             return f"usage refresh failed (exit {result.returncode})"
         report = _json_object(result.stdout)
         if report is None:
-            return None
+            return REFRESH_UNSUPPORTED
         if report.get("is_error") is True:
             return "usage refresh reported an error"
-        if _is_number(report.get("num_turns")) and report["num_turns"] > 0:
-            return REFRESH_MODEL_CALL
-        if _is_number(report.get("total_cost_usd")) and report["total_cost_usd"] > 0:
+        turns, cost = report.get("num_turns"), report.get("total_cost_usd")
+        if not _is_number(turns) or not _is_number(cost):
+            return REFRESH_UNSUPPORTED
+        if turns != 0 or cost != 0:
             return REFRESH_MODEL_CALL
         return None
 

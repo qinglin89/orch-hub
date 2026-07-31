@@ -30,6 +30,7 @@ from orch_hub.usage import (
     REFRESH_NO_CACHE,
     REFRESH_OK,
     REFRESH_TIMEOUT,
+    REFRESH_UNSUPPORTED,
     USAGE_CACHE_TTL_SECONDS,
     USAGE_POLL_TIMEOUT_SECONDS,
     ClaudeObservation,
@@ -1469,8 +1470,14 @@ def usage_cache(
     fetched_at_ms: object = CACHE_FETCHED_MS,
     five: object = 8,
     seven: object = 43,
+    limits: object = None,
 ) -> dict:
-    """The `cachedUsageUtilization` container as 2.1.220 writes it."""
+    """The `cachedUsageUtilization` container as 2.1.220 writes it.
+
+    `limits` defaults to the CLI's own shape with the two window figures mirrored
+    into it — that is what a real payload carries, and it is the witness the parser
+    checks `utilization` against. Tests that need an unwitnessed, contradicting, or
+    differently-shaped list pass their own."""
     return {
         "fetchedAtMs": fetched_at_ms,
         "accountUuid": "12500fbb-90c4-4d35-9dd7-be094ebb2bc8",
@@ -1494,14 +1501,14 @@ def usage_cache(
             # `limits[].percent` mirrors the window figures under an unambiguous
             # name — the in-payload corroboration that `utilization` is 0-100 here.
             "limits": [
-                {"kind": "session", "group": "session", "percent": 8,
+                {"kind": "session", "group": "session", "percent": five,
                  "resets_at": CACHE_5H_RESET, "is_active": False},
-                {"kind": "weekly_all", "group": "weekly", "percent": 43,
+                {"kind": "weekly_all", "group": "weekly", "percent": seven,
                  "resets_at": CACHE_7D_RESET, "is_active": True},
                 {"kind": "weekly_scoped", "group": "weekly", "percent": 6,
                  "scope": {"model": {"id": None, "display_name": "Fable"}},
                  "resets_at": CACHE_7D_RESET, "is_active": False},
-            ],
+            ] if limits is None else limits,
             "extra_usage": {"is_enabled": False, "used_credits": None},
             "spend": {"percent": 0, "enabled": False},
         },
@@ -1524,14 +1531,26 @@ def write_cache(path: Path, cache: object = None, *, extra: dict | None = None) 
     return path
 
 
+# The verbatim envelope `claude -p "/usage" --output-format json` returns on 2.1.220.
+# Its explicit zeros are the per-turn evidence that the slash command stayed inside
+# the CLI, so a turn is only a supported success when it reports them.
+MODEL_FREE_ENVELOPE = json.dumps(
+    {"is_error": False, "subtype": "success", "num_turns": 0,
+     "total_cost_usd": 0, "duration_api_ms": 0, "result": "8% used"}
+)
+
+
 class FakeRunner:
     """A recording stand-in for the `claude -p "/usage"` subprocess seam.
+
+    Defaults to the supported model-free envelope, so a test that cares about the
+    gate order (not the envelope) gets a turn the collector can verify.
 
     `effect` may refresh the fixture cache (what a real successful turn does),
     letting a test assert the read-back rather than the call alone."""
 
     def __init__(self, result: UsageRunResult | None = None, effect=None):
-        self.result = result if result is not None else UsageRunResult()
+        self.result = result if result is not None else UsageRunResult(stdout=MODEL_FREE_ENVELOPE)
         self.effect = effect
         self.calls: list[tuple[list[str], Path, float]] = []
 
@@ -1617,6 +1636,74 @@ def test_cache_rejects_out_of_range_and_missing_percentages(tmp_path: Path) -> N
         assert [w.key for w in obs.windows] == ["seven_day"]
 
 
+def test_cache_rejects_a_fraction_unit_reading_its_witness_contradicts(tmp_path: Path) -> None:
+    # THE unit failure this carrier is exposed to: `utilization` names a field whose
+    # unit is source-dependent, and a 0..1 payload would render 8% as "0.08% used" —
+    # wrong by 100x, where an unrecognized shape must degrade to unavailable instead.
+    # The check is the payload's own `limits[].percent`, not the field name.
+    fraction = usage_cache(
+        five=0.08,
+        seven=0.43,
+        limits=[{"kind": "session", "percent": 8}, {"kind": "weekly_all", "percent": 43}],
+    )
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", fraction)) is None
+
+
+def test_cache_drops_only_the_window_its_witness_contradicts(tmp_path: Path) -> None:
+    # Per window, not per payload: a disagreement is evidence about that figure.
+    mixed = usage_cache(
+        limits=[{"kind": "session", "percent": 8}, {"kind": "weekly_all", "percent": 5}],
+    )
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", mixed))
+    assert obs is not None
+    assert [(w.key, w.used_percent) for w in obs.windows] == [("five_hour", 8.0)]
+
+
+def test_cache_witness_tolerates_rounding_between_the_two_fields(tmp_path: Path) -> None:
+    # The two fields were identical in every capture, but they are separately
+    # computed; a percentage point of slack keeps ordinary rounding from blanking the
+    # card while staying ~99 points away from the fraction reading it must reject.
+    close = usage_cache(five=8.4, limits=[{"kind": "session", "percent": 8}])
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", close))
+    assert obs is not None
+    assert [(w.key, w.used_percent) for w in obs.windows] == [("five_hour", 8.4)]
+
+
+def test_cache_publishes_nothing_without_a_usable_witness(tmp_path: Path) -> None:
+    # No witness is not "assume 0-100": an unrecognized schema degrades to the same
+    # unavailable card as an absent one.
+    for limits in ([], "nope", [{"percent": 8}], [{"kind": "session", "percent": "8"}]):
+        cache = usage_cache(limits=limits)
+        assert read_claude_usage_cache(write_cache(tmp_path / "c.json", cache)) is None
+    missing = usage_cache()
+    assert missing["utilization"].pop("limits")  # the key is really there
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", missing)) is None
+
+
+def test_cache_witness_is_matched_by_kind_never_by_position(tmp_path: Path) -> None:
+    # The list is heterogeneous — it also carries per-model `weekly_scoped` entries —
+    # so a positional pairing would witness the 5h window with a Fable-scoped figure.
+    scoped_only = usage_cache(
+        limits=[{"kind": "weekly_scoped", "percent": 8,
+                 "scope": {"model": {"display_name": "Fable"}}}],
+    )
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", scoped_only)) is None
+
+
+def test_cache_survives_a_number_no_float_can_hold(tmp_path: Path) -> None:
+    # JSON bounds no integer, so "valid JSON number" does not mean "convertible":
+    # float(10**400) raises OverflowError. This parser promises never to raise, and
+    # its caller (the collector) reads it outside any catch-all.
+    huge = int("9" * 400)
+    undated = usage_cache(fetched_at_ms=huge)
+    assert read_claude_usage_cache(write_cache(tmp_path / "c.json", undated)) is None
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", usage_cache(five=huge)))
+    assert obs is not None and [w.key for w in obs.windows] == ["seven_day"]
+    witnessed = usage_cache(limits=[{"kind": "weekly_all", "percent": huge}])
+    obs = read_claude_usage_cache(write_cache(tmp_path / "c.json", witnessed))
+    assert obs is None
+
+
 def test_cache_partial_and_absent_windows(tmp_path: Path) -> None:
     cache = usage_cache()
     cache["utilization"]["seven_day"] = None
@@ -1697,7 +1784,8 @@ def test_collector_flags_a_turn_that_reached_the_model(tmp_path: Path) -> None:
     # /usage is handled inside the CLI today (num_turns/cost 0), but that is its
     # behavior, not a contract owed to us — so every turn is checked.
     path = write_cache(tmp_path / "c.json", usage_cache())
-    for report in ({"num_turns": 1}, {"total_cost_usd": 0.02}):
+    for report in ({"num_turns": 1, "total_cost_usd": 0},
+                   {"num_turns": 0, "total_cost_usd": 0.02}):
         runner = FakeRunner(UsageRunResult(stdout=json.dumps(report)))
         result = collector(path, runner, cache_fresh_after=0).refresh()
         assert result.refreshed is False
@@ -1708,13 +1796,40 @@ def test_collector_flags_a_turn_that_reached_the_model(tmp_path: Path) -> None:
 
 def test_collector_accepts_the_real_model_free_report(tmp_path: Path) -> None:
     # Verbatim success envelope from `claude -p "/usage" --output-format json`.
-    report = {"is_error": False, "subtype": "success", "num_turns": 0,
-              "total_cost_usd": 0, "duration_api_ms": 0, "result": "8% used"}
     path = write_cache(tmp_path / "c.json", usage_cache())
-    result = collector(path, FakeRunner(UsageRunResult(stdout=json.dumps(report))),
+    result = collector(path, FakeRunner(UsageRunResult(stdout=MODEL_FREE_ENVELOPE)),
                        cache_fresh_after=0).refresh()
     assert result.refreshed is True
     assert result.detail == REFRESH_OK
+
+
+def test_collector_rejects_a_turn_it_cannot_verify_as_model_free(tmp_path: Path) -> None:
+    # The other half of the same rule: a turn asked for `--output-format json` and
+    # answering with anything that does not report its model-call accounting is a CLI
+    # whose behavior we cannot check. Accepting it would leave the guard above
+    # enforcing nothing on exactly the versions it exists for.
+    path = write_cache(tmp_path / "c.json", usage_cache())
+    unverifiable = [
+        "5-hour limit: 8% used",                       # human prose, not JSON
+        "",                                            # nothing at all
+        "[]",                                          # JSON, but not an object
+        '"ok"',
+        "null",
+        json.dumps({"is_error": False, "result": "ok"}),           # no accounting
+        json.dumps({"num_turns": 0}),                              # half of it
+        json.dumps({"total_cost_usd": 0}),
+        json.dumps({"num_turns": "0", "total_cost_usd": "0"}),      # wrong types
+        json.dumps({"num_turns": 0, "total_cost_usd": None}),
+        json.dumps({"num_turns": True, "total_cost_usd": True}),    # bools are not numbers
+    ]
+    for stdout in unverifiable:
+        result = collector(path, FakeRunner(UsageRunResult(stdout=stdout)),
+                           cache_fresh_after=0).refresh()
+        assert result.detail == REFRESH_UNSUPPORTED, stdout
+        assert result.refreshed is False
+        # Still a display sidecar: the last real figures survive, dated by the CLI.
+        assert result.observation is not None
+        assert result.observation.observed_ts == CACHE_FETCHED_ISO
 
 
 # -- collector: gate order and failure modes -----------------------------------
@@ -1826,7 +1941,7 @@ def test_collector_is_single_flight_and_non_blocking(tmp_path: Path) -> None:
     def blocking(argv, cwd, timeout):
         entered.set()
         release.wait(5)
-        return UsageRunResult()
+        return UsageRunResult(stdout=MODEL_FREE_ENVELOPE)
 
     c = collector(path, blocking)
     outcomes: list[UsageRefreshResult] = []
