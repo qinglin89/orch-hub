@@ -2848,6 +2848,19 @@
     );
   }
 
+  // Every Run-history page opens the same way, whether or not it has runs to
+  // show. One shell rather than three call sites, because the feed entry is a
+  // property of the *page*, not of the page having runs: an evaluation needs no
+  // related run (an evidence pack accepts an empty related-run list), and a
+  // published catalog entry deliberately outlives the artifacts and run records
+  // it was built from — so an evaluation-enabled hub can hold a non-empty report
+  // feed and zero persisted runs. That hub is precisely the one whose only
+  // dashboard path to the feed is this link, so the empty states are where it
+  // matters most.
+  function historyHead(data) {
+    return pageTitle("Run history") + reportsEntryLink(data.evaluation_enabled);
+  }
+
   // The newest evaluation opened by the group's link, expressed as one compact
   // status light: grey for no report, amber for Layer 1, green for both layers.
   // Visible words would crowd and misalign this already-dense summary row, so
@@ -3128,7 +3141,7 @@
     const totalRuns = Number(data.total_runs) || 0;
     if (!runs.length && !totalRuns) {
       view().innerHTML =
-        pageTitle("Run history") + centerHtml("No runs recorded yet.");
+        historyHead(data) + centerHtml("No runs recorded yet.");
       return;
     }
     if (!runs.length) {
@@ -3137,7 +3150,7 @@
       // pager, whose Previous carries the server's anchor for the last page that
       // does exist — never a dead end.
       view().innerHTML =
-        pageTitle("Run history") +
+        historyHead(data) +
         historyPager(data) +
         centerHtml(
           `No runs on page ${Number(data.page) || 1}. History holds ` +
@@ -3159,8 +3172,7 @@
     if (runFilters.state && !states.includes(runFilters.state))
       runFilters.state = "";
     view().innerHTML = `
-      ${pageTitle("Run history")}
-      ${reportsEntryLink(data.evaluation_enabled)}
+      ${historyHead(data)}
       <div class="filters" role="search" aria-label="Filter runs">
         <label for="rf-repo">Repo
           <select id="rf-repo">${optionList(

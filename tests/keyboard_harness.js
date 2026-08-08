@@ -2495,6 +2495,54 @@ async function scenarioReportFeed() {
     "the feed entry survived a disabled hub"
   );
 
+  // Run history's two runless pages are exactly where the entry matters most: a
+  // published report needs no related run, and a catalog entry outlives the run
+  // records it was built from — so a hub with a full feed and no runs would
+  // otherwise have no dashboard path to it at all.
+  var emptyHist = Object.assign({}, histRuns, {
+    runs: [],
+    total_runs: 0,
+    total_pages: 0,
+  });
+  route("GET", "/api/history/runs", emptyHist);
+  await navigate("#/runs");
+  entry = doc.querySelector(".reports-entry a");
+  eq(
+    "feed: a hub with no runs at all still offers the way in",
+    entry && entry.getAttribute("href"),
+    "#/reports"
+  );
+  route(
+    "GET",
+    "/api/history/runs",
+    Object.assign({}, emptyHist, { evaluation_enabled: false })
+  );
+  await navigate("#/runs");
+  check(
+    "feed: the runless entry is gated like every other one",
+    doc.querySelector(".reports-entry a") === null,
+    "an empty history offered the feed on a disabled hub"
+  );
+  // The other runless page: a window whose runs were pruned under the cursor.
+  route(
+    "GET",
+    "/api/history/runs",
+    Object.assign({}, histRuns, {
+      runs: [],
+      page: 2,
+      total_pages: 1,
+      has_prev: true,
+      prev_cursor: "newer:" + RUN,
+    })
+  );
+  await navigate("#/runs");
+  entry = doc.querySelector(".reports-entry a");
+  eq(
+    "feed: a vanished history page keeps the way in",
+    entry && entry.getAttribute("href"),
+    "#/reports"
+  );
+
   // Walking past the end of a feed that DOES hold reports is not the same as an
   // empty feed: it says so, and keeps its pager so Previous is never a dead end.
   route("GET", "/api/evaluation/reports", function (url) {

@@ -2341,8 +2341,19 @@ def test_report_feed_route_and_entry_are_wired():
     # so a disabled hub hides it without a second request.
     assert "function reportsEntryLink(enabled)" in body
     assert "if (!enabled) return \"\";" in body
-    assert "${reportsEntryLink(data.evaluation_enabled)}" in body
     assert 'href="#/reports"' in body
+    # It rides one shared Run-history head rather than the runs-present branch, so
+    # the two runless pages keep it: a report needs no related run and outlives
+    # the run records it was built from, so a feed-holding hub can have zero runs.
+    assert "function historyHead(data) {" in body
+    assert (
+        'return pageTitle("Run history") + reportsEntryLink(data.evaluation_enabled);'
+        in body
+    )
+    runs_view = body[body.index("async function renderRuns(cursor)") :]
+    runs_view = runs_view[: runs_view.index("function renderRunTask")]
+    assert runs_view.count("historyHead(data)") == 3
+    assert 'pageTitle("Run history")' not in runs_view
 
 
 def test_report_feed_reads_the_global_feed_and_writes_nothing():
