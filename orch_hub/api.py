@@ -76,7 +76,7 @@ from .orch_config import (
 )
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
-from .report_catalog import DEFAULT_PAGE_LIMIT, ReportCatalog
+from .report_catalog import DEFAULT_PAGE_LIMIT, ReportCatalog, ReportCatalogError
 from .runs import (
     BlockedTaskError,
     LaunchBlockedError,
@@ -1561,7 +1561,10 @@ def create_app(
         real entry. ``limit`` (1..``MAX_PAGE_LIMIT``) is a caller preference here,
         unlike the run-history pager's fixed window, since ``has_more`` makes a
         short page unambiguous; out of range is a 400 rather than a silent clamp.
-        Disabled → 404.
+        A catalog whose own sequence/key identity is no longer unique (only a
+        hand-edit, a merge, or a restore can do that) is a 500 naming the defect,
+        not a page that silently omits an entry — the traversal guarantee is the
+        product here. Disabled → 404.
         """
         require_evaluation_enabled()
         cursor: int | None = None
@@ -1580,6 +1583,8 @@ def create_app(
             page = catalog.page(after_seq=cursor, limit=limit)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ReportCatalogError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         return {"enabled": True, **page.to_dict()}
 
     @app.get("/api/evaluation/reports/{report_key}")
@@ -1597,15 +1602,21 @@ def create_app(
         since the catalog outlives what it indexes — answers 200 with
         ``available: false`` and a ``detail``, as does a partially removed,
         unreadable, or unparseable set, or an entry whose stored identity cannot
-        address a contained path. That is deliberately not a 404: the report *was*
-        published and the entry is still auditable, which a "no such report" would
-        misreport. ``integrity`` reports whether the served bytes still hash to the
-        digests recorded at publication; a mismatch is surfaced rather than
-        suppressed, because only the consumer can decide what an edited report
-        means for its import. Disabled → 404.
+        address a contained path or is not the identity its key derives from. That
+        is deliberately not a 404: the report *was* published and the entry is still
+        auditable, which a "no such report" would misreport. ``integrity`` reports
+        which served artifacts still hash to the digests recorded at publication
+        (``mismatched``) and which the entry records no usable digest for
+        (``unverified``); ``verified`` requires every artifact to have been checked
+        and matched. Discrepancies are surfaced rather than suppressed, because only
+        the consumer can decide what an edited or uncheckable report means for its
+        import. Disabled → 404.
         """
         require_evaluation_enabled()
-        entry = catalog.find(report_key)
+        try:
+            entry = catalog.find(report_key)
+        except ReportCatalogError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
         if entry is None:
             raise HTTPException(
                 status_code=404, detail=f"unknown report key: {report_key}"

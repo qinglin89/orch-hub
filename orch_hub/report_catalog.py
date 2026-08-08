@@ -49,6 +49,17 @@ Three properties make the feed usable for incremental import:
   is unwired, fails, or the hub dies mid-write, the next reconciliation catalogs
   the report anyway, and never mints a second global identity for it.
 
+Damage the write path cannot cause, the read path still has to answer for: the
+file is append-only and never rewritten, so an operator's edit, a merge of two
+catalogs, or a restore over a live one is the one way its invariants break. Two
+audits keep that from becoming a silent wrong answer rather than a loud one. A
+repeated ``seq`` or ``report_key`` makes the cursor ambiguous, so every read fails
+closed until it is repaired (:func:`_require_unique_identity`); an entry whose
+stored source identity is not the one its ``report_key`` derives from cannot
+address its own artifacts, so its bundle is explicitly unavailable
+(:func:`_identity_fault`). Both refuse to guess, because the alternative is
+handing a consumer a report it will import as authentic.
+
 Publication is gated on the evaluated task being **archived**, because the feed
 exists to hand a consumer finished protocol stories, not in-progress ones. Being
 archived is an event that happens *after* the report is written, and no artifact
@@ -96,6 +107,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -168,6 +180,13 @@ segment."""
 _HASH_CHUNK = 1 << 16
 """Read size for artifact hashing. Evidence packs are bounded but not tiny, and
 nothing here needs the whole file in memory at once."""
+
+_SHA256_HEX = re.compile(r"\A[0-9a-f]{64}\Z")
+"""What a recorded artifact digest must look like to be verifiable at all. A
+manifest value that is not one cannot be any content's sha256, so the read path
+treats it as *no* digest (unverified) rather than as a mismatch — the difference
+between "this report was edited" and "this entry never recorded a checkable
+hash"."""
 
 DEFAULT_PAGE_LIMIT = 50
 """Entries per feed page when a consumer states no preference. Sized for a poll
@@ -387,10 +406,14 @@ class ReportCatalog:
 
         Resolves through the evaluation subsystem's own contained-path helper, so
         the same unsafe-segment rejection guards a catalog-driven read that guards
-        every other artifact read. Re-slugging the stored slug is safe because the
-        slug rule is idempotent (:func:`orch_hub.evaluation.repo_slug`). The dir
-        may not exist — retention prunes artifacts while entries persist — so
-        callers must treat absence as "no longer retained", not as an error.
+        every other artifact read. Passing the stored slug back through the slug
+        rule is harmless for an entry this module wrote (the rule is idempotent —
+        :func:`orch_hub.evaluation.repo_slug`) but it is *not* injective, so this is
+        path math only: whether the stored identity is the one the artifacts were
+        published under is a separate question, answered by :func:`_identity_fault`
+        before :meth:`read_bundle` touches the filesystem. The dir may not exist —
+        retention prunes artifacts while entries persist — so callers must treat
+        absence as "no longer retained", not as an error.
         """
         return evaluation_artifact_dir(
             self._config.data_dir,
@@ -424,6 +447,13 @@ class ReportCatalog:
         append) still resolves as "strictly greater", so nothing between it and the
         next real entry can be stepped over. There is no cursor that both succeeds
         and loses an entry.
+
+        The other half of "never silently skips" is not about the cursor a consumer
+        sends but about the file it lands in: this can only promise strictly-greater
+        traversal while sequences are unique, so a catalog holding a repeat raises
+        :class:`ReportCatalogError` from the read underneath rather than serving a
+        page that quietly omits the duplicate's twin
+        (:func:`_require_unique_identity`).
 
         ``limit`` is validated against :data:`MAX_PAGE_LIMIT` rather than clamped,
         so a caller learns its request was out of range instead of silently
@@ -463,16 +493,20 @@ class ReportCatalog:
         bundle is served only when the complete L1+L2 set is still present and
         readable. Every other case is ``available: false`` with a ``detail`` — a
         pruned artifact dir (the designed end state of an entry outliving its
-        artifacts), a partially removed one, an unreadable or unparseable file, or
-        a stored identity that cannot address a contained path at all. Failing
-        closed matters more here than degrading gracefully: a half-populated bundle
-        would be imported as if it were the published report.
+        artifacts), a partially removed one, an unreadable or unparseable file, a
+        stored identity that cannot address a contained path at all, or one that
+        can but is not provably the identity the report was published under
+        (:func:`_identity_fault`). Failing closed matters more here than degrading
+        gracefully: a half-populated or misattributed bundle would be imported as
+        if it were the published report.
 
-        A hash mismatch is deliberately *not* an availability failure. The
-        artifacts are served with the differing names in ``mismatched``, because
-        the recorded digests exist precisely so a consumer can tell an edited
-        report from an intact one and decide for itself; suppressing the content
-        would hide the evidence of the edit. Gated and read-only.
+        Integrity is reported, not enforced: served artifacts whose bytes no longer
+        match the digests recorded at publication are named in ``mismatched``, and
+        ones the entry holds no usable digest for in ``unverified``. Neither
+        suppresses content, because the recorded digests exist precisely so a
+        consumer can tell an edited or uncheckable report from an intact one and
+        decide for itself — hiding the bytes would hide the evidence. Gated and
+        read-only.
         """
         self._require_enabled()
         try:
@@ -483,6 +517,16 @@ class ReportCatalog:
                 entry=entry,
                 available=False,
                 detail=f"unsafe stored report identity ({err})",
+            )
+        # Also before any IO: a line that *can* name a contained dir but is not the
+        # identity that dir was published under would otherwise serve another
+        # report's artifacts, hash-verified, under this entry's key.
+        fault = _identity_fault(entry)
+        if fault is not None:
+            return ReportBundle(
+                entry=entry,
+                available=False,
+                detail=f"incoherent stored report identity ({fault})",
             )
         if not eval_dir.is_dir():
             return ReportBundle(
@@ -503,9 +547,10 @@ class ReportCatalog:
                     f" (missing {', '.join(missing)})"
                 ),
             )
-        cataloged = {artifact.name: artifact.sha256 for artifact in entry.artifacts}
+        cataloged = _cataloged_digests(entry)
         raw: dict[str, bytes] = {}
         mismatched: list[str] = []
+        unverified: list[str] = []
         for name in REQUIRED_ARTIFACTS:
             try:
                 data = (eval_dir / name).read_bytes()
@@ -516,10 +561,14 @@ class ReportCatalog:
                     detail=f"unreadable report artifact {name} ({err})",
                 )
             raw[name] = data
-            # An entry from an older/leaner writer may not have recorded this
-            # artifact's digest; absence is nothing to compare, not a mismatch.
             expected = cataloged.get(name)
-            if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+            if expected is None:
+                # An entry from an older/leaner writer, or one a hand-edit left
+                # without a usable digest for this artifact: nothing was compared,
+                # which is a weaker claim than "matched" and is reported as such
+                # rather than folded into the verified case.
+                unverified.append(name)
+            elif hashlib.sha256(data).hexdigest() != expected:
                 mismatched.append(name)
         try:
             evidence = _bundle_json(EVIDENCE_NAME, raw[EVIDENCE_NAME])
@@ -538,6 +587,7 @@ class ReportCatalog:
             semantic_report=report,
             report_md=report_md,
             mismatched=tuple(mismatched),
+            unverified=tuple(unverified),
         )
 
     # -- writes ---------------------------------------------------------------
@@ -938,7 +988,10 @@ class ReportCatalog:
         A missing catalog is an empty list (nothing published yet), not an error.
         Lines that are blank, unparseable, not objects, or missing the identity
         fields an entry must have (``seq``/``report_key``) are skipped: a torn or
-        hand-edited line must not make the rest of the catalog unreadable.
+        hand-edited line must not make the rest of the catalog unreadable. What
+        cannot be skipped is a *readable* line that breaks the identity the cursor
+        is built on — see :func:`_require_unique_identity`, which is why this
+        returns entries or raises, never a quietly narrowed set.
 
         Sorting by ``seq`` rather than trusting file order costs nothing at this
         size and makes the cursor contract hold even if a line were ever written
@@ -965,6 +1018,7 @@ class ReportCatalog:
                 continue
             found.append(entry)
         found.sort(key=lambda entry: entry.seq)
+        _require_unique_identity(found)
         return found
 
     def _scan_candidates(self) -> list[tuple[str, str, str, Path]]:
@@ -1036,6 +1090,118 @@ def _is_complete(eval_dir: Path) -> bool:
     return not _missing_artifacts(eval_dir)
 
 
+def _require_unique_identity(entries: list[ReportCatalogEntry]) -> None:
+    """Raise unless every entry holds its own ``seq`` and its own ``report_key``.
+
+    Both uniqueness rules are what exactly-once traversal is *made of*, and the
+    write path is built to guarantee them: :meth:`ReportCatalog._locked` serializes
+    allocation across threads and processes, and :func:`report_key` derives
+    identity from the source so re-publishing an evaluation is a no-op rather than
+    a second entry. A file that nevertheless holds a repeat did not get there
+    through that path — a hand-edit, two catalogs merged, a backup restored over a
+    live one, or an advisory lock silently ignored by the filesystem underneath the
+    data dir.
+
+    Whatever the cause, the cursor is then ambiguous: with two entries at ``seq``
+    N, a consumer that resumes from watermark N never sees the second one, because
+    the cursor is *strictly* greater — the feed would drop a report while reporting
+    a clean traversal. So this fails explicitly instead of picking a winner.
+    Skipping the repeat is the one outcome the cursor policy promises can never
+    happen, and renumbering is not available either: the catalog is append-only
+    precisely so a published ``seq`` never moves under a consumer that already
+    stored it. A repeated ``report_key`` is the same audit from the other side —
+    one source evaluation with two global identities, which would re-deliver a
+    report a consumer already imported under a key it thought was unique.
+
+    Failing here fails *every* path through
+    :meth:`ReportCatalog._read_entries`, which is the intended blast radius: the
+    feed refuses to serve a traversal it cannot guarantee, publication pauses
+    rather than appending onto an ambiguous file, and the retention guard's
+    fail-closed wiring (:meth:`ReportCatalog.unpublished_ids`, consulted by
+    :meth:`orch_hub.evaluation.EvaluationService.prune_evaluations`) keeps every
+    artifact meanwhile. Nothing is deleted or lost while the catalog is broken, and
+    an operator who repairs the file resumes exactly where publication paused.
+    """
+    seen_seq: set[int] = set()
+    seen_key: set[str] = set()
+    for entry in entries:
+        if entry.seq in seen_seq:
+            raise ReportCatalogError(
+                f"{CATALOG_NAME} holds more than one entry at seq {entry.seq}:"
+                " the feed cursor is ambiguous"
+            )
+        if entry.report_key in seen_key:
+            raise ReportCatalogError(
+                f"{CATALOG_NAME} holds more than one entry for report"
+                f" {entry.report_key}: global identity is not unique"
+            )
+        seen_seq.add(entry.seq)
+        seen_key.add(entry.report_key)
+
+
+def _identity_fault(entry: ReportCatalogEntry) -> str | None:
+    """Why a stored entry cannot be trusted to address its artifacts, else ``None``.
+
+    A catalog line is data, not a promise: the file is append-only and never
+    rewritten, so a hand-edit or a merge can leave a line whose *stored* identity
+    is not the one that produced its ``report_key``. That matters because
+    :meth:`ReportCatalog.artifact_dir` resolves the artifacts from the stored
+    slug/task/evaluation triple through :func:`orch_hub.evaluation.repo_slug`,
+    which is idempotent but also *lossy*: ``alpha!!`` and ``alpha`` slug to the
+    same directory. A line reading ``alpha!!`` would therefore serve the real
+    ``alpha`` repo's report — present, complete, hash-verified — under a feed
+    identity that contradicts it.
+
+    Two checks, one rule (*the stored identity is the published identity*):
+
+    - the slug must already be canonical, so it names the directory it was
+      published from rather than an alias that re-slugs onto another one;
+    - the ``report_key`` must re-derive from the stored triple, which catches every
+      other edit of the source identity, since the key is a digest of exactly that
+      triple (:func:`report_key`).
+
+    Reported as unavailability rather than raised, and checked before any IO: like
+    a pruned bundle this is a data state of an immutable file that no retry heals,
+    so naming the reason serves an operator better than a permanently failing
+    endpoint. The entry still lists in the feed — dropping it from the traversal
+    would be the silent skip the cursor policy forbids.
+    """
+    if repo_slug(entry.repo_slug) != entry.repo_slug:
+        return f"repo slug {entry.repo_slug!r} is not a canonical stored slug"
+    expected = report_key(
+        repo_slug=entry.repo_slug,
+        task_id=entry.task_id,
+        evaluation_id=entry.evaluation_id,
+    )
+    if expected != entry.report_key:
+        return (
+            "report key does not derive from the stored source identity"
+            f" ({entry.repo_slug}/{entry.task_id}/{entry.evaluation_id})"
+        )
+    return None
+
+
+def _cataloged_digests(entry: ReportCatalogEntry) -> dict[str, str]:
+    """The one usable recorded digest per artifact name in an entry's manifest.
+
+    Verification only means something against a digest that could actually be the
+    sha256 of some content, recorded exactly once. A name whose manifest is
+    malformed (not 64 hex characters) or self-contradictory (two entries with
+    different digests, from a hand-edit or a merged line) has no usable digest and
+    is left out, so the read path reports that artifact as *unverified* instead of
+    silently comparing against whichever copy happened to come last in the list.
+    """
+    digests: dict[str, str | None] = {}
+    for artifact in entry.artifacts:
+        digest: str | None = (
+            artifact.sha256 if _SHA256_HEX.match(artifact.sha256) else None
+        )
+        if artifact.name in digests and digests[artifact.name] != digest:
+            digest = None  # contradictory manifest: nothing to verify against
+        digests[artifact.name] = digest
+    return {name: value for name, value in digests.items() if value is not None}
+
+
 def _next_seq(existing: list[ReportCatalogEntry]) -> int:
     """The next global sequence: one past the highest cataloged. Starts at 1.
 
@@ -1084,21 +1250,28 @@ def _artifact_digest(path: Path) -> ReportArtifact:
     return ReportArtifact(name=path.name, size=size, sha256=digest.hexdigest())
 
 
-def _bundle_json(name: str, data: bytes) -> dict | None:
+def _bundle_json(name: str, data: bytes) -> object:
     """Parse one already-read bundle artifact, naming it if it will not parse.
 
     Separate from :func:`_read_json` because a bundle read has the bytes in hand
     already (they were hashed against the entry's digest), and re-reading the file
-    would risk hashing one version and serving another. A non-object body is
-    ``None`` rather than an error — the artifact is present and intact, it just
-    carries nothing a consumer can merge — while unparseable content raises, since
-    that is a bundle the export must fail closed on.
+    would risk hashing one version and serving another.
+
+    The parsed value is returned in whatever JSON shape the file holds — object,
+    array, or scalar. Narrowing a non-object body to ``None`` would report "no
+    content" for bytes the entry's own manifest hash says are exactly the published
+    ones, and would disagree with the per-task detail route, which hands back
+    whatever the artifact parses to. (A pack that is not an object is publishable:
+    the entry build degrades its provenance rather than rejecting it.) So inside an
+    available bundle ``null`` means the content *is* JSON ``null``, never that the
+    artifact is absent — availability is all-or-nothing, so all four files are
+    present. Unparseable content still raises: that is a bundle the export must
+    fail closed on.
     """
     try:
-        parsed = json.loads(data.decode("utf-8"))
+        return json.loads(data.decode("utf-8"))
     except (UnicodeDecodeError, ValueError) as err:
         raise ReportCatalogError(f"unparseable report artifact {name} ({err})") from err
-    return parsed if isinstance(parsed, dict) else None
 
 
 def _bundle_text(name: str, data: bytes) -> str:

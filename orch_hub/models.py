@@ -1665,7 +1665,10 @@ class ReportCatalogEntry:
       what a consumer stores and re-fetches by: it carries no ordering
       information, so a consumer never compares scoped ``evaluation_id``
       timestamps (which collide across repos) to reason about order. ``seq``
-      carries the order, and is the cursor.
+      carries the order, and is the cursor. Both are unique across the catalog,
+      and that uniqueness *is* the exactly-once traversal guarantee — a file
+      holding a repeat is served by no read path at all
+      (:mod:`orch_hub.report_catalog`).
 
     ``target_source`` and ``archived`` are deliberately different facts about
     different moments: the first is where the task file was when the *evidence*
@@ -1776,28 +1779,46 @@ class ReportBundle:
     saying so — the entry stays auditable (that is the point of an append-only
     catalog outliving its artifacts) while the fetch fails closed rather than
     handing back a partial import. The same applies to an entry whose stored
-    identity cannot address a contained directory at all.
+    identity cannot address a contained directory, or cannot be trusted to name
+    the artifacts it was published from.
+
+    The three JSON artifacts carry whatever their file parses to — object, array,
+    or scalar — exactly like the per-task detail route, because the artifact bytes
+    are what a consumer imports and what the recorded hash covers. Inside an
+    ``available`` bundle a ``null`` artifact therefore means the file's content is
+    JSON ``null``, never that the file is missing: availability already guarantees
+    all four are present.
 
     ``mismatched`` names artifacts whose bytes no longer hash to the ``sha256``
-    the entry recorded at publication. That is *not* an availability failure —
-    the content is still served — because the consumer, not the hub, decides what
-    to do about a report edited after the fact; the hub's job is to make the
-    discrepancy impossible to miss, which is what recording the hashes was for.
+    the entry recorded at publication, and ``unverified`` names artifacts the entry
+    records no usable digest for (a manifest an older/leaner writer never wrote, or
+    one a hand-edit left malformed or self-contradictory). Neither is an
+    availability failure — the content is still served — because the consumer, not
+    the hub, decides what to do about a report edited or unverifiable after the
+    fact; the hub's job is to make the discrepancy impossible to miss, which is
+    what recording the hashes was for. ``verified`` is the strict summary: every
+    served artifact was compared against a recorded digest *and* matched.
     """
 
     entry: ReportCatalogEntry
     available: bool
     detail: str | None = None
-    evidence: dict | None = None
-    static_metrics: dict | None = None
-    semantic_report: dict | None = None
+    evidence: object | None = None
+    static_metrics: object | None = None
+    semantic_report: object | None = None
     report_md: str | None = None
     mismatched: tuple[str, ...] = ()
+    unverified: tuple[str, ...] = ()
 
     @property
     def verified(self) -> bool:
-        """Whether every served artifact still hashes to its cataloged digest."""
-        return self.available and not self.mismatched
+        """Whether every served artifact was checked against a digest and matched.
+
+        Deliberately not "nothing mismatched": an artifact with no usable recorded
+        digest was never compared to anything, so counting it as verified would
+        let a manifest a hand-edit stripped read as a hash-checked import.
+        """
+        return self.available and not self.mismatched and not self.unverified
 
     def to_dict(self) -> dict:
         return {
@@ -1814,6 +1835,7 @@ class ReportBundle:
             "integrity": {
                 "verified": self.verified,
                 "mismatched": list(self.mismatched),
+                "unverified": list(self.unverified),
             },
         }
 

@@ -12,9 +12,11 @@ semantic-evaluator hook, and disabled-mode fail-closed.
 
 Session-2 adds the read side those durable guarantees exist for: cursor paging
 that traverses every report exactly once under concurrent publication, the one
-invalid/stale-cursor policy, and the fail-closed read/export-by-global-key
-bundle. Their HTTP surface is covered in ``tests/test_api.py``; session-3 adds
-the dashboard view.
+invalid/stale-cursor policy, the fail-closed read/export-by-global-key bundle,
+and the audits that keep a hand-edited append-only file from becoming a silently
+wrong answer — an ambiguous sequence/key, a stored identity that is not the one
+its key derives from, and an artifact served without a usable digest. Their HTTP
+surface is covered in ``tests/test_api.py``; session-3 adds the dashboard view.
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ from orch_hub.report_catalog import (
     REPORT_KEY_PREFIX,
     REQUIRED_ARTIFACTS,
     ReportCatalog,
+    ReportCatalogError,
     report_key,
 )
 from orch_hub.semantic import SEMANTIC_REPORT_MD_NAME, SEMANTIC_REPORT_NAME
@@ -1055,6 +1058,77 @@ def test_page_rejects_an_invalid_cursor_or_limit_instead_of_guessing(tmp_path, k
         catalog(config).page(**kwargs)
 
 
+# -- catalog identity audits ---------------------------------------------------
+#
+# The write path cannot produce these states (allocation is serialized and the
+# key is derived), but the file is append-only and never rewritten, so an
+# operator's edit, a merge of two catalogs, or a restore over a live one can. The
+# question each test asks is the same: does a broken invariant surface, or does it
+# turn into a silently wrong answer?
+
+
+def test_a_duplicate_sequence_fails_the_feed_instead_of_skipping_a_report(tmp_path):
+    # Two entries at one seq make the cursor ambiguous: a consumer resuming from
+    # that watermark never sees the second, because the cursor is strictly greater.
+    # Failing loudly is the only option that does not lose a report — the catalog is
+    # append-only, so renumbering the duplicate is not available either.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1]["seq"] = rows[0]["seq"]
+    rewrite_lines(config, rows)
+
+    with pytest.raises(ReportCatalogError, match="seq 1"):
+        catalog(config).page()
+    # Every read shares the audit, so no path serves the truncated traversal.
+    with pytest.raises(ReportCatalogError):
+        catalog(config).entries()
+    with pytest.raises(ReportCatalogError):
+        catalog(config).find(rows[0]["report_key"])
+
+
+def test_a_duplicate_report_key_fails_the_same_uniqueness_audit(tmp_path):
+    # The audit from the other side: one source evaluation with two global
+    # identities would re-deliver a report a consumer already imported under a key
+    # it was told was unique.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1]["report_key"] = rows[0]["report_key"]
+    rewrite_lines(config, rows)
+
+    with pytest.raises(ReportCatalogError, match="global identity is not unique"):
+        catalog(config).page()
+
+
+def test_an_ambiguous_catalog_pauses_publication_and_suspends_retention(tmp_path):
+    # The reason failing closed here is safe rather than merely loud: while the
+    # catalog cannot be traversed, publication stops appending onto it and the
+    # retention guard cannot answer, so nothing is deleted and nothing is lost. An
+    # operator who repairs the file resumes exactly where publication paused.
+    config = cfg(tmp_path, retention=1)
+    write_eval(config, evaluation_id="20260730T100000Z")
+    write_eval(config, evaluation_id="20260730T110000Z")
+    catalog(config).reconcile()
+    rows = lines(config)
+    rows[1]["seq"] = rows[0]["seq"]
+    rewrite_lines(config, rows)
+
+    with pytest.raises(ReportCatalogError):
+        catalog(config).reconcile()
+
+    removed = service_with_guard(config, catalog(config)).prune_evaluations(
+        repo(tmp_path), TASK_A
+    )
+
+    assert removed == []
+    stored = config.data_dir / "evaluations" / "alpha" / TASK_A
+    assert sorted(path.name for path in stored.iterdir()) == [
+        "20260730T100000Z",
+        "20260730T110000Z",
+    ]
+
+
 # -- import bundles -----------------------------------------------------------
 
 
@@ -1136,6 +1210,125 @@ def test_bundle_of_an_unsafe_stored_identity_reads_nothing(tmp_path):
     assert bundle.available is False
     assert "unsafe stored report identity" in bundle.detail
     assert bundle.evidence is None
+
+
+def test_bundle_of_a_slug_alias_refuses_to_serve_another_repos_report(tmp_path):
+    # The slug rule is idempotent but not injective: 'alpha!!' and 'alpha' resolve
+    # to the same directory. So a hand-edited slug would otherwise serve the real
+    # alpha report — complete and hash-verified — under a feed identity that
+    # contradicts it. Rejected before any IO, and named rather than hidden.
+    config = cfg(tmp_path)
+    write_eval(config, slug="alpha")
+    catalog(config).reconcile()
+    rows = lines(config)
+    rows[0]["repo_slug"] = "alpha!!"
+    rewrite_lines(config, rows)
+    cat = catalog(config)
+    entry = cat.entries()[0]
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    assert "incoherent stored report identity" in bundle.detail
+    assert "alpha!!" in bundle.detail
+    assert (bundle.evidence, bundle.report_md, bundle.verified) == (None, None, False)
+
+
+def test_bundle_of_a_safe_but_wrong_source_identity_is_refused(tmp_path):
+    # A retargeted line: every segment is a legal path component and the directory
+    # it names holds a real report — a *different* one. Containment cannot catch
+    # that; only the key can, because it is a digest of exactly the identity the
+    # report was published under.
+    config = cfg(tmp_path)
+    write_eval(config, task_id=TASK_A, evaluation_id="20260730T100000Z")
+    write_eval(config, task_id=TASK_B, evaluation_id="20260730T110000Z")
+    catalog(config).reconcile()
+    rows = lines(config)
+    retargeted = next(row for row in rows if row["task_id"] == TASK_A)
+    retargeted["task_id"] = TASK_B
+    retargeted["evaluation_id"] = "20260730T110000Z"
+    rewrite_lines(config, rows)
+    cat = catalog(config)
+    entry = next(item for item in cat.entries() if item.seq == retargeted["seq"])
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    assert "does not derive from the stored source identity" in bundle.detail
+    assert bundle.semantic_report is None
+    # The report it tried to point at is still served under its own key.
+    other = next(item for item in cat.entries() if item.seq != retargeted["seq"])
+    assert cat.read_bundle(other).available is True
+
+
+@pytest.mark.parametrize(
+    "name, body, parsed",
+    [
+        (EVIDENCE_NAME, "[]", []),
+        (STATIC_METRICS_NAME, "42", 42),
+    ],
+)
+def test_bundle_serves_a_non_object_artifact_as_the_value_it_holds(
+    tmp_path, name, body, parsed
+):
+    # Export is the import path, so it must hand over what the bytes the manifest
+    # hashed actually mean. Narrowing a non-object body to null would report "no
+    # content" for an intact, hash-matching artifact — and would disagree with the
+    # per-task detail route, which returns whatever the file parses to.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    (eval_dir / name).write_text(body, encoding="utf-8")
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is True and bundle.detail is None
+    served = {
+        EVIDENCE_NAME: bundle.evidence,
+        STATIC_METRICS_NAME: bundle.static_metrics,
+    }
+    assert served[name] == parsed
+    # Exactly the bytes publication hashed, so this is a verified import.
+    assert bundle.verified is True and bundle.mismatched == ()
+
+
+@pytest.mark.parametrize("damage", ["absent", "contradictory", "malformed"])
+def test_bundle_without_a_usable_digest_reports_the_artifact_unverified(
+    tmp_path, damage
+):
+    # A digest that was never recorded, that a second manifest entry contradicts, or
+    # that cannot be a sha256 at all was compared against nothing. Claiming
+    # verification for it would empty the content-hash contract that is the reason a
+    # consumer trusts an imported report; the artifact is still served, because only
+    # the manifest is damaged.
+    config = cfg(tmp_path)
+    write_eval(config)
+    catalog(config).reconcile()
+    rows = lines(config)
+    kept = [a for a in rows[0]["artifacts"] if a["name"] != EVIDENCE_NAME]
+    extra = {
+        "absent": [],
+        "contradictory": [
+            {"name": EVIDENCE_NAME, "size": 1, "sha256": "a" * 64},
+            {"name": EVIDENCE_NAME, "size": 1, "sha256": "b" * 64},
+        ],
+        "malformed": [{"name": EVIDENCE_NAME, "size": 1, "sha256": "not-a-digest"}],
+    }[damage]
+    rows[0]["artifacts"] = kept + extra
+    rewrite_lines(config, rows)
+    cat = catalog(config)
+    entry = cat.entries()[0]
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is True
+    assert bundle.unverified == (EVIDENCE_NAME,)
+    assert bundle.mismatched == ()
+    assert bundle.verified is False
+    assert bundle.evidence["target"]["task_id"] == TASK_A
+    # The artifacts that do carry a usable digest are still checked normally.
+    assert len(bundle.entry.artifacts) == len(kept) + len(extra)
 
 
 def test_bundle_surfaces_an_artifact_edited_since_publication(tmp_path):

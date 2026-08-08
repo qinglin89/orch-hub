@@ -3953,7 +3953,13 @@ def test_report_bundle_fetches_a_whole_report_by_global_key(tmp_path, monkeypatc
     assert artifacts["static_metrics"] == {}
     assert artifacts["evidence"]["target"]["source"] == SOURCE_ARCHIVED
     assert artifacts["report_md"] == "# report\n"
-    assert body["integrity"] == {"verified": True, "mismatched": []}
+    # Verified means every served artifact was compared against a recorded digest
+    # and matched — not merely that nothing contradicted one.
+    assert body["integrity"] == {
+        "verified": True,
+        "mismatched": [],
+        "unverified": [],
+    }
 
 
 def test_report_bundle_unknown_key_is_404(tmp_path, monkeypatch):
@@ -3993,6 +3999,35 @@ def test_report_bundle_of_pruned_artifacts_is_unavailable_not_404(
     # Export is a pure read: a missing bundle is never healed by re-evaluating
     # the task, so no artifact dir reappears and no model call can be provoked.
     assert not (config.data_dir / "evaluations" / repo.name / RUN_TASK_ID).exists()
+
+
+def test_report_feed_refuses_to_serve_an_ambiguous_catalog(tmp_path, monkeypatch):
+    # Only a hand-edit, a merge, or a restore can put two entries at one sequence,
+    # and a cursor over that file cannot promise exactly-once traversal: a consumer
+    # resuming from the duplicate's watermark would never see its twin. Both routes
+    # therefore name the defect instead of serving a page that quietly omits it.
+    client, config, _repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z", "20260722T100000Z"),
+    )
+    path = config.data_dir / "report-catalog" / "catalog.jsonl"
+    rows = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    key = rows[0]["report_key"]
+    rows[1]["seq"] = rows[0]["seq"]
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    listed = client.get("/api/evaluation/reports")
+    fetched = client.get(f"/api/evaluation/reports/{key}")
+
+    assert listed.status_code == 500
+    assert "ambiguous" in listed.json()["detail"]
+    assert fetched.status_code == 500
 
 
 def test_report_feed_routes_are_404_when_evaluation_is_disabled(tmp_path, monkeypatch):
