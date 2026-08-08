@@ -8,9 +8,13 @@ append durability under concurrent instances, torn-tail/corrupt recovery,
 deterministic idempotent reconciliation, the entry's hashes and explicit
 provenance, retention that cannot outrun publication (including a drifted
 registry path and candidates the shared rule cannot judge), the live
-semantic-evaluator hook, and disabled-mode fail-closed. Session-2 adds the
-cursor-paginated feed and read/export-by-key HTTP routes; session-3 the
-dashboard view.
+semantic-evaluator hook, and disabled-mode fail-closed.
+
+Session-2 adds the read side those durable guarantees exist for: cursor paging
+that traverses every report exactly once under concurrent publication, the one
+invalid/stale-cursor policy, and the fail-closed read/export-by-global-key
+bundle. Their HTTP surface is covered in ``tests/test_api.py``; session-3 adds
+the dashboard view.
 """
 
 from __future__ import annotations
@@ -32,7 +36,7 @@ from orch_hub.evaluation import (
     EvaluationDisabledError,
     EvaluationService,
 )
-from orch_hub.models import ManagedRepo
+from orch_hub.models import ManagedRepo, ReportCatalogEntry
 from orch_hub.report_catalog import (
     CATALOG_NAME,
     CATALOG_SUBDIR,
@@ -934,6 +938,238 @@ def test_pruned_artifacts_leave_the_entry_auditable_and_unavailable(tmp_path):
     assert len(catalog(config).entries()) == 1
 
 
+# -- cursor pages -------------------------------------------------------------
+
+
+def publish_many(config: Config, count: int, *, start: int = 0) -> None:
+    """Publish ``count`` reports, each in its own repo/task so ids never collide."""
+    for index in range(start, start + count):
+        write_eval(
+            config,
+            slug=f"repo{index}",
+            task_id=f"2026-07-30-task-{index}",
+            evaluation_id=f"20260730T1000{index:02d}Z",
+        )
+    catalog(config).reconcile()
+
+
+def rewrite_lines(config: Config, rows: list[dict]) -> None:
+    """Replace the catalog file with ``rows`` (for hand-built anomalies)."""
+    path = config.data_dir / CATALOG_SUBDIR / CATALOG_NAME
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+
+def test_paging_traverses_every_report_exactly_once_while_appends_happen(tmp_path):
+    # The feed's core contract. Entries are immutable and their sequence is
+    # monotonic, so a report published mid-traversal can only extend the suffix
+    # the watermark names — never renumber, reorder, or land before what the
+    # consumer already imported.
+    config = cfg(tmp_path)
+    publish_many(config, 5)
+    cat = catalog(config)
+
+    seen: list[int] = []
+    cursor: int | None = None
+    appended = False
+    while True:
+        page = cat.page(after_seq=cursor, limit=2)
+        seen.extend(entry.seq for entry in page.entries)
+        cursor = page.next_cursor
+        if not appended:
+            # Publish concurrently, from the middle of the traversal.
+            publish_many(config, 2, start=90)
+            appended = True
+        if not page.has_more:
+            break
+
+    assert seen == [1, 2, 3, 4, 5, 6, 7]
+    assert len(seen) == len(set(seen))
+
+
+def test_a_full_page_reports_has_more_and_the_last_page_does_not(tmp_path):
+    config = cfg(tmp_path)
+    publish_many(config, 3)
+    cat = catalog(config)
+
+    first = cat.page(limit=2)
+    assert [entry.seq for entry in first.entries] == [1, 2]
+    assert (first.cursor, first.next_cursor, first.has_more) == (0, 2, True)
+
+    last = cat.page(after_seq=first.next_cursor, limit=2)
+    assert [entry.seq for entry in last.entries] == [3]
+    assert (last.cursor, last.next_cursor, last.has_more) == (2, 3, False)
+
+
+def test_a_caught_up_consumer_gets_an_empty_page_holding_its_watermark(tmp_path):
+    # The steady state of an incremental poller: nothing new, and the cursor must
+    # not move (or reset), so the next poll resumes from the same place.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    cat = catalog(config)
+
+    idle = cat.page(after_seq=2)
+
+    assert idle.entries == ()
+    assert (idle.cursor, idle.next_cursor, idle.has_more) == (2, 2, False)
+
+    # A cursor far past the end is the same caught-up state, not an error: a
+    # consumer whose watermark outran a restored/pruned catalog keeps polling.
+    stale = cat.page(after_seq=9999)
+    assert (stale.entries, stale.next_cursor, stale.has_more) == ((), 9999, False)
+
+
+def test_a_cursor_on_a_sequence_no_entry_has_cannot_step_over_the_next_report(tmp_path):
+    # A torn append leaves a gap in the sequence. "Strictly greater" resolves it
+    # without skipping: the policy never both succeeds and loses an entry.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1]["seq"] = 3
+    rewrite_lines(config, rows)
+
+    page = catalog(config).page(after_seq=2)
+
+    assert [entry.seq for entry in page.entries] == [3]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"after_seq": -1},
+        {"limit": 0},
+        {"limit": -5},
+        {"limit": report_catalog_module.MAX_PAGE_LIMIT + 1},
+    ],
+)
+def test_page_rejects_an_invalid_cursor_or_limit_instead_of_guessing(tmp_path, kwargs):
+    # Fail closed rather than clamp: a silently reset cursor re-imports the whole
+    # feed or loses reports, and a silently clamped limit returns fewer entries
+    # than the caller sized its import around.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+
+    with pytest.raises(ValueError):
+        catalog(config).page(**kwargs)
+
+
+# -- import bundles -----------------------------------------------------------
+
+
+def test_bundle_resolves_a_global_key_to_the_entry_and_every_artifact(tmp_path):
+    # The consumer-facing point of the key: fetch a whole report without knowing
+    # the <repo-slug>/<task-id>/<evaluation-id>/ layout it is stored under.
+    config = cfg(tmp_path)
+    write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+
+    bundle = cat.read_bundle(cat.find(entry.report_key))
+
+    assert bundle.available is True and bundle.detail is None
+    assert bundle.entry.report_key == entry.report_key
+    assert bundle.evidence["target"]["task_id"] == TASK_A
+    assert bundle.static_metrics["evaluation_id"] == entry.evaluation_id
+    assert bundle.semantic_report["evaluator"]["model"] == "fake-model"
+    assert bundle.report_md.startswith("# Semantic Task Evaluation")
+    # Unedited artifacts still hash to what publication recorded.
+    assert bundle.verified is True and bundle.mismatched == ()
+
+
+def test_bundle_of_pruned_artifacts_is_explicitly_unavailable_not_missing(tmp_path):
+    # The designed end state: the append-only entry outlives the artifacts it
+    # indexes, so the report stays auditable while the fetch fails closed.
+    import shutil
+
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    shutil.rmtree(eval_dir)
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    assert "no longer retained" in bundle.detail
+    assert (bundle.evidence, bundle.report_md) == (None, None)
+    # Still auditable: the hashes recorded at publication survive the prune.
+    assert len(bundle.entry.artifacts) == len(REQUIRED_ARTIFACTS)
+    assert bundle.verified is False
+
+
+def test_bundle_of_a_partially_removed_set_fails_closed(tmp_path):
+    # All-or-nothing, matching what publication required: a half-populated bundle
+    # would otherwise be imported as if it were the published report.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).unlink()
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    # Reported as an incomplete *set* — a normal retention outcome — rather than
+    # as the IO error the first absent file would otherwise raise.
+    assert bundle.detail == (
+        f"report artifact set is incomplete (missing {SEMANTIC_REPORT_MD_NAME})"
+    )
+    assert bundle.semantic_report is None
+
+
+def test_bundle_of_an_unsafe_stored_identity_reads_nothing(tmp_path):
+    # A hand-edited or foreign catalog line must not be able to steer a read out
+    # of the evaluations tree; the containment rule rejects it before any IO.
+    config = cfg(tmp_path)
+    write_eval(config)
+    catalog(config).reconcile()
+    rows = lines(config)
+    rows[0]["task_id"] = ".."
+    rewrite_lines(config, rows)
+    cat = catalog(config)
+    entry = cat.entries()[0]
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    assert "unsafe stored report identity" in bundle.detail
+    assert bundle.evidence is None
+
+
+def test_bundle_surfaces_an_artifact_edited_since_publication(tmp_path):
+    # Not an availability failure: the content is still served, because only the
+    # consumer can decide what an edited report means for its import. Recording
+    # the digests is what makes the edit impossible to miss.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).write_text("# tampered\n", encoding="utf-8")
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is True
+    assert bundle.mismatched == (SEMANTIC_REPORT_MD_NAME,)
+    assert bundle.verified is False
+    assert bundle.report_md == "# tampered\n"
+
+
+def test_bundle_of_an_unparseable_artifact_fails_closed(tmp_path):
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    (eval_dir / STATIC_METRICS_NAME).write_text("{not json", encoding="utf-8")
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    assert STATIC_METRICS_NAME in bundle.detail
+    assert bundle.static_metrics is None
+
+
 # -- disabled mode ------------------------------------------------------------
 
 
@@ -942,6 +1178,22 @@ def test_pruned_artifacts_leave_the_entry_auditable_and_unavailable(tmp_path):
     [
         lambda cat, rp: cat.entries(),
         lambda cat, rp: cat.find("rpt-x"),
+        lambda cat, rp: cat.page(),
+        lambda cat, rp: cat.read_bundle(
+            ReportCatalogEntry(
+                seq=1,
+                report_key="rpt-x",
+                cataloged_ts=None,
+                repo_name="alpha",
+                repo_slug="alpha",
+                repo_path=None,
+                task_id=TASK_A,
+                evaluation_id="20260730T100000Z",
+                generated_ts=None,
+                target_source=SOURCE_ARCHIVED,
+                archived=True,
+            )
+        ),
         lambda cat, rp: cat.reconcile(),
         lambda cat, rp: cat.record_evaluation(rp, TASK_A, "20260730T100000Z"),
     ],

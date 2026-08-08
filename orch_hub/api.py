@@ -76,7 +76,7 @@ from .orch_config import (
 )
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
-from .report_catalog import ReportCatalog
+from .report_catalog import DEFAULT_PAGE_LIMIT, ReportCatalog
 from .runs import (
     BlockedTaskError,
     LaunchBlockedError,
@@ -1521,6 +1521,96 @@ def create_app(
         """
         require_evaluation_enabled()
         return {"enabled": True, "semantic": semantic.doctor().to_dict()}
+
+    # -- global report feed ----------------------------------------------------
+    #
+    # The cross-repo publication surface. Every route above is scoped to one
+    # ``(repo, task)``, which is right for the dashboard but wrong for an external
+    # protocol-evolution consumer: discovering new reports that way means walking
+    # every repo, every task, and every evaluation dir on each poll, then ordering
+    # the results by scoped ``evaluation_id`` stamps that collide across repos.
+    # These two routes are thin adapters over the append-only catalog
+    # (:mod:`orch_hub.report_catalog`) — one ordered, cursor-paginated feed and one
+    # fetch-by-global-key — so a consumer imports incrementally from a watermark
+    # and never constructs a repo/task/evaluation path. They are reads only:
+    # neither publishes, reconciles, evaluates, or can cause an unevaluated task to
+    # be evaluated. Gated exactly like the rest of the sidecar (disabled → 404).
+
+    @app.get("/api/evaluation/reports")
+    def list_report_feed(
+        after: str | None = None, limit: int = DEFAULT_PAGE_LIMIT
+    ) -> dict:
+        """Return one page of the global report feed, oldest-published first.
+
+        The incremental-import surface: ``after`` is the consumer's watermark (the
+        highest ``seq`` it has already imported, omitted on the first poll) and the
+        page holds the entries strictly after it in global ``seq`` order. Because
+        entries are immutable and their sequence is monotonic, concurrent
+        publication can only extend the suffix a watermark names — so repeated
+        polling traverses every report exactly once, in order, with no need to
+        compare the scoped ``evaluation_id`` timestamps that collide across repos.
+        The response carries ``next_cursor`` (send it as the next ``after``, even
+        for an empty page) and ``has_more`` (more is already available now, versus
+        caught up), so the end of the feed is never inferred from a short page.
+
+        One cursor policy: a watermark that is not a non-negative integer is a 400,
+        deliberately not a silent reset to the beginning (which re-imports
+        everything) or to the end (which loses reports); every other watermark
+        resolves as "strictly greater", so a stale cursor past the end is an empty
+        page and one naming a sequence no entry has still cannot step over the next
+        real entry. ``limit`` (1..``MAX_PAGE_LIMIT``) is a caller preference here,
+        unlike the run-history pager's fixed window, since ``has_more`` makes a
+        short page unambiguous; out of range is a 400 rather than a silent clamp.
+        Disabled → 404.
+        """
+        require_evaluation_enabled()
+        cursor: int | None = None
+        if after is not None:
+            # Parsed here rather than declared ``int`` so *every* malformed cursor
+            # gets the same fail-closed 400, instead of a type error becoming a 422
+            # while a range error becomes a 400.
+            try:
+                cursor = int(after)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"cursor 'after' must be an integer sequence: {after!r}",
+                ) from exc
+        try:
+            page = catalog.page(after_seq=cursor, limit=limit)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"enabled": True, **page.to_dict()}
+
+    @app.get("/api/evaluation/reports/{report_key}")
+    def get_report_bundle(report_key: str) -> dict:
+        """Return one published report's import bundle by its global key.
+
+        Resolves the opaque ``report_key`` a consumer stored from the feed to that
+        report's entry plus its four artifacts (the same parsed shapes the per-task
+        detail route returns), so the artifacts are fetchable without knowing which
+        repo/task/evaluation directory holds them. A key naming no published report
+        is a 404.
+
+        ``available`` is all-or-nothing and fails closed: a published entry whose
+        artifacts a retention prune has since removed — the designed end state,
+        since the catalog outlives what it indexes — answers 200 with
+        ``available: false`` and a ``detail``, as does a partially removed,
+        unreadable, or unparseable set, or an entry whose stored identity cannot
+        address a contained path. That is deliberately not a 404: the report *was*
+        published and the entry is still auditable, which a "no such report" would
+        misreport. ``integrity`` reports whether the served bytes still hash to the
+        digests recorded at publication; a mismatch is surfaced rather than
+        suppressed, because only the consumer can decide what an edited report
+        means for its import. Disabled → 404.
+        """
+        require_evaluation_enabled()
+        entry = catalog.find(report_key)
+        if entry is None:
+            raise HTTPException(
+                status_code=404, detail=f"unknown report key: {report_key}"
+            )
+        return catalog.read_bundle(entry).to_dict()
 
     @app.get("/api/repos/{repo_id}/evaluations/{task_id}")
     def list_task_evaluations(repo_id: str, task_id: str) -> dict:

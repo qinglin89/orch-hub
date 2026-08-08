@@ -113,7 +113,14 @@ from .evaluation import (
     repo_slug,
     task_evaluations_dir,
 )
-from .models import ManagedRepo, ReportArtifact, ReportCatalogEntry, ReportProvenance
+from .models import (
+    ManagedRepo,
+    ReportArtifact,
+    ReportBundle,
+    ReportCatalogEntry,
+    ReportPage,
+    ReportProvenance,
+)
 from .semantic import SEMANTIC_REPORT_MD_NAME, SEMANTIC_REPORT_NAME
 from .static_metrics import STATIC_METRICS_NAME
 from .task_store import read_archived_task_content
@@ -161,6 +168,19 @@ segment."""
 _HASH_CHUNK = 1 << 16
 """Read size for artifact hashing. Evidence packs are bounded but not tiny, and
 nothing here needs the whole file in memory at once."""
+
+DEFAULT_PAGE_LIMIT = 50
+"""Entries per feed page when a consumer states no preference. Sized for a poll
+that usually returns nothing new; a backfill raises it explicitly."""
+
+MAX_PAGE_LIMIT = 500
+"""Ceiling on a caller-chosen page size. An entry carries provenance plus four
+artifact digests, so this bounds one response at a few hundred KB. Unlike the run
+history pager — whose page size is a traversal invariant, deliberately not a
+query parameter — the feed lets a consumer choose, because ``has_more`` makes a
+short page unambiguous and a bulk importer and an idle poller genuinely want
+different sizes. Exceeding it is a fail-closed error rather than a silent clamp
+(config contract: malformed explicit values fail loudly)."""
 
 PROTOCOL_UNAVAILABLE_DETAIL = (
     "evidence packs carry no .ai-protocol version for the evaluated task"
@@ -319,10 +339,11 @@ class ReportCatalog:
     ) -> list[ReportCatalogEntry]:
         """Return cataloged entries in global order, optionally after a cursor.
 
-        The durable read primitive the (session-2) feed route is a thin adapter
-        over: ``after_seq`` is the cursor — strictly greater, so a consumer that
-        stores the last ``seq`` it imported resumes without re-reading or skipping
-        an entry — and ``limit`` caps one page. Entries are returned in ascending
+        The durable read primitive :meth:`page` (and through it the feed route) is
+        a thin adapter over: ``after_seq`` is the cursor — strictly greater, so a
+        consumer that stores the last ``seq`` it imported resumes without
+        re-reading or skipping an entry — and ``limit`` caps one page. Entries are
+        returned in ascending
         ``seq``, which is append order, so concurrent appends only ever add to the
         *end* of a page boundary and never renumber what a consumer already saw.
         Every entry is a feed item (publication *is* the eligibility decision), so
@@ -347,8 +368,8 @@ class ReportCatalog:
     def find(self, key: str) -> ReportCatalogEntry | None:
         """Return the entry for one public report key, or ``None`` if uncataloged.
 
-        The by-key read behind the (session-2) export route: a consumer that
-        stored a ``report_key`` resolves it here without knowing the
+        The by-key read behind the export route (:meth:`read_bundle`): a consumer
+        that stored a ``report_key`` resolves it here without knowing the
         repo/task/evaluation directory layout. ``None`` means the key names no
         published report — distinct from a published report whose artifacts a
         retention prune has since removed, which stays an entry and is reported as
@@ -376,6 +397,147 @@ class ReportCatalog:
             repo_name=entry.repo_slug,
             task_id=entry.task_id,
             evaluation_id=entry.evaluation_id,
+        )
+
+    def page(
+        self, *, after_seq: int | None = None, limit: int = DEFAULT_PAGE_LIMIT
+    ) -> ReportPage:
+        """Return one cursor-anchored page of the feed, with its next cursor.
+
+        The incremental-poll primitive the feed route serializes. ``after_seq`` is
+        the consumer's watermark — the highest ``seq`` it has already imported —
+        and the page is the entries strictly after it, in ascending ``seq``. The
+        cursor contract is what makes "exactly once, in global order" hold while
+        the catalog is being appended to: entries are immutable and their sequence
+        is monotonic, so an append can only ever extend the suffix a watermark
+        names. It can never renumber, reorder, or insert *before* what a consumer
+        already read, which is exactly the failure a timestamp-ordered feed over
+        scoped ``evaluation_id`` stamps would have.
+
+        **One cursor policy, and it never silently skips:** a cursor that is not a
+        non-negative integer is rejected (``ValueError`` — a malformed watermark
+        must not be quietly read as "start from the beginning", which would
+        re-import everything, nor as "start from the end", which would lose
+        reports). Any other cursor *resolves*, including a stale one: a watermark
+        past the highest ``seq`` is simply a caught-up consumer and yields an empty
+        page, and one naming a sequence no entry has (a number skipped by a torn
+        append) still resolves as "strictly greater", so nothing between it and the
+        next real entry can be stepped over. There is no cursor that both succeeds
+        and loses an entry.
+
+        ``limit`` is validated against :data:`MAX_PAGE_LIMIT` rather than clamped,
+        so a caller learns its request was out of range instead of silently
+        receiving fewer entries than it sized its import around. One extra entry is
+        read to answer ``has_more`` without a second pass; it is not returned.
+        Gated and read-only, and lock-free like :meth:`entries` — a poller must
+        never block behind a reconciliation sweep.
+        """
+        self._require_enabled()
+        if after_seq is not None and after_seq < 0:
+            raise ValueError(f"cursor must not be negative: {after_seq}")
+        if limit < 1 or limit > MAX_PAGE_LIMIT:
+            raise ValueError(f"limit must be between 1 and {MAX_PAGE_LIMIT}: {limit}")
+        window = self.entries(after_seq=after_seq, limit=limit + 1)
+        entries = tuple(window[:limit])
+        cursor = after_seq if after_seq is not None else 0
+        return ReportPage(
+            entries=entries,
+            cursor=cursor,
+            # An empty page holds the watermark where it was, so a caught-up
+            # consumer can store ``next_cursor`` unconditionally and keep polling
+            # from the same place instead of restarting the feed.
+            next_cursor=entries[-1].seq if entries else cursor,
+            has_more=len(window) > limit,
+        )
+
+    def read_bundle(self, entry: ReportCatalogEntry) -> ReportBundle:
+        """Read one published report's artifacts as a contained import bundle.
+
+        The by-key fetch behind the export route, so a consumer works from the
+        global key alone and never constructs a repo/task/evaluation path. Reads
+        are contained by :meth:`artifact_dir` (the same unsafe-segment rejection as
+        every other artifact read) and confined to the evaluation's own four files;
+        nothing about the target repo is touched.
+
+        Availability is **all-or-nothing**, matching what publication required: a
+        bundle is served only when the complete L1+L2 set is still present and
+        readable. Every other case is ``available: false`` with a ``detail`` — a
+        pruned artifact dir (the designed end state of an entry outliving its
+        artifacts), a partially removed one, an unreadable or unparseable file, or
+        a stored identity that cannot address a contained path at all. Failing
+        closed matters more here than degrading gracefully: a half-populated bundle
+        would be imported as if it were the published report.
+
+        A hash mismatch is deliberately *not* an availability failure. The
+        artifacts are served with the differing names in ``mismatched``, because
+        the recorded digests exist precisely so a consumer can tell an edited
+        report from an intact one and decide for itself; suppressing the content
+        would hide the evidence of the edit. Gated and read-only.
+        """
+        self._require_enabled()
+        try:
+            eval_dir = self.artifact_dir(entry)
+        except ValueError as err:
+            # A hand-edited or foreign catalog line: nothing is read at all.
+            return ReportBundle(
+                entry=entry,
+                available=False,
+                detail=f"unsafe stored report identity ({err})",
+            )
+        if not eval_dir.is_dir():
+            return ReportBundle(
+                entry=entry,
+                available=False,
+                detail="report artifacts are no longer retained",
+            )
+        # Same completeness rule publication used, asked for its detail rather
+        # than its verdict: a partially pruned set must read as an incomplete set,
+        # not as the IO error its first absent file would otherwise produce below.
+        missing = _missing_artifacts(eval_dir)
+        if missing:
+            return ReportBundle(
+                entry=entry,
+                available=False,
+                detail=(
+                    "report artifact set is incomplete"
+                    f" (missing {', '.join(missing)})"
+                ),
+            )
+        cataloged = {artifact.name: artifact.sha256 for artifact in entry.artifacts}
+        raw: dict[str, bytes] = {}
+        mismatched: list[str] = []
+        for name in REQUIRED_ARTIFACTS:
+            try:
+                data = (eval_dir / name).read_bytes()
+            except OSError as err:
+                return ReportBundle(
+                    entry=entry,
+                    available=False,
+                    detail=f"unreadable report artifact {name} ({err})",
+                )
+            raw[name] = data
+            # An entry from an older/leaner writer may not have recorded this
+            # artifact's digest; absence is nothing to compare, not a mismatch.
+            expected = cataloged.get(name)
+            if expected is not None and hashlib.sha256(data).hexdigest() != expected:
+                mismatched.append(name)
+        try:
+            evidence = _bundle_json(EVIDENCE_NAME, raw[EVIDENCE_NAME])
+            static = _bundle_json(STATIC_METRICS_NAME, raw[STATIC_METRICS_NAME])
+            report = _bundle_json(SEMANTIC_REPORT_NAME, raw[SEMANTIC_REPORT_NAME])
+            report_md = _bundle_text(
+                SEMANTIC_REPORT_MD_NAME, raw[SEMANTIC_REPORT_MD_NAME]
+            )
+        except ReportCatalogError as err:
+            return ReportBundle(entry=entry, available=False, detail=str(err))
+        return ReportBundle(
+            entry=entry,
+            available=True,
+            evidence=evidence,
+            static_metrics=static,
+            semantic_report=report,
+            report_md=report_md,
+            mismatched=tuple(mismatched),
         )
 
     # -- writes ---------------------------------------------------------------
@@ -852,6 +1014,11 @@ def _walk_evaluations(base: Path) -> Iterator[tuple[str, str, str, Path]]:
                     yield repo_dir.name, task_dir.name, eval_dir.name, eval_dir
 
 
+def _missing_artifacts(eval_dir: Path) -> list[str]:
+    """Which of the required L1+L2 artifacts an evaluation dir does not hold."""
+    return [name for name in REQUIRED_ARTIFACTS if not (eval_dir / name).is_file()]
+
+
 def _is_complete(eval_dir: Path) -> bool:
     """Whether an evaluation dir holds the full L1+L2 report artifact set.
 
@@ -861,8 +1028,12 @@ def _is_complete(eval_dir: Path) -> bool:
     presence is exactly the "durably complete" condition, checked on the
     filesystem rather than inferred from job state. Completeness alone does not
     publish — the candidate must also be coherent and archived.
+
+    Phrased over :func:`_missing_artifacts` so the read side can report *which*
+    artifacts are gone without restating the rule; publication and the bundle
+    export must never be able to disagree about what a complete report is.
     """
-    return all((eval_dir / name).is_file() for name in REQUIRED_ARTIFACTS)
+    return not _missing_artifacts(eval_dir)
 
 
 def _next_seq(existing: list[ReportCatalogEntry]) -> int:
@@ -911,6 +1082,31 @@ def _artifact_digest(path: Path) -> ReportArtifact:
     except OSError as err:
         raise ReportCatalogError(f"unreadable artifact {path.name} ({err})") from err
     return ReportArtifact(name=path.name, size=size, sha256=digest.hexdigest())
+
+
+def _bundle_json(name: str, data: bytes) -> dict | None:
+    """Parse one already-read bundle artifact, naming it if it will not parse.
+
+    Separate from :func:`_read_json` because a bundle read has the bytes in hand
+    already (they were hashed against the entry's digest), and re-reading the file
+    would risk hashing one version and serving another. A non-object body is
+    ``None`` rather than an error — the artifact is present and intact, it just
+    carries nothing a consumer can merge — while unparseable content raises, since
+    that is a bundle the export must fail closed on.
+    """
+    try:
+        parsed = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as err:
+        raise ReportCatalogError(f"unparseable report artifact {name} ({err})") from err
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _bundle_text(name: str, data: bytes) -> str:
+    """Decode one already-read text bundle artifact (the Markdown render)."""
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError as err:
+        raise ReportCatalogError(f"undecodable report artifact {name} ({err})") from err
 
 
 def _read_json(path: Path) -> object:

@@ -1723,6 +1723,102 @@ class ReportCatalogEntry:
 
 
 @dataclass(frozen=True)
+class ReportPage:
+    """One cursor-anchored page of the global report feed.
+
+    The traversal unit an external protocol-evolution consumer polls: entries in
+    ascending ``seq`` (:class:`ReportCatalogEntry`) plus exactly what it needs to
+    ask for the next one. Paging here is *forward-only over an append-only file*,
+    which is why it is a plain integer watermark rather than the opaque
+    bidirectional anchor run history uses (:class:`RunHistoryPage`): a published
+    entry is immutable and never renumbered, so "everything after ``seq`` N" names
+    the same suffix forever and no insertion can shift a window under the pager.
+
+    ``cursor`` echoes the watermark this page resumed from and ``next_cursor`` is
+    what to send as the next request's cursor — the last returned entry's ``seq``,
+    or ``cursor`` unchanged for an empty page, so a consumer stores one number
+    unconditionally and never has to special-case "nothing new yet". ``has_more``
+    says whether the catalog already holds more beyond this page (keep polling
+    immediately) as opposed to being caught up (poll later); a consumer must read
+    it rather than infer the end from a short page, since a page can be short and
+    still have successors appended a moment later.
+    """
+
+    entries: tuple[ReportCatalogEntry, ...] = ()
+    cursor: int = 0
+    next_cursor: int = 0
+    has_more: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "reports": [entry.to_dict() for entry in self.entries],
+            "cursor": self.cursor,
+            "next_cursor": self.next_cursor,
+            "has_more": self.has_more,
+        }
+
+
+@dataclass(frozen=True)
+class ReportBundle:
+    """One published report's catalog entry plus its artifact contents.
+
+    The import unit fetched by global ``report_key``, so a consumer never needs to
+    know the ``<repo-slug>/<task-id>/<evaluation-id>/`` layout the artifacts
+    actually live under. ``entry`` is the immutable feed item; the four artifact
+    fields are the same shapes the per-task evaluation detail route returns
+    (parsed JSON, plus ``report_md`` as raw text), so a client that already reads
+    that route parses these identically.
+
+    ``available`` is the load-bearing flag and is all-or-nothing, matching what
+    publication required: a bundle is served only when the *whole* L1+L2 set is
+    still on disk and readable. A published entry whose artifacts a later
+    retention prune removed is therefore ``available: false`` with a ``detail``
+    saying so — the entry stays auditable (that is the point of an append-only
+    catalog outliving its artifacts) while the fetch fails closed rather than
+    handing back a partial import. The same applies to an entry whose stored
+    identity cannot address a contained directory at all.
+
+    ``mismatched`` names artifacts whose bytes no longer hash to the ``sha256``
+    the entry recorded at publication. That is *not* an availability failure —
+    the content is still served — because the consumer, not the hub, decides what
+    to do about a report edited after the fact; the hub's job is to make the
+    discrepancy impossible to miss, which is what recording the hashes was for.
+    """
+
+    entry: ReportCatalogEntry
+    available: bool
+    detail: str | None = None
+    evidence: dict | None = None
+    static_metrics: dict | None = None
+    semantic_report: dict | None = None
+    report_md: str | None = None
+    mismatched: tuple[str, ...] = ()
+
+    @property
+    def verified(self) -> bool:
+        """Whether every served artifact still hashes to its cataloged digest."""
+        return self.available and not self.mismatched
+
+    def to_dict(self) -> dict:
+        return {
+            "report_key": self.entry.report_key,
+            "entry": self.entry.to_dict(),
+            "available": self.available,
+            "detail": self.detail,
+            "artifacts": {
+                "evidence": self.evidence,
+                "static_metrics": self.static_metrics,
+                "semantic_report": self.semantic_report,
+                "report_md": self.report_md,
+            },
+            "integrity": {
+                "verified": self.verified,
+                "mismatched": list(self.mismatched),
+            },
+        }
+
+
+@dataclass(frozen=True)
 class SemanticJob:
     """One async Layer-2 semantic-evaluation attempt for a ``(repo, task_id)``.
 

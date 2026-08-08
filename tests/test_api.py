@@ -55,7 +55,7 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import OrchestratorConfigError, parse_effective_config
 from orch_hub.registry import RegistryError
-from orch_hub.report_catalog import ReportCatalog
+from orch_hub.report_catalog import REQUIRED_ARTIFACTS, ReportCatalog
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
     SEMANTIC_END,
@@ -3801,6 +3801,238 @@ def test_app_lifespan_starts_with_evaluation_disabled_and_publishes_nothing(
         assert client.get("/api/health").status_code == 200
 
     assert not (config.data_dir / "report-catalog").exists()
+
+
+# -- global report feed --------------------------------------------------------
+
+
+def make_feed_client(
+    tmp_path, monkeypatch, *, enabled: bool = True, evaluation_ids=(), publish=True
+):
+    """An eval client whose catalog already holds ``evaluation_ids`` as reports.
+
+    Publication is driven explicitly rather than through the lifespan, so a test
+    can also set up a complete-but-unpublished report and prove a *read* route
+    never publishes it.
+    """
+    config = eval_config(tmp_path, enabled=enabled)
+    repo = make_run_repo(tmp_path)
+    for evaluation_id in evaluation_ids:
+        write_complete_evaluation(config, repo, evaluation_id)
+    if publish and enabled:
+        ReportCatalog(config).reconcile()
+    client, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo, enabled=enabled)
+    return client, config, repo
+
+
+def test_report_feed_serializes_global_identity_hashes_and_provenance(
+    tmp_path, monkeypatch
+):
+    # One feed item must carry everything a consumer needs to cohort and verify a
+    # report without opening the per-task routes or the artifact tree.
+    client, _config, repo = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+
+    resp = client.get("/api/evaluation/reports")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["enabled"] is True
+    assert (body["cursor"], body["next_cursor"], body["has_more"]) == (0, 1, False)
+    item = body["reports"][0]
+    assert item["seq"] == 1
+    assert item["report_key"].startswith("rpt-")
+    # Source identity stays exactly the per-task surface's, so the two agree.
+    assert (item["repo_slug"], item["task_id"], item["evaluation_id"]) == (
+        repo.name,
+        RUN_TASK_ID,
+        "20260722T090000Z",
+    )
+    assert item["archived"] is True and item["target_source"] == SOURCE_ARCHIVED
+    assert item["evaluator"] == {
+        "backend": "fake", "model": "m", "schema_version": "1"
+    }
+    assert {a["name"] for a in item["artifacts"]} == set(REQUIRED_ARTIFACTS)
+    assert all(len(a["sha256"]) == 64 for a in item["artifacts"])
+    # Provenance the evidence pack cannot carry is explicitly unavailable *with a
+    # reason*, never an empty value a consumer could read as "no protocol".
+    assert item["provenance"]["protocol"]["available"] is False
+    assert item["provenance"]["protocol"]["detail"]
+    assert item["provenance"]["orchestrator_config"]["detail"]
+
+
+def test_report_feed_paging_reaches_every_report_exactly_once(tmp_path, monkeypatch):
+    client, *_ = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z", "20260722T100000Z", "20260722T110000Z"),
+    )
+
+    seen: list[int] = []
+    params = {"limit": 2}
+    while True:
+        body = client.get("/api/evaluation/reports", params=params).json()
+        seen.extend(item["seq"] for item in body["reports"])
+        if not body["has_more"]:
+            break
+        params = {"limit": 2, "after": body["next_cursor"]}
+
+    assert seen == [1, 2, 3]
+
+
+def test_report_feed_stale_cursor_is_an_empty_page_not_an_error(tmp_path, monkeypatch):
+    # A caught-up (or over-run) consumer keeps polling from the same watermark
+    # rather than being handed an error or silently restarted at the beginning.
+    client, *_ = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+
+    body = client.get("/api/evaluation/reports", params={"after": 9999}).json()
+
+    assert body["reports"] == []
+    assert (body["next_cursor"], body["has_more"]) == (9999, False)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"after": "not-a-number"},
+        {"after": "1.5"},
+        {"after": -1},
+        {"limit": 0},
+        {"limit": 100000},
+    ],
+)
+def test_report_feed_rejects_an_invalid_cursor_or_limit(tmp_path, monkeypatch, params):
+    # One documented policy, one status code: a malformed watermark fails rather
+    # than silently resetting the feed in either direction.
+    client, *_ = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+
+    resp = client.get("/api/evaluation/reports", params=params)
+
+    assert resp.status_code == 400
+
+
+def test_report_feed_reads_never_publish_or_evaluate(tmp_path, monkeypatch):
+    # Listing is strictly a read: a complete but unpublished report stays
+    # unpublished, no catalog is created, and nothing triggers an evaluation.
+    client, config, repo = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",), publish=False
+    )
+
+    body = client.get("/api/evaluation/reports").json()
+
+    assert body["reports"] == []
+    assert not (config.data_dir / "report-catalog").exists()
+    # And the per-task surface still shows the evaluation that was already there,
+    # with no extra evaluation dir minted by the feed read.
+    listed = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert [e["evaluation_id"] for e in listed["evaluations"]] == ["20260722T090000Z"]
+
+
+def test_report_bundle_fetches_a_whole_report_by_global_key(tmp_path, monkeypatch):
+    # The point of the key: a consumer that stored it fetches the artifacts
+    # without knowing the repo/task/evaluation directory layout.
+    client, *_ = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+    key = client.get("/api/evaluation/reports").json()["reports"][0]["report_key"]
+
+    resp = client.get(f"/api/evaluation/reports/{key}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["report_key"] == key
+    assert body["available"] is True and body["detail"] is None
+    assert body["entry"]["seq"] == 1
+    artifacts = body["artifacts"]
+    assert artifacts["semantic_report"]["evaluator"]["model"] == "m"
+    assert artifacts["static_metrics"] == {}
+    assert artifacts["evidence"]["target"]["source"] == SOURCE_ARCHIVED
+    assert artifacts["report_md"] == "# report\n"
+    assert body["integrity"] == {"verified": True, "mismatched": []}
+
+
+def test_report_bundle_unknown_key_is_404(tmp_path, monkeypatch):
+    client, *_ = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+
+    resp = client.get("/api/evaluation/reports/rpt-0123456789abcdef0123456789abcdef")
+
+    assert resp.status_code == 404
+    assert "rpt-0123456789abcdef" in resp.json()["detail"]
+
+
+def test_report_bundle_of_pruned_artifacts_is_unavailable_not_404(
+    tmp_path, monkeypatch
+):
+    # The entry outlives its artifacts by design, so this is a published report
+    # whose bundle cannot be served — deliberately distinct from "no such report".
+    import shutil
+
+    client, config, repo = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+    key = client.get("/api/evaluation/reports").json()["reports"][0]["report_key"]
+    shutil.rmtree(config.data_dir / "evaluations" / repo.name / RUN_TASK_ID)
+
+    resp = client.get(f"/api/evaluation/reports/{key}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert "no longer retained" in body["detail"]
+    assert body["artifacts"]["report_md"] is None
+    # Still auditable: the entry and its publication-time hashes are intact.
+    assert len(body["entry"]["artifacts"]) == len(REQUIRED_ARTIFACTS)
+    assert client.get("/api/evaluation/reports").json()["reports"][0]["seq"] == 1
+    # Export is a pure read: a missing bundle is never healed by re-evaluating
+    # the task, so no artifact dir reappears and no model call can be provoked.
+    assert not (config.data_dir / "evaluations" / repo.name / RUN_TASK_ID).exists()
+
+
+def test_report_feed_routes_are_404_when_evaluation_is_disabled(tmp_path, monkeypatch):
+    client, *_ = make_feed_client(tmp_path, monkeypatch, enabled=False)
+
+    for resp in (
+        client.get("/api/evaluation/reports"),
+        client.get("/api/evaluation/reports/rpt-x"),
+    ):
+        assert resp.status_code == 404
+        assert "disabled" in resp.json()["detail"]
+
+
+def test_report_feed_routes_require_auth(tmp_path):
+    unauthed = TestClient(api.create_app(eval_config(tmp_path)))
+    assert unauthed.get("/api/evaluation/reports").status_code == 401
+    assert unauthed.get("/api/evaluation/reports/rpt-x").status_code == 401
+
+
+def test_task_level_evaluation_routes_stay_compatible_with_the_feed(
+    tmp_path, monkeypatch
+):
+    # The feed is additive: the per-task list/detail routes the dashboard uses
+    # keep their shapes, and both surfaces name the same source evaluation.
+    client, _config, repo = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+    item = client.get("/api/evaluation/reports").json()["reports"][0]
+
+    listed = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()
+    assert listed["latest_evaluation_id"] == item["evaluation_id"]
+    assert listed["evaluations"][0]["has_semantic_report"] is True
+
+    detail = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{item['evaluation_id']}"
+    ).json()
+    bundle = client.get(f"/api/evaluation/reports/{item['report_key']}").json()
+    # Same artifacts, reached two ways: by (repo, task, evaluation) and by key.
+    assert detail["semantic_report"] == bundle["artifacts"]["semantic_report"]
+    assert detail["report_md"] == bundle["artifacts"]["report_md"]
 
 
 # -- error shapes --------------------------------------------------------------
