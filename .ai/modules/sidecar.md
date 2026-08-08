@@ -1,12 +1,13 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Modules: Sidecar Analysis and Usage
 
 Task-evaluation layers (evidence, static metrics, semantic, jobs) and
-display-only subscription usage. Foundation modules: `core.md`.
+the global report catalog, plus display-only subscription usage. Foundation
+modules: `core.md`.
 
 ## Evaluation
 
@@ -96,6 +97,33 @@ prompt/evidence and cannot read live repo files, `.ai/`, raw logs, or secrets.
 API exposes generation through `SemanticJobManager` at protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, detail readback, and
 a gated `GET /api/evaluation/doctor` readiness route.
+
+## Global Report Catalog
+
+Location: `orch_hub/report_catalog.py`
+
+Responsibility: publish archived tasks' coherent, complete L1+L2 artifact sets
+through one hub-owned append-only catalog at
+`<data_dir>/report-catalog/catalog.jsonl`. `ReportCatalog` assigns an immutable
+monotonic `seq` (global order/cursor) and a stable opaque `report_key` derived
+from the source evaluation identity. Its semantic-finalization hook is
+best-effort promptness; the deterministic startup `reconcile()` sweep is the
+correctness path and makes backfill/restart idempotent. Reports evaluated while
+active remain candidates and publish after a contained archive probe succeeds.
+
+The read/check/allocate/append transaction uses a process-wide `flock`; appends
+are fsynced single lines with torn-tail fencing. `page()` provides forward-only
+strictly-greater integer-watermark traversal; `read_bundle()` resolves a global
+key to the complete contained artifact set and reports digest verification.
+Catalog/source identity ambiguity fails closed. Published entries outlive
+retention-pruned artifacts, which remain auditable but bundle-unavailable.
+
+`unpublished_ids()` is injected as `EvaluationService.retention_guard` so a
+prune cannot destroy recoverable publication debt. The guard and publisher read
+the same artifact-derived candidate and publishability predicate; uncertainty
+defers publication but protects retention. The catalog owns publication and
+provenance only—it never evaluates, ranks, decides protocol evolution, or
+creates protocol-improvement tasks.
 
 ## Usage
 

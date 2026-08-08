@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 232fa6cd1355cdc0ac2d7399d7b7563c588ee616
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Modules: Web UI
@@ -43,8 +43,8 @@ run controls, live per-session context strips, waiting-question answer forms,
 cursor-paged/filterable grouped run history whose task groups start collapsed,
 with est-vs-actual rollups, batched evaluation-state lights, and
 effective-config disclosures, a run-scoped task-file view, task-evaluation
-Layer 1/Layer 2 sidecar view reached from Run history, remote intake start/review views,
-and recent/live log views;
+Layer 1/Layer 2 sidecar view and global evaluation-report feed reached from Run
+history, remote intake start/review views, and recent/live log views;
 `styles.css` holds the mobile-first responsive layout. The dashboard
 reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
@@ -159,6 +159,18 @@ badge or per-group list request. Effective-config rows prefer
 and label Custom from CLI model provenance. Rollups show observed dev-session
 count vs estimate, peak context, and summed wall-clock from run-record ISO
 timestamps.
+
+The `#/reports` central feed view first probes `GET /api/evaluation`, then reads
+the forward-only global feed from `GET /api/evaluation/reports`. Run history
+owns its gated `All evaluation reports →` entry through one shared page head, so
+the entry remains discoverable with populated history, zero persisted runs, or
+a cursor page pruned away. Feed rows preserve server `seq` order, expose
+repo/task/evaluation, evaluator/completeness, timestamps, key, and explicit
+run/git provenance, and link coherent identities to existing per-task detail.
+Next follows `next_cursor`; Previous reuses a client-side trail of exact visited
+cursors rather than computing across possible sequence gaps. Never-published,
+past-end, and disabled states are distinct, and the view performs no evaluation
+write/model call.
 
 Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
 Tasks tab active. It probes availability first, distinguishes disabled,

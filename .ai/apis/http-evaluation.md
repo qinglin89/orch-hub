@@ -1,13 +1,13 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # APIs: HTTP — Task Evaluation
 
-Evaluation availability, doctor, listing/readback, evidence/metrics
-generation, and semantic-job routes. Cross-cutting auth/app behavior:
-`http-core.md`.
+Evaluation availability, doctor, global report feed/export, per-task
+listing/readback, evidence/metrics generation, and semantic-job routes.
+Cross-cutting auth/app behavior: `http-core.md`.
 
 ## `GET /api/evaluation`
 
@@ -25,6 +25,38 @@ generation, and semantic-job routes. Cross-cutting auth/app behavior:
 - Disabled behavior: enabled-gated like action routes; disabled returns 404.
 - Boundary: used by dashboard/CLI smoke checks only; never gates Start/Stop,
   run history, logs, or control-dir answers.
+
+## `GET /api/evaluation/reports`
+
+- Purpose: incrementally list complete L1+L2 reports for archived tasks across
+  every managed repo, oldest-published first, without triggering evaluation or
+  reconciliation.
+- Query: optional `after=<seq>` non-negative integer watermark; optional
+  `limit` 1..500 (default 50). Malformed/negative cursors and invalid limits are
+  400. Any accepted cursor means strictly greater; past-end and sequence-gap
+  cursors resolve without silently resetting or skipping.
+- Shape: `{"enabled":true,"reports":[ReportCatalogEntry],"cursor",
+  "next_cursor","has_more"}`. Entries include global/source identity,
+  timestamps, archive/evaluator state, artifact sizes/hashes, and explicit
+  run/git/protocol/config provenance availability.
+- Integrity failure: duplicate durable `seq` or `report_key` makes cursor
+  traversal ambiguous and returns 500 naming the defect.
+- Auth/disabled behavior: protected; disabled returns 404.
+
+## `GET /api/evaluation/reports/{report_key}`
+
+- Purpose: fetch one published report's immutable import bundle from its opaque
+  global key without constructing repo/task/evaluation paths.
+- Shape: `{"report_key","entry","available","detail","artifacts",
+  "integrity"}`. An available bundle contains parsed evidence/static/semantic
+  JSON plus raw `report_md`; `integrity` is
+  `{verified,mismatched,unverified}`.
+- Availability: unknown key is 404. A published report whose complete artifact
+  set was pruned, partially removed, unreadable, unparseable, unsafe, or
+  identity-incoherent returns 200 with `available:false` and an explicit reason.
+  Digest mismatch/unavailability is reported while content remains available
+  for the consumer's decision.
+- Auth/disabled behavior: protected; disabled returns 404.
 
 ## `GET /api/repos/{repo_id}/evaluations/{task_id}`
 

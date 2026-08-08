@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Modules: Service Surface
@@ -16,7 +16,7 @@ Responsibility: expose the implemented HTTP foundation as a thin FastAPI
 adapter over shared core functions. `create_app(config=None, *,
 run_manager=None, intake_manager=None, evaluation_service=None,
 static_evaluator=None, semantic_evaluator=None, semantic_job_manager=None,
-usage_service=None)`
+report_catalog=None, usage_service=None)`
 builds an app with a
 default-deny bearer-token middleware,
 public `GET /api/health`, public dashboard shell routes served with
@@ -58,6 +58,8 @@ intake routes are `POST /api/intakes`, `GET /api/intakes`,
 `POST /api/intakes/{intake_id}/cancel`; manager errors map to 404/409/400 and
 agent-turn failures are returned as auditable intake records rather than 5xx.
 The evaluation routes are `GET /api/evaluation`,
+`GET /api/evaluation/reports`,
+`GET /api/evaluation/reports/{report_key}`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}`,
 `GET /api/evaluation/doctor`,
@@ -73,6 +75,12 @@ Evaluation detail returns `evidence`, `static_metrics`,
 `semantic_report`, and `report_md`; evaluation list summaries include
 best-effort semantic evaluator identity for history comparison, and the doctor
 route reports Layer 2 backend availability without a model call.
+The default `ReportCatalog` is composed before the evaluation stack: its
+`unpublished_ids` guard prevents retention from deleting publication debt, the
+default semantic evaluator publishes after its complete artifact set is
+durable, and the lifespan reconciles existing/newly archived reports before
+serving. The global feed/export routes are read-only thin adapters over that
+append-only catalog; they never evaluate or reconcile on request.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.

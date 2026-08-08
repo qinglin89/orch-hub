@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 232fa6cd1355cdc0ac2d7399d7b7563c588ee616
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -90,6 +90,16 @@ Implemented behavior:
   carry one deduplicated newest-evaluation state per task group; the inline
   `Evaluation →` action shows a compact grey/amber/green light for not
   evaluated, L1, or L1 + L2, with the exact state only in title/ARIA text.
+- A central evaluation-report feed at `#/reports` is entered through the gated
+  `All evaluation reports →` link owned by the Run-history page in every state:
+  populated, zero runs, or a cursor page whose runs vanished. The view probes
+  evaluation availability before fetching `GET /api/evaluation/reports`, keeps
+  the server's ascending global order, shows sequence/source/evaluator/L1+L2 and
+  explicit run/git provenance, and links coherent source rows to the existing
+  per-task evaluation detail. Forward paging sends the server's `next_cursor`;
+  exact Previous navigation uses a client-side trail of visited cursors because
+  sequence gaps make arithmetic reconstruction unsound. Empty feed, past-end
+  page, and disabled subsystem remain distinct states.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls

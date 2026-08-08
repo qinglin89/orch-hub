@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Modules
@@ -24,6 +24,7 @@ Full responsibilities live in the detail files below.
 | Static metrics | `orch_hub/static_metrics.py` | deterministic metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation; backend isolation; doctor |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
+| Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained bundle reads |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
 | StatusLine writer | `orch_hub/statusline.py` | legacy optional statusLine fallback feeding the usage sink |
 | Intake manager | `orch_hub/intake.py` | remote intake lifecycle/audit; off-lock turns; verified confirm |
@@ -72,6 +73,9 @@ Full responsibilities live in the detail files below.
 - Semantic evaluation reads only the bounded evidence/static prompt; writes
   only `semantic_report.json` + `report.md` under the evaluation dir; backends
   enforce read isolation structurally.
+- Report catalog publishes complete archived-task artifacts with stable global
+  identity/order and explicit provenance/integrity; it does not judge reports or
+  decide protocol evolution. Its retention guard preserves unpublished debt.
 - Usage reads provider-owned local signals plus the hub-owned Claude store and
   may run Claude's local `/usage` command only when its envelope proves zero
   model activity. The legacy statusLine writer captures only whitelisted

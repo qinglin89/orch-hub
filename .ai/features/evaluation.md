@@ -1,12 +1,12 @@
 ---
-last-updated: 2026-07-30
-verified-against: d47c1abaa9ffe73ee11d53e7835aa02c8437f14d
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Features: Task Evaluation
 
-Evidence foundation, deterministic Layer 1 static metrics, and Layer 2
-semantic evaluation. Other core features: `core.md`.
+Evidence foundation, deterministic Layer 1 static metrics, Layer 2 semantic
+evaluation, and the cross-repo publication feed. Other core features: `core.md`.
 
 ## Task Evaluation Foundation
 
@@ -167,3 +167,56 @@ Implemented behavior:
 - Backend/model failures or non-conforming output remove the reserved evaluation
   dir and surface as persisted failed jobs with bounded diagnostics; disabled
   mode still fails closed at service/API boundaries.
+
+## Global Evaluation Report Feed
+
+Status: implemented
+
+Description: Publish complete L1+L2 reports for archived tasks through one
+durable, globally ordered feed without walking every repo/task evaluation tree.
+The hub publishes cohortable artifacts; it does not rank reports, decide
+protocol evolution, or create protocol-improvement tasks.
+
+Modules: report_catalog, evaluation, semantic, task_store, models, api, web.
+
+APIs: internal `ReportCatalog.record_evaluation`, `reconcile`, `page`,
+`read_bundle`, and `unpublished_ids`; protected
+`GET /api/evaluation/reports[?after=<seq>&limit=<n>]` and
+`GET /api/evaluation/reports/{report_key}`; dashboard `#/reports`.
+
+Implemented behavior:
+
+- `<data_dir>/report-catalog/catalog.jsonl` is append-only. Each immutable entry
+  has a monotonic global `seq` for order/cursors and a stable opaque
+  `report_key` derived from `(repo_slug, task_id, evaluation_id)` for retrieval;
+  scoped evaluation timestamps never define global order.
+- Publication requires the coherent all-or-nothing artifact set
+  (`evidence.json`, `static_metrics.json`, `semantic_report.json`, `report.md`)
+  and an archived task. A semantic-finalization hook publishes after durability;
+  startup reconciliation deterministically/idempotently backfills missed and
+  already-existing reports, including reports evaluated before archive.
+- Append allocation is guarded across threads/processes with `flock`; each line
+  is flushed/fsynced and torn tails are fenced. Duplicate durable sequences or
+  keys make all reads/publication fail closed instead of silently skipping a
+  report.
+- Retention asks the catalog for unpublished debt before pruning. Publication
+  and retention share one artifact-derived publishability predicate; uncertain
+  candidates are retried by publication and protected from deletion. Published
+  entries outlive pruned artifacts and remain auditable.
+- Feed paging is ascending and forward-only: `after` is a non-negative integer
+  watermark, pages return entries strictly after it plus `next_cursor` and
+  `has_more`, and `limit` is 1..500 (default 50). Invalid cursors/limits fail
+  with 400; stale or gap cursors retain strictly-greater semantics.
+- Bundle lookup by global key is contained and all-or-nothing. Unknown keys are
+  404; published-but-pruned, partial, unreadable, unparseable, or incoherently
+  identified bundles are 200 with `available:false`. Served content reports
+  strict digest `verified`, `mismatched`, and `unverified` state.
+- Feed items carry source/global identity, generated/cataloged times,
+  evaluation-time target source plus publication-time archived state, evaluator
+  backend/model/schema, artifact size/hash manifests, and run/git provenance.
+  Protocol/config provenance absent from evidence is explicitly unavailable
+  with a reason, never inferred.
+- `#/reports` preserves global order, uses a visited-cursor trail for exact
+  Previous navigation, and links each coherent row to existing per-task report
+  detail. Every Run-history state exposes the gated `All evaluation reports →`
+  entry, including histories with zero runs or a cursor page pruned away.

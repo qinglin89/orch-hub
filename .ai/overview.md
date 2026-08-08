@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Project Overview
@@ -15,7 +15,8 @@ binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
 the mobile dashboard, display-only agent subscription usage, Bark
 notifications, remote intake-task, the task-evaluation foundation,
-deterministic static task metrics, and the optional semantic task evaluator:
+deterministic static task metrics, the optional semantic task evaluator, and
+the global evaluation-report feed:
 read the
 ai-native-development local registry, list
 managed repos, report launch
@@ -36,7 +37,11 @@ protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
 CLI semantic evaluator through persisted async job records that prevent
 duplicate in-flight model calls and link completed jobs to `semantic_report.json`
 plus `report.md`, and expose evaluation evidence/static/semantic artifacts
-through protected HTTP routes. The dashboard renders Claude/Codex subscription
+through protected HTTP routes. Complete L1+L2 reports for archived tasks are
+published to one append-only, globally ordered catalog with stable keys,
+cursor-paged discovery, and contained bundle export; reconciliation heals
+missed publication without re-running the evaluator. The dashboard renders
+Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
 Codex is read from local session rollout `rate_limits`; Claude reads a
 hub-owned observation store primarily fed from Claude Code's structured local
@@ -53,7 +58,8 @@ task-evaluation sidecar with
 Layer 1 static metrics, doctor-gated Layer 2 semantic job
 running/failed/completed controls/report rendering, history model/version
 comparison, and artifact copy/download affordances; later slices add IM bot
-control.
+control. A central report view preserves the catalog's global publication order
+and links back to existing per-task detail.
 
 ## Users
 
@@ -103,6 +109,10 @@ control.
   readback, semantic doctor readiness, active or archived task targeting,
   history selection with evaluator model/version identity, retention, and
   artifact inspection without target-repo mutation.
+- Publish archived tasks' complete L1+L2 reports through one durable cross-repo
+  feed with global order/identity, explicit artifact integrity/provenance, and
+  contained bundle retrieval. orch-hub publishes; external consumers decide
+  protocol evolution and any resulting improvement work.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, log, intake,
   and task-evaluation views.
@@ -122,6 +132,8 @@ control.
 - Do not hand-edit deployed protocol/orchestrator copies in target repos; canonical changes belong in ai-native-development.
 - Do not treat subscription usage as repo health or launch readiness, and do
   not start model turns solely to refresh quota data.
+- Do not rank global evaluation reports, decide protocol evolution, or create
+  protocol-improvement tasks from the publication path.
 
 ## Tech Stack
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Architecture
@@ -8,7 +8,8 @@ verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
 orch-hub is a local control plane: inspect managed repos, start orchestrator
 runs, answer human prompts, read run state, show display-only subscription
 capacity, draft tasks via confirmed intake, and build/view read-only
-task-evaluation artifacts. It coordinates existing
+task-evaluation artifacts plus publish complete archived-task reports through a
+global feed. It coordinates existing
 systems rather than replacing them: ai-native-development remains the
 registry, target repos own their task files and deployed orchestrator
 payloads, and orch-hub owns only its service surface plus external run state.
@@ -84,6 +85,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
+| Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; consumers decide protocol evolution |
 | Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback; never gates |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
 | Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
@@ -151,6 +153,17 @@ startup reconciliation stays silent. The dashboard doctor-gates the semantic
 trigger, polls persisted job state, and keeps raw artifacts behind
 Copy/Download.
 
+Global report publication: a coherent durable L1+L2 evaluation whose task is
+archived → semantic-completion hook or deterministic startup reconciliation →
+one append-only catalog entry with global `seq`, stable opaque `report_key`,
+artifact hashes, evaluator identity, and explicit provenance availability.
+Reconciliation retries missed/newly eligible reports without a model call; a
+shared retention guard protects publishable or undecidable unpublished
+artifacts until cataloged. Protected forward-cursor list and by-key contained
+bundle routes are read-only. Published entries remain auditable after retention
+prunes their artifacts; the hub exposes integrity/unavailability and leaves
+interpretation or protocol-evolution decisions to external consumers.
+
 Subscription usage is a sidecar display flow: `UsageService` reads Claude
 Code's whitelisted structured utilization cache first, then merges the optional
 statusLine sink, serves the hub-owned observation store, and reads Codex from
@@ -191,6 +204,9 @@ never feed attention, readiness, run state, or launch/intake gates.
 - Semantic jobs own Layer 2 job state, duplicate in-flight prevention,
   failed/retryable diagnostics, and completed `evaluation_id` linkage — not
   evaluation evidence or target state.
+- Report catalog owns cross-repo publication identity/order, reconciliation,
+  provenance/hash manifests, bundle containment, and publication-debt retention
+  protection—not evaluation judgment or protocol-evolution policy.
 - Evaluation API/dashboard presentation owns sidecar routing, readback, doctor
   gating, job polling, history comparison; never gates run control or inlines
   raw logs.
@@ -237,6 +253,9 @@ never feed attention, readiness, run state, or launch/intake gates.
 - Hub-owned run dirs stay outside target repo working trees.
 - Hub-owned evaluation artifacts stay outside target trees and do not mutate
   task/run/protocol state.
+- Global report entries are append-only and uniquely ordered; retained or pruned
+  artifact state is reported explicitly, and publication never decides protocol
+  evolution.
 - Hub-owned unconfirmed intake drafts are not tasks and cannot be launched.
 - A persisted unended run and a non-terminal hub-driven intake must not coexist
   for one repo; admission conflicts are structured 409s, not readiness

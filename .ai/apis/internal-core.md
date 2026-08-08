@@ -1,13 +1,13 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # APIs: Internal — Core and Sidecar
 
-Registry/readiness/task-store interfaces, evaluation/static/semantic/usage
-service contracts, and cross-cutting API conventions. Run/intake/control/log/
-history/notifier interfaces: `internal-runtime.md`.
+Registry/readiness/task-store interfaces, evaluation/static/semantic/report-
+catalog/usage service contracts, and cross-cutting API conventions.
+Run/intake/control/log/history/notifier interfaces: `internal-runtime.md`.
 
 ## Registry Provider
 
@@ -132,6 +132,29 @@ the target repo; this enforces evidence-boundedness structurally rather than
 trusting prompt instructions. It accepts an optional usage observer called with
 stdout after the turn returns; observer failures are swallowed so usage
 bookkeeping cannot change semantic-evaluation outcomes.
+
+## Global Report Catalog
+
+Input: config/data dir, managed repo + exact task/evaluation identity for live
+publication, or the existing evaluations tree for reconciliation.
+
+Output: immutable `ReportCatalogEntry` values, forward-cursor `ReportPage`
+values, all-or-nothing `ReportBundle` values, and unpublished evaluation ids for
+retention protection.
+
+Behavior: `ReportCatalog` shares the evaluation gate. It publishes only
+coherent complete L1+L2 artifacts whose task is archived, assigning a monotonic
+global `seq` and stable source-derived `report_key` in an append-only fsynced
+JSONL catalog. A cross-process lock serializes allocation; startup
+`reconcile()` deterministically/idempotently backfills missed and newly archived
+reports without evaluating. `page(after_seq, limit)` is strictly-greater,
+ascending, and forward-only; duplicate durable sequences/keys fail closed.
+`read_bundle(entry)` performs contained by-key reads, requires the whole artifact
+set, and reports strict digest verified/mismatched/unverified state while
+preserving pruned entries as explicitly unavailable. `unpublished_ids()` and
+publication share one artifact-derived eligibility rule; uncertain debt is
+protected from pruning. The catalog publishes provenance/artifacts only and
+never decides protocol evolution.
 
 ## Usage Service
 

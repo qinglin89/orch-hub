@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-08-08
+verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ---
 
 # Design Principles and Decisions
@@ -19,6 +19,9 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 - Read-only task evaluation: evidence packs, deterministic static reports, and
   evidence-bounded semantic reports are hub-owned sidecar artifacts and must not
   mutate target tasks, run state, or protocol memory.
+- Publication boundary: orch-hub durably publishes complete archived-task
+  evaluation artifacts, identity, hashes, and provenance; downstream consumers
+  alone interpret them, decide protocol evolution, and create improvement work.
 - Display-only capacity: agent subscription usage is an operator signal, not a
   readiness, attention, run-state, launch, or intake gate.
 - Per-repo serialization: one active run per target repo to protect the working tree.
@@ -62,6 +65,8 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
   lifecycle decisions.
 - Letting semantic evaluator backends read live target-repo state outside the
   persisted evidence/static prompt boundary.
+- Ranking published evaluation reports, inferring protocol changes from them, or
+  creating protocol-improvement tasks inside orch-hub's publication path.
 - Starting model turns solely to refresh subscription usage, scraping provider
   UI/private endpoints, spending Codex reset credits, or treating quota data as
   repo health.
@@ -71,10 +76,11 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 
 ## Open Design Items
 
-- Retention/reconciliation policy for hub-owned run dirs, intake dirs, and
-  run dirs and intake dirs under `ORCH_HUB_DATA_DIR`, including per-run
+- Retention/reconciliation policy for hub-owned run, intake, and evaluation
+  state under `ORCH_HUB_DATA_DIR`, including per-run
   `events.jsonl` history and stuck `confirming` intake records after a
   mid-write process crash. Evaluation artifact retention is implemented as a
-  per-task newest-N cap.
+  per-task newest-N cap; the append-only report catalog deliberately outlives
+  pruned artifacts and currently grows without bound.
 - Exact route schema beyond the implemented repo/task/run/escalation/log/history/
   intake/evaluation/usage and dashboard-shell API surface.
