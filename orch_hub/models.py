@@ -1792,7 +1792,7 @@ class ReportBundle:
     ``mismatched`` names artifacts whose bytes no longer hash to the ``sha256``
     the entry recorded at publication, and ``unverified`` names artifacts the entry
     records no usable digest for (a manifest an older/leaner writer never wrote, or
-    one a hand-edit left malformed or self-contradictory). Neither is an
+    one a hand-edit left malformed or recorded more than once). Neither is an
     availability failure — the content is still served — because the consumer, not
     the hub, decides what to do about a report edited or unverifiable after the
     fact; the hub's job is to make the discrepancy impossible to miss, which is

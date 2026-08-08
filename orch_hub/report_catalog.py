@@ -109,6 +109,7 @@ import logging
 import os
 import re
 import threading
+from collections import Counter
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -1184,22 +1185,27 @@ def _identity_fault(entry: ReportCatalogEntry) -> str | None:
 def _cataloged_digests(entry: ReportCatalogEntry) -> dict[str, str]:
     """The one usable recorded digest per artifact name in an entry's manifest.
 
-    Verification only means something against a digest that could actually be the
-    sha256 of some content, recorded exactly once. A name whose manifest is
-    malformed (not 64 hex characters) or self-contradictory (two entries with
-    different digests, from a hand-edit or a merged line) has no usable digest and
-    is left out, so the read path reports that artifact as *unverified* instead of
-    silently comparing against whichever copy happened to come last in the list.
+    Verification only means something against a digest recorded the one way
+    publication records one: exactly one row per artifact name (``_build_entry``
+    writes a single digest per :data:`REQUIRED_ARTIFACTS` name), holding something
+    that could actually be a sha256. A name failing either test has no usable
+    digest and is left out, so the read path reports that artifact as *unverified*
+    rather than comparing against a value it picked out of a damaged manifest.
+
+    Repetition disqualifies a name whether or not the repeated rows agree. Agreeing
+    copies are not the safer case they look like: the entry is still a line the
+    writer could not have produced, so nothing about its manifest is evidence of
+    anything — and a reader that accepts them is really checking "no row
+    contradicts", which is a strictly weaker fact than the one ``verified``
+    reports. Counting also states the rule once, instead of spending a
+    same-name value comparison to reach the same verdict for disagreeing rows.
     """
-    digests: dict[str, str | None] = {}
-    for artifact in entry.artifacts:
-        digest: str | None = (
-            artifact.sha256 if _SHA256_HEX.match(artifact.sha256) else None
-        )
-        if artifact.name in digests and digests[artifact.name] != digest:
-            digest = None  # contradictory manifest: nothing to verify against
-        digests[artifact.name] = digest
-    return {name: value for name, value in digests.items() if value is not None}
+    counts = Counter(artifact.name for artifact in entry.artifacts)
+    return {
+        artifact.name: artifact.sha256
+        for artifact in entry.artifacts
+        if counts[artifact.name] == 1 and _SHA256_HEX.match(artifact.sha256)
+    }
 
 
 def _next_seq(existing: list[ReportCatalogEntry]) -> int:

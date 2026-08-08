@@ -1293,22 +1293,28 @@ def test_bundle_serves_a_non_object_artifact_as_the_value_it_holds(
     assert bundle.verified is True and bundle.mismatched == ()
 
 
-@pytest.mark.parametrize("damage", ["absent", "contradictory", "malformed"])
+@pytest.mark.parametrize("damage", ["absent", "repeated", "contradictory", "malformed"])
 def test_bundle_without_a_usable_digest_reports_the_artifact_unverified(
     tmp_path, damage
 ):
-    # A digest that was never recorded, that a second manifest entry contradicts, or
-    # that cannot be a sha256 at all was compared against nothing. Claiming
-    # verification for it would empty the content-hash contract that is the reason a
-    # consumer trusts an imported report; the artifact is still served, because only
-    # the manifest is damaged.
+    # A digest that was never recorded, that a second manifest row repeats or
+    # contradicts, or that cannot be a sha256 at all was not recorded the one way
+    # publication records one. Claiming verification for it would empty the
+    # content-hash contract that is the reason a consumer trusts an imported
+    # report; the artifact is still served, because only the manifest is damaged.
     config = cfg(tmp_path)
     write_eval(config)
     catalog(config).reconcile()
     rows = lines(config)
+    published = next(a for a in rows[0]["artifacts"] if a["name"] == EVIDENCE_NAME)
     kept = [a for a in rows[0]["artifacts"] if a["name"] != EVIDENCE_NAME]
     extra = {
         "absent": [],
+        # The case a value comparison cannot catch: both rows carry the *real*
+        # digest, so every check a lenient reader could make passes — and a
+        # manifest publication never wrote would be reported as a fully verified
+        # import.
+        "repeated": [published, dict(published)],
         "contradictory": [
             {"name": EVIDENCE_NAME, "size": 1, "sha256": "a" * 64},
             {"name": EVIDENCE_NAME, "size": 1, "sha256": "b" * 64},
