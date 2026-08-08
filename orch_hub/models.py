@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -1558,6 +1558,161 @@ class StoredEvaluation:
         return {
             "evaluation_id": self.evaluation_id,
             "artifacts": list(self.artifacts),
+        }
+
+
+@dataclass(frozen=True)
+class ReportArtifact:
+    """One artifact file of a cataloged report, with its content hash.
+
+    Part of a :class:`ReportCatalogEntry` (:mod:`orch_hub.report_catalog`). The
+    hash is what makes an imported report verifiable and de-duplicable by an
+    external consumer: two catalog entries with the same ``sha256`` for
+    ``report.md`` carry the same report body regardless of which repo/task/
+    evaluation id produced them. ``size`` is the byte length at catalog time.
+    Recorded once, at catalog time, and never rewritten — so a later
+    retention prune of the artifacts leaves the hash as the durable record of
+    what was published.
+    """
+
+    name: str
+    size: int
+    sha256: str
+
+    def to_dict(self) -> dict:
+        return {"name": self.name, "size": self.size, "sha256": self.sha256}
+
+
+@dataclass(frozen=True)
+class ReportProvenance:
+    """Cohorting provenance for one cataloged report, from durable artifacts only.
+
+    Part of a :class:`ReportCatalogEntry`. A consumer importing many reports
+    needs to group them by what produced them — which runs, which repo state,
+    which protocol/orchestrator configuration. Every field here is read from the
+    evaluation's own persisted ``evidence.json``, never re-derived from live
+    repo/run state, so the entry stays reproducible from the artifacts it names.
+
+    The ``*_available`` flags are the load-bearing part: provenance the evidence
+    pack does not carry is reported as explicitly **unavailable with a reason**,
+    never as an empty value a consumer could mistake for "no runs" or "default
+    config". Today ``protocol`` and ``orchestrator_config`` are always
+    unavailable — evidence packs carry neither a ``.ai-protocol`` version nor a
+    run's ``effective-config`` snapshot — and their ``detail`` says so.
+    ``git_newest_sha`` is the newest commit in the evidence git window (git log
+    is reverse-chronological), i.e. roughly the repo state the task ended at, not
+    necessarily current HEAD.
+    """
+
+    runs_available: bool = False
+    run_ids: tuple[str, ...] = ()
+    runs_detail: str | None = None
+    git_available: bool = False
+    git_since: str | None = None
+    git_until: str | None = None
+    git_commit_count: int = 0
+    git_newest_sha: str | None = None
+    git_detail: str | None = None
+    protocol_available: bool = False
+    protocol_detail: str | None = None
+    config_available: bool = False
+    config_detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "runs": {
+                "available": self.runs_available,
+                "run_ids": list(self.run_ids),
+                "count": len(self.run_ids),
+                "detail": self.runs_detail,
+            },
+            "git": {
+                "available": self.git_available,
+                "since": self.git_since,
+                "until": self.git_until,
+                "commit_count": self.git_commit_count,
+                "newest_sha": self.git_newest_sha,
+                "detail": self.git_detail,
+            },
+            "protocol": {
+                "available": self.protocol_available,
+                "detail": self.protocol_detail,
+            },
+            "orchestrator_config": {
+                "available": self.config_available,
+                "detail": self.config_detail,
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ReportCatalogEntry:
+    """One completed L1+L2 evaluation report, published in the global catalog.
+
+    The line format of the append-only catalog (:mod:`orch_hub.report_catalog`)
+    and the item an external protocol-evolution consumer imports. It exists so a
+    consumer can discover reports across *every* managed repo through one ordered
+    feed instead of walking each repo's tasks and each task's evaluation dirs.
+
+    Two identities, deliberately distinct:
+
+    - **source identity** — ``repo_slug``/``task_id``/``evaluation_id``, the
+      hub-owned path that locates the artifacts, plus display ``repo_name``/
+      ``repo_path``. Unchanged from the existing per-task evaluation surface, so
+      task-level routes stay compatible.
+    - **global identity** — ``seq``, the catalog's monotonic append counter, and
+      ``report_key``, a stable opaque digest of the source identity. The key is
+      what a consumer stores and re-fetches by: it carries no ordering
+      information, so a consumer never compares scoped ``evaluation_id``
+      timestamps (which collide across repos) to reason about order. ``seq``
+      carries the order, and is the cursor.
+
+    ``archived`` records whether the evaluated task file was already in
+    ``.ai-tasks/archive/`` when the evidence was built — the feed's eligibility
+    fact, stamped from the artifact rather than re-read from the live repo.
+    ``generated_ts`` and the evaluator triple come from the semantic report, so
+    reports are cohortable by evaluator model/schema. Entries are immutable once
+    appended: an entry whose artifacts a later retention prune removed stays in
+    the catalog as an auditable record of a report that once existed.
+    """
+
+    seq: int
+    report_key: str
+    cataloged_ts: str | None
+    repo_name: str
+    repo_slug: str
+    repo_path: Path | None
+    task_id: str
+    evaluation_id: str
+    generated_ts: str | None
+    target_source: str | None
+    archived: bool
+    backend: str | None = None
+    model: str | None = None
+    schema_version: str | None = None
+    artifacts: tuple[ReportArtifact, ...] = ()
+    provenance: ReportProvenance = field(default_factory=ReportProvenance)
+
+    def to_dict(self) -> dict:
+        return {
+            "seq": self.seq,
+            "report_key": self.report_key,
+            "cataloged_ts": self.cataloged_ts,
+            "repo_name": self.repo_name,
+            "repo_slug": self.repo_slug,
+            "repo_path": str(self.repo_path) if self.repo_path else None,
+            "task_id": self.task_id,
+            "evaluation_id": self.evaluation_id,
+            "generated_ts": self.generated_ts,
+            "target_source": self.target_source,
+            "archived": self.archived,
+            "evaluator": {
+                "backend": self.backend,
+                "model": self.model,
+                "schema_version": self.schema_version,
+            },
+            "artifacts": [artifact.to_dict() for artifact in self.artifacts],
+            "provenance": self.provenance.to_dict(),
         }
 
 

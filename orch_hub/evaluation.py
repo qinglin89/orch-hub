@@ -166,7 +166,13 @@ def evaluation_artifact_dir(
 
 
 def _slug(value: str) -> str:
-    """Make a repo name safe as a path component (matches ``runs._slug``)."""
+    """Make a repo name safe as a path component (matches ``runs._slug``).
+
+    Idempotent: a value this function already produced passes through unchanged,
+    so a caller holding a slug rather than a repo name — the report catalog
+    resolving an entry's artifact dir from its stored ``repo_slug`` — can route
+    through the same contained path helpers without a second slug rule.
+    """
     return _SLUG.sub("-", value).strip("-") or "x"
 
 
@@ -344,8 +350,13 @@ def _write_evidence(path: Path, data: dict) -> None:
     os.replace(tmp, path)
 
 
-def _evaluation_order_key(evaluation_id: str) -> tuple[str, int]:
+def evaluation_order_key(evaluation_id: str) -> tuple[str, int]:
     """Chronological sort key for an evaluation id: ``(stamp, suffix)``.
+
+    Public because the report catalog's backfill
+    (:meth:`orch_hub.report_catalog.ReportCatalog.reconcile`) must order existing
+    evaluations by the same rule this module's listing uses, so a backfilled
+    global sequence follows generation order instead of directory-walk order.
 
     An id is a fixed-width UTC stamp (:data:`_EVAL_ID_TS`, hyphen-free, so it
     sorts chronologically as a string) with an optional ``-N`` same-second
@@ -473,7 +484,7 @@ class EvaluationService:
         and, for each, the artifact filenames it holds (``evidence.json`` /
         ``static_metrics.json``), so the caller learns which evaluations exist and
         what each carries without reading any artifact body. Newest-first by id
-        via :func:`_evaluation_order_key`: the id is a UTC stamp with an optional
+        via :func:`evaluation_order_key`: the id is a UTC stamp with an optional
         unpadded ``-N`` same-second collision suffix, so it is ordered by
         ``(stamp, numeric suffix)`` (a plain reverse lexical sort would rank a
         same-second ``-10`` before ``-9`` and report a stale latest). An absent
@@ -496,7 +507,7 @@ class EvaluationService:
             for child in parent.iterdir()
             if child.is_dir()
         ]
-        stored.sort(key=lambda e: _evaluation_order_key(e.evaluation_id), reverse=True)
+        stored.sort(key=lambda e: evaluation_order_key(e.evaluation_id), reverse=True)
         return stored
 
     def prune_evaluations(

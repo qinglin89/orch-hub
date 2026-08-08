@@ -26,6 +26,7 @@ private-network deployment assumptions are documented in the README.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -75,6 +76,7 @@ from .orch_config import (
 )
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
+from .report_catalog import ReportCatalog
 from .runs import (
     BlockedTaskError,
     LaunchBlockedError,
@@ -98,6 +100,8 @@ from .task_store import (
     read_task_content,
 )
 from .usage import ClaudeUsageCollector, UsageService
+
+_log = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
 """Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
@@ -409,6 +413,26 @@ def _history_evaluation_states(entries, evaluation: EvaluationService) -> list[d
     return states
 
 
+def _reconcile_report_catalog(catalog: ReportCatalog) -> None:
+    """Backfill the global report feed at startup, best-effort.
+
+    Isolated the way notification delivery is: the catalog is a publication
+    sidecar, so a disabled subsystem (:class:`EvaluationDisabledError` — the
+    normal state on a hub with evaluation off) or a broken/unreadable catalog
+    file must never keep the service from starting and serving run control. A
+    real failure is logged so a persistently unpublishable feed is visible in
+    service logs rather than silently lagging forever.
+    """
+    try:
+        catalog.reconcile()
+    except EvaluationDisabledError:
+        return
+    except Exception as exc:  # noqa: BLE001 - publication is best-effort
+        _log.warning(
+            "report catalog reconciliation failed (%s): %s", type(exc).__name__, exc
+        )
+
+
 def create_app(
     config: Config | None = None,
     *,
@@ -418,6 +442,7 @@ def create_app(
     static_evaluator: StaticEvaluator | None = None,
     semantic_evaluator: SemanticEvaluator | None = None,
     semantic_job_manager: SemanticJobManager | None = None,
+    report_catalog: ReportCatalog | None = None,
     usage_service: UsageService | None = None,
 ) -> FastAPI:
     """Build the FastAPI app, resolving config from the environment by default.
@@ -465,6 +490,14 @@ def create_app(
     two independently injected managers otherwise keep two coordinators, each
     blind to the other subsystem, which admits exactly the overlap this exists to
     prevent. The chosen coordinator is exposed on ``app.state.repo_admission``.
+
+    ``report_catalog`` is the single :class:`~orch_hub.report_catalog.ReportCatalog`
+    the global report feed publishes through. The default semantic evaluator is
+    wired to it, so every completed L1+L2 report is appended once its artifacts
+    are durable, and the lifespan reconciles it at startup to backfill whatever
+    the live hook missed. An injected ``semantic_evaluator`` keeps its own
+    (possibly absent) catalog, which is what a hermetic Layer-2 test wants; the
+    startup backfill still runs over this one.
     """
     resolved = config if config is not None else Config.from_env()
     # Adopt an injected manager's coordinator (see the docstring); with both
@@ -544,6 +577,13 @@ def create_app(
         if static_evaluator is not None
         else StaticEvaluator(resolved, evaluation_service=evaluation)
     )
+    # The global report feed's durable catalog, built before the semantic evaluator
+    # because the evaluator publishes to it: every completed L1+L2 evaluation is
+    # appended once its artifact set is durable, so an external protocol-evolution
+    # consumer can poll one ordered cross-repo feed instead of walking every repo's
+    # tasks. Constructing it touches no disk; it shares the evaluation gate, so a
+    # disabled hub publishes and reconciles nothing.
+    catalog = report_catalog if report_catalog is not None else ReportCatalog(resolved)
     # The semantic (Layer 2) evaluator shares the same evaluation service + static
     # evaluator, so an injected fake service flows to all three layers. Its default
     # backend is the concrete Claude CLI driver (:class:`ClaudeSemanticBackend`,
@@ -567,6 +607,7 @@ def create_app(
                 effort=resolved.eval_effort,
                 usage_observer=claude_usage_observer,
             ),
+            catalog=catalog,
         )
     )
     # The async semantic-job manager wraps the (long, synchronous) semantic
@@ -600,6 +641,14 @@ def create_app(
         # lifespan scope straight through, so this runs regardless of the token.
         intake.reconcile_orphans()
         semantic_jobs.reconcile_orphans()
+        # Backfill the global report feed from the artifacts themselves: reports
+        # written before this feature existed, or whose live publication hook
+        # failed / never ran, are cataloged here in deterministic generation
+        # order. Idempotent (identity is derived from the source evaluation, not
+        # allocated), so a restart adds nothing and never mints a second global
+        # identity. Isolated like the notification paths — a broken catalog must
+        # not stop the service from serving run control.
+        _reconcile_report_catalog(catalog)
         monitor.start()
         try:
             yield

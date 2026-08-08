@@ -41,6 +41,7 @@ from orch_hub.models import (
     SemanticReport,
     SemanticScore,
 )
+from orch_hub.report_catalog import ReportCatalog
 from orch_hub.semantic import (
     SEMANTIC_BACKEND_CLAUDE,
     SEMANTIC_END,
@@ -200,7 +201,7 @@ def _fake_git(args, **kwargs):
 
 def semantic_evaluator(
     *, enabled: bool = True, service=None, static=None, backend=None, clock=None,
-    config: Config | None = None,
+    catalog=None, config: Config | None = None,
 ) -> SemanticEvaluator:
     cfg = config or Config(
         ai_native_path=Path("/ai-native"),
@@ -212,6 +213,7 @@ def semantic_evaluator(
         evaluation_service=service,
         static_evaluator=static,
         backend=backend,
+        catalog=catalog,
         clock=clock or (lambda: FIXED_TS),
     )
 
@@ -750,6 +752,116 @@ def test_evaluate_success_still_auto_prunes_to_cap(tmp_path):
     remaining = _service(config).list_evaluations(repo, TASK)
     assert [s.evaluation_id for s in remaining] == [second.evaluation_id]
     assert not (config.data_dir / "evaluations" / "alpha" / TASK / first.evaluation_id).exists()
+
+
+# -- global report catalog hook -----------------------------------------------
+# The evaluator publishes each completed report to the cross-repo feed. Catalog
+# mechanics live in tests/test_report_catalog.py; these cover the seam itself:
+# when it fires, when it must not, and that it can never break an evaluation.
+
+
+class RaisingCatalog:
+    """A report catalog whose publication always fails."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def record_evaluation(self, repo: ManagedRepo, task_id: str, evaluation_id: str):
+        self.calls.append((task_id, evaluation_id))
+        raise RuntimeError("catalog unwritable")
+
+
+def test_evaluate_publishes_the_completed_report_to_the_catalog(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
+
+    report = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope()),
+        catalog=catalog,
+    ).evaluate(repo, TASK)
+
+    entries = catalog.entries()
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry.seq == 1
+    assert (entry.repo_slug, entry.task_id, entry.evaluation_id) == (
+        "alpha", TASK, report.evaluation_id
+    )
+    # Stamped from the artifact the evaluation actually wrote.
+    assert entry.archived is True and entry.target_source == SOURCE_ARCHIVED
+    assert entry.model == "fake-model"
+    # A later reconciliation re-derives the same identity, so the hook and the
+    # sweep converge on exactly one entry per source evaluation.
+    assert ReportCatalog(config).reconcile() == []
+
+
+def test_evaluate_publishes_one_entry_per_rerun(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
+
+    first = semantic_evaluator(config=config, service=_service(config), catalog=catalog,
+                               backend=FakeBackend(envelope())).evaluate(repo, TASK)
+    second = semantic_evaluator(config=config, service=_service(config), catalog=catalog,
+                                backend=FakeBackend(envelope())).evaluate(repo, TASK)
+
+    entries = catalog.entries()
+    assert [e.seq for e in entries] == [1, 2]
+    assert [e.evaluation_id for e in entries] == [first.evaluation_id, second.evaluation_id]
+    assert len({e.report_key for e in entries}) == 2
+
+
+def test_failed_evaluation_publishes_nothing(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
+
+    with pytest.raises(SemanticEvaluationError, match="crashed"):
+        semantic_evaluator(config=config, service=_service(config), catalog=catalog,
+                           backend=RaisingBackend()).evaluate(repo, TASK)
+
+    # The hook sits after the artifact writes, so a failed turn never reaches it —
+    # and the evaluator's cleanup left no complete dir for a sweep to find either.
+    assert catalog.entries() == []
+    assert ReportCatalog(config).reconcile() == []
+
+
+def test_catalog_failure_never_fails_an_otherwise_complete_evaluation(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    catalog = RaisingCatalog()
+
+    report = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope()),
+        catalog=catalog,
+    ).evaluate(repo, TASK)
+
+    assert catalog.calls == [(TASK, report.evaluation_id)]
+    # The report is fully persisted despite publication failing — the feed is a
+    # sidecar, and the next reconciliation heals it from the artifacts.
+    eval_dir = config.data_dir / "evaluations" / "alpha" / TASK / report.evaluation_id
+    assert (eval_dir / SEMANTIC_REPORT_NAME).is_file()
+    assert [e.evaluation_id for e in ReportCatalog(config).reconcile()] == [
+        report.evaluation_id
+    ]
+
+
+def test_evaluator_without_a_catalog_publishes_nothing_and_still_works(tmp_path):
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+
+    report = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope())
+    ).evaluate(repo, TASK)
+
+    assert report.evaluation_id
+    assert not (config.data_dir / "report-catalog").exists()
 
 
 # -- Markdown rendering -------------------------------------------------------

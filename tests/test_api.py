@@ -42,7 +42,7 @@ from orch_hub.intake import (
     STATUS_FAILED,
     STATUS_REVISING,
 )
-from orch_hub.evaluation import EvaluationService
+from orch_hub.evaluation import EVIDENCE_NAME, SOURCE_ARCHIVED, EvaluationService
 from orch_hub.models import (
     CommitInfo,
     IntakeDraft,
@@ -55,16 +55,18 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import OrchestratorConfigError, parse_effective_config
 from orch_hub.registry import RegistryError
+from orch_hub.report_catalog import ReportCatalog
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
     SEMANTIC_END,
+    SEMANTIC_REPORT_MD_NAME,
     SEMANTIC_REPORT_NAME,
     SEMANTIC_START,
     SemanticEvaluationError,
     SemanticEvaluator,
 )
 from orch_hub.semantic_jobs import SEMANTIC_JOB_NAME, SemanticJobManager
-from orch_hub.static_metrics import StaticEvaluator
+from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_store import STATUS_MISSING
 
@@ -3734,6 +3736,71 @@ def test_app_lifespan_reconciles_orphaned_semantic_jobs(tmp_path, monkeypatch):
         pass
 
     assert mgr.get_job(repo, RUN_TASK_ID).status == "failed"
+
+
+def write_complete_evaluation(
+    config: Config, repo: ManagedRepo, evaluation_id: str
+) -> Path:
+    """Write one complete L1+L2 evaluation dir straight to the data dir."""
+    eval_dir = (
+        config.data_dir / "evaluations" / repo.name / RUN_TASK_ID / evaluation_id
+    )
+    eval_dir.mkdir(parents=True)
+    (eval_dir / EVIDENCE_NAME).write_text(
+        json.dumps({"target": {"repo_path": str(repo.path), "source": SOURCE_ARCHIVED},
+                    "runs": [], "git": {"available": False, "commits": []}}),
+        encoding="utf-8",
+    )
+    (eval_dir / STATIC_METRICS_NAME).write_text("{}", encoding="utf-8")
+    (eval_dir / SEMANTIC_REPORT_NAME).write_text(
+        json.dumps({
+            "evaluation_id": evaluation_id, "repo_name": repo.name,
+            "task_id": RUN_TASK_ID, "target_source": SOURCE_ARCHIVED,
+            "generated_ts": "2026-07-22T09:00:00+00:00",
+            "evaluator": {"backend": "fake", "model": "m", "schema_version": "1"},
+        }),
+        encoding="utf-8",
+    )
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).write_text("# report\n", encoding="utf-8")
+    return eval_dir
+
+
+def test_app_lifespan_backfills_the_global_report_catalog(tmp_path, monkeypatch):
+    # A complete report that predates the catalog (or whose live publication hook
+    # failed) must reach the cross-repo feed at startup, so a consumer never has to
+    # re-trigger an evaluation to get an existing report published.
+    config = eval_config(tmp_path)
+    repo = make_run_repo(tmp_path)
+    write_complete_evaluation(config, repo, "20260722T090000Z")
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+
+    with TestClient(api.create_app(config)):  # runs startup
+        pass
+
+    entries = ReportCatalog(config).entries()
+    assert [(e.seq, e.evaluation_id) for e in entries] == [(1, "20260722T090000Z")]
+    assert entries[0].archived is True
+
+    # A second startup is idempotent: no duplicate identity, no renumbering.
+    with TestClient(api.create_app(config)):
+        pass
+    assert [e.seq for e in ReportCatalog(config).entries()] == [1]
+
+
+def test_app_lifespan_starts_with_evaluation_disabled_and_publishes_nothing(
+    tmp_path, monkeypatch
+):
+    # The catalog shares the evaluation gate, and startup backfill is isolated:
+    # a disabled hub must still serve run control, not fail to boot.
+    config = eval_config(tmp_path, enabled=False)
+    repo = make_run_repo(tmp_path)
+    write_complete_evaluation(config, repo, "20260722T090000Z")
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+
+    with TestClient(api.create_app(config)) as client:
+        assert client.get("/api/health").status_code == 200
+
+    assert not (config.data_dir / "report-catalog").exists()
 
 
 # -- error shapes --------------------------------------------------------------

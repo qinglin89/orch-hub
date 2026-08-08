@@ -54,6 +54,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -77,6 +78,8 @@ from .models import (
 )
 from .runs import _orchestrator_env
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
+
+_log = logging.getLogger(__name__)
 
 SEMANTIC_REPORT_NAME = "semantic_report.json"
 """The persisted semantic report, written in the evaluation's artifact dir beside
@@ -1119,6 +1122,28 @@ def _md_cell(text: str) -> str:
     return text.replace("\n", " ").replace("|", "\\|")
 
 
+class ReportCataloger(Protocol):
+    """Publishes a durably-complete evaluation to the global report catalog.
+
+    The seam between Layer 2 and the cross-repo report feed
+    (:class:`orch_hub.report_catalog.ReportCatalog` satisfies it structurally).
+    It is a *protocol here* rather than a direct import so the dependency stays
+    one-way: the catalog imports this module for the artifact filenames it must
+    look for, and the evaluator stays unaware of the catalog's storage.
+
+    Called by :meth:`SemanticEvaluator.evaluate` once, after the whole
+    evidence→static→semantic artifact set is durable — never before, because a
+    cataloged report must be a report that actually exists on disk. Implementations
+    must be **idempotent** (re-recording the same ``(repo, task, evaluation)``
+    publishes nothing new) and must not mutate the evaluation artifacts, target
+    repo, or run state.
+    """
+
+    def record_evaluation(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str
+    ) -> object: ...
+
+
 class SemanticEvaluator:
     """Read-only semantic task evaluator, gated by ``evaluation_enabled``.
 
@@ -1131,7 +1156,11 @@ class SemanticEvaluator:
     evidence pack, ``static_evaluator`` computes the deterministic report,
     ``backend`` is the model driver (a fake in tests; the default
     :class:`_UnavailableSemanticBackend` fails cleanly until session-2 wires a real
-    one), and ``clock`` stamps the report's ``generated_ts``.
+    one), ``catalog`` is the optional global report-feed publisher
+    (:class:`ReportCataloger`; ``None`` — the default — simply publishes nothing,
+    exactly like a ``None`` notifier elsewhere, and the catalog's own startup
+    reconciliation backfills anything an unwired or failed hook missed), and
+    ``clock`` stamps the report's ``generated_ts``.
 
     :meth:`evaluate` is the whole flow: generate a fresh, self-contained evaluation
     dir (``evidence.json`` + ``static_metrics.json``), build the bounded semantic
@@ -1149,6 +1178,7 @@ class SemanticEvaluator:
         evaluation_service: EvaluationService | None = None,
         static_evaluator: StaticEvaluator | None = None,
         backend: SemanticBackend | None = None,
+        catalog: ReportCataloger | None = None,
         clock: Callable[[], dt.datetime] = _utc_now,
     ):
         self._config = config
@@ -1167,6 +1197,7 @@ class SemanticEvaluator:
         self._backend: SemanticBackend = (
             backend if backend is not None else _UnavailableSemanticBackend()
         )
+        self._catalog = catalog
         self._clock = clock
 
     @property
@@ -1275,7 +1306,40 @@ class SemanticEvaluator:
             # cleanup the static/evidence generators use.
             shutil.rmtree(eval_dir, ignore_errors=True)
             raise
+        # Publish to the global report feed only now: the artifact set above is
+        # durable, so a cataloged report is always one that exists on disk. Before
+        # retention, so the entry is recorded even if pruning misbehaves — and the
+        # entry outlives a later prune anyway, by design.
+        self._catalog_report(repo, task_id, pack.evaluation_id)
         # Retention runs only here — after the complete evaluation is durable — so a
         # failure above never deletes older retained evaluations (see auto_prune).
         self._service.auto_prune(repo, task_id, protect=pack.evaluation_id)
         return report
+
+    def _catalog_report(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str
+    ) -> None:
+        """Publish the just-completed evaluation to the global report feed.
+
+        Best-effort by design, mirroring :meth:`EvaluationService.auto_prune`: a
+        catalog problem must never turn a successful, fully persisted evaluation
+        into a failed one — the report exists on disk either way, and the
+        catalog's startup reconciliation re-derives any entry this missed from the
+        artifacts themselves. The failure is logged rather than swallowed silently
+        so a persistently broken catalog is visible in service logs instead of
+        only showing up as a feed that quietly lags. A ``None`` catalog is the
+        disabled case and does no work at all.
+        """
+        catalog = self._catalog
+        if catalog is None:
+            return
+        try:
+            catalog.record_evaluation(repo, task_id, evaluation_id)
+        except Exception as exc:  # noqa: BLE001 - publication is best-effort
+            _log.warning(
+                "report catalog publication failed for %s/%s (%s): %s",
+                repo.name,
+                task_id,
+                type(exc).__name__,
+                exc,
+            )
