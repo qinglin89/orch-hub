@@ -408,10 +408,11 @@
     return state;
   }
 
-  // Format a commit's strict-ISO `committed_ts` (git's %cI, passed verbatim by
-  // the hub) for at-a-glance display: a compact relative age for recent commits,
-  // falling back to the calendar date for older ones and to the raw string if it
-  // can't be parsed — trust the hub's value, but never render "NaN".
+  // Format an ISO timestamp the hub passed through verbatim (a commit's %cI, a
+  // usage observation, a report's catalog stamp) for at-a-glance display: a
+  // compact relative age for recent ones, falling back to the calendar date for
+  // older ones and to the raw string if it can't be parsed — trust the hub's
+  // value, but never render "NaN".
   function formatCommitTime(iso) {
     if (!iso) return "";
     const then = new Date(iso);
@@ -429,6 +430,20 @@
   }
 
   const centerHtml = (text) => `<p class="center">${escapeHtml(text)}</p>`;
+
+  // One paging control, shared by the two paged views (run history's
+  // server-anchored window walk and the report feed's forward-only cursor). They
+  // differ in what enables a direction and in what their status line says, not in
+  // what a page button IS — so the markup lives here once rather than being
+  // copied per pager. The arrow is decorative (aria-hidden) and the
+  // visually-hidden " page" makes the accessible name "Previous page" / "Next
+  // page" while the visible label stays short enough for a phone.
+  const pagerButton = (id, label, arrow, enabled, leading) =>
+    `<button id="${id}" class="pager-btn" type="button"${
+      enabled ? "" : " disabled"
+    }>${leading ? `<span aria-hidden="true">${arrow}</span> ` : ""}${label}${
+      leading ? "" : ` <span aria-hidden="true">${arrow}</span>`
+    }<span class="visually-hidden"> page</span></button>`;
 
   // Every view opens with exactly one `h1.page-title` naming the page. It is the
   // document outline's root (section headings are h2, their sub-headings h3),
@@ -510,8 +525,11 @@
     if (path.startsWith("/overview")) tab = "/overview";
     else if (path.startsWith("/tasks")) tab = "/tasks";
     // Task evaluation is task-scoped and reached from a Run-history task group,
-    // but the sidecar itself stays under the Tasks information architecture.
+    // but the sidecar itself stays under the Tasks information architecture; the
+    // cross-repo report feed is the same subsystem seen from above, so it keeps
+    // the same tab rather than claiming one of its own.
     else if (path.startsWith("/evaluations")) tab = "/tasks";
+    else if (path.startsWith("/reports")) tab = "/tasks";
     else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
       const active = a.dataset.tab === tab;
@@ -537,6 +555,10 @@
     if (seg[0] === "repos") return seg.length >= 2 ? "read" : "list";
     if (seg[0] === "intakes") return "read";
     if (seg[0] === "evaluations") return "read";
+    // A paged chronological feed, like run history: the wider column, and NOT the
+    // "list" kind, whose top-level card grid would break a strictly ordered feed
+    // into columns.
+    if (seg[0] === "reports") return "wide";
     if (seg[0] === "overview") return "overview";
     return "list"; // default repo list
   }
@@ -2811,6 +2833,21 @@
       </li>`;
   }
 
+  // The way into the cross-repo report feed. It lives on Run history because that
+  // is already the evaluation subsystem's entry surface (the per-task
+  // `Evaluation →` links are on the same page), and because the gate it needs —
+  // whether evaluation is enabled at all — rides the history payload the view has
+  // just fetched, so a disabled hub hides the entry with no extra request. The
+  // per-task links are unchanged: this one goes UP to the published feed, they go
+  // DOWN into one task's evaluation.
+  function reportsEntryLink(enabled) {
+    if (!enabled) return "";
+    return (
+      `<p class="reports-entry">` +
+      `<a class="text-link" href="#/reports">All evaluation reports →</a></p>`
+    );
+  }
+
   // The newest evaluation opened by the group's link, expressed as one compact
   // status light: grey for no report, amber for Layer 1, green for both layers.
   // Visible words would crowd and misalign this already-dense summary row, so
@@ -3024,9 +3061,8 @@
   // two would read as a contradiction; that state's own line names its position
   // and the real page count, leaving the pager just the whole-history total.
   //
-  // Arrows are decorative (aria-hidden); the visually-hidden " page" makes each
-  // accessible name "Previous page" / "Next page" while the visible label stays
-  // short enough for a phone.
+  // The buttons come from the shared `pagerButton` helper; only the direction
+  // sources and this status line are run-history's own.
   function historyPager(data) {
     const page = Number(data.page) || 1;
     const totalPages = Number(data.total_pages) || 0;
@@ -3034,19 +3070,13 @@
     const position = (data.runs || []).length
       ? `Page ${page} of ${totalPages} · `
       : "";
-    const button = (id, label, arrow, enabled, leading) =>
-      `<button id="${id}" class="pager-btn" type="button"${
-        enabled ? "" : " disabled"
-      }>${leading ? `<span aria-hidden="true">${arrow}</span> ` : ""}${label}${
-        leading ? "" : ` <span aria-hidden="true">${arrow}</span>`
-      }<span class="visually-hidden"> page</span></button>`;
     return (
       `<nav class="pager" aria-label="Run history pages">` +
-      button("rp-prev", "Previous", "←", !!data.prev_cursor, true) +
+      pagerButton("rp-prev", "Previous", "←", !!data.prev_cursor, true) +
       `<span class="pager-status">${position}${total} run${
         total === 1 ? "" : "s"
       } total</span>` +
-      button("rp-next", "Next", "→", !!data.next_cursor, false) +
+      pagerButton("rp-next", "Next", "→", !!data.next_cursor, false) +
       `</nav>`
     );
   }
@@ -3130,6 +3160,7 @@
       runFilters.state = "";
     view().innerHTML = `
       ${pageTitle("Run history")}
+      ${reportsEntryLink(data.evaluation_enabled)}
       <div class="filters" role="search" aria-label="Filter runs">
         <label for="rf-repo">Repo
           <select id="rf-repo">${optionList(
@@ -4161,6 +4192,202 @@
     // completed job selects its fresh evaluation, a failed one lands on retry.
     if (semanticJob && SEMANTIC_JOB_TRANSIENT.has(semanticJob.status))
       startSemanticJobPoll(repoName, taskId);
+  }
+
+  // ---- central evaluation-report feed (cross-repo, global order) ------------
+  //
+  // The sidecar above answers "how did THIS task go?"; this view answers "what has
+  // been published?" across every managed repo, reading the hub's append-only
+  // report catalog through GET /api/evaluation/reports. It is the operator's face
+  // of the very feed an external protocol-evolution consumer polls — same global
+  // order, same identities — so an operator can see exactly what a consumer would
+  // import. The hub publishes reports; deciding what to change in the protocol is
+  // the consumer's job, so this view shows and links and adds no verdict of its
+  // own.
+  //
+  // It does not replace per-task evaluation history: every row links INTO the
+  // existing #/evaluations/{repo}/{task}/{id} view, which keeps the history
+  // picker, the artifacts, and the Layer 1 / Layer 2 rendering. Nothing here
+  // publishes, generates, or can cause a task to be evaluated — the feed and the
+  // bundle route are reads.
+
+  const REPORTS_PATH = "/api/evaluation/reports";
+
+  // The cursors of the pages walked to reach the current one, so Previous can go
+  // back. The feed is forward-only by design (`after=<seq>` names a suffix), and
+  // published entries are immutable and never renumbered — so a cursor visited
+  // earlier names the same page forever and a remembered trail is exact.
+  // Arithmetic on `seq` would not be: a torn append leaves a hole in the
+  // numbering, so "first_seq - limit" can name a different window than the one
+  // that was shown. Reset on every entry to the route (below), like any pager
+  // that starts at the beginning.
+  let reportTrail = [];
+
+  const reportDetailHash = (entry) =>
+    evalHash(entry.repo_name, entry.task_id) +
+    "/" +
+    encodeURIComponent(entry.evaluation_id);
+
+  // One published report. Everything except `seq`/`report_key` can be absent in a
+  // catalog line an older/newer hub wrote (the reader degrades rather than
+  // dropping the entry), so a row without a full source identity still renders —
+  // the entry is the auditable record — but carries no link, because there is no
+  // per-task view to send it to.
+  function reportCard(entry) {
+    const evaluator = entry.evaluator || {};
+    const prov = entry.provenance || {};
+    const runs = prov.runs || {};
+    const git = prov.git || {};
+    const linkable = !!(entry.repo_name && entry.task_id && entry.evaluation_id);
+    const kv = evalKv([
+      ["repo", entry.repo_name || "(unknown repo)"],
+      ["published", formatCommitTime(entry.cataloged_ts)],
+      ["generated", formatCommitTime(entry.generated_ts)],
+      [
+        "evaluator",
+        evaluator.model
+          ? evaluator.model +
+            (evaluator.schema_version ? " · schema " + evaluator.schema_version : "")
+          : "unknown",
+      ],
+      // The evaluation-time target state, kept beside the publication-time fact
+      // that the task is archived: a report of live work is evaluated `active`
+      // and published later, once close-out archives its task.
+      ["evaluated while", entry.target_source || "unknown"],
+      // Provenance the consumer cohorts by. Absent provenance is said, not
+      // omitted — a blank row would read as "no runs" / "no commits".
+      ["runs", runs.available ? String(runs.count || 0) : "unavailable"],
+      ["commits", git.available ? String(git.commit_count || 0) : "unavailable"],
+    ]);
+    // Publication requires the whole L1 + L2 artifact set to be durable, so every
+    // feed item is complete by construction. Say it once per row in the same
+    // vocabulary Run history's state light uses (green = both layers) rather than
+    // leaving the reader to ask.
+    const head =
+      `<div class="card-head">` +
+      `<span class="report-seq">#${escapeHtml(entry.seq)}</span>` +
+      `<span class="task-id">${escapeHtml(
+        entry.task_id || "(unknown task)"
+      )}</span>` +
+      `<span class="badges">${badge("L1 + L2", "ok")}</span>` +
+      `</div>` +
+      (kv ? `<dl class="kv">${kv}</dl>` : "");
+    const body = linkable
+      ? `<a class="card-link" href="${reportDetailHash(entry)}">${head}</a>`
+      : head;
+    // The global key is what a consumer stores and re-fetches by, so it is shown
+    // rather than hidden — truncated to stay scannable on a phone, with the whole
+    // value on the title and selectable in full from the element text.
+    const key = entry.report_key || "";
+    return (
+      `<li class="card report">` +
+      body +
+      `<p class="report-key muted" title="${escapeHtml(key)}">` +
+      `key <span class="rk">${escapeHtml(key.slice(0, 16))}${
+        key.length > 16 ? "…" : ""
+      }</span></p>` +
+      `</li>`
+    );
+  }
+
+  // Forward-only pager over the feed. Unlike Run history's server-anchored
+  // bidirectional cursors, the server offers only "after N": `has_more` says
+  // whether more is already available (never inferred from a short page), and
+  // Previous is served by the client-side trail above.
+  function reportPager(data, entries) {
+    const first = entries.length ? entries[0].seq : null;
+    const last = entries.length ? entries[entries.length - 1].seq : null;
+    const span =
+      first === null
+        ? ""
+        : first === last
+        ? `report #${escapeHtml(first)} · `
+        : `reports #${escapeHtml(first)}–#${escapeHtml(last)} · `;
+    return (
+      `<nav class="pager" aria-label="Report feed pages">` +
+      pagerButton("fp-prev", "Previous", "←", reportTrail.length > 0, true) +
+      `<span class="pager-status">${span}${
+        data.has_more ? "more available" : "end of feed"
+      }</span>` +
+      pagerButton("fp-next", "Next", "→", !!data.has_more, false) +
+      `</nav>`
+    );
+  }
+
+  // Page navigation refetches (a page is a server window) and repaints the whole
+  // view, so it lands like any action-driven re-render. Next remembers the cursor
+  // it came from; Previous consumes it. Each handler re-checks its own boundary
+  // rather than trusting the disabled attribute, so a boundary control is inert
+  // however it is activated.
+  function wireReportPager(data) {
+    const next = document.getElementById("fp-next");
+    if (next)
+      next.addEventListener("click", () => {
+        if (!data.has_more) return;
+        reportTrail.push(data.cursor);
+        rerender(renderReports(data.next_cursor));
+      });
+    const prev = document.getElementById("fp-prev");
+    if (prev)
+      prev.addEventListener("click", () => {
+        if (!reportTrail.length) return;
+        rerender(renderReports(reportTrail.pop()));
+      });
+  }
+
+  async function renderReports(after) {
+    const superseded = routeGuard();
+    view().innerHTML = loadingView("Evaluation reports", "Loading reports…");
+
+    // Availability first, for the same reason the per-task view probes it: this
+    // is the one evaluation route that answers while the subsystem is disabled,
+    // so a disabled hub gets a concise explanation instead of a 404 error view.
+    const avail = await api("/api/evaluation");
+    if (superseded()) return;
+    if (!avail || !avail.enabled) {
+      view().innerHTML =
+        pageTitle("Evaluation reports") +
+        `<section class="section"><h2>Report feed</h2>` +
+        `<p class="muted">Task evaluation is disabled on this hub ` +
+        `(ORCH_HUB_EVAL_ENABLED is set to a disabled value), so no reports are ` +
+        `published and there is no feed to read.</p></section>`;
+      return;
+    }
+
+    const data = await api(
+      REPORTS_PATH +
+        (after === null || after === undefined
+          ? ""
+          : "?after=" + encodeURIComponent(after))
+    );
+    if (superseded()) return;
+    const entries = data.reports || [];
+
+    // Two different emptinesses. Nothing has ever been published is its own
+    // state — no pager, just the note, and it explains what publishes a report
+    // because that rule is not guessable (matching how empty run history reads).
+    // A page walked past the end of a feed that does hold reports keeps its
+    // pager, so Previous is never a dead end.
+    const empty = !entries.length && !reportTrail.length;
+    const body = entries.length
+      ? `<ul class="list">${entries.map(reportCard).join("")}</ul>`
+      : reportTrail.length
+      ? centerHtml("No further reports after this point in the feed.")
+      : centerHtml(
+          "No evaluation reports have been published yet. A report is " +
+            "published once a task is archived and its complete Layer 1 + " +
+            "Layer 2 evaluation is durable."
+        );
+    view().innerHTML =
+      pageTitle("Evaluation reports") +
+      `<p class="reports-intro muted">Completed Layer 1 + Layer 2 reports from
+         every managed repo, in the order the hub published them. This is the same
+         feed an external consumer imports from; orch-hub publishes the artifacts
+         and does not decide what to change in the protocol. Each report opens its
+         existing per-task evaluation view.</p>` +
+      (empty ? "" : reportPager(data, entries)) +
+      body;
+    if (!empty) wireReportPager(data);
   }
 
   // ---- remote intake (draft → review → confirm / cancel) ----
@@ -5733,6 +5960,14 @@
     // specific past one (the history picker navigates there).
     if (seg[0] === "evaluations" && seg.length >= 3)
       return () => renderTaskEval(seg[1], seg[2], seg[3]);
+    // /reports — the cross-repo evaluation-report feed. Paging stays out of the
+    // hash (like Run history) and is driven by rerender, so entering the route is
+    // always the start of the feed; the trail resets with it.
+    if (seg[0] === "reports")
+      return () => {
+        reportTrail = [];
+        return renderReports(null);
+      };
     if (seg[0] === "repos" && seg.length >= 2)
       return () => renderRepoDetail(seg[1]);
     if (seg[0] === "overview") return renderOverview;

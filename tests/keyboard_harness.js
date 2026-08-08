@@ -2248,6 +2248,315 @@ async function scenarioTaskEval() {
   route("GET", "/api/evaluation", { enabled: true }); // restore for later scenarios
 }
 
+// The cross-repo evaluation-report feed: the dashboard face of the hub's
+// append-only report catalog. What matters behaviourally is that it renders the
+// GLOBAL order the server published (not a client re-sort), that every row leads
+// back into the existing per-task evaluation view rather than replacing it, and
+// that its forward-only pager can walk off the newest page and come back — none
+// of which a served-asset grep can see.
+async function scenarioReportFeed() {
+  installRoutes({ waiting: false });
+
+  var OTHER_REPO = "other-repo";
+  var OTHER_TASK = "2026-07-18-other";
+  var EVAL_A = "20260730T010000Z";
+  var EVAL_B = "20260730T020000Z";
+  var EVAL_C = "20260731T030000Z";
+  var KEY_A = "key-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  var feedEntry = function (seq, key, repo, task, evalId, extra) {
+    return Object.assign(
+      {
+        seq: seq,
+        report_key: key,
+        cataloged_ts: "2026-07-31T09:0" + seq + ":00+00:00",
+        repo_name: repo,
+        repo_slug: repo,
+        repo_path: "/repos/" + repo,
+        task_id: task,
+        evaluation_id: evalId,
+        generated_ts: "2026-07-31T08:0" + seq + ":00+00:00",
+        target_source: "archived",
+        archived: true,
+        evaluator: {
+          backend: "claude-cli",
+          model: "claude-opus-4-8",
+          schema_version: "1",
+        },
+        artifacts: [
+          { name: "evidence.json", size: 10, sha256: "a1" },
+          { name: "static_metrics.json", size: 10, sha256: "a2" },
+          { name: "semantic_report.json", size: 10, sha256: "a3" },
+          { name: "report.md", size: 10, sha256: "a4" },
+        ],
+        provenance: {
+          runs: { available: true, run_ids: ["run-1", "run-2"], count: 2, detail: null },
+          git: {
+            available: true,
+            since: null,
+            until: null,
+            commit_count: 7,
+            newest_sha: "abc1234",
+            detail: null,
+          },
+          protocol: { available: false, detail: "evidence packs carry no protocol version" },
+          orchestrator_config: { available: false, detail: "not in the evidence pack" },
+        },
+      },
+      extra || {}
+    );
+  };
+  // Two pages of a feed whose scoped evaluation ids do NOT agree with the global
+  // order (#2 is an OLDER stamp in a different repo than #1) — exactly the
+  // cross-repo collision `seq` exists to resolve, so a view that sorted by
+  // anything but `seq` would show a different order here.
+  var page1 = {
+    enabled: true,
+    reports: [
+      feedEntry(1, KEY_A, REPO, TASK, EVAL_B),
+      feedEntry(2, "key-bbbb", OTHER_REPO, OTHER_TASK, EVAL_A),
+    ],
+    cursor: 0,
+    next_cursor: 2,
+    has_more: true,
+  };
+  var page2 = {
+    enabled: true,
+    reports: [feedEntry(3, "key-cccc", REPO, TASK, EVAL_C)],
+    cursor: 2,
+    next_cursor: 3,
+    has_more: false,
+  };
+  route("GET", "/api/evaluation/reports", function (url) {
+    return url.indexOf("after=2") !== -1 ? page2 : page1;
+  });
+
+  await navigate("#/reports");
+  var heading = pageHeading();
+  eq(
+    "feed: the view names itself",
+    heading && heading.textContent.trim(),
+    "Evaluation reports"
+  );
+  activeIs("feed: focus lands on the heading", heading);
+  eq("feed: document.title tracks the route", doc.title, "Evaluation reports · orch-hub");
+  checkOutline("report feed");
+  var current = doc.querySelectorAll(".tabbar a").filter(function (a) {
+    return a.getAttribute("aria-current") === "page";
+  });
+  eq(
+    "feed: it keeps the Tasks tab current",
+    current.length && current[0].getAttribute("data-tab"),
+    "/tasks"
+  );
+
+  // The server's global order, verbatim.
+  var seqs = doc.querySelectorAll(".report-seq").map(function (el) {
+    return el.textContent.trim();
+  });
+  eq("feed: the page renders both reports", seqs.length, 2);
+  eq("feed: in the server's global order", seqs.join(","), "#1,#2");
+  var tasks = doc.querySelectorAll(".card.report .task-id").map(function (el) {
+    return el.textContent.trim();
+  });
+  eq(
+    "feed: cross-repo reports share one order",
+    tasks.join(","),
+    TASK + "," + OTHER_TASK
+  );
+
+  // Each row leads INTO the existing per-task evaluation view, at the exact
+  // evaluation the feed item names — the per-task history is preserved, not
+  // replaced.
+  var firstLink = doc.querySelector(".card.report .card-link");
+  eq(
+    "feed: a report opens its existing per-task evaluation",
+    firstLink && firstLink.getAttribute("href"),
+    "#/evaluations/" + REPO + "/" + TASK + "/" + EVAL_B
+  );
+  check(
+    "feed: the row states the evaluator identity",
+    doc.querySelector(".card.report").textContent.indexOf("claude-opus-4-8") !== -1,
+    "no evaluator model on the row"
+  );
+  check(
+    "feed: the row states report completeness",
+    doc.querySelector(".card.report .badge").textContent.indexOf("L1 + L2") !== -1,
+    "no completeness badge"
+  );
+  check(
+    "feed: the global key is shown",
+    doc.querySelector(".report-key").getAttribute("title") === KEY_A,
+    "the full report key is not carried on the row"
+  );
+
+  // Forward-only paging: Next asks the server for the suffix after this page's
+  // last sequence; Previous walks back through the trail the client remembers.
+  var prev = doc.getElementById("fp-prev");
+  check("feed: Previous is inert on the first page", prev && prev.disabled === true, "Previous was enabled at the start of the feed");
+  pressEnter(doc.getElementById("fp-next"));
+  await flush();
+  eq(
+    "feed: Next asks for the suffix after this page",
+    lastCall("GET", "/api/evaluation/reports").url,
+    "/api/evaluation/reports?after=2"
+  );
+  eq(
+    "feed: the next page continues the global order",
+    doc.querySelectorAll(".report-seq").map(function (el) {
+      return el.textContent.trim();
+    }).join(","),
+    "#3"
+  );
+  check(
+    "feed: the end of the feed is stated, not inferred",
+    doc.querySelector(".pager-status").textContent.indexOf("end of feed") !== -1,
+    doc.querySelector(".pager-status").textContent
+  );
+  check(
+    "feed: Next is inert at the end of the feed",
+    doc.getElementById("fp-next").disabled === true,
+    "Next was still enabled with has_more false"
+  );
+  // The control must be OFFERED off the first page, not merely work when
+  // activated: the harness clicks a disabled button too, so asserting only that
+  // Previous navigates would pass with a permanently inert control.
+  check(
+    "feed: Previous is offered once off the first page",
+    doc.getElementById("fp-prev").disabled === false,
+    "Previous stayed inert after paging forward"
+  );
+  pressEnter(doc.getElementById("fp-prev"));
+  await flush();
+  eq(
+    "feed: Previous returns to the page it came from",
+    doc.querySelectorAll(".report-seq").map(function (el) {
+      return el.textContent.trim();
+    }).join(","),
+    "#1,#2"
+  );
+
+  // Re-entering the route restarts the feed (and resets the trail), so a reload
+  // never lands mid-walk with a Previous that leads nowhere.
+  pressEnter(doc.getElementById("fp-next"));
+  await flush();
+  await navigate("#/reports");
+  check(
+    "feed: re-entering the route restarts at the beginning",
+    doc.getElementById("fp-prev").disabled === true,
+    "the cursor trail survived a fresh navigation"
+  );
+
+  // Run history is the entry point, gated by the flag its own payload carries —
+  // so an evaluation-disabled hub hides the way in without a second request.
+  var histRuns = {
+    runs: [
+      {
+        run_id: RUN,
+        repo_name: REPO,
+        repo_path: "/repos/" + REPO,
+        task_id: TASK,
+        state: "completed",
+        started_ts: "2026-07-20T08:00:00Z",
+        ended_ts: "2026-07-20T08:30:00Z",
+        exit_code: 0,
+        sessions: [],
+        context_budget: 200000,
+        session_est: { current: 1, total: 2 },
+      },
+    ],
+    page: 1,
+    page_size: 50,
+    total_runs: 1,
+    total_pages: 1,
+    has_prev: false,
+    has_next: false,
+    prev_cursor: null,
+    next_cursor: null,
+    evaluation_enabled: true,
+    evaluation_states: [],
+  };
+  route("GET", "/api/history/runs", histRuns);
+  await navigate("#/runs");
+  var entry = doc.querySelector(".reports-entry a");
+  eq(
+    "feed: Run history links to the feed on an evaluation-enabled hub",
+    entry && entry.getAttribute("href"),
+    "#/reports"
+  );
+  route(
+    "GET",
+    "/api/history/runs",
+    Object.assign({}, histRuns, { evaluation_enabled: false })
+  );
+  await navigate("#/runs");
+  check(
+    "feed: an evaluation-disabled hub offers no way in",
+    doc.querySelector(".reports-entry a") === null,
+    "the feed entry survived a disabled hub"
+  );
+
+  // Walking past the end of a feed that DOES hold reports is not the same as an
+  // empty feed: it says so, and keeps its pager so Previous is never a dead end.
+  route("GET", "/api/evaluation/reports", function (url) {
+    return url.indexOf("after=2") !== -1
+      ? { enabled: true, reports: [], cursor: 2, next_cursor: 2, has_more: false }
+      : page1;
+  });
+  await navigate("#/reports");
+  pressEnter(doc.getElementById("fp-next"));
+  await flush();
+  check(
+    "feed: a page past the end is not read as an empty feed",
+    doc.getElementById("view").textContent.indexOf("No further reports after this point") !== -1,
+    doc.getElementById("view").textContent.slice(0, 200)
+  );
+  check(
+    "feed: a page past the end keeps its way back",
+    doc.getElementById("fp-prev") !== null &&
+      doc.getElementById("fp-prev").disabled === false,
+    "no way back from a page past the end of the feed"
+  );
+
+  // An empty feed explains what publishes a report (the rule is not guessable)
+  // and is its own state: no pager, just the note.
+  route("GET", "/api/evaluation/reports", {
+    enabled: true,
+    reports: [],
+    cursor: 0,
+    next_cursor: 0,
+    has_more: false,
+  });
+  await navigate("#/reports");
+  check(
+    "feed: an empty feed explains what publishes a report",
+    doc.getElementById("view").textContent.indexOf("No evaluation reports have been published yet") !== -1,
+    "no empty-feed explanation"
+  );
+  check(
+    "feed: an empty feed offers no pager",
+    doc.querySelector(".pager") === null,
+    "an empty feed rendered a pager"
+  );
+
+  // Disabled hub: the availability probe answers first, so the view explains
+  // itself instead of erroring on a 404 from the feed route.
+  route("GET", "/api/evaluation", { enabled: false });
+  var feedCallsBefore = countCalls("GET", "/api/evaluation/reports");
+  await navigate("#/reports");
+  check(
+    "feed: a disabled hub explains itself",
+    doc.getElementById("view").textContent.indexOf("disabled") !== -1,
+    "no disabled explanation"
+  );
+  eq(
+    "feed: a disabled hub does not probe the feed route",
+    countCalls("GET", "/api/evaluation/reports"),
+    feedCallsBefore
+  );
+  route("GET", "/api/evaluation", { enabled: true }); // restore for later scenarios
+  installRoutes({ waiting: false });
+}
+
 // Every route handler awaits a payload, so a slow route can resolve long after
 // the user has navigated on. Such a stale completion must not touch the view it
 // no longer owns: not by moving focus (the user is already operating the newer
@@ -4149,6 +4458,7 @@ async function scenarioRepoAdmission() {
     await scenarioHeadingOutline();
     await scenarioViewLayout();
     await scenarioTaskEval();
+    await scenarioReportFeed();
     await scenarioStaleRoute();
     await scenarioRunHistory();
     await scenarioRunHistoryPaging();

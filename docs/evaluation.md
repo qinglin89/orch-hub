@@ -22,7 +22,9 @@ layers over the same bounded evidence:
 
 Both are generated on demand and persisted as hub-owned artifacts under
 `<ORCH_HUB_DATA_DIR>/evaluations/<repo>/<task>/<evaluation-id>/`. Nothing under
-a managed target repo is written.
+a managed target repo is written. A completed Layer 1 + Layer 2 report of an
+archived task is additionally published to a cross-repo
+[global report feed](#the-global-report-feed) for external consumers.
 
 It is **not**:
 
@@ -43,10 +45,13 @@ subsystem is off:
   can hide its controls with a concise explanation instead of probing a dead
   route;
 - every other evaluation route — list, detail, evidence/metrics/semantic-job
-  generation/status, and the doctor — fails closed with `404`;
-- no `<data_dir>/evaluations` tree is created;
-- Run history hides its per-task `Evaluation →` actions and state lights, while
-  the evaluation route itself renders a short disabled note.
+  generation/status, the global report feed and bundle export, and the doctor —
+  fails closed with `404`;
+- no `<data_dir>/evaluations` or `<data_dir>/report-catalog` tree is created,
+  and nothing is published;
+- Run history hides its per-task `Evaluation →` actions, its state lights, and
+  the `All evaluation reports →` entry, while the evaluation and report-feed
+  routes render a short disabled note.
 
 This boundary is covered by tests
 (`tests/test_api.py::test_disabling_evaluation_leaves_core_run_control_intact`
@@ -104,7 +109,145 @@ freshest history is kept for trend analysis.
 
 Retention runs **only after** a generation's whole artifact set is durable, so a
 failed static or semantic generation never deletes older retained history to
-make room for an evaluation that did not complete.
+make room for an evaluation that did not complete. A prune is also skipped while
+it would delete a complete report that is still waiting to be published to the
+[global report feed](#the-global-report-feed) — see
+[Retention, and the one thing that can halt publication](#retention-and-the-one-thing-that-can-halt-publication).
+
+## The global report feed
+
+Everything above is scoped to one `(repo, task)`. The feed is the other
+direction: **one ordered, cross-repo stream of the completed reports the hub has
+published**, so an external consumer — the intended one being a
+protocol-evolution tool that reads finished tasks and proposes protocol changes —
+can import incrementally without walking every repo, every task, and every
+evaluation directory on each poll.
+
+### Where the boundary is
+
+orch-hub **publishes evaluation artifacts**. It does not decide protocol
+evolution, does not rank repos or people, and does not create
+protocol-improvement tasks. The feed hands over reports plus the provenance
+needed to cohort them; what to conclude and what to change is entirely the
+consumer's side of the line. Nothing in the feed writes to a target repo, and
+listing or exporting cannot cause an unevaluated task to be evaluated (there is
+no model call anywhere on these paths).
+
+### What gets published, and when
+
+Publication is **artifact-based and trigger-agnostic** — how an evaluation was
+started is irrelevant. A report enters the catalog when both hold:
+
+1. its evaluation directory holds the **whole** Layer 1 + Layer 2 set —
+   `evidence.json`, `static_metrics.json`, `semantic_report.json`, `report.md` —
+   durably on disk; and
+2. its **task is archived** (completed and moved to `.ai-tasks/archive/`).
+
+So a partial directory, an evidence-only or metrics-only evaluation, and a
+failed semantic job are simply not candidates. A task evaluated while it was
+still active is published later, once close-out archives it: the hub re-examines
+uncataloged candidates on every reconciliation sweep. A report of a task that is
+never archived is never published.
+
+Publication happens on two paths, and they converge on the same identity: a hook
+right after a semantic evaluation's artifacts are written (promptness), and a
+reconciliation sweep at service start (correctness — it backfills whatever the
+hook missed and picks up newly archived tasks). Reconciliation is idempotent:
+restart it as often as you like, nothing is ever published twice.
+
+The catalog is one append-only file, `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl`.
+Entries are immutable and never rewritten.
+
+### Identity: `seq` and `report_key`
+
+Each published report gets two identities, deliberately distinct:
+
+- **`seq`** — the catalog's monotonic append counter. It carries the *order* and
+  is the cursor. Scoped `evaluation_id` timestamps collide across repos, so they
+  are useless for global ordering; `seq` is what a consumer traverses by.
+- **`report_key`** — a stable, opaque digest of the source
+  `(repo, task, evaluation)` triple. It is what a consumer stores and re-fetches
+  by. It carries no ordering information on purpose, so no client can build
+  ordering assumptions on it.
+
+Both are unique across the catalog, and that uniqueness *is* the exactly-once
+traversal guarantee.
+
+### Reading the feed
+
+```
+GET /api/evaluation/reports?after=<seq>&limit=<n>
+```
+
+- `after` is the consumer's watermark — the highest `seq` it has already
+  imported; omit it on the first poll. The page holds the entries strictly after
+  it, in ascending `seq`.
+- `next_cursor` is what to send as the next `after` (it is returned even for an
+  empty page, so a consumer stores one number unconditionally), and `has_more`
+  says whether more is available *right now*. **Never infer the end from a short
+  page** — read `has_more`.
+- `limit` is 1..500 (default 50). Out of range is a `400`, not a silent clamp.
+- **Cursor policy, in one line:** a watermark must be a non-negative integer or
+  the request fails with `400`. It is deliberately never quietly reset — resetting
+  to the start re-imports everything, resetting to the end loses reports. A stale
+  cursor past the end is simply an empty page.
+
+Each item carries the source identity (repo/task/evaluation), the global
+identity, generated and published timestamps, the archived-target facts, the
+evaluator's backend/model/schema, the artifact names with their sizes and
+sha256 digests, and provenance for cohorting (run ids, git commit window).
+Provenance the evidence pack does not carry is reported as **explicitly
+unavailable with a reason** — today that is always the case for
+`.ai-protocol` version and the orchestrator `effective-config` snapshot, since
+evidence packs record neither.
+
+### Fetching one report
+
+```
+GET /api/evaluation/reports/{report_key}
+```
+
+Returns the entry plus the four artifacts in the same parsed shapes the per-task
+detail route uses, so a consumer never needs to know the
+`<repo-slug>/<task-id>/<evaluation-id>/` layout.
+
+- `available` is **all-or-nothing**: the whole set must still be on disk and
+  readable.
+- A report whose artifacts a retention prune has since removed answers
+  `200 {"available": false, "detail": ...}` — *not* `404`. The report was
+  published and its entry stays auditable; "no such report" would misreport it.
+  An unknown key is the `404`.
+- `integrity` reports which served artifacts no longer hash to the digest
+  recorded at publication (`mismatched`) and which the entry has no usable
+  digest for (`unverified`). Neither blocks the download — only the consumer can
+  decide what an edited or uncheckable report means for its import — and
+  `verified` is the strict summary: every artifact checked *and* matched.
+
+### Retention, and the one thing that can halt publication
+
+Retention (above) and the feed are coordinated: a prune is **skipped** while it
+would delete a complete report that is publishable but not yet cataloged, so a
+failed publication can always be recovered by the next sweep. Once published, an
+entry outlives its artifacts by design — it stays in the feed as an auditable
+record of a report that once existed, with `available: false` on fetch.
+
+Because the catalog is append-only and never rewritten, the only way to break it
+is to edit, merge, or restore the file by hand. If that leaves two entries
+sharing a `seq` or a `report_key`, both feed routes answer `500` naming the
+offending value and publication pauses (retention also stops pruning meanwhile,
+so nothing is lost) until the file is repaired. A damaged catalog is inert, not
+dangerous.
+
+### From the dashboard
+
+Run history carries an `All evaluation reports →` link on evaluation-enabled
+hubs. The view lists the feed in its global publication order, showing each
+report's sequence, repo/task, evaluator identity, Layer 1 + Layer 2
+completeness, run/commit provenance, and global key, and pages forward and back
+through the same cursor an external consumer uses. Every row opens the existing
+per-task evaluation view at that exact evaluation, so the per-task history
+picker and artifact affordances remain the report detail — the central view adds
+a way in, it does not replace them.
 
 ## The evaluator doctor (smoke check)
 
@@ -163,6 +306,10 @@ evaluation entry. The evaluation view:
   the raw evidence/metrics/semantic JSON and the `report.md` Markdown export. Raw
   run logs are never rendered inline.
 
+For the cross-repo view of everything that has been *published*, Run history also
+links to `All evaluation reports →`; see
+[the global report feed](#the-global-report-feed).
+
 ## HTTP surface
 
 All routes are protected by the bearer token like every non-health route.
@@ -171,6 +318,8 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
+| `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
+| `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
 | `GET /api/history/runs` | One page of run history plus batched newest-evaluation state (`none`/`l1`/`l1_l2`) per distinct task group on that page. |
 | `GET /api/repos/{repo}/evaluations/{task}` | List a task's evaluations (newest-first) + resolved target state. |
 | `GET /api/repos/{repo}/evaluations/{task}/{id}` | Read one evaluation's evidence/static/semantic/`report.md`. |

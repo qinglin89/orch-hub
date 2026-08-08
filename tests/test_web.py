@@ -906,9 +906,12 @@ def test_run_history_pager_renders_from_server_metadata():
     body = app_js()
     css = styles_css()
     # Previous/Next + a position indicator, driven by the response's own
-    # pagination fields rather than inferred from a short page.
-    assert 'button("rp-prev", "Previous"' in body
-    assert 'button("rp-next", "Next"' in body
+    # pagination fields rather than inferred from a short page. The button markup
+    # itself is the shared `pagerButton` helper (the report feed pages with the
+    # same control); only the direction sources and the status line are local.
+    assert "const pagerButton = (id, label, arrow, enabled, leading) =>" in body
+    assert 'pagerButton("rp-prev", "Previous"' in body
+    assert 'pagerButton("rp-next", "Next"' in body
     assert 'wire("rp-prev"' in body and 'wire("rp-next"' in body
     assert "data.prev_cursor" in body
     assert "data.next_cursor" in body
@@ -2308,5 +2311,117 @@ def test_semantic_layer_styles_are_present():
         ".sem-finding.sev-medium",
         ".sem-improvements",
         ".sem-label",
+    ):
+        assert selector in css, selector
+
+
+# ---- central evaluation-report feed (cross-repo, global order) --------------
+#
+# The feed view's runtime behaviour — that it paints the server's global order,
+# that each row opens the existing per-task evaluation, that the forward-only
+# pager can walk off the newest page and back — is proven in the keyboard
+# harness (tests/test_web_keyboard.py, scenario `feed:`), which drives the real
+# render against a stubbed feed. These served-asset checks pin the wiring and the
+# boundary guarantees: the route, the entry point and its gate, the read-only
+# surface, and the states that must stay distinct.
+
+
+def test_report_feed_route_and_entry_are_wired():
+    body = app_js()
+    # Its own route, and re-entering it restarts the walk (the cursor trail is
+    # client-side, so a fresh navigation must not resume mid-feed).
+    assert 'if (seg[0] === "reports")' in body
+    assert "reportTrail = [];" in body
+    assert "return renderReports(null);" in body
+    # A paged chronological feed: the wide column, never the card-grid "list"
+    # kind, which would break a strictly ordered feed into columns.
+    assert 'if (seg[0] === "reports") return "wide";' in body
+    assert 'else if (path.startsWith("/reports")) tab = "/tasks";' in body
+    # The way in is Run history, gated by the flag that payload already carries —
+    # so a disabled hub hides it without a second request.
+    assert "function reportsEntryLink(enabled)" in body
+    assert "if (!enabled) return \"\";" in body
+    assert "${reportsEntryLink(data.evaluation_enabled)}" in body
+    assert 'href="#/reports"' in body
+
+
+def test_report_feed_reads_the_global_feed_and_writes_nothing():
+    body = app_js()
+    assert "async function renderReports(after)" in body
+    feed = body[body.index("// ---- central evaluation-report feed") :]
+    feed = feed[: feed.index("// ---- remote intake")]
+    # Availability first (the one route that answers while disabled), then the
+    # catalog feed with the consumer's watermark as `after`.
+    assert 'const avail = await api("/api/evaluation");' in feed
+    assert 'const REPORTS_PATH = "/api/evaluation/reports";' in body
+    assert '"?after=" + encodeURIComponent(after)' in feed
+    # Reads only: the feed and the bundle route publish nothing, and this view
+    # must never generate or trigger an evaluation.
+    assert "method: \"POST\"" not in feed
+    assert "evalMetricsPath" not in feed
+    assert "evalSemanticJobPath" not in feed
+
+
+def test_report_feed_rows_open_the_existing_task_evaluation():
+    body = app_js()
+    # Each row links INTO the per-task view at the exact evaluation the feed item
+    # names, so the existing history picker/artifacts stay the report detail — the
+    # feed adds a way in, it does not replace per-task evaluation navigation.
+    assert "const reportDetailHash = (entry) =>" in body
+    assert "evalHash(entry.repo_name, entry.task_id) +" in body
+    assert 'encodeURIComponent(entry.evaluation_id)' in body
+    # Global order, the source identity, the evaluator, and the key a consumer
+    # re-fetches by are all on the row.
+    assert 'class="report-seq">#${escapeHtml(entry.seq)}' in body
+    assert '["repo", entry.repo_name || "(unknown repo)"]' in body
+    assert '["evaluated while", entry.target_source || "unknown"]' in body
+    assert 'badge("L1 + L2", "ok")' in body
+    assert 'class="report-key muted" title="${escapeHtml(key)}"' in body
+    # Provenance the evidence pack does not carry is said, not left blank — a
+    # missing row would read as "no runs" / "no commits".
+    assert 'runs.available ? String(runs.count || 0) : "unavailable"' in body
+    assert 'git.available ? String(git.commit_count || 0) : "unavailable"' in body
+
+
+def test_report_feed_pager_is_forward_only_with_a_client_trail():
+    body = app_js()
+    # The server offers only "after N", so Previous is served by remembering the
+    # cursors walked; `has_more` decides the end, never a short page.
+    assert "let reportTrail = [];" in body
+    assert "reportTrail.push(data.cursor);" in body
+    assert "rerender(renderReports(data.next_cursor));" in body
+    assert "rerender(renderReports(reportTrail.pop()));" in body
+    assert 'pagerButton("fp-prev", "Previous", "←", reportTrail.length > 0, true)' in body
+    assert 'pagerButton("fp-next", "Next", "→", !!data.has_more, false)' in body
+    assert 'data.has_more ? "more available" : "end of feed"' in body
+
+
+def test_report_feed_keeps_its_empty_states_distinct():
+    body = app_js()
+    # Disabled, never-published, and past-the-end are three different answers,
+    # and a never-published feed is its own state (no pager, like empty history)
+    # while a page past the end keeps one so Previous is never a dead end.
+    assert "const empty = !entries.length && !reportTrail.length;" in body
+    assert '(empty ? "" : reportPager(data, entries))' in body
+    assert "Task evaluation is disabled on this hub" in body
+    assert "so no reports are " in body
+    assert "No evaluation reports have been published yet." in body
+    assert "No further reports after this point in the feed." in body
+    # The publication rule is not guessable, so the empty state states it.
+    assert "published once a task is archived and its complete Layer 1 + " in body
+    # The ownership boundary the feed exists under, in the view itself.
+    assert "orch-hub publishes the artifacts" in body
+    assert "does not decide what to change in the protocol" in body
+
+
+def test_report_feed_styles_are_present():
+    css = styles_css()
+    for selector in (
+        ".reports-entry",
+        ".reports-intro",
+        ".report-seq",
+        ".card.report .card-head .task-id",
+        ".report-key",
+        ".report-key .rk",
     ):
         assert selector in css, selector

@@ -2053,6 +2053,52 @@ code {
   word-break: break-word;
 }
 
+/* ---- central evaluation-report feed (cross-repo, global order) ---- */
+
+/* The way up to the feed from Run history, where the per-task Evaluation links
+   already live. Right-aligned so it reads as a page-level action rather than
+   competing with the filter controls under it. */
+.reports-entry {
+  margin: 2px 0 0;
+  text-align: right;
+}
+
+.reports-intro {
+  margin: 6px 0 12px;
+  line-height: 1.5;
+}
+
+/* The global sequence leads the row: it IS the feed's order, so it gets the
+   mono/accent treatment an identifier gets elsewhere and never wraps away from
+   the task id beside it. */
+.report-seq {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--accent);
+  flex: 0 0 auto;
+}
+
+/* The task id is the row's subject; let it take the slack and wrap, keeping the
+   sequence and the completeness badge on their own edges. */
+.card.report .card-head .task-id {
+  flex: 1 1 auto;
+  word-break: break-word;
+}
+
+/* The global key a consumer stores, under the card link (not inside it — it is
+   reference text, not a destination). Truncated in the markup; the full value is
+   on the title. */
+.report-key {
+  margin: 8px 0 0;
+  font-size: 12px;
+}
+
+.report-key .rk {
+  font-family: var(--mono);
+  word-break: break-all;
+}
+
 /* ---- waiting-question answer box ---- */
 
 .section.waiting {
