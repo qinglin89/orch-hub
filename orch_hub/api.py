@@ -493,11 +493,16 @@ def create_app(
 
     ``report_catalog`` is the single :class:`~orch_hub.report_catalog.ReportCatalog`
     the global report feed publishes through. The default semantic evaluator is
-    wired to it, so every completed L1+L2 report is appended once its artifacts
-    are durable, and the lifespan reconciles it at startup to backfill whatever
-    the live hook missed. An injected ``semantic_evaluator`` keeps its own
-    (possibly absent) catalog, which is what a hermetic Layer-2 test wants; the
-    startup backfill still runs over this one.
+    wired to it, so every completed L1+L2 report of an archived task is appended
+    once its artifacts are durable, and the lifespan reconciles it at startup to
+    backfill whatever the live hook missed *and* to publish reports whose task has
+    been archived since. It is also the default evaluation service's retention
+    guard, so pruning cannot delete a completed report the feed has not indexed
+    yet — the one loss reconciliation cannot heal. An injected
+    ``semantic_evaluator`` keeps its own (possibly absent) catalog, which is what
+    a hermetic Layer-2 test wants, and an injected ``evaluation_service`` keeps
+    its own (possibly absent) guard; the startup backfill still runs over this
+    one.
     """
     resolved = config if config is not None else Config.from_env()
     # Adopt an injected manager's coordinator (see the docstring); with both
@@ -562,6 +567,14 @@ def create_app(
     manager.use_admission(admission)
     intake.use_admission(admission)
     # Optional task-evaluation subsystem (gated by ``Config.evaluation_enabled``).
+    # The global report feed's durable catalog comes first, because both the
+    # semantic evaluator (which publishes to it) and retention (which must not
+    # delete what it has not published) depend on it: every completed L1+L2
+    # evaluation of an archived task is appended once, so an external
+    # protocol-evolution consumer can poll one ordered cross-repo feed instead of
+    # walking every repo's tasks. Constructing it touches no disk; it shares the
+    # evaluation gate, so a disabled hub publishes and reconciles nothing.
+    catalog = report_catalog if report_catalog is not None else ReportCatalog(resolved)
     # The static evaluator wraps the same evaluation service the evidence/read
     # routes use, so injecting a fake ``evaluation_service`` alone (a hermetic
     # test with a fake git runner / record loader / clock) also drives the metrics
@@ -570,20 +583,13 @@ def create_app(
     evaluation = (
         evaluation_service
         if evaluation_service is not None
-        else EvaluationService(resolved)
+        else EvaluationService(resolved, retention_guard=catalog.unpublished_ids)
     )
     static_metrics = (
         static_evaluator
         if static_evaluator is not None
         else StaticEvaluator(resolved, evaluation_service=evaluation)
     )
-    # The global report feed's durable catalog, built before the semantic evaluator
-    # because the evaluator publishes to it: every completed L1+L2 evaluation is
-    # appended once its artifact set is durable, so an external protocol-evolution
-    # consumer can poll one ordered cross-repo feed instead of walking every repo's
-    # tasks. Constructing it touches no disk; it shares the evaluation gate, so a
-    # disabled hub publishes and reconciles nothing.
-    catalog = report_catalog if report_catalog is not None else ReportCatalog(resolved)
     # The semantic (Layer 2) evaluator shares the same evaluation service + static
     # evaluator, so an injected fake service flows to all three layers. Its default
     # backend is the concrete Claude CLI driver (:class:`ClaudeSemanticBackend`,

@@ -34,19 +34,35 @@ Three properties make the feed usable for incremental import:
   across repos — to reason about order or identity. Because the key is derived
   from the source identity rather than allocated, re-cataloging the same
   evaluation is a no-op, which is what makes reconciliation idempotent.
-- **Artifact-based eligibility.** An evaluation is a report candidate only when
-  its whole L1+L2 artifact set (:data:`REQUIRED_ARTIFACTS`) is already durable.
-  *How* it was evaluated is outside this module: a dir missing any of the four
-  files is simply not a candidate, so a partial evidence-only generation or a
-  failed semantic job can never surface as a ready report. ``archived`` is
-  stamped from the evidence pack's own target source, so eligibility rests on the
-  artifact, not on a live re-read of the repo.
+- **Artifact-based candidacy.** An evaluation is a report candidate only when
+  its whole L1+L2 artifact set (:data:`REQUIRED_ARTIFACTS`) is already durable
+  *and* coherent — every artifact's own recorded identity must agree with the
+  directory it was found under (:func:`_require_identity`). *How* it was
+  evaluated is outside this module: a dir missing any of the four files is simply
+  not a candidate, so a partial evidence-only generation or a failed semantic job
+  can never surface as a ready report.
 - **Self-healing durability.** Appends are single fsynced lines with a
-  torn-tail heal (:meth:`ReportCatalog._append_line`), and
+  torn-tail heal (:meth:`ReportCatalog._append_line`), taken under a lock that
+  spans processes (:meth:`ReportCatalog._locked`), and
   :meth:`ReportCatalog.reconcile` re-derives everything missing by scanning the
   evaluations tree. So the live hook is an *optimization for promptness*: if it
   is unwired, fails, or the hub dies mid-write, the next reconciliation catalogs
   the report anyway, and never mints a second global identity for it.
+
+Publication is gated on the evaluated task being **archived**, because the feed
+exists to hand a consumer finished protocol stories, not in-progress ones. Being
+archived is an event that happens *after* the report is written, and no artifact
+can record it retroactively, so the catalog resolves it in two steps: the
+semantic report's own ``target_source`` stamp (an evaluation run after close-out
+is publishable immediately), else a read-only probe of the target repo for
+``.ai-tasks/archive/<task-id>.md`` (:meth:`ReportCatalog._task_archived`). That
+probe is this module's single live read, and it is what makes a report of a
+then-active task publish later, at the sequence where it *became* publishable,
+instead of being stranded ineligible forever. A complete report the feed has not
+published yet is therefore not disposable: retention consults
+:meth:`ReportCatalog.unpublished_ids` so pruning cannot delete a report before
+its artifacts have been indexed (after which the entry — hashes and all —
+outlives them by design).
 
 The live hook is :class:`~orch_hub.semantic.ReportCataloger`, satisfied
 structurally by :class:`ReportCatalog` and called by
@@ -64,12 +80,14 @@ than any verdict of its own.
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import hashlib
 import json
 import logging
 import os
 import threading
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from .config import Config
@@ -80,10 +98,13 @@ from .evaluation import (
     EvaluationDisabledError,
     evaluation_artifact_dir,
     evaluation_order_key,
+    repo_slug,
+    task_evaluations_dir,
 )
 from .models import ManagedRepo, ReportArtifact, ReportCatalogEntry, ReportProvenance
 from .semantic import SEMANTIC_REPORT_MD_NAME, SEMANTIC_REPORT_NAME
 from .static_metrics import STATIC_METRICS_NAME
+from .task_store import read_archived_task_content
 
 _log = logging.getLogger(__name__)
 
@@ -94,6 +115,12 @@ manager's ``runs/``, the intake manager's ``intake/``, the semantic-job manager'
 
 CATALOG_NAME = "catalog.jsonl"
 """The append-only catalog file: one :class:`ReportCatalogEntry` per line."""
+
+CATALOG_LOCK_NAME = "catalog.lock"
+"""Sidecar lock file guarding the read/check/allocate/append transaction. Its
+*content* is irrelevant — only the POSIX advisory lock on it matters — so it is
+kept beside the catalog rather than locking the catalog file itself, whose
+append-mode handle is opened and closed per write."""
 
 REQUIRED_ARTIFACTS: tuple[str, ...] = (
     EVIDENCE_NAME,
@@ -164,9 +191,12 @@ def report_key(*, repo_slug: str, task_id: str, evaluation_id: str) -> str:
     ``evaluation_id`` still get different keys because the repo slug is part of
     the digest.
 
-    Derived, not allocated: re-deriving it for an already-cataloged evaluation
-    yields the same key, which is exactly how :meth:`ReportCatalog.reconcile` and
-    the live hook stay idempotent without a lock spanning processes. It carries no
+    Derived, not allocated: re-deriving it for an already-published evaluation
+    yields the same key, which is what makes :meth:`ReportCatalog.reconcile` and
+    the live hook converge on one identity per source evaluation instead of
+    racing to mint two. (Allocation is still serialized — ``seq`` has no such
+    property — but a *lost* lock could at worst duplicate a number here, never an
+    identity, and a second sweep still adds nothing.) It carries no
     ordering information by construction (a digest of identity, not of time), so a
     consumer cannot accidentally build ordering assumptions on it — ``seq`` is the
     only order in the feed. Components are joined with a null byte, which cannot
@@ -177,22 +207,8 @@ def report_key(*, repo_slug: str, task_id: str, evaluation_id: str) -> str:
     return REPORT_KEY_PREFIX + hashlib.sha256(raw).hexdigest()[:_REPORT_KEY_HEX]
 
 
-def is_eligible(entry: ReportCatalogEntry) -> bool:
-    """Whether an entry is a publishable feed item (an archived-task report).
-
-    The feed's eligibility policy in one place: the catalog records every durably
-    complete report for audit, while list/read paths surface only reports whose
-    evaluated task was already archived — i.e. a completed task whose protocol
-    story is finished and worth importing. Reading the stamped ``archived`` fact
-    (from the evidence pack's target source at evaluation time) rather than
-    re-resolving the task file keeps eligibility artifact-based and stable: an
-    entry's eligibility never changes after it is written.
-    """
-    return entry.archived
-
-
 class ReportCatalog:
-    """Durable append-only catalog of completed reports, gated like evaluation.
+    """Durable append-only catalog of published reports, gated like evaluation.
 
     One instance lives in the resident hub service. It shares the evaluation
     subsystem's ``Config.evaluation_enabled`` gate, so a deployment that disables
@@ -200,12 +216,22 @@ class ReportCatalog:
     subsystem (the API maps it to the uniform 404) — a disabled hub publishes
     nothing and reconciles nothing.
 
+    Every entry is a feed item: publication is the eligibility decision (a
+    complete, coherent report whose task is archived), so the read paths need no
+    second filter and ``seq`` is exactly the order in which reports *became*
+    publishable. A report of a task that was still active is not dropped — it is
+    simply not published yet, and the next :meth:`reconcile` picks it up once its
+    task file has moved into ``.ai-tasks/archive/``.
+
     ``clock`` must return timezone-aware UTC datetimes (it stamps
-    ``cataloged_ts``). The instance lock serializes read-modify-append cycles so
-    concurrent semantic jobs — which finish on independent daemon threads — cannot
-    interleave and allocate the same ``seq``. Sequence allocation is derived from
-    the *file* on every cycle, never carried in memory across cycles, so a restart
-    (or a crash mid-reconcile) resumes numbering correctly from durable state.
+    ``cataloged_ts``). Sequence allocation is derived from the *file* on every
+    cycle, never carried in memory across cycles, so a restart (or a crash
+    mid-reconcile) resumes numbering correctly from durable state; the whole
+    read-check-allocate-append cycle runs under :meth:`_locked`, which excludes
+    both concurrent threads (parallel semantic jobs finish on independent daemon
+    threads) *and* a second process sharing the data dir — a CLI sweep beside the
+    resident service, or an overlapping restart — either of which would otherwise
+    read the same durable maximum and mint the same ``seq`` twice.
 
     Every write is an append of one complete line: entries are immutable, and the
     file is never rewritten. That is what lets a consumer treat ``seq`` as a
@@ -240,6 +266,40 @@ class ReportCatalog:
     def catalog_path(self) -> Path:
         return self.catalog_dir / CATALOG_NAME
 
+    @property
+    def lock_path(self) -> Path:
+        return self.catalog_dir / CATALOG_LOCK_NAME
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the catalog's write transaction against threads *and* processes.
+
+        Two nested locks, because ``seq`` allocation is a read-check-allocate-
+        append cycle and any interleaving of it duplicates a sequence number (and
+        with it a ``report_key``), which silently breaks cursor pagination — a
+        consumer that resumes after the first of the two duplicates never sees the
+        second. The instance lock is the cheap intra-process case; the POSIX
+        advisory lock on :attr:`lock_path` covers what the instance lock provably
+        cannot — a second ``ReportCatalog`` over the same data dir, in this process
+        or another one (a CLI sweep, an overlapping restart). ``flock`` is
+        associated with the open file description, so a fresh handle per entry
+        makes it exclusive between threads as well.
+
+        Held for the whole of a :meth:`reconcile` sweep rather than per append:
+        the sweep re-derives its next sequence from the file once, so releasing
+        between appends would reintroduce exactly the interleaving this prevents.
+        The lock is released by the OS if the holder dies, so a crashed sweep
+        cannot wedge the feed.
+        """
+        with self._lock:
+            self.catalog_dir.mkdir(parents=True, exist_ok=True)
+            with self.lock_path.open("a+", encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
     # -- reads ----------------------------------------------------------------
 
     def entries(
@@ -253,15 +313,19 @@ class ReportCatalog:
         an entry — and ``limit`` caps one page. Entries are returned in ascending
         ``seq``, which is append order, so concurrent appends only ever add to the
         *end* of a page boundary and never renumber what a consumer already saw.
+        Every entry is a feed item (publication *is* the eligibility decision), so
+        there is no second filter to apply here.
 
-        Corrupt lines are skipped rather than fatal: a torn tail from a crashed
-        append (or hand-editing) must not make the whole catalog unreadable, and
-        such a line was never a visible entry to any consumer, so skipping it
-        cannot hide a report a consumer already imported. Gated and read-only.
+        Deliberately outside :meth:`_locked`: a reader must never wait on a long
+        reconciliation sweep, and it does not need to — an append adds a whole
+        line, so the worst a concurrent write can do is expose a half-written tail
+        that this read skips and the next poll returns (the cursor has not moved
+        past it). Corrupt lines are skipped for the same reason: a torn tail from
+        a crashed append, or hand-editing, must not make the whole catalog
+        unreadable. Gated and read-only.
         """
         self._require_enabled()
-        with self._lock:
-            found = self._read_entries()
+        found = self._read_entries()
         if after_seq is not None:
             found = [entry for entry in found if entry.seq > after_seq]
         if limit is not None and limit >= 0:
@@ -276,13 +340,13 @@ class ReportCatalog:
         repo/task/evaluation directory layout. ``None`` means the key names no
         published report — distinct from a published report whose artifacts a
         retention prune has since removed, which stays an entry and is reported as
-        explicitly unavailable by the read path. Gated and read-only.
+        explicitly unavailable by the read path. Lock-free like :meth:`entries`.
+        Gated and read-only.
         """
         self._require_enabled()
-        with self._lock:
-            for entry in self._read_entries():
-                if entry.report_key == key:
-                    return entry
+        for entry in self._read_entries():
+            if entry.report_key == key:
+                return entry
         return None
 
     def artifact_dir(self, entry: ReportCatalogEntry) -> Path:
@@ -307,19 +371,21 @@ class ReportCatalog:
     def record_evaluation(
         self, repo: ManagedRepo, task_id: str, evaluation_id: str
     ) -> ReportCatalogEntry | None:
-        """Catalog one evaluation if it is a complete, not-yet-cataloged report.
+        """Publish one evaluation if it is a complete, archived, unpublished report.
 
         The live hook (:class:`orch_hub.semantic.ReportCataloger`), called by the
         semantic evaluator once its whole artifact set is durable. Returns the new
-        entry, or ``None`` when the evaluation is not a candidate — its artifact
-        set is incomplete — or is already cataloged. Both no-op cases are normal,
-        not errors: the second is what makes a re-run hook, a racing
-        reconciliation, and a restart converge on exactly one global identity per
-        source evaluation.
+        entry, or ``None`` for the three ordinary non-publication cases: the
+        artifact set is incomplete, the evaluated task is not archived yet (an
+        evaluation of live work — it publishes from a later sweep, once close-out
+        archives the task), or it is already published. None of the three is an
+        error; the last is what makes a re-run hook, a racing reconciliation, and
+        a restart converge on exactly one global identity per source evaluation.
 
         Raises :class:`ReportCatalogError` when the artifacts exist but cannot be
-        read/parsed; the evaluator isolates that so a catalog problem never fails
-        an otherwise-successful evaluation, and the next reconciliation retries.
+        read/parsed or contradict the identity of the directory holding them; the
+        evaluator isolates that so a catalog problem never fails an
+        otherwise-successful evaluation, and the next reconciliation retries.
         """
         self._require_enabled()
         eval_dir = evaluation_artifact_dir(
@@ -338,11 +404,11 @@ class ReportCatalog:
         key = report_key(
             repo_slug=slug, task_id=task_id, evaluation_id=evaluation_id
         )
-        with self._lock:
+        with self._locked():
             existing = self._read_entries()
             if any(entry.report_key == key for entry in existing):
                 return None
-            return self._append(
+            return self._publish(
                 seq=_next_seq(existing),
                 slug=slug,
                 task_id=task_id,
@@ -350,14 +416,67 @@ class ReportCatalog:
                 eval_dir=eval_dir,
             )
 
+    def unpublished_ids(self, repo: ManagedRepo, task_id: str) -> set[str]:
+        """Evaluation ids of ``(repo, task_id)`` that are publishable but unpublished.
+
+        The retention guard (wired into
+        :class:`~orch_hub.evaluation.EvaluationService`): these are complete
+        reports the feed still owes an entry, and deleting one is *unrecoverable*
+        — reconciliation heals only from artifacts that still exist, so a report
+        whose live append failed and whose dir was then pruned by a later
+        generation would vanish from the feed permanently. Retention keeps them
+        until a sweep publishes them, after which the entry (hashes and all)
+        outlives the artifacts by design and pruning is free again.
+
+        Deliberately mirrors the publication rule rather than protecting every
+        uncataloged report: an evaluation of a still-active task is *supposed* to
+        stay unpublished, and protecting those would suspend retention for exactly
+        the common case. The archive probe runs once for the task, and an evidence
+        pack is only parsed in the narrow window where a task has just been
+        archived but its earlier reports have not been swept yet — that pack read
+        is what keeps this in step with :meth:`_build_entry`, which can only probe
+        when the pack names a repo path. Read-only; gated.
+        """
+        self._require_enabled()
+        parent = task_evaluations_dir(
+            self._config.data_dir, repo_name=repo.name, task_id=task_id
+        )
+        if not parent.is_dir():
+            return set()
+        slug = parent.parent.name
+        known = {entry.report_key for entry in self.entries()}
+        archived_now = self._task_archived(repo.path, task_id)
+        owed: set[str] = set()
+        for eval_dir in sorted(parent.iterdir()):
+            if not eval_dir.is_dir() or not _is_complete(eval_dir):
+                continue
+            key = report_key(
+                repo_slug=slug, task_id=task_id, evaluation_id=eval_dir.name
+            )
+            if key in known:
+                continue
+            if _stamped_archived(eval_dir) or (
+                archived_now
+                and _evidence_repo_path(_read_evidence(eval_dir)) is not None
+            ):
+                owed.add(eval_dir.name)
+        return owed
+
     def reconcile(self) -> list[ReportCatalogEntry]:
-        """Backfill every complete-but-uncataloged report; return what was added.
+        """Publish every complete, archived, unpublished report; return what was added.
 
         The completeness half of the design, run at startup and available as a
         manual repair. It walks the evaluations tree, keeps the dirs holding a
         full L1+L2 artifact set, and appends the ones no entry covers yet — which
         picks up reports written before this feature existed, reports whose live
         hook was unwired or failed, and reports for tasks archived long ago.
+
+        It is also how a report *becomes* publishable: a candidate whose task was
+        still active when it was evaluated is skipped (no sequence consumed) and
+        re-examined on the next sweep, so the report enters the feed at the
+        sequence where close-out made it a finished protocol story rather than
+        never at all. That re-examination is the reason candidates are re-scanned
+        every sweep instead of once.
 
         **Deterministic order:** candidates are appended sorted by
         ``(evaluation order, repo slug, task id)``, so a backfilled global
@@ -370,16 +489,19 @@ class ReportCatalog:
         **Idempotent:** membership is tested by :func:`report_key`, which is
         derived from the source identity, so a second sweep (or a restart
         mid-sweep) adds nothing and never mints a second identity for a report.
-        One unreadable evaluation is logged and skipped rather than failing the
-        sweep — the remaining reports still publish, and the broken one is retried
-        next time. Gated.
+        One broken evaluation is logged and skipped rather than failing the sweep
+        — *any* exception it raises, not just the anticipated ones, because a
+        startup backfill that aborts on the first structurally corrupt artifact
+        would strand every later report behind it. The remaining reports still
+        publish, and the broken one is retried next time. Gated.
         """
         self._require_enabled()
-        with self._lock:
+        with self._locked():
             existing = self._read_entries()
             known = {entry.report_key for entry in existing}
             seq = _next_seq(existing)
             added: list[ReportCatalogEntry] = []
+            archived: dict[tuple[Path, str], bool] = {}
             for slug, task_id, evaluation_id, eval_dir in self._scan_candidates():
                 key = report_key(
                     repo_slug=slug, task_id=task_id, evaluation_id=evaluation_id
@@ -387,17 +509,17 @@ class ReportCatalog:
                 if key in known:
                     continue
                 try:
-                    entry = self._append(
+                    entry = self._publish(
                         seq=seq,
                         slug=slug,
                         task_id=task_id,
                         evaluation_id=evaluation_id,
                         eval_dir=eval_dir,
+                        archived_cache=archived,
                     )
-                except (ReportCatalogError, OSError) as err:
-                    # One broken evaluation must not abort the sweep: skip it (no
-                    # line was written, so ``seq`` is not consumed) and let the
-                    # next reconciliation retry it once the artifact is readable.
+                except Exception as err:  # noqa: BLE001 - one dir cannot stop the sweep
+                    # No line was written, so ``seq`` is not consumed; the next
+                    # reconciliation retries once the artifact is readable.
                     _log.warning(
                         "report catalog skipped %s/%s/%s: %s",
                         slug,
@@ -406,6 +528,8 @@ class ReportCatalog:
                         err,
                     )
                     continue
+                if entry is None:
+                    continue  # not archived yet: a later sweep publishes it
                 known.add(key)
                 added.append(entry)
                 seq += 1
@@ -413,7 +537,7 @@ class ReportCatalog:
 
     # -- internals ------------------------------------------------------------
 
-    def _append(
+    def _publish(
         self,
         *,
         seq: int,
@@ -421,12 +545,16 @@ class ReportCatalog:
         task_id: str,
         evaluation_id: str,
         eval_dir: Path,
-    ) -> ReportCatalogEntry:
+        archived_cache: dict[tuple[Path, str], bool] | None = None,
+    ) -> ReportCatalogEntry | None:
         """Build one entry from its durable artifacts and append it. Lock held.
 
-        The entry is built *completely first* and only then appended, so a source
-        artifact that fails to read/parse raises before anything touches the
-        catalog — there is no partial-entry state to clean up.
+        Returns ``None`` without writing anything when the entry turns out not to
+        be publishable yet (its task is not archived). The entry is otherwise
+        built *completely first* and only then appended, so a source artifact that
+        fails to read/parse — or that contradicts the directory's identity —
+        raises before anything touches the catalog; there is no partial-entry
+        state to clean up.
         """
         entry = self._build_entry(
             seq=seq,
@@ -434,7 +562,10 @@ class ReportCatalog:
             task_id=task_id,
             evaluation_id=evaluation_id,
             eval_dir=eval_dir,
+            archived_cache=archived_cache,
         )
+        if not entry.archived:
+            return None
         self._append_line(entry)
         return entry
 
@@ -446,24 +577,52 @@ class ReportCatalog:
         task_id: str,
         evaluation_id: str,
         eval_dir: Path,
+        archived_cache: dict[tuple[Path, str], bool] | None = None,
     ) -> ReportCatalogEntry:
         """Assemble one catalog entry from an evaluation's persisted artifacts.
 
-        Reads only the evaluation's own durable files: the semantic report for
-        identity/evaluator/target facts, the evidence pack for provenance, and all
-        four artifacts for size/hash. It deliberately does *not* consult the
-        registry, the target repo, or run records — an entry must stay
-        reproducible from the artifacts it names, and the catalog must never take
-        a live read that could disagree with what was actually evaluated.
+        Content comes only from the evaluation's own durable files: the semantic
+        report for identity/evaluator/target facts, the evidence pack for
+        provenance, and all four artifacts for size/hash — never the registry, run
+        records, or live task content, so an entry stays reproducible from the
+        artifacts it names.
+
+        Two things it does *not* take on trust:
+
+        - **Identity.** Directory names alone decide the global ``report_key``, so
+          a dir whose artifacts claim a different repo/task/evaluation — a copied
+          or hand-moved bundle, a stale file left by an interrupted write — would
+          otherwise be published under a key that misidentifies its own contents.
+          Each JSON artifact is checked against the directory it was found under
+          (:func:`_require_identity`) and a contradiction rejects the candidate.
+        - **Archived-ness.** ``target_source`` is the stamp from evaluation time
+          and stays on the entry as such, but archive happens later, so
+          ``archived`` is that stamp *or* a live probe of the target repo
+          (:meth:`_task_archived`). This single field is what the publication
+          decision reads.
         """
         report = _read_json(eval_dir / SEMANTIC_REPORT_NAME)
         if not isinstance(report, dict):
             raise ReportCatalogError(
                 f"{SEMANTIC_REPORT_NAME} is not a JSON object in {eval_dir}"
             )
-        evaluator = report.get("evaluator")
-        evaluator = evaluator if isinstance(evaluator, dict) else {}
+        identity = dict(slug=slug, task_id=task_id, evaluation_id=evaluation_id)
+        _require_identity(report, name=SEMANTIC_REPORT_NAME, **identity)
+        _require_identity(
+            _read_json_object(eval_dir / STATIC_METRICS_NAME),
+            name=STATIC_METRICS_NAME,
+            **identity,
+        )
+        evidence = _read_evidence(eval_dir)
+        _require_identity(evidence, name=EVIDENCE_NAME, **identity)
+        _require_identity(
+            _mapping(evidence.get("target")) if evidence is not None else None,
+            name=f"{EVIDENCE_NAME} target",
+            **identity,
+        )
+        evaluator = _mapping(report.get("evaluator")) or {}
         target_source = _str_field(report, "target_source")
+        repo_path = _evidence_repo_path(evidence)
         return ReportCatalogEntry(
             seq=seq,
             report_key=report_key(
@@ -476,20 +635,62 @@ class ReportCatalog:
             # and re-resolves by the other.
             repo_name=_str_field(report, "repo_name") or slug,
             repo_slug=slug,
-            repo_path=_evidence_repo_path(eval_dir),
+            repo_path=repo_path,
             task_id=task_id,
             evaluation_id=evaluation_id,
             generated_ts=_str_field(report, "generated_ts"),
             target_source=target_source,
-            archived=target_source == SOURCE_ARCHIVED,
+            archived=(
+                target_source == SOURCE_ARCHIVED
+                or self._task_archived(repo_path, task_id, archived_cache)
+            ),
             backend=_str_field(evaluator, "backend"),
             model=_str_field(evaluator, "model"),
             schema_version=_str_field(evaluator, "schema_version"),
             artifacts=tuple(
                 _artifact_digest(eval_dir / name) for name in REQUIRED_ARTIFACTS
             ),
-            provenance=_provenance(eval_dir),
+            provenance=_provenance(evidence),
         )
+
+    def _task_archived(
+        self,
+        repo_path: Path | None,
+        task_id: str,
+        cache: dict[tuple[Path, str], bool] | None = None,
+    ) -> bool:
+        """Whether the evaluated task file now lives in ``.ai-tasks/archive/``.
+
+        The module's one live read, and the mechanism that lets a report of a
+        then-active task publish after close-out archives it. Routed through the
+        contained :func:`orch_hub.task_store.read_archived_task_content` reader, so
+        the same single-segment id validation and resolved-path containment that
+        guard every other task-file read apply here — a crafted task id or a
+        symlinked archive file cannot read outside the repo's archive dir. Nothing
+        is written, and nothing about the target repo is inferred beyond this one
+        fact.
+
+        Fails to *False* — not archived, therefore not published yet — for an
+        unknown repo path (a degraded evidence pack names none), an unsafe id, an
+        IO error, or an undecodable file: an unreadable target must never be
+        reported to the feed as a finished protocol story, and a probe that raised
+        would cost the rest of the sweep (or the caller's whole retention pass) as
+        well. ``cache`` memoizes the probe within one sweep, where a task's
+        evaluations (up to the retention cap) all ask the same question.
+        """
+        if repo_path is None:
+            return False
+        key = (repo_path, task_id)
+        if cache is not None and key in cache:
+            return cache[key]
+        try:
+            found = read_archived_task_content(_repo_at(repo_path), task_id) is not None
+        except (OSError, ValueError) as err:
+            _log.warning("archive probe failed for %s/%s: %s", repo_path, task_id, err)
+            found = False
+        if cache is not None:
+            cache[key] = found
+        return found
 
     def _append_line(self, entry: ReportCatalogEntry) -> None:
         """Append one entry as a single durable JSONL line. Lock held.
@@ -519,7 +720,11 @@ class ReportCatalog:
             os.fsync(fh.fileno())
 
     def _read_entries(self) -> list[ReportCatalogEntry]:
-        """Load every valid catalog line, ascending by ``seq``. Lock held.
+        """Load every valid catalog line, ascending by ``seq``.
+
+        Called both inside a write transaction (to allocate the next sequence) and
+        by the lock-free readers, which is why it must tolerate a torn tail rather
+        than assume a quiescent file.
 
         A missing catalog is an empty list (nothing published yet), not an error.
         Lines that are blank, unparseable, not objects, or missing the identity
@@ -603,11 +808,12 @@ def _walk_evaluations(base: Path) -> Iterator[tuple[str, str, str, Path]]:
 def _is_complete(eval_dir: Path) -> bool:
     """Whether an evaluation dir holds the full L1+L2 report artifact set.
 
-    The eligibility predicate, and the reason a failed semantic job or a
+    The candidate predicate, and the reason a failed semantic job or a
     ``/metrics``-only generation never appears as a ready report: the semantic
     evaluator writes all four files as one all-or-nothing dir, so their joint
     presence is exactly the "durably complete" condition, checked on the
-    filesystem rather than inferred from job state.
+    filesystem rather than inferred from job state. Completeness alone does not
+    publish — the candidate must also be coherent and archived.
     """
     return all((eval_dir / name).is_file() for name in REQUIRED_ARTIFACTS)
 
@@ -668,28 +874,125 @@ def _read_json(path: Path) -> object:
         raise ReportCatalogError(f"unreadable {path.name} ({err})") from err
 
 
-def _evidence_repo_path(eval_dir: Path) -> Path | None:
+def _read_json_object(path: Path) -> dict | None:
+    """Parse one artifact JSON as an object, or ``None`` when it is neither.
+
+    The tolerant counterpart of :func:`_read_json`, for the artifacts a report can
+    publish *without* — a missing/corrupt evidence pack or static report degrades
+    the entry's provenance and identity checks rather than suppressing an
+    otherwise-intact report. Absence is degradation; a *readable* artifact that
+    contradicts the directory is a different matter (:func:`_require_identity`).
+    """
+    try:
+        data = _read_json(path)
+    except ReportCatalogError:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _read_evidence(eval_dir: Path) -> dict | None:
+    """The evaluation's parsed evidence pack, or ``None`` when unusable.
+
+    Read once per entry and passed to both consumers (:func:`_evidence_repo_path`,
+    :func:`_provenance`): a pack carries bounded log excerpts for every related
+    run, so parsing it twice per candidate is real work on a startup sweep.
+    """
+    return _read_json_object(eval_dir / EVIDENCE_NAME)
+
+
+def _mapping(value: object) -> dict | None:
+    """``value`` when it is a JSON object, else ``None``."""
+    return value if isinstance(value, dict) else None
+
+
+def _require_identity(
+    data: dict | None,
+    *,
+    name: str,
+    slug: str,
+    task_id: str,
+    evaluation_id: str,
+) -> None:
+    """Reject an artifact whose own identity contradicts its directory.
+
+    The global ``report_key`` is derived from directory names, which are the
+    storage identity — but the *contents* are what a consumer imports, so the two
+    must agree or the feed publishes a report under a key that misidentifies it.
+    A bundle copied between task dirs, restored from a backup into the wrong
+    place, or left behind by an interrupted rename parses perfectly and would
+    otherwise pass unnoticed.
+
+    Only contradictions are fatal. A field an artifact does not carry (an older
+    schema, or a degraded pack that did not parse at all — ``data`` is ``None``)
+    is silence, not disagreement, and leaves publication alone; that keeps this
+    check from becoming a second, stricter completeness rule. ``repo_name`` is
+    compared through :func:`orch_hub.evaluation.repo_slug`, the same rule that
+    produced the directory, so a repo whose name needed slugging still matches.
+    """
+    if data is None:
+        return
+    claimed_task = _str_field(data, "task_id")
+    claimed_eval = _str_field(data, "evaluation_id")
+    claimed_repo = _str_field(data, "repo_name")
+    mismatch: str | None = None
+    if claimed_eval is not None and claimed_eval != evaluation_id:
+        mismatch = f"evaluation_id {claimed_eval!r} != {evaluation_id!r}"
+    elif claimed_task is not None and claimed_task != task_id:
+        mismatch = f"task_id {claimed_task!r} != {task_id!r}"
+    elif claimed_repo is not None and repo_slug(claimed_repo) != slug:
+        mismatch = f"repo {claimed_repo!r} != {slug!r}"
+    if mismatch is not None:
+        raise ReportCatalogError(f"{name} identity mismatch: {mismatch}")
+
+
+def _stamped_archived(eval_dir: Path) -> bool:
+    """Whether the semantic report itself says its task was already archived.
+
+    The cheap half of the publication rule, kept identical for the retention guard
+    (:meth:`ReportCatalog.unpublished_ids`) and the entry build: the semantic
+    report is the smallest artifact carrying a harness-stamped ``target_source``,
+    and an evaluation run after close-out is publishable from the artifact alone,
+    with no target-repo read at all.
+    """
+    report = _read_json_object(eval_dir / SEMANTIC_REPORT_NAME)
+    if report is None:
+        return False
+    return _str_field(report, "target_source") == SOURCE_ARCHIVED
+
+
+def _repo_at(repo_path: Path) -> ManagedRepo:
+    """A minimal :class:`ManagedRepo` for a path, for contained task-file reads.
+
+    Mirrors :meth:`orch_hub.models.RunRecord.managed_repo`: the archive probe needs
+    only a repo root, and reconstructing one locally keeps the catalog off the
+    registry (which could disagree with, or no longer list, the repo an old report
+    came from).
+    """
+    return ManagedRepo(
+        name=repo_path.name,
+        path=repo_path,
+        manifest=repo_path / ".ai-deploy-manifest.json",
+    )
+
+
+def _evidence_repo_path(evidence: dict | None) -> Path | None:
     """The evaluated repo's absolute path, read from the evidence pack's target.
 
     Best-effort and deliberately non-fatal: the repo path is consumer-facing
     context for cohorting, not part of the entry's identity (which is the
     slug/task/evaluation triple), so a degraded evidence pack yields ``None``
-    rather than blocking publication of a perfectly good report.
+    rather than blocking publication of a perfectly good report. It is also the
+    only source for the archive probe's repo root, which is why a pack without one
+    leaves a then-active report unpublishable.
     """
-    try:
-        evidence = _read_json(eval_dir / EVIDENCE_NAME)
-    except ReportCatalogError:
-        return None
-    if not isinstance(evidence, dict):
-        return None
-    target = evidence.get("target")
-    if not isinstance(target, dict):
+    target = _mapping(evidence.get("target")) if evidence is not None else None
+    if target is None:
         return None
     raw = _str_field(target, "repo_path")
     return Path(raw) if raw else None
 
 
-def _provenance(eval_dir: Path) -> ReportProvenance:
+def _provenance(evidence: dict | None) -> ReportProvenance:
     """Derive cohorting provenance from the evaluation's own evidence pack.
 
     Only durable artifact content is consulted, so the record is reproducible
@@ -699,6 +1002,12 @@ def _provenance(eval_dir: Path) -> ReportProvenance:
     or degraded — so a consumer never mistakes an absent field for a known-empty
     one. An unreadable pack is not fatal: the report itself is still publishable,
     just less cohortable.
+
+    Every nested lookup is type-checked before use rather than trusted to match
+    the schema. The pack is a file on disk that anything could have truncated or
+    rewritten, and a raised ``AttributeError`` here is not a local failure: it
+    would propagate out of the entry build and, in a sweep, cost every *later*
+    candidate its publication too.
     """
     unavailable = ReportProvenance(
         runs_detail="evidence pack unreadable",
@@ -706,11 +1015,7 @@ def _provenance(eval_dir: Path) -> ReportProvenance:
         protocol_detail=PROTOCOL_UNAVAILABLE_DETAIL,
         config_detail=CONFIG_UNAVAILABLE_DETAIL,
     )
-    try:
-        evidence = _read_json(eval_dir / EVIDENCE_NAME)
-    except ReportCatalogError:
-        return unavailable
-    if not isinstance(evidence, dict):
+    if evidence is None:
         return unavailable
     runs = evidence.get("runs")
     runs_available = isinstance(runs, list)
@@ -721,10 +1026,13 @@ def _provenance(eval_dir: Path) -> ReportProvenance:
             for run_id in (_run_id_of(item) for item in runs)
             if run_id is not None
         )
-    git = evidence.get("git")
-    git = git if isinstance(git, dict) else {}
+    git = _mapping(evidence.get("git")) or {}
     commits = git.get("commits")
     commits = commits if isinstance(commits, list) else []
+    # ``git log`` is reverse-chronological, so the window's first commit is its
+    # newest — roughly the repo state the task's runs ended at. A malformed item
+    # there degrades the field; it does not fail the report.
+    newest = _mapping(commits[0]) if commits else None
     return ReportProvenance(
         runs_available=runs_available,
         run_ids=run_ids,
@@ -733,9 +1041,7 @@ def _provenance(eval_dir: Path) -> ReportProvenance:
         git_since=_str_field(git, "since"),
         git_until=_str_field(git, "until"),
         git_commit_count=len(commits),
-        # ``git log`` is reverse-chronological, so the window's first commit is
-        # its newest — roughly the repo state the task's runs ended at.
-        git_newest_sha=_str_field(commits[0], "hash") if commits else None,
+        git_newest_sha=_str_field(newest, "hash") if newest is not None else None,
         git_detail=_str_field(git, "detail"),
         protocol_available=False,
         protocol_detail=PROTOCOL_UNAVAILABLE_DETAIL,

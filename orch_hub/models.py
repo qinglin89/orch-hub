@@ -1667,9 +1667,15 @@ class ReportCatalogEntry:
       timestamps (which collide across repos) to reason about order. ``seq``
       carries the order, and is the cursor.
 
-    ``archived`` records whether the evaluated task file was already in
-    ``.ai-tasks/archive/`` when the evidence was built — the feed's eligibility
-    fact, stamped from the artifact rather than re-read from the live repo.
+    ``target_source`` and ``archived`` are deliberately different facts about
+    different moments: the first is where the task file was when the *evidence*
+    was built (``active``/``archived``), the second is that the task was archived
+    by the time the report was *published*. A report of live work is evaluated
+    ``active`` and publishes later, once close-out archives its task, so the two
+    disagree for exactly the reports whose protocol story finished after they were
+    written. Only a report with ``archived`` set is ever cataloged, so this is a
+    provenance pair rather than a filter.
+
     ``generated_ts`` and the evaluator triple come from the semantic report, so
     reports are cohortable by evaluator model/schema. Entries are immutable once
     appended: an entry whose artifacts a later retention prune removed stays in

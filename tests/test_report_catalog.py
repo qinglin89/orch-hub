@@ -1,12 +1,15 @@
 """Tests for the global, append-only evaluation-report catalog (session-1).
 
 Covers global identity and sequence allocation (including scoped
-``evaluation_id`` collisions across repos), artifact-based eligibility (only a
-durably complete L1+L2 set publishes), append durability and torn-tail/corrupt
-recovery, deterministic idempotent reconciliation, the entry's hashes and
-explicit provenance, retention visibility, the live semantic-evaluator hook, and
-disabled-mode fail-closed. Session-2 adds the cursor-paginated feed and
-read/export-by-key HTTP routes; session-3 the dashboard view.
+``evaluation_id`` collisions across repos), publication eligibility (only a
+durably complete, coherent L1+L2 set for an archived task publishes — including
+a report that becomes publishable only after close-out archives its task),
+append durability under concurrent instances, torn-tail/corrupt recovery,
+deterministic idempotent reconciliation, the entry's hashes and explicit
+provenance, retention that cannot outrun publication, the live
+semantic-evaluator hook, and disabled-mode fail-closed. Session-2 adds the
+cursor-paginated feed and read/export-by-key HTTP routes; session-3 the
+dashboard view.
 """
 
 from __future__ import annotations
@@ -14,16 +17,19 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import threading
 from pathlib import Path
 
 import pytest
 
+from orch_hub import report_catalog as report_catalog_module
 from orch_hub.config import Config
 from orch_hub.evaluation import (
     EVIDENCE_NAME,
     SOURCE_ACTIVE,
     SOURCE_ARCHIVED,
     EvaluationDisabledError,
+    EvaluationService,
 )
 from orch_hub.models import ManagedRepo
 from orch_hub.report_catalog import (
@@ -34,7 +40,6 @@ from orch_hub.report_catalog import (
     REPORT_KEY_PREFIX,
     REQUIRED_ARTIFACTS,
     ReportCatalog,
-    is_eligible,
     report_key,
 )
 from orch_hub.semantic import SEMANTIC_REPORT_MD_NAME, SEMANTIC_REPORT_NAME
@@ -144,6 +149,26 @@ def lines(config: Config) -> list[dict]:
     ]
 
 
+def archive_task(tmp_path: Path, *, slug: str = "alpha", task_id: str = TASK_A) -> Path:
+    """Move the target repo's task file into ``.ai-tasks/archive/`` (close-out).
+
+    The only live state the catalog reads. The path matches the ``repo_path`` the
+    fixture's evidence pack records, which is how a sweep finds it again.
+    """
+    archived = tmp_path / "repos" / slug / ".ai-tasks" / "archive"
+    archived.mkdir(parents=True, exist_ok=True)
+    path = archived / f"{task_id}.md"
+    path.write_text(f"---\nid: {task_id}\nstatus: completed\n---\n", encoding="utf-8")
+    return path
+
+
+def patch_json(path: Path, **fields) -> None:
+    """Rewrite top-level fields of a persisted artifact (still valid JSON)."""
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update(fields)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 # -- global identity ----------------------------------------------------------
 
 
@@ -193,7 +218,7 @@ def test_sequence_is_monotonic_across_appends_and_restarts(tmp_path):
     assert [entry.seq for entry in catalog(config).entries()] == [1, 2]
 
 
-# -- artifact-based eligibility ----------------------------------------------
+# -- publication eligibility --------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -213,21 +238,73 @@ def test_incomplete_artifact_sets_are_never_cataloged(tmp_path, present):
     assert catalog(config).entries() == []
 
 
-def test_complete_set_publishes_and_records_archived_eligibility(tmp_path):
+def test_only_an_archived_tasks_report_publishes(tmp_path):
     config = cfg(tmp_path)
     write_eval(config, slug="alpha", task_id=TASK_A, archived=True)
     write_eval(config, slug="beta", task_id=TASK_B, archived=False)
 
     added = catalog(config).reconcile()
 
-    by_slug = {entry.repo_slug: entry for entry in added}
-    assert by_slug["alpha"].archived is True
-    assert by_slug["alpha"].target_source == SOURCE_ARCHIVED
-    assert is_eligible(by_slug["alpha"]) is True
-    # An active-task report is cataloged for audit but is not a feed item: the
-    # eligibility fact is stamped from the artifact, not re-read from the repo.
-    assert by_slug["beta"].archived is False
-    assert is_eligible(by_slug["beta"]) is False
+    # The feed carries finished protocol stories only, so publication IS the
+    # eligibility decision and every entry is a feed item.
+    assert [entry.repo_slug for entry in added] == ["alpha"]
+    assert added[0].archived is True
+    assert added[0].target_source == SOURCE_ARCHIVED
+    # The still-active report is not lost, just not published yet: it consumed no
+    # sequence, and its artifacts are untouched.
+    assert [entry.repo_slug for entry in catalog(config).entries()] == ["alpha"]
+    assert (config.data_dir / "evaluations" / "beta" / TASK_B).is_dir()
+
+
+def test_a_report_of_a_then_active_task_publishes_once_close_out_archives_it(tmp_path):
+    config = cfg(tmp_path)
+    # Evaluated while the task was still in flight — the common case, since the
+    # dashboard's Layer 2 button works on active tasks.
+    write_eval(config, archived=False)
+    assert catalog(config).reconcile() == []
+
+    archive_task(tmp_path)
+    added = catalog(config).reconcile()
+
+    # Archive happens after the report is written and no artifact can record it,
+    # so the sweep re-examines unpublished candidates and publishes this one at
+    # the sequence where it became a finished story — rather than stranding it
+    # ineligible forever behind an evaluation-time stamp.
+    assert [entry.evaluation_id for entry in added] == ["20260730T100000Z"]
+    assert added[0].seq == 1
+    assert added[0].archived is True
+    # The stamp stays honest about what was evaluated; ``archived`` is the
+    # publication-time fact.
+    assert added[0].target_source == SOURCE_ACTIVE
+    # And it is published exactly once.
+    assert catalog(config).reconcile() == []
+    assert len(catalog(config).entries()) == 1
+
+
+def test_the_live_hook_publishes_a_report_of_an_already_archived_task(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, archived=False)
+    archive_task(tmp_path)
+
+    entry = catalog(config).record_evaluation(repo(tmp_path), TASK_A, "20260730T100000Z")
+
+    # The hook and the sweep apply one publication rule, so a task archived
+    # between evaluation and hook does not need a restart to reach the feed.
+    assert entry is not None and entry.archived is True
+    assert catalog(config).reconcile() == []
+
+
+def test_an_active_report_whose_pack_names_no_repo_stays_unpublished(tmp_path):
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config, archived=False)
+    (eval_dir / EVIDENCE_NAME).write_text("{not json", encoding="utf-8")
+    archive_task(tmp_path)
+
+    # The stamp says active and the degraded pack names no repo to probe, so the
+    # catalog cannot establish that this task is archived. It declines to publish
+    # rather than guessing — and the unreadable pack does not crash the sweep.
+    assert catalog(config).reconcile() == []
+    assert catalog(config).entries() == []
 
 
 def test_live_hook_ignores_an_incomplete_evaluation(tmp_path):
@@ -236,6 +313,65 @@ def test_live_hook_ignores_an_incomplete_evaluation(tmp_path):
 
     assert catalog(config).record_evaluation(repo(tmp_path), TASK_A, "20260730T100000Z") is None
     assert catalog(config).entries() == []
+
+
+def test_live_hook_defers_a_report_whose_task_is_still_active(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, archived=False)
+
+    assert catalog(config).record_evaluation(repo(tmp_path), TASK_A, "20260730T100000Z") is None
+    assert catalog(config).entries() == []
+
+
+# -- identity coherence -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("artifact", "fields"),
+    [
+        (SEMANTIC_REPORT_NAME, {"task_id": TASK_B}),
+        (SEMANTIC_REPORT_NAME, {"evaluation_id": "20260730T999999Z"}),
+        (SEMANTIC_REPORT_NAME, {"repo_name": "somewhere-else"}),
+        (STATIC_METRICS_NAME, {"evaluation_id": "20260730T999999Z"}),
+        (EVIDENCE_NAME, {"evaluation_id": "20260730T999999Z"}),
+    ],
+)
+def test_an_artifact_contradicting_its_directory_is_never_published(
+    tmp_path, artifact, fields
+):
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config, slug="alpha", evaluation_id="20260730T100000Z")
+    patch_json(eval_dir / artifact, **fields)
+    # A healthy sibling proves the rejection is scoped to the incoherent dir.
+    write_eval(config, slug="beta", task_id=TASK_B, evaluation_id="20260730T110000Z")
+
+    added = catalog(config).reconcile()
+
+    # The global key comes from directory names, so publishing a bundle whose own
+    # contents name a different source would put a report in the feed under a key
+    # that misidentifies it — for a copied, restored, or half-renamed dir.
+    assert [entry.repo_slug for entry in added] == ["beta"]
+    assert [entry.seq for entry in added] == [1]
+
+
+def test_the_evidence_targets_own_identity_is_checked_too(tmp_path):
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    evidence = json.loads((eval_dir / EVIDENCE_NAME).read_text(encoding="utf-8"))
+    evidence["target"]["task_id"] = TASK_B
+    (eval_dir / EVIDENCE_NAME).write_text(json.dumps(evidence), encoding="utf-8")
+
+    assert catalog(config).reconcile() == []
+
+
+def test_an_artifact_that_carries_no_identity_still_publishes(tmp_path):
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    # Silence is not disagreement: an older/leaner artifact must not be treated as
+    # a mismatch, or the coherence check quietly becomes a second completeness rule.
+    (eval_dir / STATIC_METRICS_NAME).write_text(json.dumps({"scores": []}), encoding="utf-8")
+
+    assert [entry.seq for entry in catalog(config).reconcile()] == [1]
 
 
 # -- entry content ------------------------------------------------------------
@@ -297,6 +433,45 @@ def test_degraded_evidence_still_publishes_with_explicit_unavailable_provenance(
     assert entry.provenance.runs_available is False
     assert entry.provenance.runs_detail == "evidence pack unreadable"
     assert entry.provenance.git_available is False
+
+
+def test_a_malformed_nested_commit_degrades_provenance_instead_of_raising(tmp_path):
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    evidence = json.loads((eval_dir / EVIDENCE_NAME).read_text(encoding="utf-8"))
+    # A structurally corrupt pack: the commit list holds scalars, not objects.
+    evidence["git"]["commits"] = ["cafe1234", 7]
+    (eval_dir / EVIDENCE_NAME).write_text(json.dumps(evidence), encoding="utf-8")
+
+    entry = catalog(config).reconcile()[0]
+
+    # Reading a nested field off a non-object would raise AttributeError, which is
+    # not a per-candidate failure: it escapes the entry build and takes the rest of
+    # the sweep with it. Every nested lookup is type-checked, so the field simply
+    # degrades and the report still publishes.
+    assert entry.provenance.git_newest_sha is None
+    assert entry.provenance.git_commit_count == 2
+
+
+def test_an_unexpected_error_in_one_candidate_does_not_stop_the_sweep(tmp_path, monkeypatch):
+    config = cfg(tmp_path)
+    write_eval(config, slug="alpha", evaluation_id="20260730T100000Z", run_ids=("boom",))
+    write_eval(config, slug="beta", task_id=TASK_B, evaluation_id="20260730T110000Z")
+
+    real = report_catalog_module._provenance
+
+    def exploding(evidence):
+        if evidence is not None and "boom" in json.dumps(evidence.get("runs", [])):
+            raise RuntimeError("nested explosion")
+        return real(evidence)
+
+    monkeypatch.setattr(report_catalog_module, "_provenance", exploding)
+    added = catalog(config).reconcile()
+
+    # A startup backfill that aborted on the first structurally broken artifact
+    # would strand every later report behind it — including reports in other repos.
+    assert [entry.repo_slug for entry in added] == ["beta"]
+    assert [entry.seq for entry in added] == [1]
 
 
 def test_unreadable_semantic_report_is_skipped_without_failing_the_sweep(tmp_path):
@@ -464,6 +639,156 @@ def test_appends_do_not_interleave_partial_lines(tmp_path):
     assert raw.endswith("\n")
     assert len(raw.splitlines()) == 6
     assert [json.loads(line)["seq"] for line in raw.splitlines()] == [1, 2, 3, 4, 5, 6]
+
+
+def test_concurrent_instances_never_allocate_a_duplicate_sequence(tmp_path):
+    config = cfg(tmp_path)
+    for index in range(8):
+        write_eval(
+            config,
+            slug=f"repo{index}",
+            task_id=f"2026-07-30-task-{index}",
+            evaluation_id=f"20260730T1000{index:02d}Z",
+        )
+
+    # Separate instances over one data dir — what a second process (a CLI sweep
+    # beside the resident service, an overlapping restart) actually looks like. An
+    # instance-local lock leaves each of them free to read the same durable
+    # maximum and mint the same seq, which silently truncates cursor pagination:
+    # a consumer that resumes after the first duplicate never sees the second.
+    start = threading.Barrier(4)
+
+    def sweep():
+        instance = catalog(config)
+        start.wait(5)
+        instance.reconcile()
+
+    threads = [threading.Thread(target=sweep) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    records = lines(config)
+    seqs = [record["seq"] for record in records]
+    keys = [record["report_key"] for record in records]
+    assert sorted(seqs) == list(range(1, 9))
+    assert len(set(keys)) == 8
+    assert [entry.seq for entry in catalog(config).entries()] == list(range(1, 9))
+
+
+def test_a_second_instance_waits_for_an_in_flight_transaction(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, slug="alpha", evaluation_id="20260730T100000Z")
+    write_eval(config, slug="beta", task_id=TASK_B, evaluation_id="20260730T110000Z")
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocking_clock():
+        entered.set()
+        release.wait(5)
+        return FIXED_TS
+
+    holder = threading.Thread(target=lambda: catalog(config, clock=blocking_clock).reconcile())
+    holder.start()
+    assert entered.wait(5)
+
+    def second():
+        catalog(config).reconcile()
+        finished.set()
+
+    other = threading.Thread(target=second)
+    other.start()
+    # The transaction spans the whole sweep, so the second instance must not be
+    # reading (and numbering from) a file the first is still appending to.
+    assert not finished.wait(0.3)
+    release.set()
+    holder.join(10)
+    assert finished.wait(10)
+    other.join(10)
+
+    assert [entry.seq for entry in catalog(config).entries()] == [1, 2]
+    assert len({entry.report_key for entry in catalog(config).entries()}) == 2
+
+
+# -- retention --------------------------------------------------------------
+
+
+def service_with_guard(config: Config, cat: ReportCatalog) -> EvaluationService:
+    return EvaluationService(config, retention_guard=cat.unpublished_ids)
+
+
+def test_unpublished_ids_owes_only_publishable_reports(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, evaluation_id="20260730T100000Z", archived=True)
+    write_eval(config, evaluation_id="20260730T110000Z", archived=False)
+    cat = catalog(config)
+
+    # Only the archived-task report is owed a publication; the active one is
+    # supposed to stay unpublished, so protecting it would suspend retention for
+    # exactly the common case.
+    assert cat.unpublished_ids(repo(tmp_path), TASK_A) == {"20260730T100000Z"}
+
+    cat.reconcile()
+
+    # Once published, the artifacts are disposable: the entry outlives them.
+    assert cat.unpublished_ids(repo(tmp_path), TASK_A) == set()
+
+
+def test_retention_never_prunes_a_report_the_feed_has_not_published(tmp_path):
+    config = cfg(tmp_path, retention=1)
+    older = write_eval(config, evaluation_id="20260730T100000Z")
+    write_eval(config, evaluation_id="20260730T110000Z")
+    cat = catalog(config)
+    service = service_with_guard(config, cat)
+
+    # Publication of the older report failed (or never ran); retention would
+    # otherwise delete it before any sweep could index it, and reconciliation
+    # heals only from artifacts that still exist — so the report would be gone
+    # from the feed forever.
+    assert service.prune_evaluations(repo(tmp_path), TASK_A) == []
+    assert older.is_dir()
+
+    cat.reconcile()
+
+    assert service.prune_evaluations(repo(tmp_path), TASK_A) == ["20260730T100000Z"]
+    assert not older.is_dir()
+    # The published entry survives its artifacts, exactly as designed.
+    assert [entry.evaluation_id for entry in cat.entries()] == [
+        "20260730T100000Z",
+        "20260730T110000Z",
+    ]
+
+
+def test_retention_still_bounds_reports_that_are_not_publishable(tmp_path):
+    config = cfg(tmp_path, retention=1)
+    older = write_eval(config, evaluation_id="20260730T100000Z", archived=False)
+    write_eval(config, evaluation_id="20260730T110000Z", archived=False)
+    cat = catalog(config)
+
+    # An active task's reports are never owed a publication, so the guard leaves
+    # retention alone: the hub does not accumulate evaluations of live work.
+    assert service_with_guard(config, cat).prune_evaluations(repo(tmp_path), TASK_A) == [
+        "20260730T100000Z"
+    ]
+    assert not older.is_dir()
+
+
+def test_retention_is_skipped_when_the_guard_cannot_answer(tmp_path):
+    config = cfg(tmp_path, retention=1)
+    older = write_eval(config, evaluation_id="20260730T100000Z")
+    write_eval(config, evaluation_id="20260730T110000Z")
+
+    def broken_guard(repo_, task_id):
+        raise RuntimeError("catalog unreadable")
+
+    service = EvaluationService(config, retention_guard=broken_guard)
+
+    # Fail closed: with the feed's debt unknown, one deletion could be the one
+    # that loses a report, and retention self-corrects on the next generation.
+    assert service.prune_evaluations(repo(tmp_path), TASK_A) == []
+    assert older.is_dir()
 
 
 # -- reads --------------------------------------------------------------------

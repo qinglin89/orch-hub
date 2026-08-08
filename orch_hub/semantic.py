@@ -1306,10 +1306,12 @@ class SemanticEvaluator:
             # cleanup the static/evidence generators use.
             shutil.rmtree(eval_dir, ignore_errors=True)
             raise
-        # Publish to the global report feed only now: the artifact set above is
-        # durable, so a cataloged report is always one that exists on disk. Before
-        # retention, so the entry is recorded even if pruning misbehaves — and the
-        # entry outlives a later prune anyway, by design.
+        # Offer the report to the global feed only now: the artifact set above is
+        # durable, so a published report is always one that exists on disk. The
+        # catalog decides whether it publishes (an evaluation of a still-active
+        # task waits for close-out and a later sweep); this call is only the
+        # prompt path. Before retention, so the entry is recorded even if pruning
+        # misbehaves — and the entry outlives a later prune anyway, by design.
         self._catalog_report(repo, task_id, pack.evaluation_id)
         # Retention runs only here — after the complete evaluation is durable — so a
         # failure above never deletes older retained evaluations (see auto_prune).

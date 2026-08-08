@@ -864,6 +864,42 @@ def test_evaluator_without_a_catalog_publishes_nothing_and_still_works(tmp_path)
     assert not (config.data_dir / "report-catalog").exists()
 
 
+def test_retention_cannot_delete_a_report_whose_publication_failed(tmp_path):
+    # Regression: publication is best-effort, so it must compose with retention.
+    # A failed append leaves a complete report the feed has not indexed; if the
+    # next evaluation's retention pass then deletes it, reconciliation has nothing
+    # left to heal from and the report is gone from the feed permanently.
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True, eval_retention=1)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
+    guarded = EvaluationService(config, git_runner=_fake_git, clock=lambda: FIXED_TS,
+                                retention_guard=catalog.unpublished_ids)
+
+    first = semantic_evaluator(config=config, service=guarded, catalog=RaisingCatalog(),
+                               backend=FakeBackend(envelope())).evaluate(repo, TASK)
+    second = semantic_evaluator(config=config, service=guarded, catalog=catalog,
+                                backend=FakeBackend(envelope())).evaluate(repo, TASK)
+
+    # retention=1 would drop the older evaluation here; the guard keeps it,
+    # because it is the feed's outstanding debt rather than surplus history.
+    first_dir = config.data_dir / "evaluations" / "alpha" / TASK / first.evaluation_id
+    assert first_dir.is_dir()
+    assert [e.evaluation_id for e in catalog.entries()] == [second.evaluation_id]
+
+    assert [e.evaluation_id for e in catalog.reconcile()] == [first.evaluation_id]
+
+    third = semantic_evaluator(config=config, service=guarded, catalog=catalog,
+                               backend=FakeBackend(envelope())).evaluate(repo, TASK)
+
+    # Published, so the artifacts are surplus again and retention bounds them —
+    # while the entries (hashes and all) outlive the dirs, in publication order.
+    assert not first_dir.exists()
+    assert [e.evaluation_id for e in catalog.entries()] == [
+        second.evaluation_id, first.evaluation_id, third.evaluation_id
+    ]
+
+
 # -- Markdown rendering -------------------------------------------------------
 
 

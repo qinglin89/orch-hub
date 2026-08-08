@@ -42,10 +42,11 @@ from __future__ import annotations
 import datetime as dt
 import itertools
 import json
+import logging
 import os
 import re
 import shutil
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -67,6 +68,8 @@ from .runs import load_records
 from .sessions import read_snapshot
 from .subprocess_utils import Runner, run_command
 from .task_store import read_archived_task_content, read_task_content
+
+_log = logging.getLogger(__name__)
 
 EVALUATIONS_SUBDIR = "evaluations"
 """Top-level hub-data-dir subtree holding evaluation artifacts, parallel to the
@@ -128,7 +131,7 @@ def task_evaluations_dir(data_dir: Path, *, repo_name: str, task_id: str) -> Pat
     Pure path math: it creates nothing.
     """
     base = data_dir / EVALUATIONS_SUBDIR
-    repo_seg = _safe_segment(_slug(repo_name), label="repo")
+    repo_seg = _safe_segment(repo_slug(repo_name), label="repo")
     task_seg = _safe_segment(task_id, label="task id")
     target = base / repo_seg / task_seg
     if not target.resolve().is_relative_to(base.resolve()):
@@ -165,13 +168,18 @@ def evaluation_artifact_dir(
     return target
 
 
-def _slug(value: str) -> str:
+def repo_slug(value: str) -> str:
     """Make a repo name safe as a path component (matches ``runs._slug``).
 
     Idempotent: a value this function already produced passes through unchanged,
     so a caller holding a slug rather than a repo name — the report catalog
     resolving an entry's artifact dir from its stored ``repo_slug`` — can route
     through the same contained path helpers without a second slug rule.
+
+    Public (unlike the run manager's copy) because the report catalog must apply
+    exactly this rule to decide whether an artifact's recorded ``repo_name``
+    agrees with the ``<repo-slug>/`` directory it was found under; a second copy
+    of the rule there could drift and start rejecting coherent bundles.
     """
     return _SLUG.sub("-", value).strip("-") or "x"
 
@@ -383,6 +391,14 @@ class EvaluationService:
     a test drives the git window with a fake runner instead of a real
     subprocess), and ``clock`` must return timezone-aware UTC datetimes (it stamps
     the evaluation id and the pack's ``generated_ts``).
+
+    ``retention_guard`` is the optional hook that keeps retention from deleting a
+    completed report the global feed has not published yet (the app wires
+    :meth:`orch_hub.report_catalog.ReportCatalog.unpublished_ids`). Pruning is
+    otherwise free to remove a durably complete report whose live catalog append
+    failed, which would erase it from the feed permanently — reconciliation heals
+    only from artifacts that still exist. Injected as a plain callable so this
+    module stays independent of the catalog (the dependency runs the other way).
     """
 
     def __init__(
@@ -394,11 +410,13 @@ class EvaluationService:
         ] = load_records,
         git_runner: Runner = run_command,
         clock: Callable[[], dt.datetime] = _utc_now,
+        retention_guard: Callable[[ManagedRepo, str], Collection[str]] | None = None,
     ):
         self._config = config
         self._record_loader = record_loader
         self._git_runner = git_runner
         self._clock = clock
+        self._retention_guard = retention_guard
 
     @property
     def enabled(self) -> bool:
@@ -538,15 +556,36 @@ class EvaluationService:
         one un-removable dir cannot fail the prune. Returns the ids it removed,
         newest-first among the removed. Gated and hub-owned: it only ever deletes
         the subsystem's own artifacts, never target repo/task/run state.
+
+        An injected ``retention_guard`` extends ``protect`` with every evaluation
+        the global report feed still owes a publication (see the class docstring):
+        deleting one of those is unrecoverable, because reconciliation re-derives
+        entries from the artifacts themselves. The guard is consulted **fail
+        closed** — if it cannot answer, this prune is skipped entirely rather than
+        risking the one deletion that loses a report — and retention self-corrects
+        on the next generation once the feed has caught up.
         """
         self._require_enabled()
         limit = self._config.eval_retention if keep is None else keep
         if limit <= 0:
             return []
+        protected = {protect} if protect is not None else set()
+        if self._retention_guard is not None:
+            try:
+                protected |= set(self._retention_guard(repo, task_id))
+            except Exception as err:  # noqa: BLE001 - unknown guard state = no prune
+                _log.warning(
+                    "retention skipped for %s/%s: guard failed (%s): %s",
+                    repo.name,
+                    task_id,
+                    type(err).__name__,
+                    err,
+                )
+                return []
         stored = self.list_evaluations(repo, task_id)
         removed: list[str] = []
         for entry in stored[limit:]:
-            if entry.evaluation_id == protect:
+            if entry.evaluation_id in protected:
                 continue
             eval_dir = self.artifact_dir(repo, task_id, entry.evaluation_id)
             shutil.rmtree(eval_dir, ignore_errors=True)
