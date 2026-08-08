@@ -6,7 +6,8 @@ durably complete, coherent L1+L2 set for an archived task publishes — includin
 a report that becomes publishable only after close-out archives its task),
 append durability under concurrent instances, torn-tail/corrupt recovery,
 deterministic idempotent reconciliation, the entry's hashes and explicit
-provenance, retention that cannot outrun publication, the live
+provenance, retention that cannot outrun publication (including a drifted
+registry path and candidates the shared rule cannot judge), the live
 semantic-evaluator hook, and disabled-mode fail-closed. Session-2 adds the
 cursor-paginated feed and read/export-by-key HTTP routes; session-3 the
 dashboard view.
@@ -773,6 +774,81 @@ def test_retention_still_bounds_reports_that_are_not_publishable(tmp_path):
         "20260730T100000Z"
     ]
     assert not older.is_dir()
+
+
+def test_retention_cannot_outrun_publication_when_the_repo_path_drifts(tmp_path):
+    config = cfg(tmp_path, retention=1)
+    older = write_eval(config, evaluation_id="20260730T100000Z", archived=False)
+    write_eval(config, evaluation_id="20260730T110000Z", archived=False)
+    # Close-out archived the task at the path the evidence packs record; the
+    # registry has since re-registered the same repo somewhere else.
+    archive_task(tmp_path)
+    moved_path = tmp_path / "moved" / "alpha"
+    moved = ManagedRepo(
+        name="alpha", path=moved_path, manifest=moved_path / ".ai-deploy-manifest.json"
+    )
+
+    cat = catalog(config)
+
+    # The guard must answer the archive question from each candidate's own
+    # evidence pack, exactly like publication does. Probing the registry path
+    # instead reports no debt for reports a sweep would publish, and retention
+    # then deletes one — unrecoverably, since reconciliation heals only from
+    # artifacts that still exist.
+    assert service_with_guard(config, cat).prune_evaluations(moved, TASK_A) == []
+    assert older.is_dir()
+    assert [entry.evaluation_id for entry in cat.reconcile()] == [
+        "20260730T100000Z",
+        "20260730T110000Z",
+    ]
+
+
+def test_the_guard_protects_a_candidate_it_cannot_judge(tmp_path):
+    config = cfg(tmp_path, retention=1)
+    older = write_eval(
+        config, evaluation_id="20260730T100000Z", semantic_body="{broken"
+    )
+    write_eval(config, evaluation_id="20260730T110000Z")
+    cat = catalog(config)
+
+    # An artifact the publication rule cannot read is *undecided*, not decided
+    # against: a sweep skips it and retries, so pruning it on the strength of
+    # "not publishable right now" is the one deletion that loses a report.
+    assert cat.unpublished_ids(repo(tmp_path), TASK_A) == {
+        "20260730T100000Z",
+        "20260730T110000Z",
+    }
+    assert service_with_guard(config, cat).prune_evaluations(repo(tmp_path), TASK_A) == []
+    assert older.is_dir()
+
+
+def test_a_failing_archive_probe_defers_publication_and_protects_the_report(
+    tmp_path, monkeypatch
+):
+    config = cfg(tmp_path, retention=1)
+    older = write_eval(config, evaluation_id="20260730T100000Z", archived=False)
+    write_eval(config, evaluation_id="20260730T110000Z", archived=False)
+    archive_task(tmp_path)
+
+    def unreadable(repo_, task_id):
+        raise OSError("target repo volume is unavailable")
+
+    monkeypatch.setattr(report_catalog_module, "read_archived_task_content", unreadable)
+    cat = catalog(config)
+
+    # Both sides of one predicate resolve "cannot tell" in their own safe
+    # direction: publication declines (and retries next sweep) while retention
+    # keeps the artifacts a later sweep still needs.
+    assert cat.reconcile() == []
+    assert service_with_guard(config, cat).prune_evaluations(repo(tmp_path), TASK_A) == []
+    assert older.is_dir()
+
+    monkeypatch.undo()
+
+    assert [entry.evaluation_id for entry in catalog(config).reconcile()] == [
+        "20260730T100000Z",
+        "20260730T110000Z",
+    ]
 
 
 def test_retention_is_skipped_when_the_guard_cannot_answer(tmp_path):

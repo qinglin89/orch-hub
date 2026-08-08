@@ -64,6 +64,17 @@ published yet is therefore not disposable: retention consults
 its artifacts have been indexed (after which the entry — hashes and all —
 outlives them by design).
 
+Publication and that retention guard are two callers of **one** rule
+(:meth:`ReportCatalog._publishable`, over a :class:`_Candidate` read from the
+evaluation's own artifacts), because any daylight between them is a lost report:
+a guard that decides a dir is disposable while a sweep would publish it licenses
+the one deletion nothing can heal. Which is also why the archive probe uses the
+repo path the *evidence pack* recorded rather than the registry's current one —
+those drift — and why a candidate that cannot be judged (unreadable or incoherent
+artifacts, a failed probe) is undecided rather than "not publishable": each caller
+then resolves the uncertainty in its own safe direction, publication by retrying
+and retention by keeping.
+
 The live hook is :class:`~orch_hub.semantic.ReportCataloger`, satisfied
 structurally by :class:`ReportCatalog` and called by
 :meth:`orch_hub.semantic.SemanticEvaluator.evaluate` once its artifact set is
@@ -88,6 +99,7 @@ import os
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Config
@@ -382,10 +394,12 @@ class ReportCatalog:
         error; the last is what makes a re-run hook, a racing reconciliation, and
         a restart converge on exactly one global identity per source evaluation.
 
-        Raises :class:`ReportCatalogError` when the artifacts exist but cannot be
-        read/parsed or contradict the identity of the directory holding them; the
-        evaluator isolates that so a catalog problem never fails an
-        otherwise-successful evaluation, and the next reconciliation retries.
+        Raises :class:`ReportCatalogError` when the report cannot be *judged* — the
+        artifacts exist but cannot be read/parsed, contradict the identity of the
+        directory holding them, or the archive probe failed. The evaluator isolates
+        that so a catalog problem never fails an otherwise-successful evaluation,
+        and the next reconciliation retries; retention, meanwhile, keeps the
+        artifacts that retry needs (:meth:`unpublished_ids`).
         """
         self._require_enabled()
         eval_dir = evaluation_artifact_dir(
@@ -417,7 +431,7 @@ class ReportCatalog:
             )
 
     def unpublished_ids(self, repo: ManagedRepo, task_id: str) -> set[str]:
-        """Evaluation ids of ``(repo, task_id)`` that are publishable but unpublished.
+        """Evaluation ids of ``(repo, task_id)`` that retention must not delete.
 
         The retention guard (wired into
         :class:`~orch_hub.evaluation.EvaluationService`): these are complete
@@ -428,14 +442,25 @@ class ReportCatalog:
         until a sweep publishes them, after which the entry (hashes and all)
         outlives the artifacts by design and pruning is free again.
 
-        Deliberately mirrors the publication rule rather than protecting every
-        uncataloged report: an evaluation of a still-active task is *supposed* to
-        stay unpublished, and protecting those would suspend retention for exactly
-        the common case. The archive probe runs once for the task, and an evidence
-        pack is only parsed in the narrow window where a task has just been
-        archived but its earlier reports have not been swept yet — that pack read
-        is what keeps this in step with :meth:`_build_entry`, which can only probe
-        when the pack names a repo path. Read-only; gated.
+        ``repo`` only *locates* the artifacts — the same ``repo.name`` derivation
+        :meth:`~orch_hub.evaluation.EvaluationService.list_evaluations` uses to
+        pick the dirs this prune is about to delete, so the guard is guaranteed to
+        be talking about them. Whether a dir is publishable is answered per
+        candidate by the shared rule (:meth:`_publishable`) from that candidate's
+        own artifacts, never from ``repo.path``: a repo re-registered at a new path
+        still has evaluations whose evidence packs name the old one, and a guard
+        probing the registry path would report no debt for reports a sweep then
+        publishes at the recorded path — with retention free, in between, to delete
+        one.
+
+        Deliberately mirrors publication rather than protecting every uncataloged
+        report: an evaluation of a still-active task is *supposed* to stay
+        unpublished, and protecting those would suspend retention for exactly the
+        common case. A candidate that cannot be judged is owed, because *undecided*
+        is not "not publishable" — the same reason a sweep retries it. Reading each
+        unpublished candidate's artifacts costs a JSON parse per dir (bounded by
+        the retention cap, on a path that already follows a model call), which is
+        the price of the two sides never disagreeing. Read-only; gated.
         """
         self._require_enabled()
         parent = task_evaluations_dir(
@@ -445,7 +470,7 @@ class ReportCatalog:
             return set()
         slug = parent.parent.name
         known = {entry.report_key for entry in self.entries()}
-        archived_now = self._task_archived(repo.path, task_id)
+        archived: dict[tuple[Path, str], bool] = {}
         owed: set[str] = set()
         for eval_dir in sorted(parent.iterdir()):
             if not eval_dir.is_dir() or not _is_complete(eval_dir):
@@ -455,10 +480,27 @@ class ReportCatalog:
             )
             if key in known:
                 continue
-            if _stamped_archived(eval_dir) or (
-                archived_now
-                and _evidence_repo_path(_read_evidence(eval_dir)) is not None
-            ):
+            try:
+                publishable = self._publishable(
+                    _read_candidate(
+                        eval_dir,
+                        slug=slug,
+                        task_id=task_id,
+                        evaluation_id=eval_dir.name,
+                    ),
+                    task_id,
+                    archived,
+                )
+            except ReportCatalogError as err:
+                _log.warning(
+                    "retention keeps unjudged report %s/%s/%s: %s",
+                    slug,
+                    task_id,
+                    eval_dir.name,
+                    err,
+                )
+                publishable = True
+            if publishable:
                 owed.add(eval_dir.name)
         return owed
 
@@ -547,82 +589,80 @@ class ReportCatalog:
         eval_dir: Path,
         archived_cache: dict[tuple[Path, str], bool] | None = None,
     ) -> ReportCatalogEntry | None:
-        """Build one entry from its durable artifacts and append it. Lock held.
+        """Publish one candidate if the publication rule admits it. Lock held.
 
-        Returns ``None`` without writing anything when the entry turns out not to
-        be publishable yet (its task is not archived). The entry is otherwise
-        built *completely first* and only then appended, so a source artifact that
-        fails to read/parse — or that contradicts the directory's identity —
-        raises before anything touches the catalog; there is no partial-entry
-        state to clean up.
+        Returns ``None`` without writing anything when the candidate is decidedly
+        not publishable yet (its task is not archived). A candidate that cannot be
+        judged at all — unreadable artifacts, an identity contradiction, a failed
+        archive probe — raises :class:`ReportCatalogError` instead, so the caller
+        retries it rather than recording a decision it did not reach. The entry is
+        otherwise built *completely first* and only then appended, so nothing
+        touches the catalog until it is certain to be a whole record; there is no
+        partial-entry state to clean up.
         """
+        candidate = _read_candidate(
+            eval_dir, slug=slug, task_id=task_id, evaluation_id=evaluation_id
+        )
+        if not self._publishable(candidate, task_id, archived_cache):
+            return None
         entry = self._build_entry(
+            candidate,
             seq=seq,
             slug=slug,
             task_id=task_id,
             evaluation_id=evaluation_id,
-            eval_dir=eval_dir,
-            archived_cache=archived_cache,
         )
-        if not entry.archived:
-            return None
         self._append_line(entry)
         return entry
 
+    def _publishable(
+        self,
+        candidate: _Candidate,
+        task_id: str,
+        cache: dict[tuple[Path, str], bool] | None = None,
+    ) -> bool:
+        """Whether the feed should publish this candidate now — the publication rule.
+
+        The single predicate behind both a sweep and the retention guard
+        (:meth:`unpublished_ids`), so the two can never disagree about the same
+        directory — a disagreement in that direction deletes a report the other
+        side would have published.
+
+        Both of its inputs come from the candidate's own artifacts: the semantic
+        report's evaluation-time ``target_source`` stamp (a report written after
+        close-out is publishable with no live read at all), else a probe of the
+        repo path the *evidence pack* recorded. Deliberately not the registry's
+        current ``ManagedRepo.path``, which is a different fact that drifts from
+        the recorded one whenever a repo is re-registered elsewhere.
+
+        ``False`` is always a decision ("not archived yet"); an undecidable
+        candidate raises out of here or out of :func:`_read_candidate`.
+        """
+        if candidate.target_source == SOURCE_ARCHIVED:
+            return True
+        return self._task_archived(candidate.repo_path, task_id, cache)
+
     def _build_entry(
         self,
+        candidate: _Candidate,
         *,
         seq: int,
         slug: str,
         task_id: str,
         evaluation_id: str,
-        eval_dir: Path,
-        archived_cache: dict[tuple[Path, str], bool] | None = None,
     ) -> ReportCatalogEntry:
-        """Assemble one catalog entry from an evaluation's persisted artifacts.
+        """Assemble one catalog entry from an already-judged candidate.
 
-        Content comes only from the evaluation's own durable files: the semantic
-        report for identity/evaluator/target facts, the evidence pack for
-        provenance, and all four artifacts for size/hash — never the registry, run
-        records, or live task content, so an entry stays reproducible from the
-        artifacts it names.
-
-        Two things it does *not* take on trust:
-
-        - **Identity.** Directory names alone decide the global ``report_key``, so
-          a dir whose artifacts claim a different repo/task/evaluation — a copied
-          or hand-moved bundle, a stale file left by an interrupted write — would
-          otherwise be published under a key that misidentifies its own contents.
-          Each JSON artifact is checked against the directory it was found under
-          (:func:`_require_identity`) and a contradiction rejects the candidate.
-        - **Archived-ness.** ``target_source`` is the stamp from evaluation time
-          and stays on the entry as such, but archive happens later, so
-          ``archived`` is that stamp *or* a live probe of the target repo
-          (:meth:`_task_archived`). This single field is what the publication
-          decision reads.
+        Pure assembly: identity coherence is settled by :func:`_read_candidate`
+        and publishability by :meth:`_publishable`, so everything here is
+        transcription. Content comes only from the evaluation's own durable files
+        — the semantic report for identity/evaluator/target facts, the evidence
+        pack for provenance, and all four artifacts for size/hash — never the
+        registry, run records, or live task content, so an entry stays
+        reproducible from the artifacts it names.
         """
-        report = _read_json(eval_dir / SEMANTIC_REPORT_NAME)
-        if not isinstance(report, dict):
-            raise ReportCatalogError(
-                f"{SEMANTIC_REPORT_NAME} is not a JSON object in {eval_dir}"
-            )
-        identity = dict(slug=slug, task_id=task_id, evaluation_id=evaluation_id)
-        _require_identity(report, name=SEMANTIC_REPORT_NAME, **identity)
-        _require_identity(
-            _read_json_object(eval_dir / STATIC_METRICS_NAME),
-            name=STATIC_METRICS_NAME,
-            **identity,
-        )
-        evidence = _read_evidence(eval_dir)
-        _require_identity(evidence, name=EVIDENCE_NAME, **identity)
-        _require_identity(
-            _mapping(evidence.get("target")) if evidence is not None else None,
-            name=f"{EVIDENCE_NAME} target",
-            **identity,
-        )
+        report = candidate.report
         evaluator = _mapping(report.get("evaluator")) or {}
-        target_source = _str_field(report, "target_source")
-        repo_path = _evidence_repo_path(evidence)
         return ReportCatalogEntry(
             seq=seq,
             report_key=report_key(
@@ -635,22 +675,26 @@ class ReportCatalog:
             # and re-resolves by the other.
             repo_name=_str_field(report, "repo_name") or slug,
             repo_slug=slug,
-            repo_path=repo_path,
+            repo_path=candidate.repo_path,
             task_id=task_id,
             evaluation_id=evaluation_id,
             generated_ts=_str_field(report, "generated_ts"),
-            target_source=target_source,
-            archived=(
-                target_source == SOURCE_ARCHIVED
-                or self._task_archived(repo_path, task_id, archived_cache)
-            ),
+            # The evaluation-time stamp, kept beside the publication-time fact
+            # rather than collapsed into it: the two differ exactly for a report
+            # of then-live work that a later sweep published after close-out.
+            target_source=candidate.target_source,
+            # True by construction — publication *is* the eligibility decision, so
+            # an entry exists only for an archived task. It stays an explicit
+            # field because it is what a consumer reads off the feed item.
+            archived=True,
             backend=_str_field(evaluator, "backend"),
             model=_str_field(evaluator, "model"),
             schema_version=_str_field(evaluator, "schema_version"),
             artifacts=tuple(
-                _artifact_digest(eval_dir / name) for name in REQUIRED_ARTIFACTS
+                _artifact_digest(candidate.eval_dir / name)
+                for name in REQUIRED_ARTIFACTS
             ),
-            provenance=_provenance(evidence),
+            provenance=_provenance(candidate.evidence),
         )
 
     def _task_archived(
@@ -670,13 +714,15 @@ class ReportCatalog:
         is written, and nothing about the target repo is inferred beyond this one
         fact.
 
-        Fails to *False* — not archived, therefore not published yet — for an
-        unknown repo path (a degraded evidence pack names none), an unsafe id, an
-        IO error, or an undecodable file: an unreadable target must never be
-        reported to the feed as a finished protocol story, and a probe that raised
-        would cost the rest of the sweep (or the caller's whole retention pass) as
-        well. ``cache`` memoizes the probe within one sweep, where a task's
-        evaluations (up to the retention cap) all ask the same question.
+        A candidate with no recorded repo path is a decided ``False``: there is
+        nothing to probe and no later sweep will find one either (the pack is
+        immutable), so such a report can only ever publish on its own archived
+        stamp. A probe that *fails* — an unreadable file, an unmounted volume — is
+        not that: it raises, leaving the candidate undecided, because reading one
+        broken read as "not archived" would let the retention guard treat a report
+        as disposable that the next sweep would have published. ``cache`` memoizes
+        the probe across the candidates that ask the same question — a task's
+        evaluations up to the retention cap, in a sweep or in one retention pass.
         """
         if repo_path is None:
             return False
@@ -686,8 +732,9 @@ class ReportCatalog:
         try:
             found = read_archived_task_content(_repo_at(repo_path), task_id) is not None
         except (OSError, ValueError) as err:
-            _log.warning("archive probe failed for %s/%s: %s", repo_path, task_id, err)
-            found = False
+            raise ReportCatalogError(
+                f"archive probe failed for {repo_path} / {task_id} ({err})"
+            ) from err
         if cache is not None:
             cache[key] = found
         return found
@@ -877,11 +924,13 @@ def _read_json(path: Path) -> object:
 def _read_json_object(path: Path) -> dict | None:
     """Parse one artifact JSON as an object, or ``None`` when it is neither.
 
-    The tolerant counterpart of :func:`_read_json`, for the artifacts a report can
-    publish *without* — a missing/corrupt evidence pack or static report degrades
-    the entry's provenance and identity checks rather than suppressing an
-    otherwise-intact report. Absence is degradation; a *readable* artifact that
-    contradicts the directory is a different matter (:func:`_require_identity`).
+    The tolerant counterpart of :func:`_read_json`, for the static report — an
+    artifact a report can publish *without*, so a missing or corrupt one degrades
+    the entry's identity checks rather than suppressing an otherwise-intact
+    report. Absence is degradation; a *readable* artifact that contradicts the
+    directory is a different matter (:func:`_require_identity`). The evidence pack
+    has its own reader (:func:`_read_evidence`), which separates a file that will
+    not heal from one that merely cannot be read right now.
     """
     try:
         data = _read_json(path)
@@ -891,13 +940,91 @@ def _read_json_object(path: Path) -> dict | None:
 
 
 def _read_evidence(eval_dir: Path) -> dict | None:
-    """The evaluation's parsed evidence pack, or ``None`` when unusable.
+    """The evaluation's parsed evidence pack, or ``None`` when it is unusable.
 
-    Read once per entry and passed to both consumers (:func:`_evidence_repo_path`,
-    :func:`_provenance`): a pack carries bounded log excerpts for every related
-    run, so parsing it twice per candidate is real work on a startup sweep.
+    Read once per candidate and shared by every consumer (identity, repo path,
+    provenance): a pack carries bounded log excerpts for every related run, so
+    parsing it more than once per candidate is real work on a startup sweep.
+
+    ``None`` means *degrade*: a pack that is corrupt, or gone since the
+    completeness check, costs the entry its provenance and its archive probe but
+    not its publication — those are settled facts about a file that will not heal.
+    An IO failure is a different thing entirely: the pack may be intact and merely
+    unreadable right now, so it raises and leaves the candidate undecided rather
+    than quietly becoming "names no repo path, therefore not archived" — which the
+    retention guard would read as permission to delete it.
     """
-    return _read_json_object(eval_dir / EVIDENCE_NAME)
+    path = eval_dir / EVIDENCE_NAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return None
+    except OSError as err:
+        raise ReportCatalogError(f"unreadable {path.name} ({err})") from err
+    return data if isinstance(data, dict) else None
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    """One evaluation dir's publication facts, read once from its own artifacts.
+
+    The unit both callers of the publication rule work from — the entry build and
+    the retention guard — so "would the feed publish this dir?" has one answer no
+    matter who asks, derived from one set of reads. Carrying the parsed artifacts
+    also keeps an entry build to a single read per file.
+    """
+
+    eval_dir: Path
+    report: dict
+    evidence: dict | None
+    target_source: str | None
+    repo_path: Path | None
+
+
+def _read_candidate(
+    eval_dir: Path, *, slug: str, task_id: str, evaluation_id: str
+) -> _Candidate:
+    """Read and identity-check one complete evaluation dir.
+
+    Directory names alone decide the global ``report_key``, so a dir whose
+    artifacts claim a different repo/task/evaluation — a copied or hand-moved
+    bundle, a stale file left by an interrupted write — would otherwise be
+    published under a key that misidentifies its own contents. Every JSON artifact
+    is therefore checked against the directory it was found under
+    (:func:`_require_identity`).
+
+    Raises :class:`ReportCatalogError` for anything that leaves the candidate
+    *undecided*: an unreadable semantic report or evidence pack, or an identity
+    contradiction. Callers must not read that as "not publishable" — a sweep
+    retries it, and retention keeps it — because the two are only the same answer
+    when nothing is at stake, and here one of them is unrecoverable.
+    """
+    report = _read_json(eval_dir / SEMANTIC_REPORT_NAME)
+    if not isinstance(report, dict):
+        raise ReportCatalogError(
+            f"{SEMANTIC_REPORT_NAME} is not a JSON object in {eval_dir}"
+        )
+    identity = dict(slug=slug, task_id=task_id, evaluation_id=evaluation_id)
+    _require_identity(report, name=SEMANTIC_REPORT_NAME, **identity)
+    _require_identity(
+        _read_json_object(eval_dir / STATIC_METRICS_NAME),
+        name=STATIC_METRICS_NAME,
+        **identity,
+    )
+    evidence = _read_evidence(eval_dir)
+    _require_identity(evidence, name=EVIDENCE_NAME, **identity)
+    _require_identity(
+        _mapping(evidence.get("target")) if evidence is not None else None,
+        name=f"{EVIDENCE_NAME} target",
+        **identity,
+    )
+    return _Candidate(
+        eval_dir=eval_dir,
+        report=report,
+        evidence=evidence,
+        target_source=_str_field(report, "target_source"),
+        repo_path=_evidence_repo_path(evidence),
+    )
 
 
 def _mapping(value: object) -> dict | None:
@@ -943,21 +1070,6 @@ def _require_identity(
         mismatch = f"repo {claimed_repo!r} != {slug!r}"
     if mismatch is not None:
         raise ReportCatalogError(f"{name} identity mismatch: {mismatch}")
-
-
-def _stamped_archived(eval_dir: Path) -> bool:
-    """Whether the semantic report itself says its task was already archived.
-
-    The cheap half of the publication rule, kept identical for the retention guard
-    (:meth:`ReportCatalog.unpublished_ids`) and the entry build: the semantic
-    report is the smallest artifact carrying a harness-stamped ``target_source``,
-    and an evaluation run after close-out is publishable from the artifact alone,
-    with no target-repo read at all.
-    """
-    report = _read_json_object(eval_dir / SEMANTIC_REPORT_NAME)
-    if report is None:
-        return False
-    return _str_field(report, "target_source") == SOURCE_ARCHIVED
 
 
 def _repo_at(repo_path: Path) -> ManagedRepo:
