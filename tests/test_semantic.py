@@ -20,9 +20,11 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub.ai_snapshot import ROLE_EAGER, ROLE_PREFETCH, AiDiff, AiDoc, AiSnapshot
 from orch_hub.config import DEFAULT_EVAL_EFFORT, Config
 from orch_hub.evaluation import (
     EVIDENCE_NAME,
+    EVIDENCE_SCHEMA_VERSION,
     SOURCE_ACTIVE,
     SOURCE_ARCHIVED,
     EvaluationDisabledError,
@@ -100,14 +102,72 @@ def run_ev(run_id: str = "r1", *, log: LogSnapshot | None = None, warnings=()) -
     return RunEvidence(record=record, log=log, warnings=tuple(warnings))
 
 
-def pack(*runs: RunEvidence, tgt=None, warnings=(), git=None) -> EvidencePack:
+def pack(*runs: RunEvidence, tgt=None, warnings=(), git=None, ai=None) -> EvidencePack:
     return EvidencePack(
         evaluation_id="e1",
         generated_ts=START,
         target=tgt if tgt is not None else target(),
         runs=tuple(runs),
         git=git,
+        ai=ai,
         warnings=tuple(warnings),
+    )
+
+
+def ai_doc(rel: str = "index.md", *, content: str | None = "# router\n",
+           role: str = ROLE_EAGER, size: int | None = None,
+           truncated: bool = False, detail: str | None = None) -> AiDoc:
+    """One `.ai/` doc as the snapshot layer would hand it over (present unless
+    `content` is None, in which case `detail` says why it is missing)."""
+    return AiDoc(
+        path=f".ai/{rel}",
+        role=role,
+        topic=rel.split("/")[0].removesuffix(".md"),
+        present=content is not None,
+        content=content,
+        size=size if size is not None else len(content or ""),
+        truncated=truncated,
+        detail=detail,
+    )
+
+
+def ai_snapshot(*docs: AiDoc, diff: AiDiff | None = None, warnings=(),
+                present: bool = True, detail: str | None = None) -> AiSnapshot:
+    return AiSnapshot(present=present, docs=docs, diff=diff,
+                      warnings=tuple(warnings), detail=detail)
+
+
+def ai_diff(text: str | None = "diff --git a/.ai/map.md b/.ai/map.md\n+row\n", *,
+            available: bool = True, truncated: bool = False,
+            size: int | None = None, detail: str | None = None) -> AiDiff:
+    return AiDiff(
+        available=available,
+        since=START,
+        until=END,
+        text=text,
+        size=size if size is not None else len(text or ""),
+        truncated=truncated,
+        detail=detail,
+    )
+
+
+class StubStatic:
+    """Stand-in for a computed `StaticMetricsReport`: `build_semantic_evidence`
+    only ever calls `to_dict()` on it, and these tests care about the `.ai/` part
+    of the confidence math, not the static report's contents."""
+
+    def to_dict(self) -> dict:
+        return {"scores": []}
+
+
+def absent_ai_snapshot(detail: str = ".ai/ snapshot absent in target repo") -> AiSnapshot:
+    """What `read_ai_snapshot` returns for a repo with no readable `.ai/`: no docs,
+    an unavailable diff, one warning restating the same single fact."""
+    return AiSnapshot(
+        present=False,
+        diff=AiDiff(available=False, since=START, until=END, detail=detail),
+        warnings=(f".ai/: {detail}",),
+        detail=detail,
     )
 
 
@@ -219,7 +279,9 @@ def semantic_evaluator(
 
 
 def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = False,
-                ai_snippets: bool = False, present: bool = True) -> SemanticEvidence:
+                ai_snippets: bool = False, present: bool = True,
+                docs=(), diff: AiDiff | None = None,
+                schema: str | None = None) -> SemanticEvidence:
     return SemanticEvidence(
         evaluation_id="e1",
         repo_name="alpha",
@@ -233,6 +295,9 @@ def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = Fal
         ai_diffs_available=ai_diffs,
         ai_snippets_available=ai_snippets,
         omissions=(),
+        ai_docs=tuple(docs),
+        ai_diff=diff,
+        evidence_schema_version=schema,
     )
 
 
@@ -279,6 +344,8 @@ def test_report_to_dict_is_json_serializable_and_stable():
     assert data["findings"][0]["severity"] == "low"
     assert data["findings"][0]["evidence_refs"] == ["sid-b"]
     assert data["input_static_metrics"] is True
+    # Absent on a report written before the field existed — v1 by definition.
+    assert data["input_evidence_schema"] is None
 
 
 # -- bounded evidence construction --------------------------------------------
@@ -360,6 +427,181 @@ def test_confidence_penalty_grows_as_evidence_thins():
     assert thin.confidence_penalty() <= 0.60
 
 
+# -- `.ai/` snapshot consumption ----------------------------------------------
+# The pack now carries a bounded `.ai/` view; these cover the two availability
+# flags being *computed* from it, the per-part degradation, and the prompt moving
+# with them (a prompt still saying "unassessable" over a carried snapshot would
+# teach the model to ignore the evidence it was just handed).
+
+
+def test_evidence_computes_ai_flags_from_the_pack_snapshot():
+    p = pack(run_ev(), ai=ai_snapshot(ai_doc(), ai_doc("overview.md", content="# o\n"),
+                                      diff=ai_diff()))
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.ai_snippets_available is True
+    assert evidence.ai_diffs_available is True
+    # ...and with both parts carried, neither omission is recorded any more.
+    assert not [o for o in evidence.omissions if o.startswith(".ai/")]
+    assert evidence.confidence_penalty() == pytest.approx(0.30)  # static only
+
+
+def test_evidence_carries_the_ai_docs_and_diff_verbatim():
+    doc = ai_doc("map.md", content="# map\nrow\n")
+    p = pack(run_ev(), ai=ai_snapshot(doc, diff=ai_diff("PATCH-BODY")))
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.ai_docs == (doc,)
+    assert evidence.ai_diff is not None and evidence.ai_diff.text == "PATCH-BODY"
+    blob = evidence.to_dict()
+    assert blob["ai_docs"][0]["content"] == "# map\nrow\n"
+    assert blob["ai_diff"]["text"] == "PATCH-BODY"
+
+
+def test_ai_snippets_and_diffs_degrade_independently():
+    # A git failure loses the patch stream while the docs read perfectly: the two
+    # flags must not move together, and the omission carries the diff's own reason.
+    p = pack(run_ev(), ai=ai_snapshot(
+        ai_doc(),
+        diff=ai_diff(None, available=False, detail="git history unavailable"),
+    ))
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.ai_snippets_available is True
+    assert evidence.ai_diffs_available is False
+    diff_omission = [o for o in evidence.omissions if ".ai/ changed-file diffs" in o]
+    assert diff_omission and "git history unavailable" in diff_omission[0]
+    assert not [o for o in evidence.omissions if ".ai/ file contents" in o]
+
+
+def test_evidence_flags_are_false_for_a_pack_with_no_ai_section():
+    # A schema-v1 pack read back from disk, or one assembled before the section
+    # existed: nothing was ever attempted, and the omission says exactly that.
+    evidence = build_semantic_evidence(pack(run_ev()), static_report=None)
+
+    assert evidence.ai_snippets_available is False
+    assert evidence.ai_diffs_available is False
+    assert any("predates the .ai/ section" in o for o in evidence.omissions)
+
+
+def test_evidence_flags_are_false_when_a_readable_snapshot_carried_no_content():
+    # The dir is there but every doc inside it was absent/unreadable/over budget.
+    p = pack(run_ev(), ai=ai_snapshot(
+        ai_doc("overview.md", content=None, detail="not present"),
+        diff=ai_diff(""),
+    ))
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.ai_snippets_available is False
+    assert evidence.ai_diffs_available is True  # git answered: nothing changed
+    assert any("carried no readable document content" in o for o in evidence.omissions)
+
+
+def test_an_absent_ai_snapshot_is_priced_once_not_three_times():
+    # The absent-snapshot warning only restates what both flags already price, so
+    # it must not also be charged as an evidence-degradation warning.
+    p = pack(run_ev(), ai=absent_ai_snapshot())
+
+    evidence = build_semantic_evidence(p, static_report=StubStatic())
+
+    assert evidence.evidence_warnings == ()
+    assert evidence.confidence_penalty() == pytest.approx(0.20)  # the two flags only
+
+
+def test_a_partially_degraded_snapshot_charges_its_warnings():
+    # Here the flags say "grounded", so the warnings are the only carrier of the
+    # partial loss (a truncated/unreadable/dropped doc) and are priced as such.
+    p = pack(run_ev(), ai=ai_snapshot(
+        ai_doc(),
+        ai_doc("architecture.md", content="# a\n", size=99999, truncated=True),
+        diff=ai_diff(),
+        warnings=(".ai/architecture.md: truncated to 4 of 99999 bytes",
+                  ".ai/design.md: not present"),
+    ))
+
+    evidence = build_semantic_evidence(p, static_report=StubStatic())
+
+    assert len(evidence.evidence_warnings) == 2
+    assert evidence.confidence_penalty() == pytest.approx(0.10)
+
+
+def test_prompt_grounds_ai_freshness_when_the_snapshot_is_carried():
+    p = pack(run_ev(), ai=ai_snapshot(
+        ai_doc(content="# router\nROUTER-MARKER\n"),
+        ai_doc("features/evaluation.md", content="PREFETCH-MARKER\n", role=ROLE_PREFETCH),
+        diff=ai_diff("DIFF-MARKER"),
+    ))
+
+    prompt = build_prompt(build_semantic_evidence(p, static_report=None))
+
+    # The model sees the memory, both roles, and the windowed patches...
+    assert "ROUTER-MARKER" in prompt and "PREFETCH-MARKER" in prompt
+    assert "DIFF-MARKER" in prompt
+    assert ROLE_PREFETCH in prompt
+    # ...and is told to assess the dimension rather than to skip it.
+    assert "unassessable" not in prompt.lower()
+    assert "Assess `ai_freshness_utility` and `knowledge_signal_density`" in prompt
+    # Still bounded: the snapshot is a copy, not an invitation to read the repo.
+    assert "not a live repository read" in prompt
+
+
+def test_prompt_grounds_the_snapshot_even_when_the_patches_are_missing():
+    p = pack(run_ev(), ai=ai_snapshot(
+        ai_doc(content="# router\nROUTER-MARKER\n"),
+        diff=ai_diff(None, available=False, detail="git history unavailable"),
+    ))
+
+    prompt = build_prompt(build_semantic_evidence(p, static_report=None))
+
+    assert "ROUTER-MARKER" in prompt
+    assert "unassessable" not in prompt.lower()  # snippets alone ground the axis
+    assert "patches for the run window are NOT available" in prompt
+    assert "git history unavailable" in prompt
+
+
+def test_prompt_still_marks_ai_freshness_unassessable_without_a_snapshot():
+    prompt = build_prompt(build_semantic_evidence(pack(run_ev(), ai=absent_ai_snapshot()),
+                                                  static_report=None))
+
+    assert "unassessable" in prompt.lower()
+    assert "ai_freshness_utility" in prompt
+    assert "no `.ai/` snapshot in this evidence" in prompt
+
+
+def test_prompt_separates_an_empty_diff_from_an_unavailable_one():
+    untouched = build_prompt(mk_evidence(ai_snippets=True, ai_diffs=True,
+                                         docs=(ai_doc(),), diff=ai_diff("")))
+    broken = build_prompt(mk_evidence(ai_snippets=True, docs=(ai_doc(),),
+                                      diff=ai_diff(None, available=False,
+                                                   detail="git history unavailable")))
+
+    # git answered "nothing changed" — a real signal about the task, not a gap.
+    assert "`.ai/` was not changed at all" in untouched
+    assert "no `.ai/` patch stream available" not in untouched
+    assert "no `.ai/` patch stream available: git history unavailable" in broken
+
+
+def test_prompt_marks_unavailable_and_truncated_docs_with_their_reason():
+    prompt = build_prompt(mk_evidence(
+        ai_snippets=True,
+        docs=(
+            ai_doc("architecture.md", content="HEAD-ONLY", size=99999, truncated=True),
+            ai_doc("design.md", content=None, detail="not present"),
+            ai_doc("conventions.md", content=None, detail="content budget exhausted"),
+        ),
+    ))
+
+    assert "--- .ai/architecture.md (eager, TRUNCATED — head only, of 99999 bytes) ---" in prompt
+    assert "--- .ai/design.md (eager) — not present ---" in prompt
+    assert "--- .ai/conventions.md (eager) — content budget exhausted ---" in prompt
+    # The model is told which of those is a project fact and which is an evidence gap.
+    assert "is a gap in THIS evidence, not a defect" in prompt
+
+
 # -- envelope parse / schema validation ---------------------------------------
 
 
@@ -382,6 +624,19 @@ def test_parse_stamps_identity_from_context_not_from_model():
 
     assert report.task_id == TASK and report.repo_name == "alpha"
     assert report.evaluation_id == FIXED_ID and report.input_evidence_id == FIXED_ID
+
+
+def test_parse_stamps_the_evidence_pack_schema_version_for_cohorting():
+    # The cohort boundary: a pack that gains an evaluator input moves the
+    # confidence baseline, so the report must say which shape it was judged from.
+    report = parse(envelope(), evidence=mk_evidence(static={"scores": []}, schema="7"))
+
+    assert report.input_evidence_schema == "7"
+    assert report.to_dict()["input_evidence_schema"] == "7"
+    # A model claiming its own version does not get to overwrite the stamp.
+    spoofed = parse(envelope({**VALID_PAYLOAD, "input_evidence_schema": "99"}),
+                    evidence=mk_evidence(static={"scores": []}, schema="7"))
+    assert spoofed.input_evidence_schema == "7"
     assert report.evaluator.backend == "fake"  # from the injected evaluator info
 
 
@@ -900,11 +1155,47 @@ def test_retention_cannot_delete_a_report_whose_publication_failed(tmp_path):
     ]
 
 
+def test_evaluate_prompt_carries_the_repos_ai_snapshot_from_the_persisted_pack(tmp_path):
+    # End to end over a real fixture repo: `.ai/overview.md` reaches the model,
+    # and it reaches it *through the persisted evidence pack* — the backend has no
+    # repo access, so a prompt/pack mismatch would mean a live read crept in.
+    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    backend = FakeBackend(envelope())
+
+    report = semantic_evaluator(config=config, service=_service(config),
+                                backend=backend).evaluate(repo, TASK)
+
+    eval_dir = config.data_dir / "evaluations" / "alpha" / TASK / report.evaluation_id
+    pack_json = json.loads((eval_dir / EVIDENCE_NAME).read_text(encoding="utf-8"))
+    carried = [d for d in pack_json["ai"]["docs"] if d["present"]]
+    assert [d["path"] for d in carried] == [".ai/overview.md"]
+    prompt = backend.prompts[0]
+    assert carried[0]["content"] in prompt          # the pack's bytes, verbatim
+    assert "# overview\nsignal" in prompt
+    assert "unassessable" not in prompt.lower()     # the axis is grounded now
+
+    # `_fake_git` fails, so the patch stream degrades on its own while the docs
+    # survive — and the report prices exactly that, plus the snapshot's own
+    # per-doc warnings for the memory topics this fixture repo does not have.
+    assert pack_json["summary"]["ai_snippets_available"] is True
+    assert pack_json["summary"]["ai_diffs_available"] is False
+    assert any(".ai/ changed-file diffs unavailable" in w for w in report.warnings)
+    assert not any(".ai/ file contents unavailable" in w for w in report.warnings)
+
+    # And the cohort stamp rides along, in the object and on disk.
+    assert report.input_evidence_schema == EVIDENCE_SCHEMA_VERSION
+    persisted = json.loads((eval_dir / SEMANTIC_REPORT_NAME).read_text(encoding="utf-8"))
+    assert persisted["input_evidence_schema"] == EVIDENCE_SCHEMA_VERSION
+
+
 # -- Markdown rendering -------------------------------------------------------
 
 
 def _report(*, summary: str | None = "ok", scores=(), findings=(), improvements=(),
-            warnings=(), confidence: float = 0.7) -> SemanticReport:
+            warnings=(), confidence: float = 0.7,
+            schema: str | None = None) -> SemanticReport:
     return SemanticReport(
         evaluation_id=FIXED_ID,
         generated_ts=FIXED_TS.isoformat(),
@@ -920,8 +1211,15 @@ def _report(*, summary: str | None = "ok", scores=(), findings=(), improvements=
         improvements=tuple(improvements),
         input_evidence_id=FIXED_ID,
         input_static_metrics=True,
+        input_evidence_schema=schema,
         warnings=tuple(warnings),
     )
+
+
+def test_render_report_md_shows_the_evidence_schema_cohort():
+    assert "- **Evidence schema:** v2" in render_report_md(_report(schema="2"))
+    # A pre-field report is v1 by definition, and says so rather than showing "vNone".
+    assert "- **Evidence schema:** v1 (unrecorded)" in render_report_md(_report())
 
 
 def test_render_report_md_has_all_sections():

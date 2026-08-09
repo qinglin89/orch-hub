@@ -17,12 +17,13 @@ The evaluation is built from four composable, independently-tested pieces:
   deterministic :class:`~orch_hub.evaluation.EvidencePack` + the
   :class:`~orch_hub.models.StaticMetricsReport` into a model-ready
   :class:`SemanticEvidence`: the full (small) task file, the static-metrics JSON,
-  git commit *subjects* (never diffs), and an explicit ``omissions`` list. Raw
-  orchestrator logs / ``spawn.out`` tails are deliberately **excluded** (the scope
-  bars unbounded raw logs from the evaluator input) and recorded as an omission,
-  as are the unavailable ``.ai/`` diffs and the current ``.ai/`` file contents
-  (leaving ``.ai/`` freshness unassessable) — so a thin input *lowers confidence*
-  rather than failing the evaluation.
+  git commit *subjects* (never code diffs), the pack's bounded ``.ai/`` memory
+  snapshot plus its ``.ai/``-scoped windowed patches, and an explicit
+  ``omissions`` list. Raw orchestrator logs / ``spawn.out`` tails are deliberately
+  **excluded** (the scope bars unbounded raw logs from the evaluator input) and
+  recorded as an omission; a ``.ai/`` part the pack could not carry is recorded
+  the same way and leaves its dimension ungrounded — so a thin input *lowers
+  confidence* rather than failing the evaluation.
 - **prompt contract** (:func:`build_prompt`) — render the evidence into the
   evaluator prompt, instructing the model to emit exactly one JSON report between
   the :data:`SEMANTIC_START` / :data:`SEMANTIC_END` sentinels (``/intake-task``'s
@@ -41,7 +42,8 @@ The evaluation is built from four composable, independently-tested pieces:
   exactly as the intake manager injects its agent. The concrete backend is
   :class:`ClaudeSemanticBackend` — one ``claude -p`` turn whose evidence isolation
   is *structural*: it runs with every built-in tool disabled (``--tools ""`` — no
-  Read/Bash/Grep, so it cannot open ``.ai/``, raw logs, secrets, or any repo file),
+  Read/Bash/Grep, so it cannot open the live repo; the ``.ai/`` it judges is the
+  bounded copy the persisted evidence pack carries, never a live read),
   with project customizations disabled (``--safe-mode``), and from a fresh hub-owned
   empty cwd (never the target repo), so the model judges from the bounded prompt
   alone rather than live repository state; model/effort from
@@ -64,8 +66,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from .ai_snapshot import AiDiff, AiDoc, AiSnapshot
 from .config import DEFAULT_EVAL_EFFORT, Config
-from .evaluation import EvaluationDisabledError, EvaluationService, EvidencePack
+from .evaluation import (
+    EVIDENCE_SCHEMA_VERSION,
+    EvaluationDisabledError,
+    EvaluationService,
+    EvidencePack,
+)
 from .models import (
     EvaluationTarget,
     ManagedRepo,
@@ -134,18 +142,23 @@ output (a relevant extra dimension is allowed) — just the shared axis language
 _PENALTY_NO_STATIC = 0.30
 """Static metrics unavailable as input — a major deterministic signal is missing."""
 _PENALTY_NO_AI_DIFFS = 0.10
-"""``.ai/`` changed-file diffs unavailable (the evidence pack carries commit
-subjects only). The common case today, so kept modest; it flips off once a future
-pack carries ``.ai/`` diffs and :attr:`SemanticEvidence.ai_diffs_available` is True."""
+"""The ``.ai/``-scoped patches for the task's run window are unavailable — no run
+window to scope them to, a git failure, or a repo with no readable ``.ai/`` — so
+what this task changed in memory can only be inferred from commit subjects. Does
+not apply when :attr:`SemanticEvidence.ai_diffs_available` is True."""
 _PENALTY_NO_AI_SNIPPETS = 0.10
-"""Current ``.ai/`` file contents (snippets) unavailable as input — the
+"""The ``.ai/`` snapshot's document contents are unavailable — the
 ``ai_freshness_utility`` dimension cannot be grounded from the evidence, so it is
 marked unassessable in the prompt and confidence is reduced. A distinct signal from
-the diffs above (current state vs. what changed); like it, the common case today and
-kept modest, flipping off once a future pack carries ``.ai/`` snippets and
+the diffs above (current state vs. what changed), and independently degradable:
+a git failure loses the patches while the docs read fine. Does not apply when
 :attr:`SemanticEvidence.ai_snippets_available` is True."""
 _PENALTY_PER_WARNING = 0.05
-"""Per evidence-degradation warning (missing/corrupt run artifact)."""
+"""Per evidence-degradation warning: a missing/corrupt run artifact, or a
+*partially* degraded ``.ai/`` snapshot (a doc truncated, unreadable, or dropped
+for budget — the degradation the two booleans above cannot express). A snapshot
+that is missing outright contributes no warning here, because both flags above
+already price exactly that fact."""
 _PENALTY_WARNING_CAP = 0.30
 """Cap on the summed per-warning penalty, so a flood of run warnings alone cannot
 zero confidence — the model still saw the task file."""
@@ -187,20 +200,37 @@ class SemanticEvidence:
     primary subject, so unlike run logs it is not truncated); ``static_metrics``
     is the static report's dict (scores, protocol facts, per-run rollups) or
     ``None`` when unavailable; ``git_subjects`` are commit *subjects* only (never
-    diffs); ``evidence_warnings`` are the pack's evidence-degradation notes.
+    code diffs); ``evidence_warnings`` are the pack's evidence-degradation notes.
 
-    Three things are deliberately **absent** and recorded in ``omissions`` (which is
-    what makes bounded construction auditable rather than silent): the pack's
-    bounded orchestrator-log / ``spawn.out`` tails are **excluded** from the model
+    ``ai_docs`` and ``ai_diff`` are the pack's bounded ``.ai/`` memory view
+    (:class:`~orch_hub.ai_snapshot.AiSnapshot`) carried through verbatim: the
+    project's current memory snapshot and the ``.ai/``-scoped patches for the
+    task's run window. They are what grounds the ``ai_freshness_utility`` and
+    ``knowledge_signal_density`` dimensions, and ``ai_snippets_available`` /
+    ``ai_diffs_available`` are computed from what the snapshot *actually carries*
+    rather than from whether a read was attempted — so the evaluator gates its
+    ``.ai/`` judgments on exactly the facts a reader of the persisted pack sees.
+
+    They are carried whole here on purpose: the pack is producer-bounded
+    (:mod:`orch_hub.ai_snapshot` caps every doc, the doc total, and the patch
+    stream at their reads), so a second cap in this layer would either be dead
+    code or silently contradict the pack — the same reason ``task_file`` is
+    carried whole. ``git_subjects`` keeps its defensive second cap only because a
+    subject list is cheap to re-bound.
+
+    What is deliberately **absent** is recorded in ``omissions``, which is what
+    makes bounded construction auditable rather than silent: the pack's bounded
+    orchestrator-log / ``spawn.out`` tails are always **excluded** from the model
     input (the scope bars raw logs; their signal survives as the static
-    ``has_diagnostic`` rollup), ``.ai/`` changed-file diffs are unavailable
-    (``ai_diffs_available`` False — the pack carries commit subjects only), and the
-    current ``.ai/`` file contents are unavailable too (``ai_snippets_available``
-    False — the pack carries no ``.ai/`` snippets). The last means ``.ai/``
-    freshness/utility cannot be grounded from the evidence, so the prompt marks the
-    ``ai_freshness_utility`` dimension unassessable rather than inviting the backend
-    to read repo files outside this bounded input. All three lower
-    :meth:`confidence_penalty` rather than failing the evaluation.
+    ``has_diagnostic`` rollup), and each ``.ai/`` part the pack could not carry is
+    recorded the same way. With no snippets, ``.ai/`` freshness/utility cannot be
+    grounded from the evidence, so the prompt marks the ``ai_freshness_utility``
+    dimension unassessable rather than inviting the backend to read repo files
+    outside this bounded input. Every omission lowers :meth:`confidence_penalty`
+    rather than failing the evaluation.
+
+    ``evidence_schema_version`` is the shape version of the pack this was distilled
+    from, carried so :func:`parse_report` can stamp it on the report for cohorting.
     """
 
     evaluation_id: str
@@ -215,6 +245,9 @@ class SemanticEvidence:
     ai_diffs_available: bool
     ai_snippets_available: bool
     omissions: tuple[str, ...]
+    ai_docs: tuple[AiDoc, ...] = ()
+    ai_diff: AiDiff | None = None
+    evidence_schema_version: str | None = None
 
     @property
     def static_metrics_available(self) -> bool:
@@ -251,6 +284,9 @@ class SemanticEvidence:
             "evidence_warnings": list(self.evidence_warnings),
             "ai_diffs_available": self.ai_diffs_available,
             "ai_snippets_available": self.ai_snippets_available,
+            "ai_docs": [doc.to_dict() for doc in self.ai_docs],
+            "ai_diff": self.ai_diff.to_dict() if self.ai_diff is not None else None,
+            "evidence_schema_version": self.evidence_schema_version,
             "omissions": list(self.omissions),
         }
 
@@ -261,21 +297,41 @@ def build_semantic_evidence(
     """Distil a bounded, read-only :class:`SemanticEvidence` from the inputs (pure).
 
     Selects only what a semantic judge needs and can be trusted with: the full
-    task file, the static-metrics dict (when computed), git commit subjects, and
-    the pack's evidence warnings. Raw logs are excluded by construction, and every
-    exclusion is appended to ``omissions`` so the omission is a fact in the record,
-    not a silent gap. Total over any pack: an absent task file, an absent static
-    report, and a git-less pack all degrade to their empty defaults and lower the
-    confidence penalty rather than raising.
+    task file, the static-metrics dict (when computed), git commit subjects, the
+    pack's bounded ``.ai/`` snapshot and windowed patches, and the pack's evidence
+    warnings. Raw logs are excluded by construction, and every exclusion is
+    appended to ``omissions`` so the omission is a fact in the record, not a silent
+    gap. Total over any pack: an absent task file, an absent static report, a
+    git-less pack, and a pack with no ``ai`` section at all (a v1 pack, or a repo
+    with no ``.ai/``) all degrade to their empty defaults and lower the confidence
+    penalty rather than raising.
     """
     git = pack.git
     git_subjects = ()
     if git is not None and git.available:
         git_subjects = tuple(c.subject for c in git.commits[:_MAX_GIT_SUBJECTS])
 
+    ai = pack.ai
+    # Both flags are computed from what the snapshot *carries*, so a pack from
+    # before the ``ai`` section existed and a repo with no ``.ai/`` at all report
+    # the same thing — which is the honest answer for an evaluator deciding
+    # whether it may ground a ``.ai/`` judgment.
+    ai_snippets_available = ai is not None and ai.snippets_available
+    ai_diffs_available = ai is not None and ai.diffs_available
+    ai_docs = ai.docs if ai is not None else ()
+    ai_diff = ai.diff if ai is not None else None
+
     evidence_warnings = tuple(pack.warnings) + tuple(
         w for run in pack.runs for w in run.warnings
     )
+    if ai is not None and ai.present:
+        # A *readable* snapshot's warnings are the only carrier of partial
+        # degradation — a doc that was truncated, unreadable, or dropped for
+        # budget — which the two booleans above cannot express, so they are priced
+        # like any other evidence-degradation note. When the snapshot is absent
+        # entirely its single warning merely restates what both flags already
+        # price, and including it would charge one fact three times.
+        evidence_warnings += tuple(ai.warnings)
 
     omissions: list[str] = []
     if pack.runs:
@@ -287,24 +343,22 @@ def build_semantic_evidence(
             " (bounded tails live in evidence.json; the static has_diagnostic"
             " rollup summarizes them)"
         )
-    # ``.ai/`` diffs are not derivable from the evidence pack yet (it carries commit
-    # subjects only), so the evaluator never sees them; record it as a degradation.
-    ai_diffs_available = False
-    omissions.append(
-        ".ai/ changed-file diffs unavailable (evidence pack carries commit subjects"
-        " only); knowledge-signal judgment rests on the task file and commit subjects"
-    )
-    # Current ``.ai/`` file contents are likewise not carried by the pack, so the
-    # evaluator has no grounded view of ``.ai/`` to judge freshness/utility. Rather
-    # than leave that ungrounded or invite a live repo read outside this bounded
-    # input, record it, degrade confidence, and mark the dimension unassessable in
-    # the prompt (:func:`build_prompt`). Flips True when a future pack carries snippets.
-    ai_snippets_available = False
-    omissions.append(
-        ".ai/ file contents unavailable to the evaluator (evidence pack carries no"
-        " .ai/ snippets); the ai_freshness_utility dimension is unassessable from this"
-        " evidence and is marked so in the prompt"
-    )
+    if not ai_diffs_available:
+        omissions.append(
+            ".ai/ changed-file diffs unavailable"
+            f" ({_ai_diff_reason(ai, ai_diff)}); knowledge-signal judgment"
+            " rests on the task file and commit subjects"
+        )
+    if not ai_snippets_available:
+        # With no grounded view of ``.ai/`` the evaluator cannot judge its
+        # freshness/utility. Rather than leave that ungrounded or invite a live
+        # repo read outside this bounded input, record it, degrade confidence, and
+        # mark the dimension unassessable in the prompt (:func:`build_prompt`).
+        omissions.append(
+            ".ai/ file contents unavailable to the evaluator"
+            f" ({_ai_snippets_reason(ai)}); the ai_freshness_utility dimension is"
+            " unassessable from this evidence and is marked so in the prompt"
+        )
     if static_report is None:
         omissions.append("static metrics unavailable as input")
     if not pack.target.present:
@@ -323,7 +377,47 @@ def build_semantic_evidence(
         ai_diffs_available=ai_diffs_available,
         ai_snippets_available=ai_snippets_available,
         omissions=tuple(omissions),
+        ai_docs=ai_docs,
+        ai_diff=ai_diff,
+        evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
     )
+
+
+_NO_AI_SECTION = "evidence pack predates the .ai/ section"
+"""Reason used when a pack carries no ``ai`` section at all — a schema-v1 pack read
+back from disk, or one assembled before the section existed. Distinct from a
+present-but-empty snapshot: nothing was ever attempted."""
+
+
+def _ai_diff_reason(ai: AiSnapshot | None, diff: AiDiff | None) -> str:
+    """Why the ``.ai/`` patch stream is missing, for the omission note.
+
+    Never a bare "no": the snapshot layer already recorded the specific reason —
+    no run window to scope to, a git failure, an absent or escaping ``.ai/`` — and
+    the diff's own ``detail`` is the narrowest of them, since its window can be
+    absent while the docs read perfectly.
+    """
+    if ai is None:
+        return _NO_AI_SECTION
+    if diff is not None and diff.detail:
+        return diff.detail
+    return ai.detail or "no .ai/ patch stream in the evidence pack"
+
+
+def _ai_snippets_reason(ai: AiSnapshot | None) -> str:
+    """Why no ``.ai/`` document content is available, for the omission note.
+
+    A readable snapshot that still yielded no content is its own case: the dir is
+    there and every doc inside it was absent, unreadable, or dropped for budget,
+    which the per-doc warnings name individually.
+    """
+    if ai is None:
+        return _NO_AI_SECTION
+    if ai.detail:
+        return ai.detail
+    if ai.present:
+        return "the .ai/ snapshot carried no readable document content"
+    return "no .ai/ snapshot in the evidence pack"
 
 
 # -- prompt contract ----------------------------------------------------------
@@ -333,12 +427,19 @@ def build_prompt(evidence: SemanticEvidence) -> str:
     """Render the evaluator prompt for ``evidence`` (pure, deterministic).
 
     Frames the model as a read-only task-quality evaluator, hands it the bounded
-    evidence (task file, static-metrics JSON, git subjects, and the explicit
-    omissions), names the semantic dimensions to assess, and requires the single
-    JSON report envelope between :data:`SEMANTIC_START` / :data:`SEMANTIC_END`.
-    The imposed-envelope contract mirrors the intake agent's: a conversational
-    model surface has no native structured result, so the prompt makes the schema
+    evidence (task file, static-metrics JSON, git subjects, the bounded ``.ai/``
+    memory snapshot and its windowed patches, and the explicit omissions), names
+    the semantic dimensions to assess, and requires the single JSON report
+    envelope between :data:`SEMANTIC_START` / :data:`SEMANTIC_END`. The
+    imposed-envelope contract mirrors the intake agent's: a conversational model
+    surface has no native structured result, so the prompt makes the schema
     explicit and the parser enforces it.
+
+    The ``.ai/`` guidance is *computed*, not fixed: with snippets carried, the
+    prompt asks for a grounded ``ai_freshness_utility`` judgment; without them it
+    keeps marking the dimension unassessable. The two must move together — a
+    prompt that still says "unassessable" while showing the snapshot would teach
+    the model to ignore the evidence it was just handed.
     """
     static_json = (
         json.dumps(evidence.static_metrics, indent=1, sort_keys=True)
@@ -357,6 +458,9 @@ def build_prompt(evidence: SemanticEvidence) -> str:
     )
     dimensions_block = "\n".join(f"- {dim}" for dim in SEMANTIC_DIMENSIONS)
     task_block = evidence.task_file or "(no task file content — evaluate run history only)"
+    ai_docs_block = _ai_docs_block(evidence.ai_docs)
+    ai_diff_block = _ai_diff_block(evidence.ai_diff)
+    ai_bounds = _ai_bounds_paragraph(evidence)
 
     return f"""You are a READ-ONLY task-quality evaluator for an AI-coding project. \
 You are judging ONE completed task's process and knowledge quality from the bounded \
@@ -375,14 +479,10 @@ and rejected alternatives recorded), acceptance coverage, scope/slice fit versus
 the estimate, rediscovery risk (what a future session would have to re-derive), \
 and protocol soft-failures (things technically legal but weak).
 
-EVIDENCE BOUNDS: raw logs are excluded and some inputs are unavailable — treat the \
-omissions as reduced certainty, NOT as defects. Lower your confidence for thin \
-evidence; do not invent findings you cannot support from the evidence. In \
-particular, the current `.ai/` file contents are NOT included here, so `.ai/` \
-freshness/utility is unassessable from this evidence: score the \
-`ai_freshness_utility` dimension null (or low confidence) rather than guessing, and \
-treat any `.ai/`-freshness aspect of `knowledge_signal_density` as only weakly \
-grounded.
+EVIDENCE BOUNDS: raw logs are excluded and some inputs may be unavailable — treat \
+the omissions as reduced certainty, NOT as defects. Lower your confidence for thin \
+evidence; do not invent findings you cannot support from the evidence. \
+{ai_bounds}
 
 == TASK FILE ({evidence.task_id}, source={evidence.target_source}) ==
 {task_block}
@@ -390,8 +490,14 @@ grounded.
 == DETERMINISTIC STATIC METRICS (already computed; do not recompute) ==
 {static_json}
 
-== GIT COMMIT SUBJECTS (window over the task's runs; subjects only, no diffs) ==
+== GIT COMMIT SUBJECTS (window over the task's runs; subjects only, no code diffs) ==
 {git_block}
+
+== PROJECT `.ai/` MEMORY SNAPSHOT (bounded copy taken with this evidence; not a live read) ==
+{ai_docs_block}
+
+== `.ai/` CHANGES IN THE TASK'S RUN WINDOW (patches scoped to `.ai/`; no code diffs) ==
+{ai_diff_block}
 
 == EVIDENCE OMISSIONS (what you are NOT seeing, and why) ==
 {omissions_block}
@@ -419,6 +525,90 @@ The JSON must be valid: encode newlines inside strings as \\n. Output the marker
 and the object even if the evidence is thin (use low confidence and few findings)."""
 
 
+def _ai_bounds_paragraph(evidence: SemanticEvidence) -> str:
+    """The prompt's ``.ai/``-specific evidence-bounds guidance, per availability.
+
+    Three states, and the wording has to match the evidence exactly or the model
+    is being misled about what it holds: snapshot carried (assess it, with the
+    patch stream noted as present or absent), or no snapshot at all (the original
+    "unassessable" instruction). The distinction between a document the project
+    does not have and one this evidence could not carry is spelled out, because
+    only the first is a finding about the project — the omission notes and the
+    per-document markers below carry that difference, and a model that conflates
+    them invents defects out of truncation.
+    """
+    if not evidence.ai_snippets_available:
+        return (
+            "In particular, the current `.ai/` file contents are NOT included here,"
+            " so `.ai/` freshness/utility is unassessable from this evidence: score"
+            " the `ai_freshness_utility` dimension null (or low confidence) rather"
+            " than guessing, and treat any `.ai/`-freshness aspect of"
+            " `knowledge_signal_density` as only weakly grounded."
+        )
+    diffs = (
+        "The `.ai/`-scoped patches for the task's run window are included too, so"
+        " you can see what this task actually changed in memory."
+        if evidence.ai_diffs_available
+        else "The `.ai/`-scoped patches for the run window are NOT available, so judge"
+        " the snapshot's current state and treat what this task specifically changed"
+        " in memory as only weakly grounded."
+    )
+    return (
+        "The project's `.ai/` memory snapshot IS included below — a bounded copy"
+        f" taken when this evidence was assembled, not a live repository read. {diffs}"
+        " Assess `ai_freshness_utility` and `knowledge_signal_density` against it"
+        " directly. Judge only what is shown: a document marked `not present` is a"
+        " fact about the project and may support a finding, but one marked truncated,"
+        " unreadable, or omitted for budget is a gap in THIS evidence, not a defect"
+        " of the project."
+    )
+
+
+def _ai_docs_block(docs: Sequence[AiDoc]) -> str:
+    """Render the ``.ai/`` snapshot as delimited per-document sections.
+
+    Each document gets a header naming its repo-relative path and its role (eager
+    set vs. the task's declared ``prefetch:`` slice), because the two answer
+    different questions: the eager set is what every session loads, the prefetch
+    slice is what this task said it needed. A document with no content is rendered
+    as its header plus the snapshot layer's own ``detail`` — kept in the listing
+    rather than dropped, so the model sees which parts of the memory contract the
+    project has and which this evidence could not carry.
+    """
+    if not docs:
+        return "(no `.ai/` snapshot in this evidence — see the omissions below)"
+    sections: list[str] = []
+    for doc in docs:
+        if doc.present and doc.content is not None:
+            # Only the head is shown when truncated, and the exact retained byte
+            # count is deliberately not restated: the snapshot decodes leniently,
+            # so re-measuring the text here would report a number that is not the
+            # number of bytes read. The true file size is the fact worth carrying.
+            note = f", TRUNCATED — head only, of {doc.size} bytes" if doc.truncated else ""
+            sections.append(f"--- {doc.path} ({doc.role}{note}) ---\n{doc.content}")
+        else:
+            detail = doc.detail or "unavailable"
+            sections.append(f"--- {doc.path} ({doc.role}) — {detail} ---")
+    return "\n\n".join(sections)
+
+
+def _ai_diff_block(diff: AiDiff | None) -> str:
+    """Render the windowed ``.ai/`` patch stream, or say precisely why there is none.
+
+    An available diff with empty text is NOT the same as an unavailable one and
+    must not read like it: git answered and `.ai/` was untouched in the window,
+    which is a first-class signal about a task that changed nothing in memory.
+    """
+    if diff is None or not diff.available:
+        detail = (diff.detail if diff is not None else None) or "not carried by this evidence"
+        return f"(no `.ai/` patch stream available: {detail})"
+    window = f"window: {diff.since or 'unbounded'} .. {diff.until or 'now'}"
+    if not diff.text:
+        return f"(git answered for this window: `.ai/` was not changed at all — {window})"
+    trunc = f"; TRUNCATED — newest commits only, of {diff.size} bytes" if diff.truncated else ""
+    return f"({window}{trunc})\n{diff.text}"
+
+
 # -- backend ------------------------------------------------------------------
 
 
@@ -431,11 +621,15 @@ class SemanticBackend(Protocol):
 
     Contract: ``evaluate`` MUST be read-only AND evidence-bounded — it bases its
     judgment ONLY on the ``prompt``'s bounded evidence, never on live repository
-    reads outside that persisted boundary (so the report is reproducible from the
-    persisted artifacts, and the prompt's "unassessable" markers for absent inputs
-    like ``.ai/`` contents actually hold). Evidence-boundedness must be enforced,
-    not merely requested of the model: a prompt instruction alone does not stop a
-    tool-enabled agent from opening ``.ai/``, raw logs, or secrets. It must also not
+    reads outside that persisted boundary, so the report stays reproducible from
+    the persisted artifacts. The prompt now *carries* the project's ``.ai/``
+    snapshot, which sharpens rather than relaxes this: the model must judge the
+    bounded copy the evidence pack took, since a live re-read would drift from the
+    persisted artifact and quietly break reproducibility — and where a part of that
+    copy is absent, the prompt's "unassessable" marker must actually hold.
+    Evidence-boundedness must be enforced, not merely requested of the model: a
+    prompt instruction alone does not stop a tool-enabled agent from opening the
+    live ``.ai/``, raw logs, or secrets. It must also not
     write target repos, ``.ai/``, ``.ai-tasks/``, run/intake state, or task
     lifecycle. A backend that cannot run raises :class:`SemanticEvaluationError`,
     which the service turns into a clean failed evaluation (no partial artifacts, no
@@ -504,8 +698,9 @@ class _UnavailableSemanticBackend:
 # report must be bounded to the persisted :class:`SemanticEvidence` and reproducible
 # from it, so the turn must not read live repo state at all. Plan mode only blocks
 # writes, so this backend adds the read gate the evaluator needs: ``--tools ""``
-# disables every built-in tool (no Read/Bash/Grep — it cannot open ``.ai/``, raw
-# logs, secrets, or any file), ``--safe-mode`` disables project customizations (no
+# disables every built-in tool (no Read/Bash/Grep — it cannot open the live
+# ``.ai/``, raw logs, secrets, or any file; the ``.ai/`` it judges is the bounded
+# copy the prompt carries), ``--safe-mode`` disables project customizations (no
 # target-repo ``CLAUDE.md``/skills/hooks/MCP injected into context), and the turn
 # runs from a fresh hub-owned empty cwd (never the target repo — see
 # :meth:`ClaudeSemanticBackend.evaluate`) so even passive cwd/git-status context
@@ -686,9 +881,11 @@ class ClaudeSemanticBackend:
         the prompt alone, never live repo state:
 
         - ``--tools ""`` disables every built-in tool, so the turn has no Read/Bash/
-          Grep/etc. and literally cannot open ``.ai/``, raw logs, secrets, or any
-          target file (the read gate; ``--permission-mode plan`` only blocks
-          *writes*, still allowing reads — see the module comment above).
+          Grep/etc. and literally cannot open the live ``.ai/``, raw logs, secrets,
+          or any target file (the read gate; ``--permission-mode plan`` only blocks
+          *writes*, still allowing reads — see the module comment above). The
+          project's ``.ai/`` still reaches the model, but only as the bounded copy
+          the prompt carries, so the judgment stays reproducible from the artifacts.
         - ``--safe-mode`` disables project customizations (target-repo ``CLAUDE.md``,
           skills, plugins, hooks, MCP servers, custom agents), so none of that repo
           state is injected into the model context. Auth/model/permissions still work.
@@ -796,8 +993,10 @@ def parse_report(
     """Parse and validate the model's envelope into a :class:`SemanticReport`.
 
     The model supplies only the judgment fields; identity and provenance
-    (``evaluation_id``, repo/task, ``evaluator``, ``generated_ts``, input links)
-    are stamped from context so the model cannot spoof what it evaluated. A missing
+    (``evaluation_id``, repo/task, ``evaluator``, ``generated_ts``, input links,
+    and the evidence pack's shape version — the cohort boundary a later reader
+    needs to know before comparing two reports' confidence) are stamped from
+    context so the model cannot spoof what it evaluated. A missing
     envelope, a non-object envelope, or a schema violation (bad severity, a score
     without a rationale, a finding with no usable ``evidence_refs``, a non-numeric
     where a number is required, a missing top-level ``confidence``) raises
@@ -835,6 +1034,7 @@ def parse_report(
         improvements=improvements,
         input_evidence_id=evaluation_id,
         input_static_metrics=evidence.static_metrics_available,
+        input_evidence_schema=evidence.evidence_schema_version,
         warnings=warnings,
     )
 
@@ -1053,6 +1253,7 @@ def render_report_md(report: SemanticReport) -> str:
         f"- **Target:** {target}",
         f"- **Overall confidence:** {_fmt_num(report.overall_confidence)}",
         f"- **Static metrics input:** {'yes' if report.input_static_metrics else 'no'}",
+        f"- **Evidence schema:** v{report.input_evidence_schema or '1 (unrecorded)'}",
         "",
         "## Summary",
         "",

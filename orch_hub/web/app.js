@@ -3666,6 +3666,11 @@
       ["overall confidence", conf],
       ["evaluator", evaluatorTxt],
       ["static metrics input", report.input_static_metrics ? "yes" : "no"],
+      // The evidence pack's shape version: when the pack gains an input the
+      // evaluator reasons over, the confidence baseline moves, so two reports are
+      // only comparable on confidence within one schema. Reports written before
+      // the field existed carry no value and are v1 by definition.
+      ["evidence schema", "v" + (report.input_evidence_schema || "1 (unrecorded)")],
     ])}</dl>`;
     const summary = report.summary
       ? `<p class="sem-summary">${escapeHtml(report.summary)}</p>`

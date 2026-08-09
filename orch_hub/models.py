@@ -1488,8 +1488,17 @@ class SemanticReport:
     and the model cannot spoof what it evaluated: ``evaluation_id`` names the
     evaluation dir (shared with the evidence/static artifacts it consumed),
     ``evaluator`` records which backend/model/version produced it (rerun
-    identity), and ``input_evidence_id``/``input_static_metrics`` link the report
-    to the evidence and static-metrics inputs actually used.
+    identity), and ``input_evidence_id``/``input_static_metrics``/
+    ``input_evidence_schema`` link the report to the evidence and static-metrics
+    inputs actually used.
+
+    ``input_evidence_schema`` is the evidence pack's serialized shape version
+    (:data:`orch_hub.evaluation.EVIDENCE_SCHEMA_VERSION`) and exists for
+    *cohorting*: when the pack gains an input the evaluator reasons over, the
+    confidence baseline moves, so reports either side of that bump are not
+    directly comparable on confidence. Recording it on the report makes the
+    boundary machine-visible without diffing two evidence packs. ``None`` on a
+    report written before the field existed.
 
     The model supplies the judgment: ``summary`` (narrative overall assessment —
     the explanation that replaces a naked overall score), ``scores`` (per-axis,
@@ -1514,6 +1523,7 @@ class SemanticReport:
     improvements: tuple[str, ...] = ()
     input_evidence_id: str | None = None
     input_static_metrics: bool = False
+    input_evidence_schema: str | None = None
     warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
@@ -1532,6 +1542,7 @@ class SemanticReport:
             "improvements": list(self.improvements),
             "input_evidence_id": self.input_evidence_id,
             "input_static_metrics": self.input_static_metrics,
+            "input_evidence_schema": self.input_evidence_schema,
             "warnings": list(self.warnings),
         }
 

@@ -86,14 +86,27 @@ not by asking the model nicely:
 
 - the Claude CLI turn runs from a fresh **empty, non-repo** working directory —
   even the cwd path and a git-status snapshot reflect no target-repo state;
-- built-in tools are disabled (`--tools ""`), so the model cannot open `.ai/`,
-  raw logs, secrets, or any repo file;
+- built-in tools are disabled (`--tools ""`), so the model cannot open any repo
+  file — no live `.ai/`, no raw logs, no secrets;
 - it runs in safe mode with no session persistence and plan-mode writes blocked.
+
+The evaluator does see the project's `.ai/` memory, but only as the **bounded
+copy the evidence pack took** when the evaluation was generated — the eager set,
+the task's declared `prefetch:` docs, and the `.ai/`-scoped patches for the run
+window, each capped and carried inside `evidence.json`. That is what grounds the
+`ai_freshness_utility` and `knowledge_signal_density` judgments. A live re-read
+would be the opposite of this guarantee: it would drift from the persisted
+artifact and make the report unreproducible.
 
 So a semantic report is reproducible from its persisted evidence pack and cannot
 have read live target-repo state outside the prompt. This is verified by tests
 that assert the backend's argv/cwd isolation and that a semantic run leaves the
 target `.ai-tasks/` untouched.
+
+Each report records the evidence pack's shape version as `input_evidence_schema`.
+When a pack gains an input the evaluator reasons over, the confidence baseline
+moves, so reports are only directly comparable on confidence within one schema
+version — compare cohorts, not raw numbers across a bump.
 
 ## Retention
 
