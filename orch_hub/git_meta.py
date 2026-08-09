@@ -19,7 +19,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .models import CommitInfo, ManagedRepo
-from .subprocess_utils import CommandNotFoundError, Runner, run_command
+from .subprocess_utils import CommandNotFoundError, CommandResult, Runner, run_command
 
 DEFAULT_COMMIT_LIMIT = 10
 """Default number of recent commits for the repo-detail list."""
@@ -104,14 +104,19 @@ class DiffLog:
     changed in the window. Callers must keep the two apart, since "git could not
     be read" and "the path was untouched" support opposite conclusions.
 
-    ``text`` is git's raw output and is **not** bounded here: the query is capped
-    by commit count, but the byte bound belongs to whoever owns the consuming
-    budget (:mod:`orch_hub.ai_snapshot` caps the ``.ai/`` patch alongside its doc
-    caps, so all of that policy lives in one place).
+    ``text`` is bounded by the caller's ``max_bytes`` and holds the *head* of
+    git's output (newest commits first). ``size`` is the full output size, so a
+    consumer can report how much was cut, and ``truncated`` says the cap bound.
+    The cap value is the caller's policy (:mod:`orch_hub.ai_snapshot` owns the
+    ``.ai/`` budgets); enforcing it *here*, at the producer, is this module's:
+    the patch stream is repo-content-sized, so a byte bound applied after an
+    unbounded capture would bound only what is kept, not what is read.
     """
 
     available: bool
     text: str = ""
+    size: int = 0
+    truncated: bool = False
 
 
 _DIFF_HEADER_FORMAT = "commit %h %cI %s"
@@ -126,6 +131,7 @@ def read_path_diff_between(
     pathspec: str,
     since: str | None,
     until: str | None = None,
+    max_bytes: int,
     limit: int = MAX_COMMIT_LIMIT,
     runner: Runner = run_command,
 ) -> DiffLog:
@@ -139,6 +145,15 @@ def read_path_diff_between(
     filtering, so it counts commits that actually touched the path — and is
     clamped to ``1..MAX_COMMIT_LIMIT``.
 
+    ``max_bytes`` is required, not defaulted: unlike a commit list, whose size is
+    the format times the commit cap, a patch stream is as large as the repo's
+    content makes it, so every caller must name a bound. It is pushed down to the
+    runner (:func:`orch_hub.subprocess_utils.run_command`'s capped mode), which
+    retains only that many bytes and drains the rest — the read itself is bounded,
+    not just the retained slice. A runner that does not measure (an injected test
+    fake) is re-bounded here from its returned string, so no runner can widen the
+    contract.
+
     Rendering is pinned so the output is a function of the repo alone: no color,
     no external diff driver, no textconv filter — a repo-local ``diff.external``
     or a ``.gitattributes`` textconv would otherwise run arbitrary configured
@@ -147,6 +162,7 @@ def read_path_diff_between(
     """
     if not repo.path.is_dir():
         return DiffLog(available=False)
+    cap = max(0, max_bytes)
     extra: list[str] = []
     if since:
         extra.append(f"--since={since}")
@@ -168,12 +184,32 @@ def read_path_diff_between(
                 pathspec,
             ],
             cwd=repo.path,
+            max_stdout_bytes=cap,
         )
     except CommandNotFoundError:
         return DiffLog(available=False)
     if not result.ok:
         return DiffLog(available=False)
-    return DiffLog(available=True, text=result.stdout)
+    text, size, truncated = _bounded_stdout(result, cap)
+    return DiffLog(available=True, text=text, size=size, truncated=truncated)
+
+
+def _bounded_stdout(result: CommandResult, cap: int) -> tuple[str, int, bool]:
+    """Return ``(head text, full size, truncated)`` for a capped command result.
+
+    A runner that measured its own output (the capped mode) already returns the
+    head plus the true size, and is trusted: re-slicing its decoded text could
+    cut a replacement character it had to insert at the byte boundary. A runner
+    that did not measure (``stdout_bytes`` None — an unbounded capture, or a test
+    fake ignoring the cap) has its string bounded here instead, so the returned
+    log honors the cap either way.
+    """
+    if result.stdout_bytes is not None:
+        return result.stdout, result.stdout_bytes, result.stdout_truncated
+    data = result.stdout.encode("utf-8")
+    if len(data) <= cap:
+        return result.stdout, len(data), False
+    return data[:cap].decode("utf-8", errors="replace"), len(data), True
 
 
 def _clamp_limit(limit: int) -> int:

@@ -797,6 +797,35 @@ def test_no_run_window_leaves_both_git_sections_unavailable_without_calling_git(
     assert pack.ai.snippets_available is True
 
 
+def test_a_failed_ai_diff_read_keeps_the_docs_it_already_collected(tmp_path):
+    # A git failure distinct from executable absence, in the `.ai/` patch read
+    # only: the two `.ai/` parts are independently degradable, so the snippets
+    # must not be discarded with the diff that failed.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00",
+              ended_ts="2026-07-22T09:30:00+00:00")
+
+    def git(args, **kwargs):
+        argv = [str(a) for a in args]
+        if "--patch" in argv:  # the `.ai/` patch stream, not the commit window
+            raise PermissionError(13, "Permission denied")
+        return CommandResult(tuple(argv), 0, commit_line("feat: x"), "")
+
+    pack = make_service(config, git_runner=git).build_evidence(
+        repo, TASK, evaluation_id="e1"
+    )
+
+    assert pack.ai.present is True
+    assert pack.ai.snippets_available is True  # docs survived
+    assert pack.ai.diffs_available is False
+    assert "PermissionError" in pack.ai.diff.detail
+    assert pack.git.available is True  # the commit window is unaffected
+
+
 def test_absent_ai_snapshot_degrades_the_pack_instead_of_failing_it(tmp_path):
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)  # no `.ai/`

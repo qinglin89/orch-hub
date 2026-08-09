@@ -1,10 +1,14 @@
 """Tests for the bounded ``.ai/`` memory-snapshot evidence reader.
 
-Covers the four things the reader has to get right: eager-entrypoint resolution
+Covers the five things the reader has to get right: eager-entrypoint resolution
 in both legal forms (router first, then file shape), the task's ``prefetch:``
-slice, the caps, and total degradation — an absent ``.ai/``, a missing
-entrypoint, an unreadable or escaping file, and a cap hit each produce a warning
-plus a false/degraded flag rather than an exception.
+slice, the caps, repo containment, and total degradation — an absent ``.ai/``, a
+missing entrypoint, an unreadable or escaping file, a git failure, and a cap hit
+each produce a warning plus a false/degraded flag rather than an exception.
+
+The cap tests assert what was *read*, not just what was kept (:func:`record_reads`
+wraps the real file handle), because a bound applied after the whole file is in
+memory is not a bound.
 
 Fake repos live in ``tmp_path`` and git is always an injected fake runner, so no
 test touches a real repo, the real snapshot, or a real subprocess.
@@ -24,6 +28,7 @@ from orch_hub.ai_snapshot import (
     ROLE_EAGER,
     ROLE_PREFETCH,
     ROOT_DOCS,
+    ROUTER_MAX_BYTES,
     read_ai_snapshot,
     read_router,
     resolve_entrypoint,
@@ -83,7 +88,12 @@ def write_single_file_snapshot(repo: ManagedRepo, **extra: str) -> Path:
 
 
 def fake_git(*, stdout: str = "", rc: int = 0, calls: list | None = None):
-    """A fake git runner recording argv and returning canned patch output."""
+    """A fake git runner recording argv and returning canned patch output.
+
+    Deliberately *ignores* the byte cap it is handed, so the reader's own bound
+    (:func:`orch_hub.git_meta._bounded_stdout`) is what the cap tests exercise;
+    ``kwargs`` records let a test assert the cap was pushed down all the same.
+    """
 
     def runner(args, **kwargs):
         argv = [str(a) for a in args]
@@ -92,6 +102,60 @@ def fake_git(*, stdout: str = "", rc: int = 0, calls: list | None = None):
         return CommandResult(tuple(argv), rc, stdout, "")
 
     return runner
+
+
+def recording_git(*, stdout: str = "", rc: int = 0, calls: list):
+    """A fake git runner recording the full call, kwargs included."""
+
+    def runner(args, **kwargs):
+        argv = [str(a) for a in args]
+        calls.append({"argv": argv, **kwargs})
+        return CommandResult(tuple(argv), rc, stdout, "")
+
+    return runner
+
+
+class RecordingHandle:
+    """A binary file handle that records the size of every read it serves.
+
+    Wraps a real handle so a test can assert what the producer *read*, not just
+    what it kept: an unbounded read shows up as one giant entry here even when
+    the retained content is small.
+    """
+
+    def __init__(self, handle, sink: list[int]):
+        self._handle = handle
+        self._sink = sink
+
+    def read(self, size=-1):
+        data = self._handle.read(size)
+        self._sink.append(len(data))
+        return data
+
+    def __enter__(self):
+        self._handle.__enter__()
+        return self
+
+    def __exit__(self, *exc):
+        return self._handle.__exit__(*exc)
+
+
+def record_reads(monkeypatch, name: str) -> list[int]:
+    """Record the byte counts of every read of ``.ai/`` files named ``name``.
+
+    Patched after the fixture is written, so it never intercepts fixture writes.
+    """
+    reads: list[int] = []
+    real_open = Path.open
+
+    def recording_open(self, *args, **kwargs):
+        handle = real_open(self, *args, **kwargs)
+        if self.name == name:
+            return RecordingHandle(handle, reads)
+        return handle
+
+    monkeypatch.setattr(Path, "open", recording_open)
+    return reads
 
 
 def docs_by_path(snapshot) -> dict[str, object]:
@@ -257,7 +321,7 @@ def test_missing_eager_entrypoint_is_absent_with_a_warning(tmp_path):
     assert snapshot.snippets_available is True
 
 
-# -- absent snapshot ----------------------------------------------------------
+# -- absent / escaping snapshot -----------------------------------------------
 
 
 def test_absent_ai_dir_is_unavailable_with_a_warning(tmp_path):
@@ -273,6 +337,42 @@ def test_absent_ai_dir_is_unavailable_with_a_warning(tmp_path):
     assert "absent" in snapshot.detail
     assert len(snapshot.warnings) == 1
     assert calls == []  # nothing to diff against => git is never invoked
+
+
+def test_ai_dir_symlinked_outside_the_repo_is_refused_whole(tmp_path):
+    # `.ai` linked at a sibling checkout: `is_dir()` says yes and every child
+    # check would pass (they are relative to the resolved outside dir), so the
+    # repo would silently be evaluated on another project's memory.
+    repo = make_repo(tmp_path)
+    other = make_repo(tmp_path, name="beta")
+    write_single_file_snapshot(other, **{"overview.md": "# Overview\nbeta secrets\n"})
+    (repo.path / AI_DIRNAME).symlink_to(other.path / AI_DIRNAME)
+    calls: list = []
+
+    snapshot = read_ai_snapshot(repo, since=SINCE, runner=fake_git(calls=calls))
+
+    assert snapshot.present is False
+    assert snapshot.docs == ()
+    assert snapshot.snippets_available is False
+    assert "resolves outside the managed repo" in snapshot.detail
+    assert any("resolves outside the managed repo" in w for w in snapshot.warnings)
+    assert calls == []  # refused before any read, git included
+
+
+def test_ai_dir_symlinked_inside_the_repo_is_still_read(tmp_path):
+    # The rule is repo containment, not path literalism: a snapshot the repo
+    # itself relocates is still its own memory.
+    repo = make_repo(tmp_path)
+    relocated = repo.path / "memory"
+    relocated.mkdir()
+    for rel, body in {"index.md": router_md(DEFAULT_ROUTES), **SINGLE_FILE_BODIES}.items():
+        (relocated / rel).write_text(body, encoding="utf-8")
+    (repo.path / AI_DIRNAME).symlink_to(relocated)
+
+    snapshot = read_ai_snapshot(repo, runner=fake_git())
+
+    assert snapshot.present is True and snapshot.snippets_available is True
+    assert "purpose" in docs_by_path(snapshot)[f"{AI_DIRNAME}/overview.md"].content
 
 
 # -- prefetch slice -----------------------------------------------------------
@@ -390,6 +490,53 @@ def test_total_budget_exhaustion_omits_later_docs_with_a_warning(tmp_path):
     assert snapshot.snippets_available is True
 
 
+def test_an_oversize_doc_is_never_read_past_its_cap(tmp_path, monkeypatch):
+    # The cap has to bound the *read*, not a slice taken after the whole file is
+    # in memory: a drifted (or hostile) doc must cost the cap to refuse.
+    repo = make_repo(tmp_path)
+    write_single_file_snapshot(repo, **{"overview.md": "x" * 2_000_000})
+    reads = record_reads(monkeypatch, "overview.md")
+
+    snapshot = read_ai_snapshot(repo, doc_max_bytes=1000, runner=fake_git())
+
+    overview = docs_by_path(snapshot)[f"{AI_DIRNAME}/overview.md"]
+    assert overview.size == 2_000_000 and len(overview.content) == 1000
+    assert overview.truncated is True
+    assert sum(reads) <= 1000  # nothing beyond the cap ever entered memory
+
+
+def test_a_budget_dropped_doc_is_not_opened_at_all(tmp_path, monkeypatch):
+    repo = make_repo(tmp_path)
+    write_single_file_snapshot(repo, **{"overview.md": "x" * 5000})
+    ai_dir = repo.path / AI_DIRNAME
+    budget = (ai_dir / "index.md").stat().st_size + (ai_dir / "map.md").stat().st_size
+    reads = record_reads(monkeypatch, "overview.md")
+
+    snapshot = read_ai_snapshot(repo, total_max_bytes=budget, runner=fake_git())
+
+    assert docs_by_path(snapshot)[f"{AI_DIRNAME}/overview.md"].present is False
+    assert reads == []  # skipped on stat alone
+
+
+def test_the_router_is_never_read_past_its_cap(tmp_path, monkeypatch):
+    # `index.md` is read twice — once to route, once as an eager doc — so both
+    # reads need the bound, not just the doc one.
+    repo = make_repo(tmp_path)
+    write_single_file_snapshot(repo)
+    padding = "\n" + "y" * 500_000
+    (repo.path / AI_DIRNAME / "index.md").write_text(
+        router_md(DEFAULT_ROUTES) + padding, encoding="utf-8"
+    )
+    reads = record_reads(monkeypatch, "index.md")
+
+    snapshot = read_ai_snapshot(repo, doc_max_bytes=2000, runner=fake_git())
+
+    # Routing still worked off the bounded head, so the eager set resolved.
+    assert docs_by_path(snapshot)[f"{AI_DIRNAME}/overview.md"].present is True
+    assert reads and max(reads) <= ROUTER_MAX_BYTES
+    assert all(size <= ROUTER_MAX_BYTES for size in reads)
+
+
 def test_a_doc_read_never_escapes_the_snapshot_dir(tmp_path):
     repo = make_repo(tmp_path)
     write_single_file_snapshot(repo)
@@ -411,14 +558,14 @@ def test_a_doc_read_never_escapes_the_snapshot_dir(tmp_path):
 def test_unreadable_doc_degrades_to_a_warning(tmp_path, monkeypatch):
     repo = make_repo(tmp_path)
     write_single_file_snapshot(repo)
-    real_read_bytes = Path.read_bytes
+    real_open = Path.open
 
-    def failing(self):
+    def failing(self, *args, **kwargs):
         if self.name == "overview.md":
             raise PermissionError(13, "Permission denied")
-        return real_read_bytes(self)
+        return real_open(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", failing)
+    monkeypatch.setattr(Path, "open", failing)
 
     snapshot = read_ai_snapshot(repo, runner=fake_git())
 
@@ -505,6 +652,41 @@ def test_diff_unavailable_when_git_is_missing(tmp_path):
     snapshot = read_ai_snapshot(repo, since=SINCE, runner=missing)
 
     assert snapshot.diffs_available is False
+
+
+def test_a_raising_runner_degrades_only_the_diff(tmp_path):
+    # A failure distinct from executable absence — the runner itself blows up.
+    # The docs are already collected and stay: the two parts fail independently.
+    repo = make_repo(tmp_path)
+    write_single_file_snapshot(repo)
+
+    def exploding(args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    snapshot = read_ai_snapshot(repo, since=SINCE, runner=exploding)
+
+    assert snapshot.present is True
+    assert snapshot.snippets_available is True  # docs survive the diff failure
+    assert snapshot.diffs_available is False
+    assert "PermissionError" in snapshot.diff.detail
+    assert any("windowed diff unavailable" in w for w in snapshot.warnings)
+
+
+def test_diff_read_pushes_the_byte_cap_into_the_git_call(tmp_path):
+    # The cap must bound what git's output *costs*, so it travels to the runner
+    # rather than being applied to an already-captured string.
+    repo = make_repo(tmp_path)
+    write_single_file_snapshot(repo)
+    calls: list = []
+
+    read_ai_snapshot(
+        repo,
+        since=SINCE,
+        diff_max_bytes=4096,
+        runner=recording_git(stdout="patch\n", calls=calls),
+    )
+
+    assert calls[0]["max_stdout_bytes"] == 4096
 
 
 def test_no_window_skips_git_and_reuses_the_caller_reason(tmp_path):

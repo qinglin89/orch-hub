@@ -1,9 +1,14 @@
-"""Tests for best-effort git commit metadata reads.
+"""Tests for best-effort git commit metadata and pathspec-scoped patch reads.
 
 Injects a fake runner (never a real git subprocess) and uses ``tmp_path`` for
 the repo dir so ``read_commits`` / ``latest_commit`` are exercised without
 touching real git history. The core contract under test is best-effort: any git
 problem degrades to an unavailable log / ``None``, never an exception.
+
+The patch reader adds a second contract: its byte cap reaches the command
+(a fake runner records the kwarg) and still binds when a runner ignores it. What
+the *real* capped runner does with an oversized stream is
+``tests/test_subprocess_utils.py``.
 """
 
 from __future__ import annotations
@@ -16,6 +21,7 @@ from orch_hub.git_meta import (
     latest_commit,
     read_commits,
     read_commits_between,
+    read_path_diff_between,
 )
 from orch_hub.models import CommitInfo, ManagedRepo
 from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
@@ -198,3 +204,104 @@ def test_read_commits_between_unavailable_when_path_missing(tmp_path):
     )
     assert log.available is False
     assert calls == []  # runner never invoked when the path is not a dir
+
+
+# -- pathspec-scoped patch stream (byte-bounded at the producer) ---------------
+
+SINCE = "2026-08-09T09:00:00+00:00"
+
+
+def test_path_diff_pushes_the_byte_cap_into_the_command(tmp_path):
+    # The cap has to reach the runner: a patch stream is repo-content-sized, so
+    # bounding it only after capture would bound what is kept, not what is read.
+    calls: list = []
+
+    def runner(args, **kwargs):
+        calls.append(kwargs)
+        return CommandResult(tuple(str(a) for a in args), 0, "", "")
+
+    read_path_diff_between(
+        make_repo(tmp_path), pathspec=".ai", since=SINCE, max_bytes=4096, runner=runner
+    )
+
+    assert calls[0]["max_stdout_bytes"] == 4096
+
+
+def test_path_diff_trusts_a_runner_that_measured_its_own_output(tmp_path):
+    # The capped runner returns the head plus the true size; re-slicing its text
+    # could cut the replacement character it had to insert at the byte boundary.
+    def runner(args, **kwargs):
+        return CommandResult(
+            tuple(str(a) for a in args), 0, "head", "", stdout_bytes=9000,
+            stdout_truncated=True,
+        )
+
+    log = read_path_diff_between(
+        make_repo(tmp_path), pathspec=".ai", since=SINCE, max_bytes=4, runner=runner
+    )
+
+    assert log.available is True
+    assert log.text == "head" and log.size == 9000 and log.truncated is True
+
+
+def test_path_diff_bounds_a_runner_that_ignored_the_cap(tmp_path):
+    # An unmeasured capture (an injected fake, or an unbounded runner) must not
+    # be able to widen the contract the caller asked for.
+    log = read_path_diff_between(
+        make_repo(tmp_path),
+        pathspec=".ai",
+        since=SINCE,
+        max_bytes=100,
+        runner=make_runner(stdout="d" * 4000),
+    )
+
+    assert len(log.text) == 100 and log.size == 4000 and log.truncated is True
+
+
+def test_path_diff_below_the_cap_is_whole_and_untruncated(tmp_path):
+    log = read_path_diff_between(
+        make_repo(tmp_path),
+        pathspec=".ai",
+        since=SINCE,
+        max_bytes=100,
+        runner=make_runner(stdout="commit abc\n+ line\n"),
+    )
+
+    assert log.text == "commit abc\n+ line\n"
+    assert log.size == len("commit abc\n+ line\n") and log.truncated is False
+
+
+def test_path_diff_unavailable_on_failure_and_missing_git(tmp_path):
+    repo = make_repo(tmp_path)
+
+    def missing(args, **kwargs):
+        raise CommandNotFoundError("git")
+
+    failed = read_path_diff_between(
+        repo, pathspec=".ai", since=SINCE, max_bytes=100, runner=make_runner(rc=128)
+    )
+    absent = read_path_diff_between(
+        repo, pathspec=".ai", since=SINCE, max_bytes=100, runner=missing
+    )
+
+    assert failed.available is False and failed.text == ""
+    assert absent.available is False
+
+
+def test_path_diff_scopes_the_pathspec_and_pins_rendering(tmp_path):
+    calls: list = []
+    read_path_diff_between(
+        make_repo(tmp_path),
+        pathspec=".ai",
+        since=SINCE,
+        until="2026-08-09T10:00:00+00:00",
+        max_bytes=100,
+        runner=make_runner(calls=calls),
+    )
+
+    argv = calls[0]["argv"]
+    assert argv[:2] == ["git", "log"]
+    assert argv[-2:] == ["--", ".ai"]
+    for pinned in ("--patch", "--no-color", "--no-ext-diff", "--no-textconv"):
+        assert pinned in argv
+    assert f"-{MAX_COMMIT_LIMIT}" in argv
