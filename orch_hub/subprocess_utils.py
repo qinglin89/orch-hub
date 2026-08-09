@@ -16,7 +16,10 @@ rather than what is kept after an unbounded read.
 
 from __future__ import annotations
 
+import os
+import selectors
 import subprocess
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -71,6 +74,11 @@ def run_command(
     drift-controlled; the unbounded default stays for the small, fixed-shape
     probes (``git status``, ``aii-2 status``) whose stderr callers report.
 
+    ``timeout`` means the same thing in both modes: it bounds the whole call and
+    raises :class:`subprocess.TimeoutExpired` when it expires. Callers can
+    therefore combine it with ``max_stdout_bytes`` to bound memory and runtime
+    at once.
+
     Raises :class:`CommandNotFoundError` when the executable is missing.
     """
     argv = [str(a) for a in args]
@@ -115,7 +123,13 @@ def _run_capped(
     (the command blocks writing stderr, so it stops writing the stdout we are
     blocked reading). Callers that need stderr diagnostics use the unbounded
     mode. The command's own bounds — for ``git log`` a commit cap — remain the
-    caller's responsibility; this bounds memory, not runtime.
+    caller's responsibility.
+
+    ``timeout`` becomes an absolute deadline covering the drain *and* the wait,
+    because the drain is where a stuck command actually stalls: a child that
+    sleeps, trickles, or merely holds stdout open blocks the read, and a timeout
+    checked only afterwards would be reached once the command had already
+    finished taking as long as it liked.
     """
     try:
         proc = subprocess.Popen(
@@ -126,10 +140,19 @@ def _run_capped(
         )
     except FileNotFoundError as exc:
         raise CommandNotFoundError(argv[0]) from exc
+    deadline = None if timeout is None else time.monotonic() + timeout
     try:
         with proc.stdout as stream:  # type: ignore[union-attr] - stdout=PIPE
-            head, total = _drain(stream, limit)
-        returncode = proc.wait(timeout=timeout)
+            head, total, expired = _drain(stream, limit, deadline)
+        if expired:
+            # Same exception the uncapped mode raises, carrying the head read so
+            # far: partial evidence, like `subprocess.run`'s own `output`.
+            raise subprocess.TimeoutExpired(
+                argv,
+                timeout,  # type: ignore[arg-type] - a deadline implies a timeout
+                output=head.decode("utf-8", errors="replace"),
+            )
+        returncode = proc.wait(timeout=_remaining(deadline))
     except BaseException:
         # A timeout (or an interrupt) leaves a live child holding the pipe; kill
         # it before propagating so no orphan outlives this call.
@@ -146,21 +169,47 @@ def _run_capped(
     )
 
 
-def _drain(stream: IO[bytes], limit: int) -> tuple[bytes, int]:
-    """Read ``stream`` to EOF; return its first ``limit`` bytes and its full size.
+def _drain(
+    stream: IO[bytes], limit: int, deadline: Optional[float]
+) -> tuple[bytes, int, bool]:
+    """Read ``stream`` to EOF; return its first ``limit`` bytes, its full size,
+    and whether ``deadline`` expired first.
+
+    Every read waits for readability first, so ``deadline`` bounds the whole
+    drain rather than any single read. It is absolute, not refreshed per chunk:
+    a command trickling output forever stops at the caller's timeout, not at the
+    first quiet gap. Readability is answered with exactly one ``os.read`` — a
+    buffered ``read(n)`` blocks until it has all ``n`` bytes, which would put an
+    unbounded blocking read back inside the bounded loop.
 
     Decoding is left to the caller because the cut lands at an arbitrary byte
     offset and may split a multi-byte character.
     """
     head = bytearray()
     total = 0
-    while True:
-        chunk = stream.read(_STREAM_CHUNK)
-        if not chunk:
-            return bytes(head), total
-        total += len(chunk)
-        if len(head) < limit:
-            head += chunk[: limit - len(head)]
+    fd = stream.fileno()
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            if not selector.select(_remaining(deadline)):
+                return bytes(head), total, True
+            chunk = os.read(fd, _STREAM_CHUNK)
+            if not chunk:
+                return bytes(head), total, False
+            total += len(chunk)
+            if len(head) < limit:
+                head += chunk[: limit - len(head)]
+
+
+def _remaining(deadline: Optional[float]) -> Optional[float]:
+    """Seconds left until ``deadline``; ``None`` when there is no deadline.
+
+    Clamped at zero so a deadline already passed becomes a non-blocking poll
+    instead of a negative timeout.
+    """
+    if deadline is None:
+        return None
+    return max(0.0, deadline - time.monotonic())
 
 
 # A runner has the same call shape as :func:`run_command`. Tests inject fakes.
