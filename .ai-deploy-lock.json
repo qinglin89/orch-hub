@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "1dedac406e90f7ca16b49ab5c50dd0917d19f2a2c7e2d3dbb3a7c3eeedbfde61",
+  "canonical_payload_sha256": "533a87d311bd99d9ae9ba25f1385a3c22396b4e704a8b75a2ad9b9b36614f450",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -98,15 +98,57 @@
       "target_relative_path": ".claude/settings.json"
     },
     {
-      "canonical_relative_path": "canonical/claude/skills/session-ai-audit/SKILL.md",
-      "canonical_sha256": "ede0034c8df244b43974c4aa27c862765ac0279376839ffe96006e8e98204f57",
-      "canonical_size_bytes": 6824,
-      "target_relative_path": ".claude/skills/session-ai-audit/SKILL.md"
+      "canonical_relative_path": "canonical/claude/skills/ai-housekeeping/SKILL.md",
+      "canonical_sha256": "3a39f86f9ced4f08c804c10e5713f54f06939f0cb215c1aad51ae2bcf9082a85",
+      "canonical_size_bytes": 4317,
+      "target_relative_path": ".claude/skills/ai-housekeeping/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/ai-init/SKILL.md",
+      "canonical_sha256": "a971a81a8628520065e357d6a8d50fc49b0c6d6a8df898264d833c25cd582a0a",
+      "canonical_size_bytes": 7167,
+      "target_relative_path": ".claude/skills/ai-init/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/ai-load/SKILL.md",
+      "canonical_sha256": "9e90b1809203abca88f5eee50061e516cb6cd20b19bbcdf9495fdc30aaefb8e2",
+      "canonical_size_bytes": 1200,
+      "target_relative_path": ".claude/skills/ai-load/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/ai-sync-v2/SKILL.md",
+      "canonical_sha256": "39c90dfb21493a6d793708a2d904580fceed5a9b6f92cae8602dc738ef583618",
+      "canonical_size_bytes": 6049,
+      "target_relative_path": ".claude/skills/ai-sync-v2/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/ctd-tasks/SKILL.md",
+      "canonical_sha256": "3c1293d61d3ce0e226ae07d0165d35de8bf97831f51ceb0282ce1b0d61f33c90",
+      "canonical_size_bytes": 2885,
+      "target_relative_path": ".claude/skills/ctd-tasks/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/ctd-tasks/scan.sh",
+      "canonical_sha256": "acc1c0db1c771f2693b7ae92e732a745fcf7491db195345d62fd9381789a556f",
+      "canonical_size_bytes": 5821,
+      "target_relative_path": ".claude/skills/ctd-tasks/scan.sh"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/intake-task/SKILL.md",
+      "canonical_sha256": "f16ea12a658b9524bdba5ffec61dac52c853a05fdcf1fbdfa699e79dbeeb22c9",
+      "canonical_size_bytes": 4521,
+      "target_relative_path": ".claude/skills/intake-task/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/invoke/SKILL.md",
+      "canonical_sha256": "8c8539c28788eaf2f03bac7f82b760ec0d9e758166c6721b567976dd84842f0a",
+      "canonical_size_bytes": 2689,
+      "target_relative_path": ".claude/skills/invoke/SKILL.md"
     },
     {
       "canonical_relative_path": "canonical/codex/README.md",
-      "canonical_sha256": "30d8cf188d6597da7c68d6f4bda6c13fb2c21c814dee6a9f2047d480004c1c49",
-      "canonical_size_bytes": 5367,
+      "canonical_sha256": "a0682723de0c4c063c14134f4d1dc5f1baee1eb95cdb7166e9ab06aa891131ec",
+      "canonical_size_bytes": 5532,
       "target_relative_path": ".codex/README.md"
     },
     {
@@ -117,14 +159,14 @@
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/session-start.sh",
-      "canonical_sha256": "6c0858299278893cbd157de8a6a92c0ab302901f4060a447e6281fe5985bbb57",
-      "canonical_size_bytes": 6618,
+      "canonical_sha256": "c6b099994f3eca7341f6fd0006e5cc9e3c4e4b5023ab423cbd72081d14682157",
+      "canonical_size_bytes": 6675,
       "target_relative_path": ".codex/hooks/session-start.sh"
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/stop-context-check.sh",
-      "canonical_sha256": "d661966742bbf3b0859eddbaa11d1444e9e2c72f9df256b40189b93a35f8ac32",
-      "canonical_size_bytes": 8435,
+      "canonical_sha256": "6f7ce3c867fcf48641c93ffe4af3a5ea8341fe32dc3cd4d61b5d0412506816b9",
+      "canonical_size_bytes": 8583,
       "target_relative_path": ".codex/hooks/stop-context-check.sh"
     },
     {
@@ -147,8 +189,8 @@
     },
     {
       "canonical_relative_path": "canonical/cursor/hooks/stop-context-check.sh",
-      "canonical_sha256": "6a94662940da55b25ceb3ec4f7c2db0fabf89b0ca6beb9d7e1e3c5ebccc30ede",
-      "canonical_size_bytes": 7862,
+      "canonical_sha256": "12b96bf41a4a302cd7e7df5ccb38e43967e05449352e095eb33606b244e736a4",
+      "canonical_size_bytes": 7962,
       "target_relative_path": ".cursor/hooks/stop-context-check.sh"
     },
     {
@@ -171,8 +213,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub.md",
-      "canonical_sha256": "68352ad1d61db9537116a47d09b1ad58b95a8b42972ede966bdcfefd3cfb8d55",
-      "canonical_size_bytes": 14742,
+      "canonical_sha256": "2dcad360393e5f1e1f710c525db7adbf9bd942bb76544763880a2b4c0c75a7fe",
+      "canonical_size_bytes": 14943,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub.md"
     },
     {
@@ -183,8 +225,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "e9b5077862fa7a7213d4e83575274739a31b36164c1d8b6869eba06cd4ae83a9",
-      "canonical_size_bytes": 144543,
+      "canonical_sha256": "e96b604c679417759837a545d2e0561d19bcd7e7bc9b40e697bb2115604b32de",
+      "canonical_size_bytes": 144785,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -279,8 +321,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/prompts/entry/conduct-annex.md",
-      "canonical_sha256": "52de97aba431e63cd4be951e8db9c68133b45ace91acf501451d115600eed512",
-      "canonical_size_bytes": 2134,
+      "canonical_sha256": "aaafe31802afa7d90bba4b168ea52d74541967609a52616b4f96d6bce2b2c126",
+      "canonical_size_bytes": 2470,
       "target_relative_path": ".cursor/orchestrator/prompts/entry/conduct-annex.md"
     },
     {
@@ -639,14 +681,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "d485797036239a51990e9242cddf91ac0732edfcba45e0d357da72c3d45be24f",
-      "canonical_size_bytes": 102230,
+      "canonical_sha256": "f5781b5d9ecf337e9727fc2c454375adca3a5c3de9337312f04186f088ef7406",
+      "canonical_size_bytes": 103026,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
       "canonical_relative_path": "canonical/cursor/rules/protocol.mdc",
-      "canonical_sha256": "06def47ee36b60268c6c9c82e8e155d55eca56230cd88dfabf491cf0a7ca0910",
-      "canonical_size_bytes": 2202,
+      "canonical_sha256": "2a0c81b95adb8a40c4206dc7a06fe2ff55d240cf2670da67fcdba55c3792131d",
+      "canonical_size_bytes": 2284,
       "target_relative_path": ".cursor/rules/protocol.mdc"
     },
     {
@@ -663,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "d3f44240d8ddf1ccbf79a5a43cb60c72098889a5",
+  "source_git_commit": "6b62754694c289fc8822562cec22ab774e071b2c",
   "source_repo": "ai-native-deployment"
 }
