@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -21,7 +21,11 @@ reads active `.ai-tasks/<id>.md` first, then archived
 pid probing, or writes; `build_evidence` assembles a bounded `EvidencePack`
 from task content, related run records, metadata-only events, persisted session
 snapshots, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
-and best-effort git-window commits; `generate_evidence` mints an evaluation id
+best-effort git-window commits, and a bounded `.ai/` snapshot. The memory
+section contains the routed eager set, task-declared prefetch docs, and a
+`.ai/`-scoped patch stream over the same git window; per-part failures degrade
+independently, and every doc/router/diff bound is enforced at its producer.
+`generate_evidence` mints an evaluation id
 and atomically writes `evidence.json` under
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. `list_evaluations`
 enumerates persisted dirs newest-first by `(timestamp, numeric suffix)` and
@@ -81,19 +85,25 @@ persist `semantic_report.json` and `report.md` beside `evidence.json` and
 `static_metrics.json` in a fresh evaluation dir. `SemanticEvaluator` shares the
 evaluation gate and raises `EvaluationDisabledError` when disabled. Its evidence
 distillation includes the task file, static report, capped git commit subjects,
-and explicit omissions; raw orchestrator/spawn logs and unavailable `.ai/`
-snippets/diffs stay out of the prompt and lower confidence instead of failing.
+the pack's bounded `.ai/` docs and windowed patches, and explicit omissions.
+The two `.ai/` availability flags come from what the pack actually carries:
+snippets make `ai_freshness_utility` assessable, while each unavailable part
+stays out and lowers confidence independently. Raw orchestrator/spawn logs stay
+out of the prompt.
 
 The report parser requires sentinel-wrapped JSON, stamps task/evaluation
-provenance itself, rejects malformed schema output, and requires each finding to
-carry at least one non-empty evidence ref. The default `ClaudeSemanticBackend`
+provenance itself (including the evidence-pack schema cohort), rejects malformed
+schema output, and requires each finding to carry at least one non-empty evidence
+ref. The default `ClaudeSemanticBackend`
 runs one `claude -p --output-format stream-json` turn with `--tools ""`,
 `--safe-mode`, `--no-session-persistence`, and `--permission-mode plan` from a
 fresh empty cwd outside the target repo. Its `doctor()` is a no-cost
 `claude`-resolution probe surfaced through HTTP/CLI so an unavailable backend
 can disable Layer 2 without affecting Layer 1 or run control. That structural
 boundary is load-bearing: the semantic model must judge only the persisted
-prompt/evidence and cannot read live repo files, `.ai/`, raw logs, or secrets.
+prompt/evidence and cannot read live repo files, raw logs, or secrets. It sees
+`.ai/` only as the bounded persisted copy in the prompt; a live reread would
+break artifact reproducibility.
 API exposes generation through `SemanticJobManager` at protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, detail readback, and
 a gated `GET /api/evaluation/doctor` readiness route.

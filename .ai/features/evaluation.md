@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Features: Task Evaluation
@@ -13,11 +13,11 @@ evaluation, and the cross-repo publication feed. Other core features: `core.md`.
 Status: implemented
 
 Description: Build optional read-only evidence packs for one active or archived
-task so static metrics and semantic evaluators have bounded task/run/git input
-without changing normal run-control state.
+task so static metrics and semantic evaluators have bounded task/run/git/`.ai/`
+input without changing normal run-control state.
 
-Modules: evaluation, config, task_store, runs, history, sessions, logs,
-git_meta, models.
+Modules: evaluation, ai_snapshot, config, task_store, runs, history, sessions,
+logs, git_meta, subprocess_utils, models.
 
 APIs: internal `EvaluationService.resolve_target`, `related_runs`,
 `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`,
@@ -39,7 +39,16 @@ Implemented behavior:
 - Evidence packs include task content/archive state, related run records,
   metadata-only events, persisted session snapshots, bounded orchestrator-log
   and `spawn.out` excerpts with size/truncation metadata, terminal record fields,
-  explicit warnings, and best-effort git commit-window metadata.
+  explicit warnings, best-effort git commit-window metadata, and a producer-
+  bounded `.ai/` view: the full eager set, task-declared prefetch docs, and a
+  `.ai/`-scoped patch stream over the same run window. Each memory part carries
+  availability, size/truncation metadata, and degradation warnings.
+- Eager memory topics resolve through `.ai/index.md` routing before file-shape
+  fallback (`topic.md` versus `topic/index.md`). Snapshot roots and child reads
+  stay inside the managed repo; document/router reads and git patch output are
+  bounded at their producers, and a failed patch read preserves collected docs.
+- `evidence.json` records its shape as schema v2; pre-version packs remain
+  readable as v1-shaped artifacts.
 - Git evidence uses ambient commit-date history reachable from HEAD over the
   run lifecycle window, capped at 50 commits; any related run with no parseable
   end keeps `until` open-ended.
@@ -125,8 +134,8 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: semantic_jobs, semantic, static_metrics, evaluation, config, models,
-notifications, api, cli, web.
+Modules: semantic_jobs, semantic, ai_snapshot, static_metrics, evaluation,
+config, models, notifications, api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`,
@@ -144,10 +153,16 @@ Implemented behavior:
   the complete semantic artifact set is durable.
 - The report schema has no naked overall score: it carries per-dimension scores
   with rationales/confidence, findings with severity/confidence/evidence refs,
-  evaluator identity, linked input ids, summary, and suggested improvements.
+  evaluator identity, linked input ids, input evidence-schema cohort, summary,
+  and suggested improvements.
 - Bounded prompt evidence includes the task file, static metrics, capped commit
-  subjects, warnings, and explicit omissions. Raw logs plus unavailable `.ai/`
-  snippets/diffs are excluded and lower confidence rather than failing.
+  subjects, the pack's bounded `.ai/` docs and patch stream, warnings, and
+  explicit omissions. Snippet/diff availability is computed independently from
+  what the pack carries: snippets ground `ai_freshness_utility`; missing parts
+  remain omitted and lower confidence rather than failing. Raw logs stay out.
+- Reports stamp `input_evidence_schema`; confidence comparisons must remain
+  within one evidence-schema cohort because a new evaluator input moves the
+  confidence baseline.
 - The default Claude CLI backend is evidence-bounded structurally: it runs one
   stateless `claude -p` turn from a fresh empty cwd outside the target repo with
   `--tools ""`, `--safe-mode`, `--no-session-persistence`, and

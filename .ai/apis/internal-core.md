@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -105,13 +105,16 @@ Input: config, an `EvidencePack` plus `StaticMetricsReport`, or a managed repo
 plus exact task id.
 
 Output: `SemanticReport`, a deterministic Markdown render, and persisted
-`semantic_report.json` plus `report.md` beside the pack/static artifacts.
+`semantic_report.json` plus `report.md` beside the pack/static artifacts; report
+provenance includes the input evidence-schema cohort.
 
 Behavior: `SemanticEvaluator` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` when disabled. `build_semantic_evidence(pack, static)`
 constructs a bounded model input from the task file, static metrics, capped git
-subjects, and explicit omissions; raw logs and unavailable `.ai/` snippets/diffs
-are omitted and lower confidence rather than failing. `build_prompt` requires a
+subjects, the pack's producer-bounded `.ai/` docs and same-window patches, and
+explicit omissions. Snippet/diff availability is computed independently from
+the persisted section; unavailable parts and raw logs are omitted and lower
+confidence rather than failing. `build_prompt` requires a
 sentinel-wrapped JSON report. `parse_report` stamps provenance from the harness,
 requires scored rationales and evidence-backed findings, and treats malformed
 model output as `SemanticEvaluationError`. `evaluate(repo, task_id)` mints a

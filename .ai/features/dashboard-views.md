@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -136,9 +136,10 @@ Implemented behavior:
   job's `evaluation_id` so the fresh semantic report paints.
   The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
   semantic backend disables only the Layer 2 trigger with an explanation while
-  Layer 1 stays usable. Semantic reports render evaluator provenance, per-axis
-  rationales, severity/confidence/evidence-ref findings, suggested improvements,
-  JSON and `report.md` downloads, and history-picker model/schema labels. Raw
+  Layer 1 stays usable. Semantic reports render evaluator provenance including
+  the input evidence-schema cohort, per-axis rationales, severity/confidence/
+  evidence-ref findings, suggested improvements, JSON and `report.md` downloads,
+  and history-picker model/schema labels. Raw
   evidence/static/semantic JSON and Markdown are offered only through
   Copy/Download affordances, never inline raw logs.
 - The remote-intake review view polls `GET /api/intakes/{id}` while an intake

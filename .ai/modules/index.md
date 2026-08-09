@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Modules
@@ -15,12 +15,13 @@ Full responsibilities live in the detail files below.
 | Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch readiness checks |
-| Git metadata | `orch_hub/git_meta.py` | best-effort commit reads for display/evidence |
+| Git metadata | `orch_hub/git_meta.py` | best-effort commit reads and capped path-patch streams for display/evidence |
 | Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |
-| Subprocess utilities | `orch_hub/subprocess_utils.py` | shared subprocess wrappers |
+| Subprocess utilities | `orch_hub/subprocess_utils.py` | shared blocking wrappers; optional producer-capped stdout with whole-call timeout |
 | Task inventory | `orch_hub/task_store.py` | `.ai-tasks` index/frontmatter parsing; contained active/archive reads |
 | Repo admission | `orch_hub/admission.py` | per-repo atomic run↔intake admission; persisted occupancy probes; structured conflicts |
 | Evaluation | `orch_hub/evaluation.py` | evidence targets/packs; artifact persistence/retention/reads |
+| AI snapshot evidence | `orch_hub/ai_snapshot.py` | producer-bounded routed `.ai/` docs and same-window patch evidence |
 | Static metrics | `orch_hub/static_metrics.py` | deterministic metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation; backend isolation; doctor |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
@@ -48,7 +49,7 @@ Full responsibilities live in the detail files below.
 | File | Contains |
 |---|---|
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
-| sidecar.md | Evaluation, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
+| sidecar.md | Evaluation, AI snapshot evidence, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
 | intake.md | Intake manager, intake agent |
 | runtime.md | Repo admission, run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
 | service.md | API app, launchd operations |
@@ -67,6 +68,9 @@ Full responsibilities live in the detail files below.
   checked before, and remains separate from, readiness.
 - Evaluation reads target tasks/run artifacts via existing stores; writes only
   contained artifacts under `<ORCH_HUB_DATA_DIR>/evaluations/`.
+- AI snapshot evidence resolves memory through the target router/file shape,
+  enforces repo containment and byte bounds at every read producer, and degrades
+  docs and patches independently; it never writes the target snapshot.
 - Static metrics read evidence packs; write only contained
   `static_metrics.json` in the same evaluation dir; no target/run/protocol
   mutation.

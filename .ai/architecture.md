@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Architecture
@@ -133,16 +133,20 @@ the paths it was authorized to touch while the process is alive.
 off the state-critical path when Bark is configured.
 
 Task evaluation: exact active/archive id → read-only aggregation of every
-`(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics
-plus a best-effort git window → `evidence.json` under the hub data dir.
+`(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics,
+a best-effort git window, and a producer-bounded `.ai/` eager/prefetch snapshot
+plus same-window `.ai/` patches → versioned `evidence.json` under the hub data
+dir.
 Static metrics adds deterministic run/session, taskfile/session-log, score,
 confidence, and warning rollups as `static_metrics.json` beside it. The
-semantic layer builds a model prompt from the persisted evidence/static
-chain, records omitted inputs (`.ai/` snippets/diffs, raw logs) as confidence
-degradation, and persists `semantic_report.json` + `report.md` in the same
-dir. The default Claude CLI backend runs from an empty non-repo cwd with
-tools disabled, safe mode, no session persistence, and plan-mode writes
-blocked — the model cannot read live target-repo state outside the prompt. Protected routes expose availability, generation, async
+semantic layer builds a model prompt from the persisted evidence/static chain,
+including the bounded `.ai/` copy and its independently available patch stream;
+missing parts and raw logs are recorded as confidence degradation. It persists
+`semantic_report.json` + `report.md` in the same dir and stamps the evidence
+schema cohort on the report. The default Claude CLI backend runs from an empty
+non-repo cwd with tools disabled, safe mode, no session persistence, and
+plan-mode writes blocked — the model cannot read live target-repo state outside
+the prompt. Protected routes expose availability, generation, async
 semantic job start/status, doctor readiness, history, and artifact readback.
 `SemanticJobManager` stores one current job per `(repo, task)` under
 `<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job

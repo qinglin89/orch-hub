@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-26
-verified-against: 3582180d93032df92e22fd39c83b64896b526583
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Modules: Core
@@ -131,7 +131,9 @@ evaluation target resolution and run aggregation; `RunRollup`, `RunMetrics`,
 deterministic static-metrics output shapes. `SemanticScore`,
 `SemanticFinding`, `SemanticEvaluatorInfo`, and `SemanticReport` carry Layer 2
 scores, findings, severity/confidence/evidence refs, evaluator identity, and
-suggested improvements. Evidence composites stay in
+suggested improvements; `SemanticReport` also stamps the input evidence-schema
+cohort so confidence comparisons do not cross a changed evidence baseline.
+Evidence composites stay in
 `evaluation.py` because they reference `logs.LogSnapshot`, avoiding a
 models/logs import cycle.
 
@@ -160,6 +162,9 @@ with limits clamped to `1..50`, invoke `git log` in the repo, parse `%H`, `%h`,
 `%cI`, and `%s` using an ASCII unit-separator field delimiter, and degrade to
 unavailable on missing git, non-git dirs, missing paths, or non-zero exit.
 Commit lookup failure must not hide repo/task content or fail evidence packs.
+`read_path_diff_between` uses the same timestamp window and a caller-required
+byte cap for a path-scoped patch stream; rendering disables external diff and
+textconv execution, and the result preserves true output size/truncation.
 
 ## Housekeeping
 
@@ -173,7 +178,11 @@ boolean and must not participate in readiness or launch gating.
 
 Location: `orch_hub/subprocess_utils.py`
 
-Responsibility: central wrapper for running commands with cwd, capture, timeout if later needed, and concise output extraction. Do not hide command failures that readiness or API callers need to report.
+Responsibility: central wrapper for running commands with cwd, capture, timeout,
+and concise output extraction. Optional capped stdout mode streams and counts the
+whole output while retaining only its bounded head; one absolute deadline covers
+drain plus wait, and expiry kills/reaps the child before raising `TimeoutExpired`.
+Do not hide command failures that readiness or API callers need to report.
 The detached orchestrator launch is not routed through this blocking wrapper;
 `RunManager` uses `subprocess.Popen` directly so it can keep a process handle
 and redirect output.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-09
+verified-against: 79b6b88c586380012edb532809d2318f34131f5a
 ---
 
 # Project Map
@@ -14,9 +14,9 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | implemented; ai-native-development registry = truth (absolute `aii-2` first, registry-file fallback); readiness JSON lists failed checks only; commit/housekeeping metadata display-only |
 | Task inventory | task_store, api, models | implemented; local parser only; index ids/summaries normalized (Markdown-link cells, five-column form); frontmatter authoritative status/blockers; reads index-gated + contained under `.ai-tasks`; exact-id archive + `session-est` reads |
-| Task evaluation foundation | evaluation, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | implemented; `ORCH_HUB_EVAL_ENABLED` gate + per-task `ORCH_HUB_EVAL_RETENTION`; exact active/archive ids; read-only `(repo_path, task_id)` run aggregation; bounded evidence + best-effort git window; hub-owned artifacts under `<data_dir>/evaluations/`; prune only after durable artifacts; run-history state is batched from newest artifacts |
+| Task evaluation foundation | evaluation, ai_snapshot, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | implemented; `ORCH_HUB_EVAL_ENABLED` gate + per-task `ORCH_HUB_EVAL_RETENTION`; exact active/archive ids; read-only `(repo_path, task_id)` run aggregation; producer-bounded versioned evidence with best-effort git window + routed eager/prefetch `.ai/` snapshot + same-window `.ai/` patches; hub-owned artifacts under `<data_dir>/evaluations/`; prune only after durable artifacts; run-history state is batched from newest artifacts |
 | Task static metrics | static_metrics, evaluation, config, models, api, web | implemented; gated deterministic Layer 1 over `EvidencePack`; rollups, protocol facts, five score axes, confidence, warnings; `static_metrics.json` beside `evidence.json`; no model call |
-| Task semantic evaluator | semantic_jobs, semantic, static_metrics, evaluation, config, models, notifications, api, cli, web | implemented; gated Layer 2 model report over bounded evidence + static; persisted async job blocks duplicate in-flight calls, survives restart; fresh terminal outcomes emit metadata-only push; `semantic_report.json` + `report.md`; isolated Claude CLI backend (no tools/persistence/repo cwd; safe mode; plan-mode writes blocked); doctor probes without model call |
+| Task semantic evaluator | semantic_jobs, semantic, ai_snapshot, static_metrics, evaluation, config, models, notifications, api, cli, web | implemented; gated Layer 2 model report over bounded evidence + static + persisted `.ai/` copy; independent snippet/patch availability controls assessability/confidence; reports stamp the evidence-schema cohort; persisted async job blocks duplicate in-flight calls, survives restart; fresh terminal outcomes emit metadata-only push; `semantic_report.json` + `report.md`; isolated Claude CLI backend (no tools/persistence/repo cwd; safe mode; plan-mode writes blocked); doctor probes without model call |
 | Global evaluation report feed | report_catalog, evaluation, semantic, task_store, models, api, web | implemented; append-only cross-repo publication catalog; archived + coherent durable L1+L2 candidacy; monotonic `seq` cursor + opaque stable `report_key`; semantic hook + idempotent startup reconciliation; retention guard preserves publication debt; contained bundle export + explicit provenance/integrity/unavailability; hub publishes, consumer decides protocol evolution |
 | Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, web, docs | implemented; Codex = newest local rollout; Claude = whitelisted local utilization cache + bounded model-free `/usage` refresh on stale reads/run ends; statusLine/stream = fallbacks; per-window merge; fail-soft display-only; never gates |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | implemented; thin FastAPI routes reuse CLI/core payload helpers; localhost-default env-configured uvicorn; only health + enumerated shell assets public |
@@ -62,9 +62,9 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | models | stable shared data shapes for CLI/API/tests; `RunRecord` → `ManagedRepo` reconstruction for run-scoped reads |
 | registry | discover managed repos from `aii-2` or registry file |
 | readiness | seven fail-closed launch readiness checks |
-| git_meta | latest/recent/windowed commit metadata; display/evidence only; degrades to unavailable, never gates |
+| git_meta | latest/recent/windowed commit metadata + caller-capped path patch streams; external diff/textconv disabled; display/evidence only; degrades to unavailable, never gates |
 | housekeeping | `.ai/.housekeeping-pending` display-only warning state |
-| subprocess_utils | consistent external command runs; missing executables surfaced distinctly |
+| subprocess_utils | consistent external command runs; optional streamed stdout head/size cap with one drain+wait timeout and kill/reap on expiry; missing executables surfaced distinctly |
 | cli | human + JSON readiness output; launchd, notify-test, eval-doctor dispatch |
 | launchd | deployment settings incl. optional Bark URL; plist render/install; package install/update; launchctl lifecycle; status probe |
 | task_store | parse `.ai-tasks` indexes + frontmatter; contained active/archive reads + typed `session-est` by exact id |
@@ -73,9 +73,10 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | intake_agent | Claude CLI `/intake-task` session; structured envelopes; session resume; read-only draft/revise; write-permitted confirm |
 | runs | start/list/get/stop/reattach subprocess runs; run state; per-repo serialization; live/end classification; history events; session/effective-config snapshots; isolated notification + usage-refresh terminal hooks |
 | orch_config | split-role `--print-config` query; strict parse + legacy detection; split/legacy argv; tolerant `effective-config:` snapshots; no orchestrator imports |
-| evaluation | resolve targets; aggregate related runs; bounded evidence packs; persist/prune/list/read hub-owned artifacts behind optional gate |
+| evaluation | resolve targets; aggregate related runs; build versioned bounded evidence packs including producer-bounded `.ai/` snapshots/patches; persist/prune/list/read hub-owned artifacts behind optional gate |
+| ai_snapshot | resolve routed eager/prefetch memory; enforce repo containment and producer byte caps; collect independently degradable `.ai/` docs and same-window patches |
 | static_metrics | deterministic Layer 1 score reports from evidence packs; `static_metrics.json` persistence; retention after durable writes |
-| semantic | Layer 2 model-judged reports; Markdown render; Claude CLI evidence isolation; doctor; persisted artifacts behind gate |
+| semantic | Layer 2 model-judged reports over persisted evidence/static/`.ai/`; independent degradation; evidence-schema cohort stamp; Markdown render; Claude CLI live-repo isolation; doctor; persisted artifacts behind gate |
 | semantic_jobs | persisted async job records; duplicate in-flight guard; off-lock execution; orphan reconciliation; completed-job evaluation linkage; isolated fresh terminal-outcome push |
 | report_catalog | append-only global publication identity/order; complete archived-report reconciliation; cross-process append lock; cursor paging; contained bundle/integrity read; retention debt guard; explicit provenance/unavailability |
 | usage | Claude cache parser + single-flight model-free CLI collector; cache/statusLine figure merge; Codex rollout scan; stream-boundary merge; bounded aggregate cache; fail-soft/rolled states |
