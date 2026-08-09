@@ -1,15 +1,17 @@
-"""Best-effort git commit metadata for managed repos (display-only).
+"""Best-effort git reads for managed repos: commit metadata and scoped patches.
 
 Separate from :mod:`orch_hub.readiness`: readiness runs git as a launch *gate*
-(is the working tree clean?), while this reads commit history for the
-dashboard's repo cards (latest commit) and repo-detail view (recent commits).
+(is the working tree clean?), while this reads history for the dashboard's repo
+cards (latest commit), the repo-detail view (recent commits), and the
+task-evaluation evidence layer (a commit window, and a pathspec-scoped patch
+stream for :mod:`orch_hub.ai_snapshot`).
 
 Every read is best-effort. A missing ``git`` executable, a path that is not a
 git work tree, or a failed ``git log`` degrades to "unavailable"
-(:class:`CommitLog` with ``available=False`` / :func:`latest_commit` returning
-``None``) rather than raising — a commit-lookup problem must never hide the
-repo or its readiness. Git is invoked bare (``git``, on ``PATH``), matching the
-readiness git-clean check.
+(:class:`CommitLog`/:class:`DiffLog` with ``available=False`` /
+:func:`latest_commit` returning ``None``) rather than raising — a git problem
+must never hide the repo, its readiness, or an evidence pack. Git is invoked
+bare (``git``, on ``PATH``), matching the readiness git-clean check.
 """
 
 from __future__ import annotations
@@ -89,6 +91,89 @@ def read_commits_between(
     if until:
         extra.append(f"--until={until}")
     return _git_log(repo, count=_clamp_limit(limit), extra=tuple(extra), runner=runner)
+
+
+@dataclass(frozen=True)
+class DiffLog:
+    """Result of reading a pathspec-scoped patch stream over a commit window.
+
+    ``available`` is False on the same conditions as :class:`CommitLog` — a
+    missing git executable, a path that is not a git work tree, or a non-zero
+    ``git log`` — in which case ``text`` is empty. An ``available`` log may also
+    be empty, which is a *fact* rather than a gap: nothing under the pathspec
+    changed in the window. Callers must keep the two apart, since "git could not
+    be read" and "the path was untouched" support opposite conclusions.
+
+    ``text`` is git's raw output and is **not** bounded here: the query is capped
+    by commit count, but the byte bound belongs to whoever owns the consuming
+    budget (:mod:`orch_hub.ai_snapshot` caps the ``.ai/`` patch alongside its doc
+    caps, so all of that policy lives in one place).
+    """
+
+    available: bool
+    text: str = ""
+
+
+_DIFF_HEADER_FORMAT = "commit %h %cI %s"
+"""Compact per-commit header preceding each patch: short hash, committer date,
+subject. ``git log -p``'s default header block (author, email, wrapped body) is
+padding in an evidence pack that already carries commit metadata separately."""
+
+
+def read_path_diff_between(
+    repo: ManagedRepo,
+    *,
+    pathspec: str,
+    since: str | None,
+    until: str | None = None,
+    limit: int = MAX_COMMIT_LIMIT,
+    runner: Runner = run_command,
+) -> DiffLog:
+    """Return the patches touching ``pathspec`` in a time window, newest first.
+
+    The patch counterpart of :func:`read_commits_between`, sharing its exact
+    windowing semantics (``--since``/``--until`` over git's commit date, history
+    reachable from HEAD) so a caller can pair a commit window with the patches
+    for one path inside it without a second, differently-bounded notion of "the
+    window". ``limit`` caps the number of *commits* shown — after pathspec
+    filtering, so it counts commits that actually touched the path — and is
+    clamped to ``1..MAX_COMMIT_LIMIT``.
+
+    Rendering is pinned so the output is a function of the repo alone: no color,
+    no external diff driver, no textconv filter — a repo-local ``diff.external``
+    or a ``.gitattributes`` textconv would otherwise run arbitrary configured
+    commands and change what the evidence records. Same best-effort degradation
+    as every other read here: an unavailable log, never an exception.
+    """
+    if not repo.path.is_dir():
+        return DiffLog(available=False)
+    extra: list[str] = []
+    if since:
+        extra.append(f"--since={since}")
+    if until:
+        extra.append(f"--until={until}")
+    try:
+        result = runner(
+            [
+                "git",
+                "log",
+                f"-{_clamp_limit(limit)}",
+                "--patch",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                f"--pretty=format:{_DIFF_HEADER_FORMAT}",
+                *extra,
+                "--",
+                pathspec,
+            ],
+            cwd=repo.path,
+        )
+    except CommandNotFoundError:
+        return DiffLog(available=False)
+    if not result.ok:
+        return DiffLog(available=False)
+    return DiffLog(available=True, text=result.stdout)
 
 
 def _clamp_limit(limit: int) -> int:

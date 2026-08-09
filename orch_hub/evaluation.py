@@ -31,10 +31,18 @@ The subsystem is built from four composable primitives:
 - **evidence pack build + persist** — assemble a bounded :class:`EvidencePack`
   from the target task, its related runs (each run's metadata-only history
   events, per-session context snapshot, and *bounded* log/``spawn.out`` tails),
-  and best-effort git-window commit metadata, then persist it as ``evidence.json``.
-  Every per-run read is isolated so a corrupt run artifact degrades to a warning
-  rather than failing the pack, and the whole build stays read-only over target
-  repo/run state — the only writes are the pack's own artifacts.
+  best-effort git-window commit metadata, and a bounded view of the repo's
+  ``.ai/`` memory snapshot plus its patches over that same window
+  (:mod:`orch_hub.ai_snapshot`), then persist it as ``evidence.json``. Every
+  per-run and ``.ai/`` read is isolated so a corrupt artifact degrades to a
+  warning rather than failing the pack, and the whole build stays read-only over
+  target repo/run state — the only writes are the pack's own artifacts.
+
+Raw *code* diffs stay out by design (:class:`EvidenceGit`): they are unbounded,
+and the bounded-evidence rule keeps them and raw transcripts out of the pack.
+``.ai/`` is the deliberate exception, and only because the unboundedness
+objection does not apply to it — the memory protocol caps its size — so it is
+admitted with its own explicit caps rather than on trust.
 """
 
 from __future__ import annotations
@@ -50,6 +58,7 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .ai_snapshot import AiDiff, AiSnapshot, read_ai_snapshot
 from .config import Config
 from .git_meta import read_commits_between
 from .history import KIND_HISTORY_ERROR, read_events
@@ -67,7 +76,7 @@ from .models import (
 from .runs import load_records
 from .sessions import read_snapshot
 from .subprocess_utils import Runner, run_command
-from .task_store import read_archived_task_content, read_task_content
+from .task_store import parse_prefetch, read_archived_task_content, read_task_content
 
 _log = logging.getLogger(__name__)
 
@@ -77,6 +86,21 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
+
+EVIDENCE_SCHEMA_VERSION = "2"
+"""Version of the serialized ``evidence.json`` shape, stamped into every pack.
+
+Bumped when the shape gains or changes inputs the downstream evaluators reason
+over, so a batch of reports spanning the change can be split into coherent
+cohorts instead of being compared across a moved baseline. ``2`` added the
+``ai`` section (:class:`orch_hub.ai_snapshot.AiSnapshot`); a persisted pack with
+no ``schema_version`` key is version 1 and predates it.
+
+Only *additive* so far, deliberately: every consumer of a persisted pack reads
+named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
+evaluation detail route), so packs written before a bump stay readable rather
+than needing migration.
+"""
 
 EVIDENCE_LOG_MAX_LINES = 200
 """Bounded tail size for a run's orchestrator log and ``spawn.out`` in the pack.
@@ -286,15 +310,20 @@ class EvidencePack:
 
     The whole subject of static/semantic evaluation, assembled once and self-
     contained: ``target`` is the resolved task file (active/archived/absent),
-    ``runs`` are its related runs' aggregated evidence (oldest-first), and ``git``
-    is the best-effort commit window. ``warnings`` collects pack-level degradation
-    (per-run warnings live on each :class:`RunEvidence`). ``summary`` (computed in
+    ``runs`` are its related runs' aggregated evidence (oldest-first), ``git``
+    is the best-effort commit window, and ``ai`` is the bounded view of the
+    repo's ``.ai/`` memory snapshot plus the ``.ai/``-scoped patches for that same
+    window (:class:`orch_hub.ai_snapshot.AiSnapshot`) — the evidence that lets a
+    downstream evaluator judge knowledge maintenance from what the task actually
+    left behind rather than from commit subjects. ``warnings`` collects
+    pack-level degradation (per-run warnings live on each :class:`RunEvidence`,
+    ``.ai/`` warnings on the snapshot). ``summary`` (computed in
     :meth:`to_dict`) is the validating metadata — run/ended counts, whether task
-    content was found, git availability, and the total warning count — enough to
-    sanity-check a pack without walking it. ``evaluation_dir`` is the persisted
-    location, set only by :meth:`EvaluationService.generate_evidence`; it is
-    internal filesystem detail and is excluded from :meth:`to_dict`, matching
-    ``RunRecord``/``LogSnapshot``.
+    content was found, git/``.ai/`` availability, and the total warning count
+    across every section — enough to sanity-check a pack without walking it.
+    ``evaluation_dir`` is the persisted location, set only by
+    :meth:`EvaluationService.generate_evidence`; it is internal filesystem detail
+    and is excluded from :meth:`to_dict`, matching ``RunRecord``/``LogSnapshot``.
     """
 
     evaluation_id: str
@@ -302,30 +331,40 @@ class EvidencePack:
     target: EvaluationTarget
     runs: tuple[RunEvidence, ...] = ()
     git: EvidenceGit | None = None
+    ai: AiSnapshot | None = None
     warnings: tuple[str, ...] = ()
     evaluation_dir: Path | None = None
 
     def to_dict(self) -> dict:
         git = self.git if self.git is not None else EvidenceGit(available=False)
+        ai = self.ai if self.ai is not None else AiSnapshot(present=False)
         return {
+            "schema_version": EVIDENCE_SCHEMA_VERSION,
             "evaluation_id": self.evaluation_id,
             "generated_ts": self.generated_ts,
             "target": self.target.to_dict(),
             "runs": [run.to_dict() for run in self.runs],
             "git": git.to_dict(),
+            "ai": ai.to_dict(),
             "warnings": list(self.warnings),
-            "summary": self._summary(git),
+            "summary": self._summary(git, ai),
         }
 
-    def _summary(self, git: EvidenceGit) -> dict:
+    def _summary(self, git: EvidenceGit, ai: AiSnapshot) -> dict:
         return {
             "run_count": len(self.runs),
             "runs_ended": sum(1 for run in self.runs if run.ended),
             "has_task_content": self.target.present,
             "target_source": self.target.source,
             "git_available": git.available,
+            "ai_snapshot_present": ai.present,
+            "ai_doc_count": sum(1 for doc in ai.docs if doc.present),
+            "ai_snippets_available": ai.snippets_available,
+            "ai_diffs_available": ai.diffs_available,
             "warning_count": (
-                len(self.warnings) + sum(len(run.warnings) for run in self.runs)
+                len(self.warnings)
+                + sum(len(run.warnings) for run in self.runs)
+                + len(ai.warnings)
             ),
         }
 
@@ -349,6 +388,32 @@ def _parse_ts(value: str | None) -> dt.datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed
+
+
+def _git_window(
+    related: Sequence[RelatedRun],
+) -> tuple[str | None, str | None, str | None]:
+    """The task's run-lifecycle window as ``(since, until, unavailable-detail)``.
+
+    Computed once and shared by every git-backed evidence section (the commit
+    list and the ``.ai/`` patch stream), so they cannot drift into describing
+    different spans.
+
+    The window spans the earliest run ``started_ts`` to the latest run
+    ``ended_ts``, and stays open-ended (``until=None``) whenever any run is still
+    live (no parseable ``ended_ts``) — a live run's activity runs to now, so the
+    window must not close at an earlier run's end and drop the commits made
+    during it. Only an all-ended set closes, at the latest end. With no parseable
+    run start there is no window at all: ``since`` is ``None`` and the third
+    element carries the reason for the sections to report.
+    """
+    starts = [ts for ts in (_parse_ts(r.record.started_ts) for r in related) if ts]
+    if not starts:
+        return None, None, "no run start timestamps to form a git window"
+    run_ends = [_parse_ts(r.record.ended_ts) for r in related]
+    any_live = any(end is None for end in run_ends)
+    until = None if any_live else max(run_ends).isoformat()
+    return min(starts).isoformat(), until, None
 
 
 def _write_evidence(path: Path, data: dict) -> None:
@@ -667,13 +732,18 @@ class EvaluationService:
     ) -> EvidencePack:
         """Assemble a bounded, read-only :class:`EvidencePack` (no writes).
 
-        Composes the three foundation primitives: the resolved target task
+        Composes the foundation primitives: the resolved target task
         (active/archived/absent), every related run's aggregated evidence
         (:meth:`_run_evidence` — bounded logs, history events, session snapshot,
-        each read isolated), and a best-effort git-window
-        (:meth:`_git_evidence`). Stays entirely read-only over target repo and run
-        state; ``evaluation_id`` is caller-supplied so a build is deterministic
-        for tests (:meth:`generate_evidence` is the path that mints an id and
+        each read isolated), a best-effort git-window (:meth:`_git_evidence`),
+        and the bounded ``.ai/`` snapshot view (:meth:`_ai_evidence`). The two
+        git-backed sections are handed the *same* window (:func:`_git_window`),
+        computed once: a commit list and a ``.ai/`` patch stream that disagreed
+        about which window they covered would be worse than either alone.
+
+        Stays entirely read-only over target repo and run state;
+        ``evaluation_id`` is caller-supplied so a build is deterministic for
+        tests (:meth:`generate_evidence` is the path that mints an id and
         persists). ``resolve_target`` may still propagate a genuine target-repo IO
         error (its session-1 contract), so callers that must never fail wrap it.
         """
@@ -681,13 +751,16 @@ class EvaluationService:
         target = self.resolve_target(repo, task_id)
         related = self.related_runs(repo, task_id)
         runs = tuple(self._run_evidence(run) for run in related)
-        git = self._git_evidence(repo, related)
+        since, until, window_detail = _git_window(related)
+        git = self._git_evidence(repo, since, until, window_detail)
+        ai = self._ai_evidence(repo, target, since, until, window_detail)
         return EvidencePack(
             evaluation_id=evaluation_id,
             generated_ts=self._clock().isoformat(),
             target=target,
             runs=runs,
             git=git,
+            ai=ai,
         )
 
     def generate_evidence(
@@ -802,36 +875,23 @@ class EvaluationService:
         )
 
     def _git_evidence(
-        self, repo: ManagedRepo, related: Sequence[RelatedRun]
+        self,
+        repo: ManagedRepo,
+        since: str | None,
+        until: str | None,
+        window_detail: str | None,
     ) -> EvidenceGit:
         """Best-effort git commit metadata for the task's run-lifecycle window.
 
-        The window spans the earliest run ``started_ts`` to the latest run
-        ``ended_ts``, and stays open-ended (``until=None``) whenever any run is
-        still live (no parseable ``ended_ts``) — a live run's activity runs to now,
-        so the window must not close at an earlier run's end.
-        With no parseable run start there is no window, so git evidence is
-        ``available=False`` with that reason. The query is bounded by
-        :data:`EVIDENCE_COMMIT_LIMIT` and fails closed to unavailable on any git
-        problem (:func:`orch_hub.git_meta.read_commits_between`); it is read-only
+        With no window (:func:`_git_window` found no parseable run start) git
+        evidence is ``available=False`` carrying that reason and git is never
+        invoked. The query is bounded by :data:`EVIDENCE_COMMIT_LIMIT` and fails
+        closed to unavailable on any git problem
+        (:func:`orch_hub.git_meta.read_commits_between`); it is read-only
         ``git log``. ``truncated`` marks a window with more commits than the cap.
         """
-        starts = [ts for ts in (_parse_ts(r.record.started_ts) for r in related) if ts]
-        if not starts:
-            return EvidenceGit(
-                available=False,
-                detail="no run start timestamps to form a git window",
-            )
-        run_ends = [_parse_ts(r.record.ended_ts) for r in related]
-        any_live = any(end is None for end in run_ends)
-        since = min(starts).isoformat()
-        # The window's upper bound is the union of every run's activity: an ended
-        # run reaches its ``ended_ts``, a still-live run (no parseable ``ended_ts``)
-        # runs to now. So any live run leaves the lifecycle open and the window
-        # unbounded (``until=None``) — bounding it at an earlier run's end would drop
-        # commits made during that live run. Only an all-ended set closes, at the
-        # latest end.
-        until = None if any_live else max(run_ends).isoformat()
+        if since is None:
+            return EvidenceGit(available=False, detail=window_detail)
         log = read_commits_between(
             repo,
             since=since,
@@ -847,3 +907,44 @@ class EvaluationService:
             truncated=len(log.commits) >= EVIDENCE_COMMIT_LIMIT,
             detail=None if log.available else "git history unavailable",
         )
+
+    def _ai_evidence(
+        self,
+        repo: ManagedRepo,
+        target: EvaluationTarget,
+        since: str | None,
+        until: str | None,
+        window_detail: str | None,
+    ) -> AiSnapshot:
+        """Bounded, read-only view of the repo's ``.ai/`` memory for this task.
+
+        The task's own frontmatter ``prefetch:`` list selects the lazy slice to
+        carry alongside the eager set, so the pack records the part of the
+        snapshot the sessions declared they used rather than a guess. The window
+        is the pack's own (shared with :meth:`_git_evidence`), so the ``.ai/``
+        patches and the commit list describe the same span.
+
+        Isolated like the per-run reads and for the same reason: ``.ai/`` is
+        *secondary* evidence — unlike the target task file, whose absence changes
+        what is being evaluated — so an unexpected failure degrades this section
+        to unavailable instead of failing a pack whose runs and task file are
+        perfectly intact. :func:`orch_hub.ai_snapshot.read_ai_snapshot` already
+        handles every expected failure mode itself; this catches the rest.
+        """
+        try:
+            return read_ai_snapshot(
+                repo,
+                prefetch=parse_prefetch(target.content),
+                since=since,
+                until=until,
+                window_detail=window_detail,
+                runner=self._git_runner,
+            )
+        except Exception as err:  # noqa: BLE001 - secondary evidence never fails a pack
+            detail = f".ai/ snapshot unreadable ({type(err).__name__}: {err})"
+            return AiSnapshot(
+                present=False,
+                diff=AiDiff(available=False, since=since, until=until, detail=detail),
+                warnings=(f".ai/: {detail}",),
+                detail=detail,
+            )

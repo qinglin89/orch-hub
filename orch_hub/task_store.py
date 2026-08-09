@@ -132,6 +132,24 @@ def read_session_est(repo: ManagedRepo, task_id: str) -> SessionEst | None:
     return _parse_session_est(_parse_frontmatter(content).get("session-est"))
 
 
+def parse_prefetch(content: str | None) -> tuple[str, ...]:
+    """Return a task file's frontmatter ``prefetch:`` entries, verbatim.
+
+    Takes the file *content* rather than ``(repo, task_id)`` because the caller
+    that needs it — the evaluation evidence builder — already resolved the target
+    through the active-then-archive fallback and holds the text. Entries are
+    returned exactly as written, including malformed ones: this module owns the
+    frontmatter grammar, while what counts as a usable ``.ai/`` doc path is the
+    consumer's rule (:func:`orch_hub.ai_snapshot._prefetch_rel`), and folding the
+    two together here would hide a malformed entry the consumer wants to warn
+    about. Absent content, absent frontmatter, an absent field, and ``[]`` all
+    yield ``()``.
+    """
+    if not content:
+        return ()
+    return _parse_inline_list(_parse_frontmatter(content).get("prefetch"))
+
+
 def _parse_session_est(raw: str | None) -> SessionEst | None:
     """Parse a ``session-est`` frontmatter value ``<current>/<total>``.
 

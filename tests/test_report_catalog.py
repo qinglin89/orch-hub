@@ -429,6 +429,24 @@ def test_entry_round_trips_through_the_persisted_line(tmp_path):
     assert reloaded.to_dict() == lines(config)[0]
 
 
+def test_pre_schema_version_evidence_pack_publishes_with_full_provenance(tmp_path):
+    # `write_eval` builds the evidence pack in the shape that predates the pack's
+    # `schema_version`/`ai` section, and that is deliberate: entries outlive the
+    # schema they were written under, so an older pack must still yield complete
+    # provenance rather than degrading. Asserted explicitly so a later fixture
+    # refresh cannot silently retire this guarantee.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    evidence = json.loads((eval_dir / EVIDENCE_NAME).read_text(encoding="utf-8"))
+    assert "schema_version" not in evidence and "ai" not in evidence
+
+    entry = catalog(config).reconcile()[0]
+
+    assert entry.provenance.runs_available is True and entry.provenance.run_ids == ("r1",)
+    assert entry.provenance.git_available is True
+    assert entry.repo_path == config.data_dir.parent / "repos" / "alpha"
+
+
 def test_degraded_evidence_still_publishes_with_explicit_unavailable_provenance(tmp_path):
     config = cfg(tmp_path)
     eval_dir = write_eval(config)

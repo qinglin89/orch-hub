@@ -22,6 +22,7 @@ from orch_hub.evaluation import (
     EVIDENCE_COMMIT_LIMIT,
     EVIDENCE_LOG_MAX_LINES,
     EVIDENCE_NAME,
+    EVIDENCE_SCHEMA_VERSION,
     SOURCE_ACTIVE,
     SOURCE_ARCHIVED,
     EvaluationDisabledError,
@@ -136,10 +137,46 @@ def make_repo(tmp_path: Path, name: str = "alpha") -> ManagedRepo:
     return ManagedRepo(name=name, path=path, manifest=path / ".ai-deploy-manifest.json")
 
 
-def write_active_task(repo: ManagedRepo, task_id: str, body: str) -> None:
+def write_active_task(
+    repo: ManagedRepo, task_id: str, body: str, *, prefetch: str | None = None
+) -> None:
+    front = f"id: {task_id}\nstatus: in_progress\n"
+    if prefetch is not None:
+        front += f"prefetch: {prefetch}\n"
     (repo.path / ".ai-tasks" / f"{task_id}.md").write_text(
-        f"---\nid: {task_id}\nstatus: in_progress\n---\n\n{body}\n", encoding="utf-8"
+        f"---\n{front}---\n\n{body}\n", encoding="utf-8"
     )
+
+
+def write_ai_snapshot(repo: ManagedRepo, **extra: str) -> Path:
+    """Write a conforming eager `.ai/` set (plus any extra docs) into ``repo``.
+
+    Most fixtures here deliberately have no `.ai/` at all — the pre-existing
+    shape, which exercises the absent-snapshot degradation — so a test that wants
+    the grounded path asks for it explicitly.
+    """
+    docs = {
+        "index.md": (
+            "# AI Knowledge Router\n\n| Document | File | Use when |\n|---|---|---|\n"
+            "| Overview | overview.md | scope |\n"
+            "| Architecture | architecture.md | shape |\n"
+            "| Design | design.md | rationale |\n"
+            "| Conventions | conventions.md | style |\n"
+            "| Map | map.md | cross-ref |\n"
+        ),
+        "map.md": "# Map\nfeature -> module\n",
+        "overview.md": "# Overview\npurpose\n",
+        "architecture.md": "# Architecture\nlayers\n",
+        "design.md": "# Design\nprinciples\n",
+        "conventions.md": "# Conventions\nstyle\n",
+    }
+    docs.update(extra)
+    ai_dir = repo.path / ".ai"
+    for rel, text in docs.items():
+        target = ai_dir / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    return ai_dir
 
 
 def write_archived_task(repo: ManagedRepo, task_id: str, body: str) -> None:
@@ -436,7 +473,13 @@ def test_build_evidence_aggregates_active_task_and_its_runs(tmp_path):
         "has_task_content": True,
         "target_source": SOURCE_ACTIVE,
         "git_available": False,  # fake git defaults to a failed window
-        "warning_count": 0,
+        # This fixture repo has no `.ai/` at all: both `.ai/` flags are false and
+        # the absent snapshot is the pack's one degradation warning.
+        "ai_snapshot_present": False,
+        "ai_doc_count": 0,
+        "ai_snippets_available": False,
+        "ai_diffs_available": False,
+        "warning_count": 1,
     }
 
 
@@ -529,7 +572,9 @@ def test_build_evidence_corrupt_history_degrades_with_warning(tmp_path):
     # the pack still builds (partial evidence, not a failure).
     assert any(e.kind == "history_error" for e in run.events)
     assert any("corrupt history" in w for w in run.warnings)
-    assert pack.to_dict()["summary"]["warning_count"] == 1
+    # Summary counts every section's warnings: this run's, plus the absent `.ai/`
+    # snapshot in this fixture repo.
+    assert pack.to_dict()["summary"]["warning_count"] == 2
 
 
 def test_build_evidence_isolates_unexpected_run_read_failure(tmp_path, monkeypatch):
@@ -668,6 +713,140 @@ def test_git_window_truncated_at_limit(tmp_path):
     assert pack.git.truncated is True
 
 
+# -- `.ai/` snapshot evidence -------------------------------------------------
+
+
+def test_build_evidence_carries_the_ai_snapshot_and_the_prefetch_slice(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo, **{"features/evaluation.md": "# Evaluation\nfeature doc\n"})
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/features/evaluation.md]")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00",
+              ended_ts="2026-07-22T09:30:00+00:00")
+
+    pack = make_service(
+        config, git_runner=fake_git(rc=0, stdout="commit abc .ai patch\n")
+    ).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.ai is not None and pack.ai.present is True
+    paths = [doc.path for doc in pack.ai.docs]
+    # Full eager set, then the doc the task's own frontmatter declared it used.
+    assert paths == [
+        ".ai/index.md",
+        ".ai/map.md",
+        ".ai/overview.md",
+        ".ai/architecture.md",
+        ".ai/design.md",
+        ".ai/conventions.md",
+        ".ai/features/evaluation.md",
+    ]
+    assert pack.ai.snippets_available is True and pack.ai.diffs_available is True
+    summary = pack.to_dict()["summary"]
+    assert summary["ai_snapshot_present"] is True
+    assert summary["ai_doc_count"] == 7
+    assert summary["ai_snippets_available"] is True
+    assert summary["ai_diffs_available"] is True
+    assert summary["warning_count"] == 0
+
+
+def test_ai_diff_uses_the_same_window_as_the_commit_evidence(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00",
+              ended_ts="2026-07-22T09:30:00+00:00")
+    calls: list = []
+
+    pack = make_service(
+        config, git_runner=fake_git(rc=0, stdout=commit_line("feat: x"), calls=calls)
+    ).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.ai.diff.since == pack.git.since == "2026-07-22T09:00:00+00:00"
+    assert pack.ai.diff.until == pack.git.until == "2026-07-22T09:30:00+00:00"
+    # Two git reads: the commit window, then the `.ai/`-scoped patch stream over
+    # exactly the same bounds.
+    window_argv, diff_argv = calls
+    assert "--patch" not in window_argv
+    assert diff_argv[-2:] == ["--", ".ai"]
+    for argv in (window_argv, diff_argv):
+        assert "--since=2026-07-22T09:00:00+00:00" in argv
+        assert "--until=2026-07-22T09:30:00+00:00" in argv
+
+
+def test_no_run_window_leaves_both_git_sections_unavailable_without_calling_git(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo)  # no started_ts
+    calls: list = []
+
+    pack = make_service(config, git_runner=fake_git(calls=calls)).build_evidence(
+        repo, TASK, evaluation_id="e1"
+    )
+
+    assert calls == []
+    assert pack.git.available is False
+    assert pack.ai.diffs_available is False
+    # Both sections explain the absent window the same way.
+    assert pack.ai.diff.detail == pack.git.detail
+    # Snippets do not depend on git, so they are still grounded.
+    assert pack.ai.snippets_available is True
+
+
+def test_absent_ai_snapshot_degrades_the_pack_instead_of_failing_it(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)  # no `.ai/`
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00")
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.target.present is True  # the pack itself is intact
+    assert pack.ai.present is False
+    assert pack.ai.snippets_available is False and pack.ai.diffs_available is False
+    assert len(pack.ai.warnings) == 1
+    assert pack.to_dict()["ai"]["docs"] == []
+
+
+def test_unexpected_ai_read_failure_is_isolated_from_the_pack(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00")
+    monkeypatch.setattr(
+        "orch_hub.evaluation.read_ai_snapshot",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    # `.ai/` is secondary evidence: it degrades, the pack survives.
+    assert pack.ai.present is False
+    assert "RuntimeError" in pack.ai.detail
+    assert any("boom" in w for w in pack.ai.warnings)
+    assert pack.runs and pack.target.present is True
+
+
+def test_malformed_prefetch_does_not_stop_the_eager_set(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body", prefetch="[docs/not-ai.md]")
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.ai.snippets_available is True
+    assert any("is not a .ai/*.md path" in w for w in pack.ai.warnings)
+    assert pack.to_dict()["summary"]["warning_count"] == 1
+
+
 # -- evidence pack persistence (safe, atomic, read-only) ----------------------
 
 
@@ -692,6 +871,59 @@ def test_generate_evidence_persists_pack_under_contained_dir(tmp_path):
     assert on_disk["summary"]["run_count"] == 1
     # No stray temp file left behind by the atomic write.
     assert list(pack.evaluation_dir.iterdir()) == [evidence_file]
+
+
+def test_persisted_pack_stamps_the_schema_version_and_ai_section(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body")
+
+    pack = make_service(config).generate_evidence(repo, TASK)
+
+    on_disk = json.loads((pack.evaluation_dir / EVIDENCE_NAME).read_text())
+    # The version is what lets a consumer split reports into coherent cohorts
+    # across a change that moved what the evaluator can see.
+    assert on_disk["schema_version"] == EVIDENCE_SCHEMA_VERSION
+    assert on_disk["ai"]["present"] is True
+    assert on_disk["ai"]["snippets_available"] is True
+    assert on_disk["ai"]["docs"][0]["path"] == ".ai/index.md"
+    assert "# Overview" in on_disk["ai"]["docs"][2]["content"]
+
+
+def test_pack_persisted_before_the_ai_section_still_reads_back(tmp_path):
+    # A pack written by the previous schema: no `schema_version`, no `ai` key. The
+    # shape only ever grows by addition, so an older artifact stays readable
+    # rather than needing a migration or being silently dropped.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    evaluation_id = "20260722T090000Z"
+    eval_dir = config.data_dir / EVALUATIONS_SUBDIR / "alpha" / TASK / evaluation_id
+    eval_dir.mkdir(parents=True)
+    legacy = {
+        "evaluation_id": evaluation_id,
+        "generated_ts": "2026-07-22T09:00:00+00:00",
+        "target": {
+            "repo_name": "alpha",
+            "repo_path": str(repo.path),
+            "task_id": TASK,
+            "source": SOURCE_ARCHIVED,
+            "present": True,
+            "content": "# body",
+        },
+        "runs": [],
+        "git": {"available": False, "commits": [], "detail": "git history unavailable"},
+        "warnings": [],
+        "summary": {"run_count": 0, "warning_count": 0},
+    }
+    (eval_dir / EVIDENCE_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+
+    service = make_service(config)
+
+    assert service.read_artifact(repo, TASK, evaluation_id, EVIDENCE_NAME) == legacy
+    stored = service.list_evaluations(repo, TASK)
+    assert [e.evaluation_id for e in stored] == [evaluation_id]
+    assert stored[0].artifacts == (EVIDENCE_NAME,)
 
 
 def test_generate_evidence_id_is_timestamped_and_collision_safe(tmp_path):
