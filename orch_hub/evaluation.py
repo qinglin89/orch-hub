@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "4"
+EVIDENCE_SCHEMA_VERSION = "5"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -100,8 +100,12 @@ first evidence about how sessions *read* memory rather than what they wrote to
 it; ``4`` split that section's reads at the observable entry/work boundary, which
 moves the meaning of its completeness and retrieval facts rather than only adding
 to them — a v3 pack's ``complete`` counts a doc opened long after the code was
-read, a v4 pack's does not. A persisted pack with no ``schema_version`` key is
-version 1 and predates all of it.
+read, a v4 pack's does not; ``5`` moves that boundary again, by reading shell
+commands and plan/session-log writes as work and by refusing the completeness
+verdict where lost evidence or an unclassifiable command could have placed the
+boundary elsewhere, so a v4 session that is ``complete`` may be ``late`` or
+unassessable in v5. A persisted pack with no ``schema_version`` key is version 1
+and predates all of it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the

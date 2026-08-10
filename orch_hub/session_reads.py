@@ -22,14 +22,14 @@ downstream:
 
 The two are separated by an observable boundary rather than by declaration
 membership (:data:`ENTRY_SCOPE_DIRS`): a session is assembling context until
-it first *works* — reads repo source, searches the tree, or edits a file that is
-not its own task file. Without that partition the two mechanisms collapse into
-each other in both directions: a declared doc opened only after the code was
-already read would score as a completed pre-load, and a lazy doc the harness
-injected at entry would read as a mid-flight retrieval that never happened.
-A declared doc first delivered after the boundary is therefore recorded as a
-*late* recovery — not a pre-load, and visible in the retrieval trace where it
-belongs.
+it first *works* — reads or shells out to repo source, searches the tree, edits
+a file outside its instructions, or records a decision in its own task file.
+Without that partition the two mechanisms collapse into each other in both
+directions: a declared doc opened only after the code was already read would
+score as a completed pre-load, and a lazy doc the harness injected at entry
+would read as a mid-flight retrieval that never happened. A declared doc first
+delivered after the boundary is therefore recorded as a *late* recovery — not a
+pre-load, and visible in the retrieval trace where it belongs.
 
 Evidence source and boundary
 ----------------------------
@@ -74,9 +74,18 @@ That extends to *partial* evidence, which is the subtler case: this reader skips
 a malformed or over-long row and stops at a byte budget, so a load it never saw
 is indistinguishable from one that never happened. A missing doc reported
 against evidence known to have holes would be a fabricated negative, so the
-prefetch measurement is refused whenever the scanned prefix that determines it
-was not read whole (:func:`_entry_evidence_intact`) — while the retrieval facts
-the same scan did collect are kept, since they stand on their own.
+prefetch verdict is refused whenever the evidence it rests on was not read whole
+(:func:`_entry_verdict_refusal`) — while the retrieval facts the same scan did
+collect are kept, since they stand on their own. Three things can undermine that
+verdict, and each is tracked positionally rather than as one blanket flag:
+
+- a hole *inside* the entry phase, which could hide either a load or the work
+  signal that would have ended the phase earlier;
+- a hole anywhere after a still-unanswered entry-phase request, which could be
+  the delivery that request was waiting for — phase comes from the row a read
+  was *asked* for, so an entry-phase result can legitimately land late;
+- a shell command this reader cannot classify, which could be the work the
+  boundary should have been drawn at (:func:`_classify_command`).
 """
 
 from __future__ import annotations
@@ -200,6 +209,28 @@ _COMMAND_NAME = re.compile(r"<command-name>\s*/?([A-Za-z0-9._-]+)\s*</command-na
 """Slash-command invocations as the transcript records them; the other spelling
 of a skill invocation beside a ``Skill`` tool call."""
 
+_STATEMENTS = re.compile(r"&&|\|\||[;\n]")
+"""Statement separators inside one shell command. A single ``|`` is deliberately
+absent: a pipeline's tail filters the head's output rather than reaching for
+anything of its own, so only the text before the first pipe names the command."""
+
+_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+"""A leading ``VAR=value`` prefix, skipped so ``PATH=... npm run build`` is read
+as ``npm`` rather than as an unrecognizable head."""
+
+_DECISION_MARKER = re.compile(
+    r"^\s*(?:#{2,3}\s|- (?:Done|Next|Open|Plan-slice|Verdict|Group|Findings"
+    r"|Dispute-unresolved):)",
+    re.MULTILINE,
+)
+"""Task-file content that records a decision rather than claiming the task.
+
+The taskfile schema's own shapes: a section or session-entry heading, or one of
+the session-log fields. A session's entry checklist writes frontmatter (claim,
+estimate, status) — no headings, no field lines — so this separates the
+prescribed entry bookkeeping from the plan and session-log writes that are the
+closest thing a transcript has to *a decision was recorded here*."""
+
 _READ_TOOLS = ("Read",)
 """Tool names whose successful result puts a named file's content into context.
 Deliberately narrow: a shell command that happens to mention a path is not
@@ -216,14 +247,107 @@ _SEARCH_TOOLS = ("Grep", "Glob")
 """Tools that search the tree. A repo-wide search is the canonical *rediscover
 it from the code* move this measurement exists to distinguish from consulting
 memory, so it ends context assembly; a search explicitly scoped to an
-entry-scope path does not (the memory contract's routed reads are not a hunt).
+entry-scope path does not (the memory contract's routed reads are not a hunt)."""
 
-A shell command is deliberately *not* a work signal, for the same reason its
-path mentions are not reads: its argv is not classifiable without interpreting a
-shell, and the entry checklist itself prescribes ``date -u``/``git status``, so
-treating one as work would cut the entry phase before the pre-load it measures.
-The cost is a known conservative gap — a session that greps through ``Bash``
-stays in the entry phase — and it errs in the safe direction."""
+_SHELL_TOOLS = ("Bash",)
+"""Tools that run a shell command. Their argv is not reliably parseable, but
+ignoring them is not an option either: measured sessions grep, ``sed``, and run
+test suites through the shell, and doing that before opening memory is exactly
+the scratch-first behavior this measurement exists to catch. So a command is
+classified three ways (:func:`_classify_command`) and the one it cannot decide
+is recorded as boundary uncertainty rather than guessed in either direction."""
+
+COMMAND_NEUTRAL = "neutral"
+"""A shell command recognized as entry-checklist or repo-metadata work: the
+clock, ``git`` status/history metadata, or an operation confined to the entry
+scope. It puts no repo content in context, so it does not end context assembly."""
+
+COMMAND_WORK = "work"
+"""A shell command that reaches into the code: it names a repo path outside the
+entry scope, or it runs a content command (read, search, build, test). This is
+the shell spelling of the same signal a ``Read`` or ``Grep`` carries."""
+
+COMMAND_UNCLEAR = "unclear"
+"""Neither — an unrecognized command with no repo path to place it. Treating it
+as neutral would credit a pre-load that may have followed real work; treating it
+as work would invent a missed doc for a session that merely ran a tool this
+reader has not seen. Both are claims the evidence does not support, so it is
+recorded as uncertainty and refuses only the verdicts that rest on it."""
+
+NEUTRAL_COMMANDS = frozenset(
+    {
+        "cd",
+        "date",
+        "echo",
+        "ls",
+        "printf",
+        "pwd",
+        "sleep",
+        "true",
+        "which",
+        "git branch",
+        "git check-ignore",
+        "git config",
+        "git log",
+        "git remote",
+        "git rev-parse",
+        "git status",
+    }
+)
+"""Command heads that carry no repo content. The protocol's own entry and
+session-end steps are here (``date -u`` for the claim timestamp, ``git status
+--porcelain`` for the clean-tree check) plus navigation and ``git`` metadata:
+commit subjects and hashes are what the evidence pack itself treats as display
+metadata, so reading them is not reading the code."""
+
+CONTENT_COMMANDS = frozenset(
+    {
+        "awk",
+        "cargo",
+        "cat",
+        "cp",
+        "curl",
+        "diff",
+        "egrep",
+        "find",
+        "fgrep",
+        "gofmt",
+        "go",
+        "grep",
+        "head",
+        "jq",
+        "less",
+        "make",
+        "more",
+        "mv",
+        "mypy",
+        "node",
+        "npm",
+        "npx",
+        "pnpm",
+        "pytest",
+        "python",
+        "python3",
+        "rg",
+        "rm",
+        "ruff",
+        "sed",
+        "sort",
+        "tail",
+        "tsc",
+        "uniq",
+        "wc",
+        "yarn",
+        "git apply",
+        "git blame",
+        "git diff",
+        "git grep",
+        "git show",
+    }
+)
+"""Command heads that put repo content in context or act on it. Consulted only
+when the command names no repo path at all — ``cat .ai/index.md`` is routed
+memory, not code, and the path decides that before the head is looked at."""
 
 
 @dataclass(frozen=True)
@@ -255,14 +379,17 @@ class Activity:
     Counts, never content: no paths, no commands, no text. ``task_edits`` is
     separate from ``edits`` because writing the session's own task file is
     protocol bookkeeping — the claim, a plan, the session-log entry — and the
-    second one of those is the closest observable marker of *a decision was
-    already recorded* that a transcript offers.
+    plan/session-log ones are the closest observable marker of *a decision was
+    already recorded* that a transcript offers. ``shell`` counts only the shell
+    commands that were not recognized as entry-checklist or metadata operations,
+    since ``date -u`` is not work a retrieval could be late relative to.
     """
 
     code_reads: int = 0
     searches: int = 0
     edits: int = 0
     task_edits: int = 0
+    shell: int = 0
 
     def bump(self, field_name: str) -> "Activity":
         return replace(self, **{field_name: getattr(self, field_name) + 1})
@@ -273,6 +400,7 @@ class Activity:
             "searches": self.searches,
             "edits": self.edits,
             "task_edits": self.task_edits,
+            "shell": self.shell,
         }
 
 
@@ -362,9 +490,13 @@ class SessionReads:
 
     ``entry_boundary`` is where context assembly ended (``None`` = the session
     never reached for anything outside its instructions, so the whole scan is
-    entry). ``entry_extra`` holds the lazy docs it loaded there beyond its
-    declared set — good behavior that would otherwise vanish from the evidence
-    once those reads stopped being counted as mid-flight retrievals.
+    entry). ``boundary_unsure`` is the earliest row from which that partition is
+    no longer certain — an unclassifiable shell command, or a lost result for a
+    request that would have moved the boundary — so a reader can see that a long
+    "entry" phase was inferred rather than observed. ``entry_extra`` holds the
+    lazy docs loaded at entry beyond the declared set — good behavior that would
+    otherwise vanish from the evidence once those reads stopped being counted as
+    mid-flight retrievals.
     """
 
     session_id: str
@@ -380,6 +512,7 @@ class SessionReads:
     coverage: float | None = None
     complete: bool | None = None
     entry_boundary: int | None = None
+    boundary_unsure: int | None = None
     entry_extra: tuple[str, ...] = ()
     entry_extra_truncated: bool = False
     midflight: tuple[MemoryRead, ...] = ()
@@ -427,6 +560,7 @@ class SessionReads:
             "coverage": self.coverage,
             "complete": self.complete,
             "entry_boundary": self.entry_boundary,
+            "boundary_unsure": self.boundary_unsure,
             "entry_extra": list(self.entry_extra),
             "entry_extra_truncated": self.entry_extra_truncated,
             "midflight": [read.to_dict() for read in self.midflight],
@@ -653,6 +787,7 @@ def _session_rollup(
         truncated=scan.truncated,
         closeout_seen=scan.closeout_seen,
         entry_boundary=scan.boundary,
+        boundary_unsure=scan.boundary_unsure,
         activity=scan.activity,
     )
     if scan.rows == 0:
@@ -693,12 +828,13 @@ def _session_rollup(
         loads=loads,
         detail=expected_detail,
     )
-    # Facts stay, the score does not: a hole in the entry-phase evidence could
-    # hold the very load that would flip this verdict — or an earlier work signal
-    # that would move one of the loads we did see out of the entry phase — so the
-    # observed loads are reported as diagnosis while coverage stays unclaimed.
-    if expected and not _entry_evidence_intact(scan):
-        return _degraded(base, _gap_detail(scan), warnings)
+    # Facts stay, the score does not: lost evidence could hold the very load that
+    # would flip this verdict — or the work signal that would move one of the
+    # loads we did see out of the entry phase — so the observed loads are
+    # reported as diagnosis while coverage stays unclaimed.
+    refusal = _entry_verdict_refusal(scan, loads) if expected else None
+    if refusal is not None:
+        return _degraded(base, refusal, warnings)
 
     loaded = sum(1 for load in loads if load.loaded)
     return _replace(
@@ -714,6 +850,37 @@ def _prefetch_role(role: str | None) -> bool:
     return role in PREFETCH_ROLES
 
 
+def _entry_verdict_refusal(
+    scan: "_Scan", loads: Sequence[PrefetchLoad]
+) -> str | None:
+    """Why this session's prefetch verdict cannot be claimed, or ``None``.
+
+    Three questions, each about a different way the evidence can fail to support
+    the verdict, and each asked only of the part of the evidence that verdict
+    actually rests on. A blanket "any damage anywhere makes the session
+    unassessable" would be simpler and much more expensive: transcripts big
+    enough to hit the byte cap reached the code long before it, so the cut is
+    always in the work phase, and the pre-load evidence in front of it is intact.
+    """
+    if not _entry_evidence_intact(scan):
+        return _gap_detail(scan)
+    lost = {load.path for load in loads if not load.loaded} & scan.lost_entry
+    if lost:
+        return (
+            f"entry-phase evidence incomplete ({len(lost)} declared doc(s) were"
+            " requested before the boundary and their results did not survive the"
+            " scan); prefetch loading not measured"
+        )
+    unsure = {load.path for load in loads if load.loaded} & _unsure_entry_paths(scan)
+    if unsure:
+        return (
+            f"entry boundary not determinable ({len(unsure)} declared doc(s) were"
+            " delivered after activity this reader could not classify); prefetch"
+            " loading not measured"
+        )
+    return None
+
+
 def _entry_evidence_intact(scan: "_Scan") -> bool:
     """Whether the scanned prefix that decides entry prefetch was read whole.
 
@@ -721,9 +888,8 @@ def _entry_evidence_intact(scan: "_Scan") -> bool:
     "any hole anywhere": a row skipped or a tail cut *after* the session began
     working can hide a late recovery or a mid-flight read (both already reported
     as their own bounded, flagged facts) but cannot change what was in context
-    before the boundary. That is what keeps the common big-transcript case
-    measurable — the byte budget bites in the work phase of a long session, while
-    the pre-load evidence sits in the first few dozen rows.
+    before the boundary — with the one exception the caller checks next, a read
+    asked for before the boundary whose result landed in the damage.
 
     With no boundary observed, the entry phase is the whole scan and any hole is
     inside it — including a truncated tail, which is why a cut with no boundary
@@ -734,6 +900,22 @@ def _entry_evidence_intact(scan: "_Scan") -> bool:
     ):
         return False
     return not (scan.truncated and scan.boundary is None)
+
+
+def _unsure_entry_paths(scan: "_Scan") -> set[str]:
+    """Paths whose entry-phase credit rests on an undetermined boundary.
+
+    A doc delivered *before* the first unclassifiable activity is a pre-load
+    whatever that activity turns out to have been; only what came after it is in
+    question, so the refusal stays as narrow as the doubt.
+    """
+    if scan.boundary_unsure is None:
+        return set()
+    return {
+        read.path
+        for read in scan.reads
+        if read.phase == PHASE_ENTRY and read.requested_at >= scan.boundary_unsure
+    }
 
 
 def _gap_detail(scan: "_Scan") -> str:
@@ -919,14 +1101,17 @@ def _first_by_path(reads: Sequence["_Read"], phase: str) -> dict[str, "_Read"]:
 class _Read:
     """One observed delivery of a repo file's content into a session's context.
 
-    ``order`` is the row the content landed in; ``phase`` is decided from the row
-    the session *asked* for it, so a parallel batch issued during context
-    assembly stays entry-phase even when its results trickle in after the batch's
-    own code read already closed the boundary.
+    ``order`` is the row the content landed in; ``phase`` is decided from
+    ``requested_at``, the row the session *asked* for it, so a parallel batch
+    issued during context assembly stays entry-phase even when its results
+    trickle in after the batch's own code read already closed the boundary. Both
+    rows are kept because that split is exactly what makes a late-landing result
+    vulnerable to a hole the entry phase itself never had.
     """
 
     path: str
     order: int
+    requested_at: int
     actor: str
     method: str
     phase: str
@@ -939,14 +1124,18 @@ class _Scan:
     """Raw facts extracted from one transcript, before any judgment.
 
     ``pending`` is scanning scaffolding, not an extracted fact: it holds each
-    read tool call's requested path and row only until its result arrives, so a
-    call that never returned is dropped rather than credited.
+    read tool call's repo-relative path and row only until its result arrives, so
+    a call that never returned is dropped rather than credited. What it leaves
+    behind at the end of the scan is evidence in its own right — see
+    :meth:`close_pending`.
 
-    ``first_gap`` is the row position of the earliest hole — a malformed row, a
-    row past the per-row cap — and is positional because that is what decides
-    whether the hole could have swallowed entry-phase evidence
-    (:func:`_entry_evidence_intact`). A truncated tail is recorded separately
-    since it is always at the end.
+    ``first_gap``/``last_gap`` are the row positions of the earliest and latest
+    hole — a malformed row, a row past the per-row cap. Positions rather than a
+    flag because that is what decides which verdicts a hole can undermine
+    (:func:`_entry_verdict_refusal`): the earliest says whether entry-phase
+    evidence was lost, the latest whether a still-unanswered request could have
+    been answered inside one. A truncated tail is recorded separately since it is
+    always after everything.
     """
 
     reads: list[_Read] = field(default_factory=list)
@@ -956,10 +1145,13 @@ class _Scan:
     truncated: bool = False
     skipped: int = 0
     first_gap: int | None = None
+    last_gap: int | None = None
     boundary: int | None = None
+    boundary_unsure: int | None = None
+    lost_entry: set[str] = field(default_factory=set)
     activity: Activity = Activity()
     error: str | None = None
-    pending: dict[str, tuple[object, int]] = field(default_factory=dict)
+    pending: dict[str, tuple[str | None, int]] = field(default_factory=dict)
     seen: set[tuple[str, str]] = field(default_factory=set)
 
     def note_gap(self) -> None:
@@ -967,18 +1159,35 @@ class _Scan:
         self.skipped += 1
         if self.first_gap is None:
             self.first_gap = self.rows
+        self.last_gap = self.rows
 
-    def note_work(self, order: int, kind: str) -> None:
-        """Count one observed activity and close context assembly if it is work.
+    def note_activity(self, kind: str) -> None:
+        """Count one observed activity without ending context assembly.
 
-        ``task_edits`` is the one kind that counts without closing the phase: the
-        claim edit the entry checklist prescribes happens *during* assembly, so
-        treating it as work would end the entry phase before the pre-load it is
-        there to measure.
+        The claim edit the entry checklist prescribes happens *during* assembly,
+        so treating it as work would end the entry phase before the pre-load it
+        is there to measure — but it is still activity the retrieval trace is
+        read against.
         """
         self.activity = self.activity.bump(kind)
-        if self.boundary is None and kind != "task_edits":
+
+    def note_work(self, order: int, kind: str) -> None:
+        """Count one observed activity and close context assembly."""
+        self.note_activity(kind)
+        if self.boundary is None:
             self.boundary = order
+
+    def note_unsure(self, order: int) -> None:
+        """Record that from ``order`` on, the entry/work partition is a guess.
+
+        Only meaningful while context assembly is still open: once work has been
+        observed the boundary is already placed, and nothing later can move it
+        earlier.
+        """
+        if self.boundary is not None and self.boundary <= order:
+            return
+        if self.boundary_unsure is None or order < self.boundary_unsure:
+            self.boundary_unsure = order
 
     def phase_at(self, order: int) -> str:
         """Which phase a delivery requested at ``order`` belongs to."""
@@ -1017,6 +1226,7 @@ class _Scan:
             _Read(
                 path=path,
                 order=order,
+                requested_at=requested_at,
                 actor=actor,
                 method=method,
                 phase=phase,
@@ -1024,6 +1234,38 @@ class _Scan:
                 before=self.activity,
             )
         )
+
+    def close_pending(self) -> None:
+        """Turn the requests that never got a result into evidence about the gaps.
+
+        A read whose result never arrived normally means nothing entered the
+        context — a turn cut off mid-flight is not a load. But if this scan lost
+        rows *after* that request, the result may be exactly what it lost, and
+        then two different conclusions become unsafe:
+
+        - an unanswered request for a memory doc, issued while assembling
+          context, could be a declared doc this rollup would otherwise report as
+          never loaded — a fabricated negative;
+        - an unanswered request for repo source could be the delivery that would
+          have ended context assembly, leaving every later "pre-load" credited
+          against a boundary that should have closed earlier.
+
+        Both are recorded and left for :func:`_entry_verdict_refusal` to weigh
+        against what the session actually declared.
+        """
+        for rel, requested_at in self.pending.values():
+            if rel is None or self.phase_at(requested_at) != PHASE_ENTRY:
+                continue
+            if not (
+                self.truncated
+                or (self.last_gap is not None and self.last_gap > requested_at)
+            ):
+                continue
+            if rel.startswith(f"{AI_DIRNAME}/"):
+                self.lost_entry.add(rel)
+            elif not _entry_scope(rel):
+                self.note_unsure(requested_at)
+        self.pending.clear()
 
 
 def _scan_transcript(
@@ -1079,7 +1321,7 @@ def _scan_transcript(
                     break
     except OSError as err:
         return _Scan(error=f"session transcript unreadable ({err})")
-    scan.pending.clear()
+    scan.close_pending()
     scan.seen.clear()
     return scan
 
@@ -1176,12 +1418,17 @@ def _absorb_row(
             if name == "Skill" and args.get("skill") == CLOSEOUT_SKILL:
                 return True
             if name in _READ_TOOLS and isinstance(block_id, str):
-                scan.pending[block_id] = (args.get("file_path"), order)
+                scan.pending[block_id] = (
+                    _repo_rel(args.get("file_path"), repo_root),
+                    order,
+                )
             elif name in _EDIT_TOOLS:
                 _absorb_edit(args, scan, order=order, repo_root=repo_root,
                              task_paths=task_paths)
             elif name in _SEARCH_TOOLS:
                 _absorb_search(args, scan, order=order, repo_root=repo_root)
+            elif name in _SHELL_TOOLS:
+                _absorb_command(args, scan, order=order, repo_root=repo_root)
         return False
 
     if kind == "user":
@@ -1221,18 +1468,182 @@ def _absorb_edit(
 ) -> None:
     """Count one file mutation, and close context assembly unless it is bookkeeping.
 
-    Writing the session's own task file is the claim, the plan, the session-log
-    entry — protocol bookkeeping, counted apart as the one observable marker of a
-    recorded decision. Writing anything else inside the repo is work; writing
-    outside it (a scratch file in ``/tmp``) is not this repo's work at all.
+    Writing the session's own task file splits in two. The claim — status,
+    estimate, ``claimed-by`` — is the entry checklist's own first step and must
+    not end the phase it precedes. A plan or session-log write is the opposite:
+    it is the transcript's clearest evidence that a decision has been made, so a
+    doc opened after it is not informing that decision. Both are counted as
+    ``task_edits``; only the second one closes context assembly.
+
+    Writing anything else inside the repo is work; writing outside it (a scratch
+    file in ``/tmp``) is not this repo's work at all.
     """
     rel = _repo_rel(args.get("file_path") or args.get("notebook_path"), repo_root)
     if rel is None:
         return
     if rel in task_paths:
-        scan.note_work(order, "task_edits")
+        if _records_decision(args):
+            scan.note_work(order, "task_edits")
+        else:
+            scan.note_activity("task_edits")
     elif not _entry_scope(rel):
         scan.note_work(order, "edits")
+
+
+def _records_decision(args: dict) -> bool:
+    """Whether a task-file edit writes plan/session-log content rather than a claim.
+
+    Reads the edit's replacement text only to classify its *shape*
+    (:data:`_DECISION_MARKER`); nothing about it is retained. ``MultiEdit``
+    carries its replacements one level down, and a whole-file ``Write`` of a task
+    file necessarily contains the session log, so both are covered.
+    """
+    values = [args.get("new_string"), args.get("content")]
+    edits = args.get("edits")
+    if isinstance(edits, list):
+        values += [edit.get("new_string") for edit in edits if isinstance(edit, dict)]
+    return any(
+        isinstance(value, str) and _DECISION_MARKER.search(value) for value in values
+    )
+
+
+def _absorb_command(args: dict, scan: _Scan, *, order: int, repo_root: Path) -> None:
+    """Fold one shell command into the boundary, or into its uncertainty."""
+    command = args.get("command")
+    verdict = _classify_command(command if isinstance(command, str) else "", repo_root)
+    if verdict == COMMAND_WORK:
+        scan.note_work(order, "shell")
+    elif verdict == COMMAND_UNCLEAR:
+        scan.note_activity("shell")
+        scan.note_unsure(order)
+
+
+def _classify_command(command: str, repo_root: Path) -> str:
+    """Place one shell command as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
+
+    A best-effort reading of argv, in the order that keeps the common shapes
+    right. The repo paths a command names decide it first — ``cat .ai/index.md``
+    is routed memory whatever ``cat`` usually means, and ``sed -n 1,40p
+    src/api.ts`` is the code whatever ``sed`` usually means. Only a command that
+    names no repo path falls through to its head word, and only a command whose
+    head word is unrecognized falls through to uncertainty.
+
+    This is not a shell parser and does not pretend to be one: quoting, command
+    substitution, and functions are not interpreted. It is safe because a
+    misreading has somewhere to go — :data:`COMMAND_UNCLEAR` — instead of having
+    to become one of the two verdicts that carry a claim.
+    """
+    if not command.strip():
+        return COMMAND_NEUTRAL
+    paths = _command_paths(command, repo_root)
+    if paths:
+        return (
+            COMMAND_NEUTRAL
+            if all(_entry_scope(path) for path in paths)
+            else COMMAND_WORK
+        )
+    heads = _statement_heads(command)
+    if any(head in CONTENT_COMMANDS for head in heads):
+        return COMMAND_WORK
+    if heads and all(head in NEUTRAL_COMMANDS for head in heads):
+        return COMMAND_NEUTRAL
+    return COMMAND_UNCLEAR
+
+
+def _command_paths(command: str, repo_root: Path) -> list[str]:
+    """Repo-relative paths a command names, as repo-relative POSIX strings.
+
+    Textual, unlike :func:`_repo_rel`: a command token is a hint about intent,
+    not a file this reader opens, and resolving one would put filesystem state
+    from *now* into a judgment about *then*. Relative tokens are read against the
+    repo because that is the cwd every orchestrator session is launched with.
+
+    Two arguments are deliberately not read targets: ``-C``'s and ``cd``'s, which
+    name a working directory. Counting ``git -C <repo> status`` as touching the
+    repo root would make the single most common entry-checklist command in the
+    measured corpus read as work.
+    """
+    root = repo_root.as_posix()
+    paths: list[str] = []
+    skip = False
+    for token in command.replace("\n", " ").split():
+        if skip:
+            skip = False
+            continue
+        if token in ("-C", "cd"):
+            skip = True
+            continue
+        if token.startswith("-") or _ASSIGNMENT.match(token):
+            continue
+        rel = _command_rel(token.strip("\"'`();{}"), root)
+        if rel is not None:
+            paths.append(rel)
+    return paths
+
+
+def _command_rel(token: str, root: str) -> str | None:
+    """One argv token as a repo-relative path, or ``None`` when it is not one.
+
+    Anything outside the repo drops out first — another checkout, ``/tmp``, the
+    machine's own config — because it says nothing about this repo's code.
+    """
+    if token.startswith(f"{root}/"):
+        token = token[len(root) + 1 :]
+    elif token == root or token.startswith("/"):
+        return None
+    if token.startswith("./"):
+        token = token[2:]
+    return token if _pathlike(token) else None
+
+
+def _pathlike(token: str) -> bool:
+    """Whether an argv token names a file or subtree at all.
+
+    A token counts when it has a separator, names an entry-scope root outright,
+    or carries a suffix. A bare glob (``find -name '*.md'``) is a pattern rather
+    than a path, and a token holding a variable cannot be resolved to one
+    without running the shell — neither may decide a verdict.
+    """
+    if not token or token in (".", "..") or "$" in token:
+        return False
+    if "*" in token or "?" in token:
+        return "/" in token
+    if "/" in token:
+        return True
+    if token in ENTRY_SCOPE_DIRS or token in ENTRY_SCOPE_NAMES:
+        return True
+    return "." in token.lstrip(".")
+
+
+def _statement_heads(command: str) -> list[str]:
+    """The head word of each statement in a command, ``git`` subcommands included."""
+    heads = []
+    for statement in _STATEMENTS.split(command):
+        head = _statement_head(statement)
+        if head is not None:
+            heads.append(head)
+    return heads
+
+
+def _statement_head(statement: str) -> str | None:
+    """One statement's command word, or ``None`` when it has none."""
+    tokens = statement.split("|", 1)[0].split()
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    head = tokens[0].strip("\"'`(){}").rsplit("/", 1)[-1]
+    if head != "git":
+        return head
+    rest = iter(tokens[1:])
+    for token in rest:
+        if token == "-C":
+            next(rest, None)
+            continue
+        if token.startswith("-"):
+            continue
+        return f"git {token}"
+    return head
 
 
 def _absorb_search(args: dict, scan: _Scan, *, order: int, repo_root: Path) -> None:
@@ -1286,7 +1697,7 @@ def _absorb_tool_results(
         requested, requested_at = pending.pop(block.get("tool_use_id"), (None, order))
         if block.get("is_error"):
             continue
-        rel = _repo_rel(requested, repo_root) or result_rel
+        rel = requested or result_rel
         if rel is None:
             continue
         if not _entry_scope(rel):

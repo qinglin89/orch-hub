@@ -171,8 +171,21 @@ def tool_row(name: str, args: dict, *, uid: str = "t") -> dict:
     }
 
 
-def edit_row(abs_path: Path | str, *, uid: str = "e", name: str = "Edit") -> dict:
-    return tool_row(name, {"file_path": str(abs_path)}, uid=uid)
+def edit_row(
+    abs_path: Path | str,
+    *,
+    uid: str = "e",
+    name: str = "Edit",
+    new_string: str | None = None,
+) -> dict:
+    args: dict = {"file_path": str(abs_path)}
+    if new_string is not None:
+        args["new_string"] = new_string
+    return tool_row(name, args, uid=uid)
+
+
+def bash_row(command: str, *, uid: str = "sh") -> dict:
+    return tool_row("Bash", {"command": command}, uid=uid)
 
 
 def search_row(path: Path | str | None = None, *, uid: str = "g") -> dict:
@@ -712,6 +725,114 @@ def test_a_parallel_entry_batch_is_not_split_by_its_own_first_code_read(tmp_path
     assert session.loads[0].phase == PHASE_ENTRY
 
 
+def test_entry_checklist_commands_do_not_end_context_assembly(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [bash_row("date -u +%Y-%m-%dT%H:%M:%SZ", uid="ts")]
+        + [bash_row("git status --porcelain && git log --oneline -8", uid="git")]
+        + [bash_row(f"ls {repo.path}/.ai/features/", uid="route")]
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The claim timestamp, the clean-tree check, and a routed listing are the
+    # protocol's own entry steps: they put no repo content in context, so a
+    # pre-load after them is still a pre-load.
+    assert session.entry_boundary is None and session.boundary_unsure is None
+    assert session.complete is True
+    assert session.activity == Activity()
+
+
+def test_shell_mediated_code_work_ends_context_assembly(tmp_path):
+    repo = make_repo(tmp_path)
+    cases = {
+        "grep-sid": 'grep -rn "RunManager" orch_hub/',
+        "read-sid": "sed -n '1,40p' orch_hub/runs.py",
+        "test-sid": "go test ./...",
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="late")
+            + read_rows(repo.path / SIDECAR, content="# sidecar", uid="extra"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # Rediscovering the code through the shell is the same behavior as reading or
+    # grepping it through a tool: the declared doc opened afterwards is a late
+    # recovery, and the undeclared one is a mid-flight retrieval rather than an
+    # entry pre-load that never happened.
+    for sid, session in rolled.items():
+        assert session.assessable is True, sid
+        assert (session.complete, session.coverage) == (False, 0.0), sid
+        assert session.late == (FEATURES,), sid
+        assert session.activity == Activity(shell=1), sid
+        assert [read.path for read in session.midflight] == [FEATURES, SIDECAR], sid
+        assert session.entry_extra == (), sid
+
+
+def test_an_unclassifiable_command_refuses_only_what_follows_it(tmp_path):
+    repo = make_repo(tmp_path)
+    probe = bash_row("for f in a b c; do echo $f; done", uid="probe")
+    doc = read_rows(repo.path / FEATURES, content="# eval", uid="a")
+    entry = entry_rows(repo, f"[{FEATURES}]")
+    write_transcript(tmp_path, repo, entry + [probe] + doc, sid="after-sid")
+    write_transcript(tmp_path, repo, entry + doc + [probe], sid="before-sid")
+
+    after = only(roll(tmp_path, repo, [dev(sid="after-sid")]))
+    before = only(roll(tmp_path, repo, [dev(sid="before-sid")]))
+
+    # A command this reader cannot place may have been work; crediting the doc
+    # that followed it would be a guess, so the verdict is refused rather than
+    # decided in either direction.
+    assert after.boundary_unsure == 2
+    assert after.assessable is False
+    assert after.coverage is None and after.complete is None
+    assert after.loaded == (FEATURES,)  # the observation still stands
+    assert "boundary not determinable" in after.detail
+    # A doc already in context before it is a pre-load whatever it turns out to
+    # have been: the doubt does not spread backwards.
+    assert before.boundary_unsure == 4
+    assert before.assessable is True and before.complete is True
+
+
+def test_a_session_log_write_ends_context_assembly_but_a_claim_does_not(tmp_path):
+    repo = make_repo(tmp_path)
+    task_file = repo.path / ".ai-tasks" / f"{TASK}.md"
+    cases = {
+        "claim-sid": "claimed-by: 93abe2b6@2026-08-10T02:58:15Z\nsession-est: 3/3",
+        "log-sid": f"### 2026-08-10 / {SID} / (in_progress → in_progress)\n- Done: ...",
+    }
+    for sid, new_string in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [edit_row(task_file, uid="t", new_string=new_string)]
+            + read_rows(repo.path / FEATURES, content="# eval"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # Both are task-file writes and both are counted as such, but only one of
+    # them records a decision a later read could no longer have informed.
+    assert rolled["claim-sid"].complete is True
+    assert rolled["claim-sid"].entry_boundary is None
+    assert rolled["log-sid"].complete is False
+    assert rolled["log-sid"].late == (FEATURES,)
+    assert rolled["log-sid"].activity == Activity(task_edits=1)
+
+
 # -- close-out exclusion ------------------------------------------------------
 
 
@@ -870,6 +991,95 @@ def test_holes_after_the_boundary_leave_the_entry_measurement_standing(tmp_path)
     # Nothing after the session reached the code can change what it had loaded
     # before that, so the pre-load verdict is still owed.
     assert session.assessable is True and session.complete is True
+
+
+def delayed_doc_rows(repo: ManagedRepo, *, content: str = "# eval"):
+    """An entry batch whose memory result lands after a sibling code read's.
+
+    The shape the phase partition exists for — and the shape that makes lost
+    evidence dangerous, because the surviving rows say the boundary is closed
+    while the answer to a pre-boundary request is still outstanding.
+    """
+    doc_call, doc_result = read_rows(repo.path / FEATURES, content=content, uid="a")
+    code_call, code_result = work_rows(repo)
+    return (
+        entry_rows(repo, f"[{FEATURES}, {SIDECAR}]") + [doc_call, code_call, code_result],
+        doc_result,
+    )
+
+
+def assert_delayed_result_refused(session):
+    """A lost delayed result must cost the verdict, not the doc it was carrying."""
+    assert session.entry_boundary is not None  # damage is all past the boundary
+    assert session.assessable is False
+    assert session.coverage is None and session.complete is None
+    assert session.applicable is True
+    assert session.expected == (FEATURES, SIDECAR)
+    assert session.missing == (FEATURES, SIDECAR)
+    assert "did not survive the scan" in session.detail
+
+
+def test_a_delayed_entry_result_lost_to_a_malformed_row_refuses_the_verdict(tmp_path):
+    repo = make_repo(tmp_path)
+    rows, _ = delayed_doc_rows(repo)
+    path = write_transcript(tmp_path, repo, rows)
+    # The row that would have carried the doc is unreadable.
+    path.write_text(path.read_text(encoding="utf-8") + "{not json\n", encoding="utf-8")
+
+    behavior = roll(tmp_path, repo, [dev()])
+
+    # The hole sits after the boundary, so the entry phase itself is intact — but
+    # the request it may have answered was made before it, and reporting that doc
+    # as never loaded would be a negative this evidence cannot support.
+    assert_delayed_result_refused(only(behavior))
+    assert behavior.warnings
+
+
+def test_a_delayed_entry_result_past_the_row_cap_refuses_the_verdict(tmp_path):
+    repo = make_repo(tmp_path)
+    rows, doc_result = delayed_doc_rows(repo, content="x" * 9000)
+    write_transcript(tmp_path, repo, rows + [doc_result])
+
+    session = only(roll(tmp_path, repo, [dev()], max_line_bytes=4000))
+
+    assert session.skipped_rows == 1
+    assert_delayed_result_refused(session)
+
+
+def test_a_delayed_entry_result_in_the_truncated_tail_refuses_the_verdict(tmp_path):
+    repo = make_repo(tmp_path)
+    rows, doc_result = delayed_doc_rows(repo)
+    budget = len("".join(json.dumps(row) + "\n" for row in rows))
+    write_transcript(tmp_path, repo, rows + [doc_result])
+
+    session = only(roll(tmp_path, repo, [dev()], max_bytes=budget))
+
+    # A clean cut, no unreadable row at all: the tail alone is the lost evidence.
+    assert (session.truncated, session.skipped_rows) == (True, 0)
+    assert_delayed_result_refused(session)
+
+
+def test_a_lost_code_read_result_makes_the_boundary_unsure_not_the_load(tmp_path):
+    repo = make_repo(tmp_path)
+    code_call, _ = work_rows(repo)
+    rows = (
+        entry_rows(repo, f"[{FEATURES}]")
+        + [code_call]  # its result never arrives
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a")
+        + [edit_row(repo.path / "orch_hub" / "runs.py", uid="w", name="Write")]
+    )
+    path = write_transcript(tmp_path, repo, rows)
+    path.write_text(path.read_text(encoding="utf-8") + "{not json\n", encoding="utf-8")
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The lost row may hold the code delivery that would have closed context
+    # assembly *before* the doc, so the doc's entry credit is not owed either —
+    # the same doubt as an unclassifiable command, reached from the other side.
+    assert session.entry_boundary == 5 and session.boundary_unsure == 2
+    assert session.assessable is False and session.complete is None
+    assert session.loaded == (FEATURES,)
+    assert "boundary not determinable" in session.detail
 
 
 def test_a_task_read_cut_mid_frontmatter_does_not_supply_the_expected_set(tmp_path):
