@@ -527,6 +527,9 @@ def test_an_unanswered_edit_of_a_doc_withholds_the_verdict_but_keeps_the_read(tm
     assert session.writeback_excluded == ()
     assert [read.path for read in session.trace] == [FEATURES]
     assert "in flight" in (session.detail or "")
+    # The same doubt reaches both consumers: the declared-set verdict here, and
+    # the read the semantic layer will weigh.
+    assert session.trace[0].write_uncertain is True
 
 
 def test_an_edit_result_landing_after_the_read_it_raced_withholds_the_verdict(tmp_path):
@@ -546,6 +549,73 @@ def test_an_edit_result_landing_after_the_read_it_raced_withholds_the_verdict(tm
     assert session.available and not session.assessable
     assert (session.coverage, session.complete) == (None, None)
     assert [read.path for read in session.trace] == [FEATURES]
+
+
+def test_an_unsettled_write_marks_its_read_even_when_no_verdict_speaks_for_it(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        # The declared set is read cleanly; the unsettled edit is of a doc the
+        # task never declared, so the prefetch verdict never looks at it.
+        entry_rows(repo, f"[{SIDECAR}]")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="s")
+        + edit_rows(repo.path / FEATURES, name="Write", uid="w", answered=False)
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Compliance with the declared set is measured and unharmed: an unsettled
+    # write elsewhere is not evidence about the docs the task asked for.
+    assert (session.coverage, session.complete) == (1.0, True)
+    assert session.assessable is True
+    # But the trace is what the semantic layer judges, declared or not, so the
+    # undeclared read must not pass for settled — its ordering against that edit
+    # is exactly as unresolved as a declared doc's would have been.
+    declared, undeclared = session.trace
+    assert (declared.path, declared.write_uncertain) == (SIDECAR, False)
+    assert (undeclared.path, undeclared.write_uncertain) == (FEATURES, True)
+
+
+def test_a_racing_edit_marks_the_read_it_raced_and_still_shows_where_it_landed(tmp_path):
+    repo = make_repo(tmp_path)
+    call, result = edit_rows(repo.path / FEATURES, name="Write", uid="w")
+    read_call, read_result = read_rows(repo.path / FEATURES, content="# eval", uid="a")
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{SIDECAR}]")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="s")
+        + [call, read_call, read_result, result],
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The write did land, after the read's result — so both facts travel: where it
+    # was confirmed, and that their order does not settle which came first.
+    read = session.trace[1]
+    assert read.path == FEATURES and read.write_uncertain is True
+    assert read.first_write is not None and read.first_write > read.order
+    assert (session.coverage, session.complete) == (1.0, True)
+
+
+def test_a_refused_edit_leaves_its_reads_ordering_settled(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{SIDECAR}]")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="s")
+        + edit_rows(repo.path / FEATURES, name="Write", uid="w", is_error=True)
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # An edit that came back refused wrote nothing, so there is no doubt to carry:
+    # False here is a settled fact, not an unrecorded one.
+    assert [r.write_uncertain for r in session.trace] == [False, False]
 
 
 def test_an_edit_of_another_doc_leaves_this_read_alone(tmp_path):

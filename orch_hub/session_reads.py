@@ -104,8 +104,10 @@ the **result** rather than the request: an edit that failed or was never answere
 changed no file, so treating its request as a write would drop a genuine later
 read into the read-back bucket and report the declared doc missing. Where the
 outcome or the ordering cannot be established (a result that never arrived, or one
-that landed after the read it might have preceded), the read stays and the verdict
-is withheld instead — the ruling's uncertainty clause, not a negative.
+that landed after the read it might have preceded), the read stays — marked
+``write_uncertain`` so the trace carries its own doubt — and whatever rested on
+the ordering is withheld instead. That is the ruling's uncertainty clause, not a
+negative.
 
 A ``.ai/`` doc rewritten through a shell redirection is invisible as a write,
 because telling a shell write from a mention of the same path requires
@@ -353,6 +355,17 @@ class MemoryRead:
     ``declared_prefetch`` marks the read as delivery of a declared doc; it is
     ``None`` when the session-time expected set could not be recovered, since
     membership is then unknown rather than false.
+
+    ``write_uncertain`` is the ruling's uncertainty clause carried by the event
+    itself: an edit of this same path was in flight when the read was credited and
+    never settled into a "did not write", so whether the file had already changed
+    under the read is unresolved. It travels here because the trace is what the
+    semantic layer judges, declared and undeclared docs alike — the session-level
+    verdict withholding (:func:`_verdict_refusal`) answers only for the declared
+    set, and an undeclared read would otherwise be indistinguishable from a clean
+    one. ``False`` is a settled fact, not an absence: either no same-path edit
+    overlapped this read, or the one that did came back refused and so wrote
+    nothing.
     """
 
     path: str
@@ -363,6 +376,7 @@ class MemoryRead:
     declared_prefetch: bool | None = None
     before: Activity = Activity()
     first_write: int | None = None
+    write_uncertain: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -374,6 +388,7 @@ class MemoryRead:
             "declared_prefetch": self.declared_prefetch,
             "before": self.before.to_dict(),
             "first_write": self.first_write,
+            "write_uncertain": self.write_uncertain,
         }
 
 
@@ -404,8 +419,10 @@ class SessionReads:
     followed a *confirmed* write of this session's own: excluded from the trace by
     the success condition, but recorded rather than silently dropped, since "read
     back what it just wrote" is itself a fact about the session. A write this
-    reader could not confirm never excludes a read — it withholds the verdict
-    instead (:func:`_verdict_refusal`).
+    reader could not confirm never excludes a read — it withholds what rests on
+    it instead: the declared-set verdict here (:func:`_verdict_refusal`), and the
+    affected read's own ``write_uncertain`` mark in ``trace``, which is the only
+    channel for a doc the declared set never named.
     """
 
     session_id: str
@@ -761,6 +778,13 @@ def _verdict_refusal(scan: "_Scan", docs: Sequence[PrefetchDoc]) -> str | None:
     there the evidence arrived, but it does not settle whether the file had
     already changed under the read. The read stays either way — refusing a
     verdict is not the same as excluding evidence.
+
+    All three questions are asked *of the declared docs only*, because what this
+    withholds is the declared-set verdict. An unresolved write to some other
+    ``.ai/`` doc says nothing about prefetch compliance and must not lower it; the
+    uncertainty that belongs to that read travels on the read
+    (:attr:`MemoryRead.write_uncertain`), which is where the semantic layer reads
+    the undeclared side from.
     """
     uncertain = set(scan.uncertain_writes)
     if uncertain and any(doc.read and doc.path in uncertain for doc in docs):
@@ -907,7 +931,9 @@ def _trace(
 
     One sequence, because the ruling made attribution an attribute rather than a
     partition: a declared doc and one the session went and found are the same kind
-    of event, and only ``declared_prefetch`` tells them apart.
+    of event, and only ``declared_prefetch`` tells them apart. Each event carries
+    the uncertainty that applies to it as well as the facts, so an undeclared read
+    the declared-set verdict never speaks for cannot pass for settled.
 
     The eager set is excluded: it is in every session's context by the loading
     contract, so reading it is not retrieval and not reading it is not a missed
@@ -932,6 +958,7 @@ def _trace(
                 declared_prefetch=None if declared is None else read.path in declared,
                 before=read.before,
                 first_write=read.first_write,
+                write_uncertain=read.write_uncertain,
             )
         )
     return tuple(trace), truncated
@@ -950,7 +977,8 @@ class _Read:
     by then, and ``first_write`` where this session's first confirmed write of the
     same path landed — filled at the end of the scan, and necessarily after
     ``order``, since a read a confirmed write preceded never becomes a ``_Read``
-    at all.
+    at all. ``write_uncertain`` is filled from the same pass and says the ordering
+    against a same-path edit never settled.
     """
 
     path: str
@@ -960,6 +988,7 @@ class _Read:
     ts: str | None = None
     before: Activity = Activity()
     first_write: int | None = None
+    write_uncertain: bool = False
 
 
 @dataclass
@@ -1104,15 +1133,22 @@ class _Scan:
         open if it really wrote: one whose result came back an error mutated
         nothing, so the read it overlapped is clean after all. Anything else — a
         success landing after the read, or a call whose result never arrived — is
-        the ruling's unresolvable order.
+        the ruling's unresolvable order, and it is marked on the read itself so
+        that it survives into the trace for a doc no declared-set verdict speaks
+        for.
         """
         self.uncertain_writes = tuple(
             path
             for path, keys in self.write_wait.items()
             if any(key not in self.failed_writes for key in keys)
         )
+        uncertain = set(self.uncertain_writes)
         self.reads = [
-            replace(read, first_write=self.writes.get(read.path))
+            replace(
+                read,
+                first_write=self.writes.get(read.path),
+                write_uncertain=read.path in uncertain,
+            )
             for read in self.reads
         ]
         self.pending.clear()

@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "12"
+EVIDENCE_SCHEMA_VERSION = "13"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -115,7 +115,11 @@ clause against the edit's *result* rather than its request: an edit that failed 
 was never answered wrote nothing, so in v11 it could report a genuinely read
 declared doc missing, and an in-flight edit now withholds the session's verdict
 instead of excluding the read. The per-read ``first_write`` also moves from the
-call row to the row that confirmed the write.
+call row to the row that confirmed the write. ``13`` carries that unsettled
+ordering on the read itself (``trace[].write_uncertain``): in v12 it reached only
+the declared-set verdict, so an unresolved edit of an *undeclared* ``.ai/`` doc
+left its trace event looking exactly like a clean read. A v12 event says nothing
+about its own ordering; a v13 one does.
 A persisted pack with no ``schema_version`` key is version 1 and predates all of
 it.
 
