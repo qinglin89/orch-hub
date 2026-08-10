@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -60,8 +60,8 @@ checks active task files before archive files. Related-run aggregation loads
 persisted run records read-only via `runs.load_records` and matches exact
 `(repo_path, task_id)`. Evidence building reads run events, session snapshots,
 bounded orchestrator logs, bounded `spawn.out`, terminal record fields, and
-best-effort git-window commits; per-run artifact failures become warnings, while
-target task IO errors fail the build. Persistence writes only
+producer-bounded best-effort git-window commits; per-run artifact failures
+become warnings, while target task IO errors fail the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
 Persisted evaluation listing and artifact reads are structural and contained:

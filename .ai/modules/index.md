@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
 ---
 
 # Modules
@@ -15,7 +15,7 @@ Full responsibilities live in the detail files below.
 | Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | managed repo discovery from `aii-2` or registry file |
 | Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch readiness checks |
-| Git metadata | `orch_hub/git_meta.py` | best-effort commit reads and capped path-patch streams for display/evidence |
+| Git metadata | `orch_hub/git_meta.py` | best-effort producer-capped commit reads and caller-capped path-patch streams for display/evidence |
 | Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | shared blocking wrappers; optional producer-capped stdout with whole-call timeout |
 | Task inventory | `orch_hub/task_store.py` | `.ai-tasks` index/frontmatter parsing; contained active/archive reads |

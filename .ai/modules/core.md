@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
 ---
 
 # Modules: Core
@@ -157,11 +157,15 @@ Responsibility: read best-effort git commit metadata for managed repos without
 participating in launch readiness. `latest_commit(repo)` returns the newest
 `CommitInfo` or `None`; `read_commits(repo, limit=...)` returns recent commits;
 `read_commits_between(repo, since, until, limit=...)` returns windowed commits
-for evaluation evidence. All return `CommitLog(available, commits)` newest-first
-with limits clamped to `1..50`, invoke `git log` in the repo, parse `%H`, `%h`,
-`%cI`, and `%s` using an ASCII unit-separator field delimiter, and degrade to
-unavailable on missing git, non-git dirs, missing paths, or non-zero exit.
-Commit lookup failure must not hide repo/task content or fail evidence packs.
+for evaluation evidence. All return `CommitLog(available, commits, truncated)`
+newest-first with limits clamped to `1..50`; the fixed 64KB cap is enforced by
+the subprocess producer as well as the count limit. A byte-cut capture drops
+its trailing line before parsing so no partial subject becomes a `CommitInfo`,
+and `truncated` propagates the incomplete prefix into evaluation evidence. The
+readers invoke `git log` in the repo, parse `%H`, `%h`, `%cI`, and `%s` using an
+ASCII unit-separator field delimiter, and degrade to unavailable on missing
+git, non-git dirs, missing paths, or non-zero exit. Commit lookup failure must
+not hide repo/task content or fail evidence packs.
 `read_path_diff_between` uses the same timestamp window and a caller-required
 byte cap for a path-scoped patch stream; rendering disables external diff and
 textconv execution, and the result preserves true output size/truncation.

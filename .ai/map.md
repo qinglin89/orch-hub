@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
 ---
 
 # Project Map
@@ -62,7 +62,7 @@ Cross-reference only; full behavior lives in `features/`, `modules/`,
 | models | stable shared data shapes for CLI/API/tests; `RunRecord` → `ManagedRepo` reconstruction for run-scoped reads |
 | registry | discover managed repos from `aii-2` or registry file |
 | readiness | seven fail-closed launch readiness checks |
-| git_meta | latest/recent/windowed commit metadata + caller-capped path patch streams; external diff/textconv disabled; display/evidence only; degrades to unavailable, never gates |
+| git_meta | producer-capped latest/recent/windowed commit metadata + caller-capped path patch streams; whole-record truncation; external diff/textconv disabled; display/evidence only; degrades to unavailable, never gates |
 | housekeeping | `.ai/.housekeeping-pending` display-only warning state |
 | subprocess_utils | consistent external command runs; optional streamed stdout head/size cap with one drain+wait timeout and kill/reap on expiry; missing executables surfaced distinctly |
 | cli | human + JSON readiness output; launchd, notify-test, eval-doctor dispatch |

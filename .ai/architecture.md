@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
 ---
 
 # Architecture
@@ -134,9 +134,9 @@ off the state-critical path when Bark is configured.
 
 Task evaluation: exact active/archive id → read-only aggregation of every
 `(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics,
-a best-effort git window, and a producer-bounded `.ai/` eager/prefetch snapshot
-plus same-window `.ai/` patches → versioned `evidence.json` under the hub data
-dir.
+a producer-bounded best-effort git window, and a producer-bounded `.ai/`
+eager/prefetch snapshot plus same-window `.ai/` patches → versioned
+`evidence.json` under the hub data dir.
 Static metrics adds deterministic run/session, taskfile/session-log, score,
 confidence, and warning rollups as `static_metrics.json` beside it. The
 semantic layer builds a model prompt from the persisted evidence/static chain,

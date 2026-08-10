@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
 ---
 
 # Features: Task Evaluation
@@ -50,8 +50,10 @@ Implemented behavior:
 - `evidence.json` records its shape as schema v2; pre-version packs remain
   readable as v1-shaped artifacts.
 - Git evidence uses ambient commit-date history reachable from HEAD over the
-  run lifecycle window, capped at 50 commits; any related run with no parseable
-  end keeps `until` open-ended.
+  run lifecycle window, capped at 50 commits and 64KB at the subprocess
+  producer. A byte cut drops its partial trailing record and marks the evidence
+  prefix truncated; any related run with no parseable end keeps `until`
+  open-ended.
 - `generate_evidence` persists `evidence.json` atomically under
   `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`, cleaning an empty
   reserved dir on failure. It never mutates target repos, task files, run
