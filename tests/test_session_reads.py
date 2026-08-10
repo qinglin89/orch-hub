@@ -957,6 +957,80 @@ def test_a_redirect_target_is_a_write_whatever_it_is_named(tmp_path):
         assert rolled[sid].activity == Activity(shell=1), sid
 
 
+def test_a_redirect_needs_no_space_in_front_of_its_target(tmp_path):
+    repo = make_repo(tmp_path)
+    writes = {
+        "make-sid": "echo generated>Makefile",
+        "version-sid": "printf generated>>VERSION",
+    }
+    # ``>`` ends the word in front of it, so the gap is a habit rather than part
+    # of the shape — but the punctuation an operator wears still is.
+    guarded = {
+        "arrow-sid": "echo pending->in_progress",
+        "compare-sid": "echo count>=5",
+    }
+    for sid, command in {**writes, **guarded}.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in {**writes, **guarded}}
+
+    # The repo was mutated before the declared doc arrived, however tightly the
+    # redirection was spelled; requiring whitespace left both writes wearing the
+    # neutral verdict of the ``echo`` in front of them.
+    for sid in writes:
+        assert (rolled[sid].complete, rolled[sid].late) == (False, (FEATURES,)), sid
+        assert rolled[sid].activity == Activity(edits=1), sid
+    # Nothing was written to ``in_progress`` or to ``5``: an arrow and a
+    # comparison are the shapes a ``>`` wears when it is not a redirection, and
+    # reading the adjacent spelling must not swallow them too.
+    for sid in guarded:
+        assert rolled[sid].complete is True, sid
+        assert rolled[sid].entry_boundary is None, sid
+        assert rolled[sid].activity == Activity(), sid
+
+
+def test_an_escaped_quote_is_a_character_not_the_end_of_its_string(tmp_path):
+    repo = make_repo(tmp_path)
+    cases = {
+        # The middle quote is escaped, so the string runs to the end and the
+        # ``>`` inside it is the text ``echo`` was handed.
+        "quoted-sid": 'echo "coverage \\" > baseline"',
+        # The same backslash outside a string means the quote never opened one,
+        # and what follows really is a redirection.
+        "write-sid": 'echo \\" > baseline',
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # Ending the string at the escaped quote leaves the quoted ``>`` standing as
+    # a write to ``baseline``, which closes the entry phase and turns a complete
+    # prefetch into a false miss.
+    assert rolled["quoted-sid"].complete is True
+    assert rolled["quoted-sid"].entry_boundary is None
+    assert rolled["quoted-sid"].activity == Activity()
+    assert (rolled["write-sid"].complete, rolled["write-sid"].late) == (
+        False,
+        (FEATURES,),
+    )
+    assert rolled["write-sid"].activity == Activity(edits=1)
+
+
 def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
     repo = make_repo(tmp_path)
     task_file = f"{repo.path}/.ai-tasks/{TASK}.md"

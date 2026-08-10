@@ -229,7 +229,7 @@ loop unclassifiable — and a survey of the task files written as a loop is
 exactly the entry-checklist shape this reader must not lose."""
 
 _REDIRECT = re.compile(
-    r"(?<![-=<>\w])(?:\d+|&)?>>?(?!=)\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))"
+    r"(?<![-=<>])(?:\d+|&)?>>?(?!=)\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))"
 )
 """An output redirection and the file it writes, if any. Without this a shell
 append is read as just another path the command *names*, which lets a
@@ -241,16 +241,22 @@ since the whole match is cut out of the statement — it also stops being read a
 an argument of the command it trails, which would otherwise turn ``ls .ai/
 2>&1`` into a listing of something called ``2>&1``.
 
-The lookbehind and lookahead keep prose and code out of it: ``echo "(ignored ->
-won't dirty tree)"``, an ``awk`` program's ``if(b>m)``, a SQL heredoc's
-``closed_at >= $2``, and a JavaScript arrow ``r=>r.json()`` are not
-redirections. Reading them as writes of ``won't``, ``m)``, ``=``, or ``r.json``
+Whitespace is not part of the shape. ``>`` is a shell metacharacter: it ends the
+word in front of it by itself, so ``echo generated>Makefile`` and ``printf
+1.4.0>>VERSION`` write this repo exactly as their spaced spellings do. Requiring
+a gap left both of them wearing the neutral verdict of the ``echo`` in front,
+which is the same false neutral asking what the target was *called* produced.
+
+What the lookbehind and lookahead still keep out are the shapes a ``>`` wears
+when it is not a redirection at all: a SQL heredoc's ``closed_at >= $2``, an
+arrow in prose (``echo "(ignored -> won't dirty tree)"``), and a JavaScript
+``r=>r.json()``. Reading those as writes of ``=``, ``won't``, or ``r.json``
 would make an entry-checklist echo — or a database query — look like the moment
-a session started working. Comparison and arrow operators are the shapes a
-``>`` wears when it is not a redirection, and both of its sides are checked
-because both spellings occur. Quoting is the other half of that guard and
-cannot be expressed here, because a quoted string spans the separators
-statements are split on (:func:`_quoted_spans`)."""
+a session started working. Both sides are checked because both spellings occur.
+Quoting is the other half of that guard and cannot be expressed here, because a
+quoted string spans the separators statements are split on
+(:func:`_quoted_spans`) — and it is what covers the operators that wear no
+punctuation, an ``awk`` program's ``if(b>m)`` among them."""
 
 _NUMERIC_FLAG = re.compile(r"^-\d+$")
 """``git log -8``: a count, spelled as a flag. Normalized to ``-n``."""
@@ -1958,12 +1964,28 @@ def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
     false neutral this guard exists to close.
 
     A quote inside another quote is a character, not a delimiter, so the scan
-    tracks which one opened the string it is in.
+    tracks which one opened the string it is in — and so is an *escaped* one,
+    which is why the backslash is read as the shell reads it. In ``echo
+    "coverage \\" > baseline"`` the middle quote is a character in the string,
+    and taking it for the closing delimiter leaves the still-quoted ``>``
+    standing as a write to ``baseline``: an entry-checklist echo turned into the
+    moment the session started working, and with it a complete prefetch turned
+    into a false miss. Outside a string the same backslash means the quote never
+    opened one (``echo \\" > baseline`` really does write the file).
+
+    Only a double-quoted string reads escapes, because only it has them: inside
+    single quotes every character stands for itself, the backslash included, and
+    honoring one there would run the span past its real end.
     """
     spans: list[tuple[int, int]] = []
     quote = ""
     start = 0
-    for index, char in enumerate(command):
+    index = 0
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and quote != "'":
+            index += 2
+            continue
         if quote:
             if char == quote:
                 spans.append((start, index))
@@ -1971,6 +1993,7 @@ def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
         elif char in "\"'":
             quote = char
             start = index
+        index += 1
     return tuple(spans)
 
 

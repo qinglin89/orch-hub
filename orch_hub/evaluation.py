@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "7"
+EVIDENCE_SCHEMA_VERSION = "8"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -115,8 +115,11 @@ while reading as metadata — a clustered short ``git`` flag (``-sp`` is a patch
 not the metadata-only ``-s`` its first letter spells) and a redirection to a
 plainly named file (``> Makefile``) — and, so that the second of those does not
 turn a quoted ``>`` into a write, reads quoting across the whole command rather
-than per statement. A persisted pack with no ``schema_version`` key is version 1
-and predates all of it.
+than per statement. ``8`` finishes that redirection reading on both sides: a
+write spelled without a gap (``echo generated>Makefile``) is the write it is,
+and an escaped quote inside a string (``echo "coverage \\" > baseline"``) no
+longer ends the string early and turns its quoted ``>`` into one. A persisted
+pack with no ``schema_version`` key is version 1 and predates all of it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
