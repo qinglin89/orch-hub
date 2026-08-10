@@ -1201,12 +1201,16 @@ def session_reads(
     )
 
 
-def reads_report(*sessions, available=True, warnings=()):
+def reads_report(*sessions, available=True, warnings=(), dropped=0, dropped_candidates=0):
     p = pack(tgt=mk_target(COMPLETED, source=SOURCE_ARCHIVED))
     p = replace(
         p,
         reads=ReadBehavior(
-            available=available, sessions=tuple(sessions), warnings=tuple(warnings)
+            available=available,
+            sessions=tuple(sessions),
+            warnings=tuple(warnings),
+            dropped_sessions=dropped,
+            dropped_candidates=dropped_candidates,
         ),
     )
     return evaluator().build_report(p)
@@ -1268,6 +1272,38 @@ def test_unmeasurable_sessions_lower_confidence_not_the_score():
     assert any("could not be measured" in w for w in sc.warnings)
 
 
+def test_sessions_past_the_readers_cap_lower_confidence_not_the_score():
+    # Every session the reader looked at read its whole declared set, but its
+    # session cap dropped two more dev sessions it never opened. The measured
+    # result stands as measured; the claim to have seen the whole task does not.
+    report = reads_report(
+        session_reads("s1", expected=(A,), read=(A,)),
+        session_reads("s2", expected=(A, B), read=(A, B)),
+        dropped=3,
+        dropped_candidates=2,
+        warnings=["read behavior: 3 session(s) dropped past the 2-session cap"],
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score == 1.0 and sc.confidence == 0.5  # 2 measured of 4 candidates
+    assert report.reads.dropped_candidate_count == 2
+    assert report.reads.session_count == 2  # the cap left only these behind
+    assert any("could not be measured" in w for w in sc.warnings)
+
+
+def test_a_dropped_session_with_no_obligation_leaves_confidence_alone():
+    # The third dropped session was a review session: outside the measurement, so
+    # the cap losing it costs the score nothing to be uncertain about.
+    report = reads_report(
+        session_reads("s1", expected=(A,), read=(A,)),
+        dropped=2,
+        dropped_candidates=0,
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score == 1.0 and sc.confidence == 1.0
+
+
 def test_sessions_with_nothing_to_comply_with_are_in_neither_denominator():
     # A review session (the instruction never reaches it) and a dev session that
     # declared no lazy doc: both have no obligation, so neither the score nor its
@@ -1315,7 +1351,7 @@ def test_prefetch_read_axis_unassessable_when_no_candidate_was_measured():
 
     assert sc.score is None and sc.confidence == 0.0
     assert report.reads.scored_count == 0
-    assert any("none was" in w for w in sc.warnings)
+    assert any("none of them measured" in w for w in sc.warnings)
 
 
 def test_read_axis_does_not_reward_reading_more_than_declared():
@@ -1387,6 +1423,7 @@ def test_report_ties_to_pack_and_serializes():
         "unknown_applicable_count": 0,
         "scored_count": 0,
         "complete_count": 0,
+        "dropped_candidate_count": 0,
         "sessions": [],
         "warnings": [],
     }

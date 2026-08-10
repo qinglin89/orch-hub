@@ -178,11 +178,13 @@ ground. Does not apply when :attr:`SemanticEvidence.reads_available` is True —
 including a section that carries only *degraded* sessions, whose per-session
 reasons are themselves the evidence that the reading could not be measured."""
 _PENALTY_PER_WARNING = 0.05
-"""Per evidence-degradation warning: a missing/corrupt run artifact, or a
+"""Per evidence-degradation warning: a missing/corrupt run artifact, a
 *partially* degraded ``.ai/`` snapshot (a doc truncated, unreadable, or dropped
-for budget — the degradation the two booleans above cannot express). A snapshot
-that is missing outright contributes no warning here, because both flags above
-already price exactly that fact."""
+for budget — the degradation the two booleans above cannot express), or the same
+partiality on the read side (a session with no transcript beside one that parsed,
+a scan that lost rows, a trace or a session list cut at its cap). A snapshot or a
+read section that is missing outright contributes no warning here, because the
+flags above already price exactly that fact."""
 _PENALTY_WARNING_CAP = 0.30
 """Cap on the summed per-warning penalty, so a flood of run warnings alone cannot
 zero confidence — the model still saw the task file."""
@@ -242,7 +244,10 @@ class SemanticEvidence:
     observed behavior instead of inference from the task file, and
     ``reads_available`` gates both on what the section actually carries. It is a
     rollup, never a transcript: paths, order, and counts, so the prompt gains no
-    conversation text.
+    conversation text. That flag is deliberately coarse — one parsed transcript
+    turns it True — so the section's own degradation notes join
+    ``evidence_warnings``, where partial reading costs confidence the way a partly
+    readable ``.ai/`` snapshot does.
 
     They are carried whole here on purpose: the pack is producer-bounded
     (:mod:`orch_hub.ai_snapshot` caps every doc, the doc total, and the patch
@@ -385,6 +390,17 @@ def build_semantic_evidence(
         # entirely its single warning merely restates what both flags already
         # price, and including it would charge one fact three times.
         evidence_warnings += tuple(ai.warnings)
+    if reads is not None and reads.available:
+        # Same rule one section over, and it is the only channel partial read
+        # evidence has: ``reads_available`` is True as soon as *one* transcript
+        # parsed, so a task whose other sessions left none, whose scan lost rows,
+        # or whose trace stopped at its cap looks identical to one observed whole.
+        # The reader has already named each of those (:class:`ReadBehavior`
+        # warnings, at most one per session); pricing them here is what makes a
+        # judgment over half the reading honestly less certain. Withheld when the
+        # section carries nothing, because :data:`_PENALTY_NO_READS` already
+        # charges exactly that and its warnings would only restate it.
+        evidence_warnings += tuple(reads.warnings)
 
     omissions: list[str] = []
     if pack.runs:

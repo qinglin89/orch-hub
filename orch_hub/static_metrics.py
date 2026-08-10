@@ -146,7 +146,7 @@ STATIC_METRICS_NAME = "static_metrics.json"
 """The persisted static-metrics report, written beside ``evidence.json`` in the
 evaluation's artifact dir (one dir per evaluation)."""
 
-STATIC_SCHEMA_VERSION = "2"
+STATIC_SCHEMA_VERSION = "3"
 """Version of the ``static_metrics.json`` shape, stamped into every report.
 
 The counterpart of :data:`orch_hub.evaluation.EVIDENCE_SCHEMA_VERSION` for this
@@ -157,9 +157,15 @@ is the five-axis report (``protocol``, ``reliability``, ``handoff``,
 :data:`SCORE_PREFETCH_READS` and the :class:`~orch_hub.models.ReadMetrics`
 rollup it is computed from. A v1 report does not carry a *bad*
 prefetch-reading score, it carries *no* score for an axis that did not exist —
-which an aggregate that mixes the two would read as a difference in quality. A
-persisted report with no ``schema_version`` key is version 1 and predates the
-stamp. Additive so far: consumers read named keys and tolerate absent ones."""
+which an aggregate that mixes the two would read as a difference in quality.
+``3`` keeps that axis's set but corrects its confidence denominator: a session
+past the reader's cap is a candidate nobody measured, so a v2 report over a
+capped task claims evidence coverage it did not have. The score itself is
+unchanged — only how much of the population it speaks for — and the report
+carries no evidence-cohort key of its own, so the stamp is the only place that
+difference can be recorded. A persisted report with no ``schema_version`` key is
+version 1 and predates the stamp. Additive so far: consumers read named keys and
+tolerate absent ones."""
 
 # -- score axes ---------------------------------------------------------------
 SCORE_PROTOCOL = "protocol"
@@ -536,6 +542,10 @@ def _compute_read_metrics(pack: EvidencePack) -> ReadMetrics:
         unknown_applicable_count=sum(1 for s in sessions if s.applicable is None),
         scored_count=len(scored),
         complete_count=sum(1 for s in scored if s.complete),
+        # Carried, not derived from ``sessions``: a session past the reader's cap
+        # has no rollup here by construction, and reading the denominator off what
+        # survived the cap is exactly how an unmeasured candidate disappears.
+        dropped_candidate_count=behavior.dropped_candidates,
         sessions=sessions,
         warnings=tuple(behavior.warnings),
     )
@@ -1223,10 +1233,14 @@ def _score_prefetch_reads(rdm: ReadMetrics) -> ScoreComponent:
     four reports its one result honestly, at 0.25 confidence.
 
     Candidates are sessions the instruction plausibly applied to: known-applicable
-    plus unknown-applicable. A session known *not* applicable (a role the
-    instruction never reaches, or one that declared no lazy doc) is in neither
-    denominator: there was nothing to comply with, and counting it either way
-    would be an opinion about a session with no obligation.
+    plus unknown-applicable, plus the ones the reader's session cap dropped before
+    it could establish either (their role alone makes them candidates). A session
+    known *not* applicable (a role the instruction never reaches, or one that
+    declared no lazy doc) is in neither denominator: there was nothing to comply
+    with, and counting it either way would be an opinion about a session with no
+    obligation. A capped-out candidate is the opposite case — an obligation nobody
+    looked at — so leaving it out would report full evidence coverage for a task
+    that was only partly read.
 
     **Known limit, measured rather than approximated.** A task may declare a doc
     that did not exist when the session ran, which no session could have read;
@@ -1248,7 +1262,11 @@ def _score_prefetch_reads(rdm: ReadMetrics) -> ScoreComponent:
             0.0,
             ("no session read evidence in the pack; prefetch reading not assessable",),
         )
-    candidates = rdm.applicable_count + rdm.unknown_applicable_count
+    candidates = (
+        rdm.applicable_count
+        + rdm.unknown_applicable_count
+        + rdm.dropped_candidate_count
+    )
     if candidates == 0:
         return ScoreComponent(
             SCORE_PREFETCH_READS,
@@ -1262,8 +1280,8 @@ def _score_prefetch_reads(rdm: ReadMetrics) -> ScoreComponent:
             SCORE_PREFETCH_READS,
             None,
             0.0,
-            (f"{candidates} session(s) could have been measured but none was"
-             " (no usable transcript evidence); prefetch reading not assessable",),
+            (f"{candidates} candidate session(s), none of them measured"
+             " (no usable read evidence); prefetch reading not assessable",),
         )
     warnings: list[str] = []
     incomplete = rdm.scored_count - rdm.complete_count

@@ -317,7 +317,7 @@ def session_reads(sid: str = "s1", *, role: str = "dev", expected=(), read=(),
                   trace=(), assessable: bool = True, applicable=True,
                   detail: str | None = None, activity: Activity | None = None,
                   closeout: bool = False, writeback=(), skipped: int = 0,
-                  truncated: bool = False) -> SessionReads:
+                  truncated: bool = False, available: bool = True) -> SessionReads:
     """One session rollup as the reader emits it (the semantic layer only renders
     what it is handed, so these are built directly rather than scanned)."""
     docs = tuple(PrefetchDoc(path=p, read=p in read) for p in expected)
@@ -327,7 +327,7 @@ def session_reads(sid: str = "s1", *, role: str = "dev", expected=(), read=(),
         session_id=sid,
         role=role,
         kind="session",
-        available=True,
+        available=available,
         assessable=assessable,
         applicable=applicable,
         expected=tuple(expected),
@@ -699,6 +699,56 @@ def test_evidence_carries_the_pack_read_behavior_and_grounds_the_dimension():
     assert evidence.reads_available is True
     assert not [o for o in evidence.omissions if o.startswith("session .ai/ read")]
     assert evidence.to_dict()["reads_available"] is True
+
+
+def test_partly_observed_reading_charges_the_sections_own_warnings():
+    # `reads_available` goes True on the first transcript that parses, so a task
+    # observed in one session out of two — or observed through a trace that stopped
+    # at the reader's cap — looks exactly like one observed whole. The section's
+    # degradation notes are the only carrier of that difference, so they are priced
+    # like a partly readable `.ai/` snapshot's.
+    p = pack(
+        run_ev(),
+        ai=ai_snapshot(ai_doc(), diff=ai_diff()),
+        reads=mk_reads(
+            session_reads("s1", expected=(".ai/map.md",), read=(".ai/map.md",),
+                          trace=(memory_read(".ai/map.md", 3),)),
+            session_reads("s2", available=False, assessable=False, applicable=None,
+                          detail="no session transcript found"),
+            warnings=(
+                "read behavior: session s2: no session transcript found",
+                "read behavior: session s1: measured over incomplete evidence"
+                " (a read trace cut at the event cap); reads may be missing from"
+                " this session's trace",
+            ),
+        ),
+    )
+
+    evidence = build_semantic_evidence(p, static_report=StubStatic())
+
+    assert evidence.reads_available is True  # one session did parse
+    assert len(evidence.evidence_warnings) == 2
+    assert evidence.confidence_penalty() == pytest.approx(0.10)
+
+
+def test_an_unobserved_read_section_is_priced_once_not_twice():
+    # With nothing observed at all, the per-session notes only restate what the
+    # missing-section penalty already charges — the same double-charge rule the
+    # absent `.ai/` snapshot follows.
+    p = pack(
+        run_ev(),
+        ai=ai_snapshot(ai_doc(), diff=ai_diff()),
+        reads=mk_reads(
+            available=False,
+            warnings=("read behavior: session s1: no session transcript found",),
+            detail="no session transcript could be read",
+        ),
+    )
+
+    evidence = build_semantic_evidence(p, static_report=StubStatic())
+
+    assert evidence.evidence_warnings == ()
+    assert evidence.confidence_penalty() == pytest.approx(0.10)  # the section flag only
 
 
 def test_evidence_records_the_omission_when_no_read_behavior_was_observed():

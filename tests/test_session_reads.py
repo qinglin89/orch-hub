@@ -331,6 +331,24 @@ def test_a_review_session_is_not_applicable_and_does_not_warn(tmp_path):
     assert behavior.warnings == ()
 
 
+def test_a_parsed_transcript_that_yields_no_verdict_warns_whatever_the_role(tmp_path):
+    repo = make_repo(tmp_path)
+    # A review session that did leave a transcript, and never read its task file:
+    # nothing was expected of it, but its reads *are* trace evidence, and the
+    # layer that judges them cannot tell a short trace from a whole one unless the
+    # section says the session could not be read out.
+    write_transcript(tmp_path, repo, read_rows(repo.path / SIDECAR, content="# s"))
+
+    behavior = roll(
+        tmp_path, repo, [SessionRef(session_id=SID, run_id="r", role="review")]
+    )
+    session = only(behavior)
+
+    assert session.available is True and session.assessable is False
+    assert [r.path for r in session.trace] == [SIDECAR]
+    assert any(SID in w for w in behavior.warnings)
+
+
 def test_a_plan_gate_session_shares_the_dev_prefetch_expectation(tmp_path):
     repo = make_repo(tmp_path)
     write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"))
@@ -952,9 +970,15 @@ def test_the_trace_is_capped_and_says_so(tmp_path):
         rows += read_rows(repo.path / f".ai/modules/m{n}.md", content="x", uid=f"u{n}")
     write_transcript(tmp_path, repo, rows)
 
-    session = only(roll(tmp_path, repo, [dev()], max_reads=3))
+    behavior = roll(tmp_path, repo, [dev()], max_reads=3)
+    session = only(behavior)
 
     assert len(session.trace) == 3 and session.trace_truncated is True
+    # The session was still measured — the cap cuts the trace, not the verdict —
+    # but the list a judge reads stops early, and nothing downstream can tell a
+    # short trace from a whole one unless the section says so.
+    assert session.assessable is True and session.complete is not None
+    assert any("trace cut at the event cap" in w for w in behavior.warnings)
 
 
 # -- timing evidence, not a timing verdict ------------------------------------
@@ -1156,20 +1180,26 @@ def test_lost_evidence_after_every_read_leaves_a_complete_verdict_standing(tmp_p
     )
     path.write_text(text + damaged, encoding="utf-8")
 
-    session = only(
-        roll(
-            tmp_path,
-            repo,
-            [dev()],
-            max_bytes=len(text) + len(damaged) - 3,
-            max_line_bytes=4000,
-        )
+    behavior = roll(
+        tmp_path,
+        repo,
+        [dev()],
+        max_bytes=len(text) + len(damaged) - 3,
+        max_line_bytes=4000,
     )
+    session = only(behavior)
 
     assert (session.skipped_rows, session.truncated) == (3, True)
     # A doc that was read stays read: no later damage can un-deliver it, and
     # nothing was reported missing that the damage could have been hiding.
     assert session.assessable is True and session.complete is True
+    # The verdict standing is not the same as the evidence being whole: what was
+    # lost could have held a read this trace never lists, so the loss is recorded
+    # for the layer that judges the trace rather than the verdict.
+    assert any(
+        "measured over incomplete evidence" in w and "unreadable row(s)" in w
+        for w in behavior.warnings
+    )
 
 
 def test_blank_rows_are_not_evidence_holes(tmp_path):
@@ -1226,6 +1256,29 @@ def test_sessions_past_the_cap_are_dropped_with_a_warning(tmp_path):
 
     assert len(behavior.sessions) == 2
     assert any("dropped past" in warning for warning in behavior.warnings)
+    # The cap bounds the rollups, not the truth: a dropped session still happened,
+    # and its role already settles whether it owed a pre-load — so a downstream
+    # denominator can keep counting it instead of narrowing to what fit.
+    assert behavior.dropped_sessions == 2 and behavior.dropped_candidates == 2
+    assert any("a role the prefetch instruction reaches" in w for w in behavior.warnings)
+
+
+def test_a_dropped_session_with_nothing_to_comply_with_is_not_a_candidate(tmp_path):
+    repo = make_repo(tmp_path)
+    kept = dev(sid="sid-0")
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"), sid=kept.session_id)
+    refs = [
+        kept,
+        SessionRef(session_id="sid-r", run_id="run-1", role="review"),
+        dev(sid="sid-2"),
+    ]
+
+    behavior = roll(tmp_path, repo, refs, max_sessions=1)
+
+    # Two dropped, but the review session was never asked to pre-load anything:
+    # counting it as an unmeasured candidate would invent an obligation the cap
+    # merely happened to hide.
+    assert behavior.dropped_sessions == 2 and behavior.dropped_candidates == 1
 
 
 # -- containment and caps -----------------------------------------------------

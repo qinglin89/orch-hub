@@ -1351,6 +1351,15 @@ class ReadMetrics:
     evidence out of the quality score: it lowers the score's *confidence*
     (``scored_count`` over the candidates) instead of counting as a session that
     read nothing.
+
+    ``dropped_candidate_count`` is the fourth, and the one with no rollup behind
+    it: sessions the reader's own cap
+    (:data:`orch_hub.session_reads.MAX_SESSIONS`) never looked at, whose role says
+    the prefetch instruction reached them. They belong in the confidence
+    denominator for the same reason an unmeasurable session does — they are
+    candidates nobody measured — and out of the quality one for the same reason
+    too. Counting only what ``sessions`` carries would let a cap report full
+    evidence coverage for a task it read three quarters of.
     """
 
     available: bool
@@ -1359,6 +1368,7 @@ class ReadMetrics:
     unknown_applicable_count: int
     scored_count: int
     complete_count: int
+    dropped_candidate_count: int = 0
     sessions: tuple[SessionReadRollup, ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -1370,6 +1380,7 @@ class ReadMetrics:
             "unknown_applicable_count": self.unknown_applicable_count,
             "scored_count": self.scored_count,
             "complete_count": self.complete_count,
+            "dropped_candidate_count": self.dropped_candidate_count,
             "sessions": [s.to_dict() for s in self.sessions],
             "warnings": list(self.warnings),
         }

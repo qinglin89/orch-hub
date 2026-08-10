@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "13"
+EVIDENCE_SCHEMA_VERSION = "14"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -119,7 +119,11 @@ call row to the row that confirmed the write. ``13`` carries that unsettled
 ordering on the read itself (``trace[].write_uncertain``): in v12 it reached only
 the declared-set verdict, so an unresolved edit of an *undeclared* ``.ai/`` doc
 left its trace event looking exactly like a clean read. A v12 event says nothing
-about its own ordering; a v13 one does.
+about its own ordering; a v13 one does. ``14`` makes the section account for what
+it could not carry: the sessions its own cap dropped (``dropped_sessions`` /
+``dropped_candidates``), and — as a warning per session — evidence a *measured*
+session lost to a hole or a cap. In v13 both were invisible to a consumer, so a
+partly-read task and a wholly-read one presented identical coverage.
 A persisted pack with no ``schema_version`` key is version 1 and predates all of
 it.
 

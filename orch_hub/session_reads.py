@@ -511,13 +511,25 @@ class ReadBehavior:
     ``warnings`` are this section's degradation notes, aggregated into the pack's
     warning count like the per-run and ``.ai/`` ones. Only sessions that *could*
     have been measured warn — a review session with no transcript is expected,
-    not degraded.
+    not degraded — and each warns at most once, whether it could not be measured
+    at all or was measured over evidence this reader knows it lost.
+
+    ``dropped_sessions``/``dropped_candidates`` account for what the
+    :data:`MAX_SESSIONS` cap left out. The cap bounds the *rollups*, but a session
+    it drops is still a session that existed, and ``role`` alone already settles
+    whether the prefetch instruction reached it (:data:`PREFETCH_ROLES`) — so the
+    counts are carried rather than the rollups. Without them a downstream
+    denominator built from ``sessions`` silently narrows to what fit, and a task
+    whose 25th session was never looked at reports the same evidence coverage as
+    one measured whole.
     """
 
     available: bool
     sessions: tuple[SessionReads, ...] = ()
     warnings: tuple[str, ...] = ()
     detail: str | None = None
+    dropped_sessions: int = 0
+    dropped_candidates: int = 0
 
     @property
     def assessable_count(self) -> int:
@@ -533,6 +545,8 @@ class ReadBehavior:
             "sessions": [session.to_dict() for session in self.sessions],
             "warnings": list(self.warnings),
             "detail": self.detail,
+            "dropped_sessions": self.dropped_sessions,
+            "dropped_candidates": self.dropped_candidates,
         }
 
 
@@ -622,11 +636,21 @@ def read_session_behavior(
             warnings=warnings,
         )
         rollups.append(rollup)
-    dropped = max(0, len(unique) - max_sessions)
-    if dropped:
+    # A dropped session is unmeasured, not absent: its role still says whether the
+    # prefetch instruction reached it, which is all a confidence denominator needs
+    # to keep counting it as a candidate it never got to look at.
+    dropped_refs = unique[max_sessions:]
+    dropped_candidates = sum(1 for ref in dropped_refs if _prefetch_role(ref.role))
+    if dropped_refs:
         warnings.append(
-            f"read behavior: {dropped} session(s) dropped past the"
+            f"read behavior: {len(dropped_refs)} session(s) dropped past the"
             f" {max_sessions}-session cap"
+            + (
+                f", {dropped_candidates} of them a role the prefetch instruction"
+                " reaches"
+                if dropped_candidates
+                else ""
+            )
         )
     available = any(rollup.available for rollup in rollups)
     return ReadBehavior(
@@ -634,6 +658,8 @@ def read_session_behavior(
         sessions=tuple(rollups),
         warnings=tuple(warnings),
         detail=None if available else "no session transcript could be read",
+        dropped_sessions=len(dropped_refs),
+        dropped_candidates=dropped_candidates,
     )
 
 
@@ -746,6 +772,15 @@ def _session_rollup(
     if refusal is not None:
         return _degraded(base, refusal, warnings)
 
+    # Loss that a measured session survived is the one degradation nothing else
+    # records: the verdict above may legitimately stand over it, but the trace the
+    # semantic layer judges is short by whatever was lost. Warned here rather than
+    # in :func:`_degraded` so a session warns at most once — an unmeasurable one
+    # already says what it lost, in the same list.
+    loss = _loss_note(scan, trace_truncated)
+    if loss is not None:
+        warnings.append(f"read behavior: session {ref.session_id}: {loss}")
+
     found = sum(1 for doc in docs if doc.read)
     return _replace(
         base,
@@ -812,6 +847,34 @@ def _verdict_refusal(scan: "_Scan", docs: Sequence[PrefetchDoc]) -> str | None:
     return None
 
 
+def _loss_note(scan: "_Scan", trace_truncated: bool) -> str | None:
+    """What a *measured* session's read evidence lost, or ``None`` when nothing.
+
+    Distinct from :func:`_verdict_refusal`, which withholds a conclusion: here the
+    conclusion stands (a hole after the read it could have changed cannot
+    undermine it) and the loss is still real for everything the verdict does not
+    speak for — the ordered trace. A hole may hide an undeclared read entirely, and
+    a trace cut at the event cap simply stops listing them, so a judgment made over
+    what survived is a judgment over partial evidence and has to be priced as one.
+
+    Both caps are producer bounds, so this is the ordinary shape of a very long
+    session rather than a failure — which is exactly why it needs saying: nothing
+    downstream can tell a short trace from a complete one without it.
+    """
+    parts: list[str] = []
+    if scan.skipped or scan.truncated:
+        parts.append(_gap_detail(scan))
+    if trace_truncated:
+        parts.append("a read trace cut at the event cap")
+    if not parts:
+        return None
+    return (
+        "measured over incomplete evidence ("
+        + "; ".join(parts)
+        + "); reads may be missing from this session's trace"
+    )
+
+
 def _gap_detail(scan: "_Scan") -> str:
     """What was lost from this scan, in the reader's own terms."""
     parts = []
@@ -829,8 +892,13 @@ def _degraded(base: SessionReads, detail: str, warnings: list[str]) -> SessionRe
     Codex-backed conversation leaves nothing in this store) is *expected* to have
     no read evidence, so it is not degradation. A dev session with no usable
     transcript is a real gap in the measurement and says so.
+
+    ``available`` widens that to the one case the role test misses: a transcript
+    that *was* located and parsed and still yielded no verdict is a gap whatever
+    the role, because its reads are trace evidence the semantic layer would
+    otherwise be short of without knowing it.
     """
-    if _prefetch_role(base.role):
+    if _prefetch_role(base.role) or base.available:
         warnings.append(f"read behavior: session {base.session_id}: {detail}")
     return _replace(base, assessable=False, detail=detail)
 
