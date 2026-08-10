@@ -238,10 +238,13 @@ class EvidenceGit:
     window; ``detail`` then says which. Windowing is by git commit date over
     history reachable from HEAD, so ``commits`` is ambient repo history in that
     window — not a task-scoped filter — a deliberately best-effort signal.
-    ``truncated`` marks a window that hit :data:`EVIDENCE_COMMIT_LIMIT` (more
-    commits exist than returned). Diffs are intentionally omitted: they are
-    unbounded, and the bounded-evidence rule keeps raw diffs/transcripts out of
-    the pack.
+    ``truncated`` marks a window whose commit list is a prefix — more commits
+    exist than returned — whether the count hit :data:`EVIDENCE_COMMIT_LIMIT` or
+    the reader's byte cap cut the tail
+    (:data:`orch_hub.git_meta.COMMIT_LOG_MAX_BYTES`); a consumer weighing the
+    evidence needs the incompleteness, not which bound produced it. Diffs are
+    intentionally omitted: they are unbounded, and the bounded-evidence rule
+    keeps raw diffs/transcripts out of the pack.
     """
 
     available: bool
@@ -888,7 +891,10 @@ class EvaluationService:
         invoked. The query is bounded by :data:`EVIDENCE_COMMIT_LIMIT` and fails
         closed to unavailable on any git problem
         (:func:`orch_hub.git_meta.read_commits_between`); it is read-only
-        ``git log``. ``truncated`` marks a window with more commits than the cap.
+        ``git log``. ``truncated`` folds both incompleteness bounds together:
+        the count cap here, and the reader's own byte cap on the capture — a
+        byte-cut list is short of the count cap, so the count test alone would
+        report a partial window as whole.
         """
         if since is None:
             return EvidenceGit(available=False, detail=window_detail)
@@ -904,7 +910,7 @@ class EvaluationService:
             since=since,
             until=until,
             commits=log.commits,
-            truncated=len(log.commits) >= EVIDENCE_COMMIT_LIMIT,
+            truncated=log.truncated or len(log.commits) >= EVIDENCE_COMMIT_LIMIT,
             detail=None if log.available else "git history unavailable",
         )
 

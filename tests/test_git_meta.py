@@ -1,21 +1,26 @@
 """Tests for best-effort git commit metadata and pathspec-scoped patch reads.
 
-Injects a fake runner (never a real git subprocess) and uses ``tmp_path`` for
-the repo dir so ``read_commits`` / ``latest_commit`` are exercised without
-touching real git history. The core contract under test is best-effort: any git
-problem degrades to an unavailable log / ``None``, never an exception.
+Injects a fake runner and uses ``tmp_path`` for the repo dir so ``read_commits``
+/ ``latest_commit`` are exercised without touching real git history. The core
+contract under test is best-effort: any git problem degrades to an unavailable
+log / ``None``, never an exception.
 
-The patch reader adds a second contract: its byte cap reaches the command
-(a fake runner records the kwarg) and still binds when a runner ignores it. What
-the *real* capped runner does with an oversized stream is
+Both readers add a second contract: a byte cap reaches the command (a fake
+runner records the kwarg) and still binds when a runner ignores it. One test
+proves the commit-list cap end to end against a *real* oversized producer — it
+runs ``sys.executable`` through the real capped runner, never git, a managed
+repo, or the registry — because a fake runner cannot show what the producer
+captured. What the capped runner itself does with such a stream is
 ``tests/test_subprocess_utils.py``.
 """
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from orch_hub.git_meta import (
+    COMMIT_LOG_MAX_BYTES,
     MAX_COMMIT_LIMIT,
     CommitLog,
     latest_commit,
@@ -24,7 +29,7 @@ from orch_hub.git_meta import (
     read_path_diff_between,
 )
 from orch_hub.models import CommitInfo, ManagedRepo
-from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
+from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult, run_command
 
 FIELD_SEP = "\x1f"
 
@@ -204,6 +209,142 @@ def test_read_commits_between_unavailable_when_path_missing(tmp_path):
     )
     assert log.available is False
     assert calls == []  # runner never invoked when the path is not a dir
+
+
+# -- commit list (byte-bounded at the producer) --------------------------------
+
+SUBJECT_BYTES = 1000
+"""Per-commit subject size: legal git, ~13x the 72 columns convention wraps at,
+and enough that a plausible number of commits overruns the cap."""
+
+EMITTED = 200
+"""Commits the oversized producer writes — well past what the cap can retain."""
+
+
+def emit_commits(count: int, subject_bytes: int) -> list[str]:
+    """Argv for a command writing ``count`` commit lines in git's own format.
+
+    No trailing newline after the last line, matching ``--pretty=format:``
+    (``tformat:`` would add one), so the cut-line case is the real one.
+    """
+    return [
+        sys.executable,
+        "-c",
+        "import sys\n"
+        "sep = chr(31)\n"
+        "lines = [sep.join((str(i).zfill(40), str(i).zfill(7),"
+        f" '2026-08-09T00:00:00+00:00', 'x' * {subject_bytes}))"
+        f" for i in range({count})]\n"
+        "sys.stdout.write('\\n'.join(lines))",
+    ]
+
+
+def test_commit_readers_push_the_byte_cap_into_the_command(tmp_path):
+    # The commit *count* cap bounds how many lines git prints, not how long one
+    # of them is: `%s` has no length limit, so without a byte cap on the command
+    # a drifted repo is read whole before anything inspects it.
+    calls: list = []
+
+    def runner(args, **kwargs):
+        calls.append(kwargs)
+        return CommandResult(tuple(str(a) for a in args), 0, "", "")
+
+    read_commits(make_repo(tmp_path), runner=runner)
+    read_commits_between(
+        make_repo(tmp_path), since="2026-08-09T09:00:00+00:00", runner=runner
+    )
+
+    assert [call["max_stdout_bytes"] for call in calls] == [COMMIT_LOG_MAX_BYTES] * 2
+
+
+def test_commit_list_is_bounded_at_the_producer_and_keeps_whole_commits(tmp_path):
+    # End to end against a real oversized producer: the runner ignores the git
+    # argv it is handed and runs a command emitting far more than the cap through
+    # the real capped mode, forwarding the cap `_git_log` chose.
+    seen: list = []
+
+    def oversized(args, **kwargs):
+        result = run_command(
+            emit_commits(EMITTED, SUBJECT_BYTES),
+            max_stdout_bytes=kwargs.get("max_stdout_bytes"),
+        )
+        seen.append((kwargs.get("max_stdout_bytes"), result))
+        return result
+
+    log = read_commits(make_repo(tmp_path), runner=oversized)
+
+    cap, result = seen[0]
+    assert cap == COMMIT_LOG_MAX_BYTES
+    # The producer retained the cap and drained the rest, so the read was bounded
+    # rather than the capture trimmed afterwards.
+    assert len(result.stdout.encode("utf-8")) == COMMIT_LOG_MAX_BYTES
+    assert result.stdout_bytes > COMMIT_LOG_MAX_BYTES and result.stdout_truncated
+    # Whole commits or none: the line the cut landed in is dropped, never parsed
+    # into a CommitInfo with a silently shortened subject.
+    assert log.available is True and log.truncated is True
+    assert 0 < len(log.commits) < EMITTED
+    assert {len(c.subject) for c in log.commits} == {SUBJECT_BYTES}
+
+
+def test_truncated_capture_drops_only_the_partial_trailing_line(tmp_path):
+    # A fragment cut inside `%s` still splits into four fields, so it would parse
+    # as a valid-looking commit; only the whole preceding line may be reported.
+    whole = commit_line("a" * 40, "aaaaaaa", "2026-08-09T00:00:00+00:00", "whole")
+    partial = commit_line("b" * 40, "bbbbbbb", "2026-08-09T00:00:00+00:00", "cut he")
+
+    def measured(args, **kwargs):
+        return CommandResult(
+            tuple(str(a) for a in args), 0, f"{whole}\n{partial}", "",
+            stdout_bytes=99999, stdout_truncated=True,
+        )
+
+    log = read_commits(make_repo(tmp_path), runner=measured)
+
+    assert [c.subject for c in log.commits] == ["whole"]
+    assert log.truncated is True
+
+
+def test_untruncated_capture_keeps_its_last_commit(tmp_path):
+    # The drop is conditional on truncation: git's format emits no trailing
+    # newline, so a complete final line looks exactly like a cut one.
+    line = commit_line("c" * 40, "ccccccc", "2026-08-09T00:00:00+00:00", "last")
+
+    log = read_commits(make_repo(tmp_path), runner=make_runner(stdout=line))
+
+    assert [c.subject for c in log.commits] == ["last"]
+    assert log.truncated is False
+
+
+def test_commit_list_bounds_a_runner_that_ignored_the_cap(tmp_path):
+    # An unmeasured capture (an injected fake, or an unbounded runner) must not
+    # be able to widen the contract, exactly as for the patch stream.
+    emitted = COMMIT_LOG_MAX_BYTES // SUBJECT_BYTES + 2
+    stdout = "\n".join(
+        commit_line(
+            f"{i:040d}", f"{i:07d}", "2026-08-09T00:00:00+00:00", "x" * SUBJECT_BYTES
+        )
+        for i in range(emitted)
+    )
+
+    log = read_commits(make_repo(tmp_path), runner=make_runner(stdout=stdout))
+
+    assert log.truncated is True
+    assert 0 < len(log.commits) < emitted
+    assert {len(c.subject) for c in log.commits} == {SUBJECT_BYTES}
+
+
+def test_single_commit_longer_than_the_cap_is_available_but_empty(tmp_path):
+    # Nothing whole survived, which is the same graceful "no commits to show"
+    # state as empty history — not an error, and not a corrupt commit.
+    huge = commit_line(
+        "d" * 40, "ddddddd", "2026-08-09T00:00:00+00:00", "y" * (COMMIT_LOG_MAX_BYTES * 2)
+    )
+
+    log = read_commits(make_repo(tmp_path), runner=make_runner(stdout=huge))
+
+    assert log.available is True and log.truncated is True
+    assert log.commits == ()
+    assert latest_commit(make_repo(tmp_path), runner=make_runner(stdout=huge)) is None
 
 
 # -- pathspec-scoped patch stream (byte-bounded at the producer) ---------------

@@ -27,6 +27,18 @@ DEFAULT_COMMIT_LIMIT = 10
 MAX_COMMIT_LIMIT = 50
 """Hard cap so a crafted ``limit`` cannot ask git for an unbounded history."""
 
+COMMIT_LOG_MAX_BYTES = 64 * 1024
+"""Byte cap on the commit-list *read*, applied on top of the commit-count cap.
+
+The count cap alone does not bound the output: a formatted line is a fixed ~80
+bytes of hash/date plus ``%s``, and a commit subject has no length limit, so
+drifted or hostile history makes ``git log`` as large as it likes. Unlike
+:func:`read_path_diff_between`'s cap this is not a caller budget — a commit list
+has one natural size — so the module owns it. At :data:`MAX_COMMIT_LIMIT` it
+still leaves ~1.3KB per line, far beyond the 72 columns git's own convention
+wraps a subject at, so it binds only on history no display or evidence pack
+wanted whole anyway."""
+
 # ASCII unit separator: a field delimiter that cannot appear in the single-line
 # ``%s`` subject (git never emits control characters there), so each formatted
 # line splits cleanly into exactly four fields.
@@ -43,10 +55,17 @@ class CommitLog:
     in which case ``commits`` is empty. An ``available`` log may still be empty
     in the (not expected for a managed repo) case of no matching history; the
     distinction lets the dashboard show "unavailable" rather than "no commits".
+
+    ``truncated`` says :data:`COMMIT_LOG_MAX_BYTES` cut the read, so ``commits``
+    is a newest-first *prefix* of the window rather than all of it. It is the
+    byte-level sibling of the count-level "more commits than the limit" signal a
+    caller derives from ``len(commits)``; an evidence pack must treat either as
+    the same incompleteness (:class:`orch_hub.evaluation.EvidenceGit`).
     """
 
     available: bool
     commits: tuple[CommitInfo, ...]
+    truncated: bool = False
 
 
 def read_commits(
@@ -57,9 +76,12 @@ def read_commits(
 ) -> CommitLog:
     """Return up to ``limit`` recent commits for ``repo``, newest first.
 
-    ``limit`` is clamped to ``1..MAX_COMMIT_LIMIT``. Returns an unavailable log
-    (never raises) when the repo path is not a directory, git is missing, or the
-    command fails, so callers can treat a git problem as a graceful empty state.
+    ``limit`` is clamped to ``1..MAX_COMMIT_LIMIT``, and the capture is bounded
+    by :data:`COMMIT_LOG_MAX_BYTES` on top of that, so history of pathological
+    subjects comes back short (``truncated``) rather than large. Returns an
+    unavailable log (never raises) when the repo path is not a directory, git is
+    missing, or the command fails, so callers can treat a git problem as a
+    graceful empty state.
     """
     return _git_log(repo, count=_clamp_limit(limit), extra=(), runner=runner)
 
@@ -145,9 +167,11 @@ def read_path_diff_between(
     filtering, so it counts commits that actually touched the path — and is
     clamped to ``1..MAX_COMMIT_LIMIT``.
 
-    ``max_bytes`` is required, not defaulted: unlike a commit list, whose size is
-    the format times the commit cap, a patch stream is as large as the repo's
-    content makes it, so every caller must name a bound. It is pushed down to the
+    ``max_bytes`` is required, not defaulted: unlike a commit list, which has one
+    natural size and so carries the module's own :data:`COMMIT_LOG_MAX_BYTES`, a
+    patch stream is as large as the repo content under the pathspec makes it and
+    is worth different budgets to different callers, so each names its own bound
+    (:mod:`orch_hub.ai_snapshot` owns the ``.ai/`` one). It is pushed down to the
     runner (:func:`orch_hub.subprocess_utils.run_command`'s capped mode), which
     retains only that many bytes and drains the rest — the read itself is bounded,
     not just the retained slice. A runner that does not measure (an injected test
@@ -230,6 +254,20 @@ def _git_log(
     unavailable log (never raises) when the repo path is not a directory, git is
     missing, or the command exits non-zero, so a git problem is a graceful empty
     state rather than a caller-visible error.
+
+    The read is bounded at the producer by :data:`COMMIT_LOG_MAX_BYTES`, pushed
+    down to the runner's capped mode exactly as the patch stream's cap is: the
+    commit *count* cap bounds how many lines git prints, not how long one of them
+    is, so a bound applied after capture would bound only what is kept.
+
+    A cut lands at an arbitrary byte offset, so the last retained line may be a
+    fragment — and a fragment cut inside ``%s`` still splits into four fields,
+    which would parse into a :class:`~orch_hub.models.CommitInfo` carrying a
+    silently shortened subject. Dropping that trailing line is therefore the
+    truncation rule: whole commits or none. It costs at most one commit (a cut
+    landing exactly on a newline drops a line that was in fact complete), and a
+    single line longer than the whole cap yields an empty-but-available log,
+    which is the same graceful "no commits to show" state as empty history.
     """
     if not repo.path.is_dir():
         return CommitLog(available=False, commits=())
@@ -237,17 +275,22 @@ def _git_log(
         result = runner(
             ["git", "log", f"-{count}", f"--pretty=format:{_COMMIT_FORMAT}", *extra],
             cwd=repo.path,
+            max_stdout_bytes=COMMIT_LOG_MAX_BYTES,
         )
     except CommandNotFoundError:
         return CommitLog(available=False, commits=())
     if not result.ok:
         return CommitLog(available=False, commits=())
+    text, _size, truncated = _bounded_stdout(result, COMMIT_LOG_MAX_BYTES)
+    lines = text.splitlines()
+    if truncated and lines:
+        lines.pop()
     commits = tuple(
         commit
-        for commit in (_parse_line(line) for line in result.stdout.splitlines())
+        for commit in (_parse_line(line) for line in lines)
         if commit is not None
     )
-    return CommitLog(available=True, commits=commits)
+    return CommitLog(available=True, commits=commits, truncated=truncated)
 
 
 def latest_commit(

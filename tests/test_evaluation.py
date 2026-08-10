@@ -713,6 +713,26 @@ def test_git_window_truncated_at_limit(tmp_path):
     assert pack.git.truncated is True
 
 
+def test_git_window_truncated_by_the_readers_byte_cap(tmp_path):
+    # A byte-cut list is *short* of the count cap, so testing the count alone
+    # would report a partial window as a whole one.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    write_run(config, "20260722T090000Z-alpha-task", repo=repo,
+              started_ts="2026-07-22T09:00:00+00:00")
+    stdout = "\n".join(
+        commit_line("s" * 4000, h=f"{i:040d}") for i in range(EVIDENCE_COMMIT_LIMIT // 2)
+    )
+
+    pack = make_service(config, git_runner=fake_git(rc=0, stdout=stdout)).build_evidence(
+        repo, TASK, evaluation_id="e1"
+    )
+
+    assert len(pack.git.commits) < EVIDENCE_COMMIT_LIMIT // 2
+    assert pack.git.truncated is True
+
+
 # -- `.ai/` snapshot evidence -------------------------------------------------
 
 
