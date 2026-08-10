@@ -1280,6 +1280,102 @@ class ProtocolMetrics:
 
 
 @dataclass(frozen=True)
+class SessionReadRollup:
+    """One session's prefetch-reading facts, as the static report keeps them.
+
+    The deterministic diagnosis behind the task-level
+    ``prefetch_set_read_completeness`` score: a 0.5 aggregate is not actionable
+    without knowing *which* session missed *which* declared doc, and the raw
+    per-session rollup lives in the evidence pack, which a reader of the report
+    alone does not have. Distilled from
+    :class:`orch_hub.session_reads.SessionReads` — the trace and its timing
+    anchors stay in the pack (they are the semantic layer's input, not a
+    deterministic one).
+
+    ``applicable`` is ``True`` only for a session the prefetch instruction
+    reaches that declared a non-empty lazy set, ``False`` when there was nothing
+    to comply with, and ``None`` when the session-time declaration could not be
+    recovered — so applicability itself is unknown. ``assessable`` is whether the
+    reading could be measured at all. ``coverage``/``complete`` are ``None``
+    unless both hold; there is no default-to-zero, because a zero is a claim
+    about the session rather than about the evidence. ``detail`` is why, when
+    either is unclaimed.
+    """
+
+    session_id: str
+    role: str | None
+    kind: str | None
+    applicable: bool | None
+    assessable: bool
+    expected_count: int
+    read_count: int
+    missing: tuple[str, ...]
+    coverage: float | None
+    complete: bool | None
+    undeclared_read_count: int
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "role": self.role,
+            "kind": self.kind,
+            "applicable": self.applicable,
+            "assessable": self.assessable,
+            "expected_count": self.expected_count,
+            "read_count": self.read_count,
+            "missing": list(self.missing),
+            "coverage": self.coverage,
+            "complete": self.complete,
+            "undeclared_read_count": self.undeclared_read_count,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class ReadMetrics:
+    """Task-level rollup of how the task's sessions read the declared memory.
+
+    The deterministic half of the read side (the semantic half judges the
+    ordered trace). ``available`` mirrors
+    :class:`orch_hub.session_reads.ReadBehavior`: whether the pack carries read
+    evidence at all, not whether a read was attempted — a pack built where no
+    transcript store exists and one built for sessions that left none say the
+    same thing.
+
+    The three counts are deliberately separate denominators:
+    ``applicable_count`` is the sessions the measurement is *about*,
+    ``unknown_applicable_count`` those whose applicability could not be
+    established, and ``scored_count`` the applicable ones actually measurable.
+    ``complete_count`` is the numerator. That split is what keeps missing
+    evidence out of the quality score: it lowers the score's *confidence*
+    (``scored_count`` over the candidates) instead of counting as a session that
+    read nothing.
+    """
+
+    available: bool
+    session_count: int
+    applicable_count: int
+    unknown_applicable_count: int
+    scored_count: int
+    complete_count: int
+    sessions: tuple[SessionReadRollup, ...] = ()
+    warnings: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "available": self.available,
+            "session_count": self.session_count,
+            "applicable_count": self.applicable_count,
+            "unknown_applicable_count": self.unknown_applicable_count,
+            "scored_count": self.scored_count,
+            "complete_count": self.complete_count,
+            "sessions": [s.to_dict() for s in self.sessions],
+            "warnings": list(self.warnings),
+        }
+
+
+@dataclass(frozen=True)
 class ScoreComponent:
     """One evidence-backed static score axis, computed deterministically.
 
@@ -1324,8 +1420,13 @@ class StaticMetricsReport:
     top level, kept separate from the per-score quality warnings. ``generated_ts``
     stamps when the report was computed. Task identity (``repo_name``/``task_id``/
     ``target_present``/``target_source``) is carried so the artifact is
-    self-describing without re-reading the pack. No semantic judgment, no model
-    call — every field is a pure function of the evidence pack.
+    self-describing without re-reading the pack. ``reads`` is the memory-read
+    rollup (:class:`ReadMetrics`) the ``prefetch_set_read_completeness`` axis is
+    computed from, and ``schema_version`` is the report-shape version that says
+    which axes a report could carry — an older report predates an axis rather
+    than scoring it badly, so an aggregate across the boundary must not mix them.
+    No semantic judgment, no model call — every field is a pure function of the
+    evidence pack.
     """
 
     evaluation_id: str
@@ -1338,10 +1439,13 @@ class StaticMetricsReport:
     protocol: ProtocolMetrics
     scores: tuple[ScoreComponent, ...] = ()
     warnings: tuple[str, ...] = ()
+    reads: ReadMetrics | None = None
+    schema_version: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "evaluation_id": self.evaluation_id,
+            "schema_version": self.schema_version,
             "generated_ts": self.generated_ts,
             "repo_name": self.repo_name,
             "task_id": self.task_id,
@@ -1351,6 +1455,7 @@ class StaticMetricsReport:
             "warnings": list(self.warnings),
             "runs": self.runs.to_dict(),
             "protocol": self.protocol.to_dict(),
+            "reads": self.reads.to_dict() if self.reads is not None else None,
         }
 
 

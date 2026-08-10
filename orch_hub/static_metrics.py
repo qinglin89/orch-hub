@@ -33,7 +33,9 @@ protocol parser (:func:`_parse_protocol`) via the frontmatter status.
 **Layers.** :meth:`StaticEvaluator.run_metrics` is the run/session/event
 rollup (:class:`~orch_hub.models.RunMetrics`); :meth:`build_report` adds the
 task-file protocol facts (:class:`~orch_hub.models.ProtocolMetrics`, parsed from
-the pack's task content) and the evidence-backed score axes
+the pack's task content), the memory-read rollup
+(:class:`~orch_hub.models.ReadMetrics`, distilled from the pack's per-session
+read behavior) and the evidence-backed score axes
 (:class:`~orch_hub.models.ScoreComponent`), composing a
 :class:`~orch_hub.models.StaticMetricsReport`; :meth:`generate_metrics` builds a
 fresh evidence pack (delegating to :class:`~orch_hub.evaluation.EvaluationService`)
@@ -43,7 +45,12 @@ and persists ``static_metrics.json`` beside its ``evidence.json``.
 and subtracts documented per-issue penalties (the ``_P_*`` constants), flooring
 at ``0.0``; every penalty appends a warning naming the evidence, and an axis with
 no backing evidence reports ``score=None`` with ``confidence=0.0`` rather than a
-misleading ``0.0``. Two knowledge-maintenance signals the scope names are
+misleading ``0.0``. :data:`SCORE_PREFETCH_READS` is the one axis shaped as a
+fraction instead — the per-session fact it aggregates is already binary — and it
+is also where the difference between *bad* and *unmeasured* is priced most
+explicitly: unmeasurable sessions leave the quality denominator entirely and
+lower the axis's confidence, because "no transcript" is not "read nothing".
+Two knowledge-maintenance signals the scope names are
 **not derivable from the evidence pack** and are intentionally omitted (not
 guessed): which files a windowed commit touched (the pack carries commit
 subjects only — diffs/file-lists are deliberately excluded), and whether a
@@ -79,11 +86,13 @@ from .models import (
     EvaluationTarget,
     ManagedRepo,
     ProtocolMetrics,
+    ReadMetrics,
     RunEvent,
     RunMetrics,
     RunRollup,
     ScoreComponent,
     SessionEst,
+    SessionReadRollup,
     SessionSummary,
     StaticMetricsReport,
 )
@@ -137,12 +146,33 @@ STATIC_METRICS_NAME = "static_metrics.json"
 """The persisted static-metrics report, written beside ``evidence.json`` in the
 evaluation's artifact dir (one dir per evaluation)."""
 
+STATIC_SCHEMA_VERSION = "2"
+"""Version of the ``static_metrics.json`` shape, stamped into every report.
+
+The counterpart of :data:`orch_hub.evaluation.EVIDENCE_SCHEMA_VERSION` for this
+layer, and for the same reason: the *score set* is part of the shape, so a batch
+of reports spanning a change to it cannot be aggregated as one population. ``1``
+is the five-axis report (``protocol``, ``reliability``, ``handoff``,
+``estimate``, ``knowledge``); ``2`` adds
+:data:`SCORE_PREFETCH_READS` and the :class:`~orch_hub.models.ReadMetrics`
+rollup it is computed from. A v1 report does not carry a *bad*
+prefetch-reading score, it carries *no* score for an axis that did not exist —
+which an aggregate that mixes the two would read as a difference in quality. A
+persisted report with no ``schema_version`` key is version 1 and predates the
+stamp. Additive so far: consumers read named keys and tolerate absent ones."""
+
 # -- score axes ---------------------------------------------------------------
 SCORE_PROTOCOL = "protocol"
 SCORE_RELIABILITY = "reliability"
 SCORE_HANDOFF = "handoff"
 SCORE_ESTIMATE = "estimate"
 SCORE_KNOWLEDGE = "knowledge"
+SCORE_PREFETCH_READS = "prefetch_set_read_completeness"
+"""Whether the sessions that declared lazy memory docs actually read them — the
+deterministic half of the read side, over
+:class:`orch_hub.session_reads.ReadBehavior`. Deliberately *not* a count of
+reads: more reading is not better, and the axis asks only whether what a session
+itself declared it needed reached its context."""
 
 # -- taskfile protocol vocabulary (mirrors .ai-protocol/meta/taskfile.md) ------
 # Local literals, not imported: the protocol contract lives outside the codebase
@@ -454,6 +484,75 @@ def _count(rollups: Sequence[RunRollup], outcome: str) -> int:
     return sum(1 for r in rollups if r.outcome == outcome)
 
 
+# -- memory-read rollup -------------------------------------------------------
+
+
+def _compute_read_metrics(pack: EvidencePack) -> ReadMetrics:
+    """Distil the pack's per-session read behavior into the L1 rollup (pure).
+
+    Carries over only the deterministic facts: which declared docs a session was
+    expected to read, which it did, and whether that could be measured at all.
+    The ordered trace and its timing anchors stay in the pack — they are evidence
+    for a judgment about *when* and *whether it helped*, which is Layer 2's, and
+    copying them here would imply this layer scores them.
+
+    Total over any pack: one with no ``reads`` section (a pack predating it, or
+    one built where no transcript store exists) yields an unavailable rollup with
+    zero counts, which the score reads as not-assessable rather than as zero
+    compliance.
+    """
+    behavior = pack.reads
+    if behavior is None:
+        return ReadMetrics(
+            available=False,
+            session_count=0,
+            applicable_count=0,
+            unknown_applicable_count=0,
+            scored_count=0,
+            complete_count=0,
+        )
+    sessions = tuple(
+        SessionReadRollup(
+            session_id=s.session_id,
+            role=s.role,
+            kind=s.kind,
+            applicable=s.applicable,
+            assessable=s.assessable,
+            expected_count=len(s.expected),
+            read_count=len(s.read),
+            missing=s.missing,
+            coverage=s.coverage,
+            complete=s.complete,
+            undeclared_read_count=len(s.undeclared_reads),
+            detail=s.detail,
+        )
+        for s in behavior.sessions
+    )
+    scored = tuple(s for s in sessions if _scored(s))
+    return ReadMetrics(
+        available=behavior.available,
+        session_count=len(sessions),
+        applicable_count=sum(1 for s in sessions if s.applicable is True),
+        unknown_applicable_count=sum(1 for s in sessions if s.applicable is None),
+        scored_count=len(scored),
+        complete_count=sum(1 for s in scored if s.complete),
+        sessions=sessions,
+        warnings=tuple(behavior.warnings),
+    )
+
+
+def _scored(session: SessionReadRollup) -> bool:
+    """Whether this session contributes to the prefetch-reading *score*.
+
+    All three clauses are load-bearing and none implies another: the session must
+    be one the measurement is about (``applicable``), its reading must have been
+    measurable (``assessable``), and the verdict must actually be present — the
+    last defensively, since an unclaimed verdict is exactly what a degraded
+    session reports.
+    """
+    return session.applicable is True and session.assessable and session.complete is not None
+
+
 # -- report assembly ----------------------------------------------------------
 
 
@@ -463,12 +562,14 @@ def _build_report(pack: EvidencePack, generated_ts: str | None) -> StaticMetrics
     ``pack.evaluation_id``."""
     runs = _compute_run_metrics(pack)
     protocol = _parse_protocol(pack.target)
+    reads = _compute_read_metrics(pack)
     scores = (
         _score_protocol(protocol),
         _score_reliability(runs),
         _score_handoff(protocol),
         _score_estimate(protocol),
         _score_knowledge(protocol, runs),
+        _score_prefetch_reads(reads),
     )
     # Top-level warnings are the *evidence-degradation* signals (missing/corrupt
     # run artifacts), kept distinct from each axis's quality warnings.
@@ -486,6 +587,8 @@ def _build_report(pack: EvidencePack, generated_ts: str | None) -> StaticMetrics
         protocol=protocol,
         scores=scores,
         warnings=evidence_warnings,
+        reads=reads,
+        schema_version=STATIC_SCHEMA_VERSION,
     )
 
 
@@ -1099,6 +1202,93 @@ def _score_estimate(pm: ProtocolMetrics) -> ScoreComponent:
             f"{pm.remediation_count} remediation round(s) (changes-requested rework)"
         )
     return ScoreComponent(SCORE_ESTIMATE, _clamp01(score), 1.0, tuple(warnings))
+
+
+def _score_prefetch_reads(rdm: ReadMetrics) -> ScoreComponent:
+    """Fraction of measurable sessions that read their whole declared prefetch set.
+
+    The one axis whose shape is a fraction rather than ``1 - penalties``, because
+    the underlying fact is already binary per session (the ruling: a declared doc
+    was read, anywhere in the session, or it was not) and a per-issue penalty
+    would make two sessions with one miss each indistinguishable from one session
+    with two.
+
+    Evidence availability is kept strictly out of the score and put in the
+    confidence instead — the task's rule, and the reason the two denominators
+    differ. A session whose transcript is gone or whose evidence had a hole is
+    *not* a session that read nothing; scoring it as one would manufacture the
+    penalizing default this measurement exists to avoid. So the quality
+    denominator is the sessions actually measured, while confidence is what
+    fraction of the candidates those were — a task measured in one session out of
+    four reports its one result honestly, at 0.25 confidence.
+
+    Candidates are sessions the instruction plausibly applied to: known-applicable
+    plus unknown-applicable. A session known *not* applicable (a role the
+    instruction never reaches, or one that declared no lazy doc) is in neither
+    denominator: there was nothing to comply with, and counting it either way
+    would be an opinion about a session with no obligation.
+
+    **Known limit, measured rather than approximated.** A task may declare a doc
+    that did not exist when the session ran, which no session could have read;
+    this layer cannot tell that case from a genuine miss, because existence *at
+    session time* is not something either the task file or the pack's
+    (present-tense) snapshot records. The available fix is worse than the gap:
+    excusing a declared doc the snapshot no longer shows would forgive every real
+    miss of a doc later split or renamed — the common case in a maintained
+    ``.ai/``, and the direction that invents compliance. Measured over the whole
+    archived corpus, **0 of 381** missed declared docs were paths with no history
+    in their repo at all, so every miss on record is a miss of a readable
+    document. The semantic layer, which does see the ``.ai/`` patch stream, is
+    told to check it before any missed-retrieval finding.
+    """
+    if not rdm.available:
+        return ScoreComponent(
+            SCORE_PREFETCH_READS,
+            None,
+            0.0,
+            ("no session read evidence in the pack; prefetch reading not assessable",),
+        )
+    candidates = rdm.applicable_count + rdm.unknown_applicable_count
+    if candidates == 0:
+        return ScoreComponent(
+            SCORE_PREFETCH_READS,
+            None,
+            0.0,
+            ("no session declared a lazy prefetch set; prefetch reading not"
+             " applicable to this task",),
+        )
+    if rdm.scored_count == 0:
+        return ScoreComponent(
+            SCORE_PREFETCH_READS,
+            None,
+            0.0,
+            (f"{candidates} session(s) could have been measured but none was"
+             " (no usable transcript evidence); prefetch reading not assessable",),
+        )
+    warnings: list[str] = []
+    incomplete = rdm.scored_count - rdm.complete_count
+    if incomplete:
+        warnings.append(
+            f"{incomplete} of {rdm.scored_count} measured session(s) did not read"
+            " their whole declared prefetch set: "
+            + "; ".join(
+                f"{s.session_id} missed {', '.join(s.missing)}"
+                for s in rdm.sessions
+                if _scored(s) and not s.complete
+            )
+        )
+    unmeasured = candidates - rdm.scored_count
+    if unmeasured:
+        warnings.append(
+            f"{unmeasured} of {candidates} applicable session(s) could not be"
+            " measured; scored on the remainder with lowered confidence"
+        )
+    return ScoreComponent(
+        SCORE_PREFETCH_READS,
+        _clamp01(rdm.complete_count / rdm.scored_count),
+        _clamp01(rdm.scored_count / candidates),
+        tuple(warnings),
+    )
 
 
 def _score_knowledge(pm: ProtocolMetrics, rm: RunMetrics) -> ScoreComponent:

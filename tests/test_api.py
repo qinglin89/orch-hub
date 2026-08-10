@@ -3365,9 +3365,10 @@ def test_generate_metrics_then_list_and_fetch(tmp_path, monkeypatch):
     assert report["evaluation_id"] == eval_id
     assert report["task_id"] == RUN_TASK_ID
     assert report["target_source"] == "active"
-    # The five deterministic score axes are present in the report.
+    # The deterministic score axes are present in the report.
     assert {s["name"] for s in report["scores"]} == {
-        "protocol", "reliability", "handoff", "estimate", "knowledge"
+        "protocol", "reliability", "handoff", "estimate", "knowledge",
+        "prefetch_set_read_completeness",
     }
 
     listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}").json()

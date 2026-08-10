@@ -85,6 +85,7 @@ from .models import (
     StaticMetricsReport,
 )
 from .runs import _orchestrator_env
+from .session_reads import MemoryRead, ReadBehavior, SessionReads
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 
 _log = logging.getLogger(__name__)
@@ -100,10 +101,14 @@ SEMANTIC_REPORT_MD_NAME = "report.md"
 and the download affordance the dashboard layer surfaces). Written atomically in
 the same step as the JSON — a dir with the JSON has this too."""
 
-SEMANTIC_SCHEMA_VERSION = "1"
+SEMANTIC_SCHEMA_VERSION = "2"
 """Version of the semantic prompt/report contract. Stamped onto every report's
 :class:`~orch_hub.models.SemanticEvaluatorInfo` so a rerun under a newer contract
-is comparable rather than silently conflated with an older one."""
+is comparable rather than silently conflated with an older one. ``2`` adds the
+session read-behavior evidence and the :data:`SEMANTIC_DIMENSIONS` entry that
+judges it, and grounds ``rediscovery_risk`` in the same evidence — a v1 report's
+``rediscovery_risk`` was inferred from the task file alone, so the two versions
+are not one population on that axis either."""
 
 SEMANTIC_BACKEND_CLAUDE = "claude-cli"
 """``SemanticEvaluatorInfo.backend`` value for the concrete Claude CLI backend."""
@@ -122,6 +127,7 @@ severity axis stays a small, stable, sortable vocabulary."""
 SEMANTIC_DIMENSIONS = (
     "knowledge_signal_density",
     "ai_freshness_utility",
+    "retrieval_effectiveness",
     "handoff_completeness",
     "decision_trace",
     "acceptance_coverage",
@@ -131,7 +137,16 @@ SEMANTIC_DIMENSIONS = (
 )
 """The semantic dimensions the scope names, offered to the model as the
 recommended ``dimension`` vocabulary for scores/findings. Not enforced on model
-output (a relevant extra dimension is allowed) — just the shared axis language."""
+output (a relevant extra dimension is allowed) — just the shared axis language.
+
+``retrieval_effectiveness`` is the read side's semantic half and is deliberately
+its own axis rather than a clause of ``knowledge_signal_density``: that one asks
+whether the memory the task *left behind* is worth reading, this one whether the
+memory that already existed was actually *used*, and a project can score well on
+either while failing the other. The deterministic half
+(:data:`orch_hub.static_metrics.SCORE_PREFETCH_READS`) answers only *whether* a
+declared doc was read; when, whether it helped, and whether an undeclared need
+went unmet are judgments over the ordered trace, which is why they are here."""
 
 # -- confidence degradation for thin evidence ---------------------------------
 # The scope's robustness rule: missing/partial evidence must *lower confidence*,
@@ -153,6 +168,15 @@ marked unassessable in the prompt and confidence is reduced. A distinct signal f
 the diffs above (current state vs. what changed), and independently degradable:
 a git failure loses the patches while the docs read fine. Does not apply when
 :attr:`SemanticEvidence.ai_snippets_available` is True."""
+_PENALTY_NO_READS = 0.10
+"""No session read-behavior evidence — no transcript was located or parsed for any
+of the task's sessions. ``retrieval_effectiveness`` then has nothing to judge and
+``rediscovery_risk`` falls back to inference from the task file, so the prompt
+marks the first unassessable and confidence drops. Priced like the ``.ai/`` parts
+above and for the same reason: each gates a judgment the evidence can otherwise
+ground. Does not apply when :attr:`SemanticEvidence.reads_available` is True —
+including a section that carries only *degraded* sessions, whose per-session
+reasons are themselves the evidence that the reading could not be measured."""
 _PENALTY_PER_WARNING = 0.05
 """Per evidence-degradation warning: a missing/corrupt run artifact, or a
 *partially* degraded ``.ai/`` snapshot (a doc truncated, unreadable, or dropped
@@ -211,12 +235,22 @@ class SemanticEvidence:
     rather than from whether a read was attempted — so the evaluator gates its
     ``.ai/`` judgments on exactly the facts a reader of the persisted pack sees.
 
+    ``reads`` is the same view from the other side: how the task's own sessions
+    *read* that memory (:class:`~orch_hub.session_reads.ReadBehavior`), as one
+    ordered trace per session with its timing anchors. It is what makes
+    ``retrieval_effectiveness`` judgeable and what grounds ``rediscovery_risk`` in
+    observed behavior instead of inference from the task file, and
+    ``reads_available`` gates both on what the section actually carries. It is a
+    rollup, never a transcript: paths, order, and counts, so the prompt gains no
+    conversation text.
+
     They are carried whole here on purpose: the pack is producer-bounded
     (:mod:`orch_hub.ai_snapshot` caps every doc, the doc total, and the patch
-    stream at their reads), so a second cap in this layer would either be dead
-    code or silently contradict the pack — the same reason ``task_file`` is
-    carried whole. ``git_subjects`` keeps its defensive second cap only because a
-    subject list is cheap to re-bound.
+    stream at their reads; :mod:`orch_hub.session_reads` caps sessions and trace
+    events at its scan), so a second cap in this layer would either be dead code
+    or silently contradict the pack — the same reason ``task_file`` is carried
+    whole. ``git_subjects`` keeps its defensive second cap only because a subject
+    list is cheap to re-bound.
 
     What is deliberately **absent** is recorded in ``omissions``, which is what
     makes bounded construction auditable rather than silent: the pack's bounded
@@ -248,10 +282,22 @@ class SemanticEvidence:
     ai_docs: tuple[AiDoc, ...] = ()
     ai_diff: AiDiff | None = None
     evidence_schema_version: str | None = None
+    reads: ReadBehavior | None = None
 
     @property
     def static_metrics_available(self) -> bool:
         return self.static_metrics is not None
+
+    @property
+    def reads_available(self) -> bool:
+        """Whether the read-behavior section carries anything to judge.
+
+        Derived rather than stored, unlike its ``.ai/`` neighbours, because the
+        section already answers this question about itself
+        (:class:`~orch_hub.session_reads.ReadBehavior`: at least one transcript
+        located and parsed) and a second copy could only ever disagree with it.
+        """
+        return self.reads is not None and self.reads.available
 
     def confidence_penalty(self) -> float:
         """Degradation penalty in ``[0, _PENALTY_CAP]`` from missing/partial input.
@@ -268,6 +314,8 @@ class SemanticEvidence:
             penalty += _PENALTY_NO_AI_DIFFS
         if not self.ai_snippets_available:
             penalty += _PENALTY_NO_AI_SNIPPETS
+        if not self.reads_available:
+            penalty += _PENALTY_NO_READS
         penalty += min(_PENALTY_WARNING_CAP, len(self.evidence_warnings) * _PENALTY_PER_WARNING)
         return min(_PENALTY_CAP, penalty)
 
@@ -286,6 +334,8 @@ class SemanticEvidence:
             "ai_snippets_available": self.ai_snippets_available,
             "ai_docs": [doc.to_dict() for doc in self.ai_docs],
             "ai_diff": self.ai_diff.to_dict() if self.ai_diff is not None else None,
+            "reads_available": self.reads_available,
+            "reads": self.reads.to_dict() if self.reads is not None else None,
             "evidence_schema_version": self.evidence_schema_version,
             "omissions": list(self.omissions),
         }
@@ -320,6 +370,9 @@ def build_semantic_evidence(
     ai_diffs_available = ai is not None and ai.diffs_available
     ai_docs = ai.docs if ai is not None else ()
     ai_diff = ai.diff if ai is not None else None
+
+    reads = pack.reads
+    reads_available = reads is not None and reads.available
 
     evidence_warnings = tuple(pack.warnings) + tuple(
         w for run in pack.runs for w in run.warnings
@@ -359,6 +412,15 @@ def build_semantic_evidence(
             f" ({_ai_snippets_reason(ai)}); the ai_freshness_utility dimension is"
             " unassessable from this evidence and is marked so in the prompt"
         )
+    if not reads_available:
+        # Same treatment as the ``.ai/`` parts: the dimension it grounds is marked
+        # unassessable in the prompt rather than judged from nothing, and the gap
+        # is a recorded fact instead of a silent absence.
+        omissions.append(
+            "session .ai/ read behavior unavailable"
+            f" ({_reads_reason(reads)}); retrieval_effectiveness is unassessable"
+            " from this evidence and rediscovery_risk rests on the task file alone"
+        )
     if static_report is None:
         omissions.append("static metrics unavailable as input")
     if not pack.target.present:
@@ -379,6 +441,7 @@ def build_semantic_evidence(
         omissions=tuple(omissions),
         ai_docs=ai_docs,
         ai_diff=ai_diff,
+        reads=reads,
         evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
     )
 
@@ -418,6 +481,19 @@ def _ai_snippets_reason(ai: AiSnapshot | None) -> str:
     if ai.present:
         return "the .ai/ snapshot carried no readable document content"
     return "no .ai/ snapshot in the evidence pack"
+
+
+def _reads_reason(reads: ReadBehavior | None) -> str:
+    """Why no session read behavior is available, for the omission note.
+
+    The reader's own ``detail`` is preferred over any restatement here. Its
+    ordinary case is not a failure at all: the sessions ran on a backend that
+    leaves no transcript in this store, which the note must say plainly so the
+    absence does not read as a project defect.
+    """
+    if reads is None:
+        return "evidence pack predates the session read-behavior section"
+    return reads.detail or "no session transcript was located or parsed"
 
 
 # -- prompt contract ----------------------------------------------------------
@@ -461,6 +537,8 @@ def build_prompt(evidence: SemanticEvidence) -> str:
     ai_docs_block = _ai_docs_block(evidence.ai_docs)
     ai_diff_block = _ai_diff_block(evidence.ai_diff)
     ai_bounds = _ai_bounds_paragraph(evidence)
+    reads_block = _reads_block(evidence.reads)
+    reads_guidance = _reads_guidance_paragraph(evidence)
 
     return f"""You are a READ-ONLY task-quality evaluator for an AI-coding project. \
 You are judging ONE completed task's process and knowledge quality from the bounded \
@@ -474,7 +552,8 @@ scores and findings; you may add another dimension if genuinely relevant):
 {dimensions_block}
 
 Consider, per dimension: knowledge signal density and whether `.ai/` looks \
-fresh/useful, session-log handoff completeness, the decision trace (were choices \
+fresh/useful, whether the sessions actually retrieved the memory they needed and \
+in time, session-log handoff completeness, the decision trace (were choices \
 and rejected alternatives recorded), acceptance coverage, scope/slice fit versus \
 the estimate, rediscovery risk (what a future session would have to re-derive), \
 and protocol soft-failures (things technically legal but weak).
@@ -483,6 +562,8 @@ EVIDENCE BOUNDS: raw logs are excluded and some inputs may be unavailable — tr
 the omissions as reduced certainty, NOT as defects. Lower your confidence for thin \
 evidence; do not invent findings you cannot support from the evidence. \
 {ai_bounds}
+
+{reads_guidance}
 
 == TASK FILE ({evidence.task_id}, source={evidence.target_source}) ==
 {task_block}
@@ -498,6 +579,9 @@ evidence; do not invent findings you cannot support from the evidence. \
 
 == `.ai/` CHANGES IN THE TASK'S RUN WINDOW (patches scoped to `.ai/`; no code diffs) ==
 {ai_diff_block}
+
+== SESSION `.ai/` READ BEHAVIOR (what each session declared it needed, and what it read) ==
+{reads_block}
 
 == EVIDENCE OMISSIONS (what you are NOT seeing, and why) ==
 {omissions_block}
@@ -562,6 +646,153 @@ def _ai_bounds_paragraph(evidence: SemanticEvidence) -> str:
         " unreadable, or omitted for budget is a gap in THIS evidence, not a defect"
         " of the project."
     )
+
+
+def _reads_guidance_paragraph(evidence: SemanticEvidence) -> str:
+    """How to read the read-behavior evidence — or that there is none.
+
+    The instruction has to be explicit about four asymmetries, because each has an
+    obvious wrong reading that would turn a measurement into a penalty: reading
+    nothing beyond the declared set is not a defect, a document that did not exist
+    yet cannot have been missed, an unsettled read is not evidence of anything,
+    and an unobserved session is not an idle one. The deterministic layer already
+    answers *whether* a declared doc was read; what is asked here is only what an
+    ordering can support.
+    """
+    if not evidence.reads_available:
+        return (
+            "SESSION READ BEHAVIOR: no session's `.ai/` reading could be observed"
+            " for this task, so `retrieval_effectiveness` is unassessable from this"
+            " evidence — score it null (or very low confidence) rather than"
+            " guessing, and do not treat the absence as evidence that memory went"
+            " unread. Judge `rediscovery_risk` from the task file and `.ai/`"
+            " snapshot alone, and say so in its rationale."
+        )
+    return (
+        "SESSION READ BEHAVIOR: the section below records, per session, which lazy"
+        " `.ai/` documents the task declared it needed (`prefetch:`) and every"
+        " `.ai/` document that actually entered that session's context, in order,"
+        " with the work already done at that point. Use it for"
+        " `retrieval_effectiveness` and to ground `rediscovery_risk` in what the"
+        " sessions did rather than in what the task file claims. Ask: did a"
+        " knowledge need arise, did relevant memory exist at the time, was it"
+        " consulted before the work re-derived it or only afterwards, and does the"
+        " later work show that the document was actually useful. Four rules bound"
+        " that judgment: (1) reading nothing beyond the declared set is NOT a"
+        " defect — it is the expected case when the declared set was sufficient and"
+        " no new need arose, and read *count* is not quality; (2) a document may"
+        " have been created or rewritten after a session ran, so a snapshot"
+        " document is not evidence that an earlier session could have read it —"
+        " check the `.ai/` patches before any missed-retrieval finding; (3) a read"
+        " marked `write-order unsettled` is not a settled retrieval and cannot"
+        " support a positive judgment; (4) a session marked not-measured is missing"
+        " evidence, never bad behavior — exclude it and lower confidence."
+    )
+
+
+def _reads_block(reads: ReadBehavior | None) -> str:
+    """Render the per-session read behavior as compact ordered text.
+
+    JSON would carry the same facts, but the trace is the one input the model has
+    to reason about *positionally* (this read, against that much work already
+    done), and a line per event in order is what makes that legible. Only the
+    rollup's own fields appear — paths, order, counts — so nothing here can leak
+    conversation text the pack itself does not carry.
+    """
+    if reads is None or not reads.available:
+        detail = (reads.detail if reads is not None else None) or "not carried by this evidence"
+        return f"(no session read behavior available: {detail})"
+    sections = [_session_reads_section(s) for s in reads.sessions]
+    if reads.warnings:
+        sections.append(
+            "NOTE — read-evidence degradation:\n"
+            + "\n".join(f"- {w}" for w in reads.warnings)
+        )
+    return "\n\n".join(sections) or "(the read-behavior section carried no sessions)"
+
+
+def _session_reads_section(session: SessionReads) -> str:
+    """One session: its declared set, its verdict, and its ordered reads."""
+    head = f"--- session {session.session_id} (role={session.role or 'unknown'}"
+    if session.kind:
+        head += f", {session.kind}"
+    head += ") ---"
+    if not session.available:
+        # Nothing below was observed for this session, and its zero counts are
+        # unknowns rather than measurements — rendering them as facts would invite
+        # exactly the "this session read nothing" reading the task forbids.
+        why = session.detail or "no transcript located or parsed"
+        expected = (
+            " (the prefetch instruction does not reach this role, so nothing was"
+            " expected of it)"
+            if session.applicable is False
+            else ""
+        )
+        return f"{head}\nREAD BEHAVIOR NOT OBSERVED: {why}{expected}"
+    lines = [head]
+    if session.expected:
+        lines.append(f"declared prefetch: {', '.join(session.expected)}")
+        if session.complete is None:
+            lines.append(
+                "prefetch reading NOT MEASURED: "
+                + (session.detail or "evidence insufficient")
+            )
+        else:
+            lines.append(
+                f"read {len(session.read)}/{len(session.expected)}"
+                + (f"; missing: {', '.join(session.missing)}" if session.missing else "")
+                + f" (complete={str(session.complete).lower()})"
+            )
+    elif session.applicable is False:
+        lines.append("declared prefetch: none (nothing was expected of this session)")
+    else:
+        lines.append(
+            "declared prefetch: NOT RECOVERABLE — "
+            + (session.detail or "the session-time declaration could not be read")
+        )
+    a = session.activity
+    lines.append(
+        f"session totals: code_reads={a.code_reads} searches={a.searches}"
+        f" edits={a.edits} task_edits={a.task_edits} shell={a.shell}"
+        + ("; close-out reached (later reads excluded)" if session.closeout_seen else "")
+    )
+    if session.trace:
+        lines.append("`.ai/` reads, in order (work already done at each):")
+        lines.extend(f"  {_read_line(r)}" for r in session.trace)
+        if session.trace_truncated:
+            lines.append("  (trace truncated at the reader's cap — later reads not listed)")
+    elif session.available:
+        lines.append("`.ai/` reads: none observed in this session")
+    if session.writeback_excluded:
+        lines.append(
+            "read back after this session wrote it (not counted as consultation): "
+            + ", ".join(session.writeback_excluded)
+        )
+    if session.skipped_rows or session.truncated:
+        lines.append(
+            f"evidence gaps: {session.skipped_rows} unreadable row(s)"
+            + ("; truncated tail" if session.truncated else "")
+        )
+    return "\n".join(lines)
+
+
+def _read_line(read: MemoryRead) -> str:
+    """One traced read: what, when, by whom, and against how much prior work."""
+    if read.declared_prefetch is None:
+        declared = "declared?"
+    else:
+        declared = "declared" if read.declared_prefetch else "undeclared"
+    b = read.before
+    line = (
+        f"#{read.order} {read.path} [{declared}] {read.method}/{read.actor}"
+        f" — before: code_reads={b.code_reads} searches={b.searches}"
+        f" edits={b.edits} task_edits={b.task_edits} shell={b.shell}"
+    )
+    if read.first_write is not None:
+        line += f"; this session later wrote it at #{read.first_write}"
+    if read.write_uncertain:
+        line += "; WRITE-ORDER UNSETTLED"
+    return line
 
 
 def _ai_docs_block(docs: Sequence[AiDoc]) -> str:

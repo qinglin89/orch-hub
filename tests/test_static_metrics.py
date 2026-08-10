@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -29,6 +30,7 @@ from orch_hub.evaluation import (
 )
 from orch_hub.history import KIND_ANSWER_RECORDED, KIND_RUN_STARTED, KIND_STOP_REQUESTED
 from orch_hub.logs import LogSnapshot
+from orch_hub.session_reads import MemoryRead, PrefetchDoc, ReadBehavior, SessionReads
 from orch_hub.models import (
     EvaluationTarget,
     ManagedRepo,
@@ -52,10 +54,12 @@ from orch_hub.static_metrics import (
     SCORE_ESTIMATE,
     SCORE_HANDOFF,
     SCORE_KNOWLEDGE,
+    SCORE_PREFETCH_READS,
     SCORE_PROTOCOL,
     SCORE_RELIABILITY,
     SESSION_KIND,
     STATIC_METRICS_NAME,
+    STATIC_SCHEMA_VERSION,
     StaticEvaluator,
 )
 from orch_hub.subprocess_utils import CommandResult
@@ -691,9 +695,16 @@ def test_clean_completed_task_scores_all_perfect():
     )
 
     assert {s.name for s in report.scores} == {
-        SCORE_PROTOCOL, SCORE_RELIABILITY, SCORE_HANDOFF, SCORE_ESTIMATE, SCORE_KNOWLEDGE
+        SCORE_PROTOCOL, SCORE_RELIABILITY, SCORE_HANDOFF, SCORE_ESTIMATE,
+        SCORE_KNOWLEDGE, SCORE_PREFETCH_READS,
     }
+    # The task-file/run axes are clean. Prefetch reading is a different kind of
+    # axis: this pack carries no read evidence, so it is *not assessable* rather
+    # than perfect — which is the distinction the axis exists to keep.
     for s in report.scores:
+        if s.name == SCORE_PREFETCH_READS:
+            assert s.score is None and s.confidence == 0.0 and s.warnings
+            continue
         assert s.score == 1.0, s.name
         assert s.confidence == 1.0 and s.warnings == ()
 
@@ -1138,6 +1149,198 @@ def test_knowledge_flags_repeated_evidence_warnings():
     assert any("missing-evidence" in w for w in sk.warnings)
 
 
+# -- prefetch-set read completeness -------------------------------------------
+# The read side's deterministic axis. Its whole point is the difference between
+# a session that did not read what it declared and one whose reading could not
+# be measured, so most of these fix the score and vary only the evidence.
+
+
+_AUTO = object()
+"""Sentinel: derive `applicable` rather than state it. Distinct from `None`,
+which is the reader's real "applicability unknown" value."""
+
+
+def session_reads(
+    sid,
+    *,
+    role=DEV_ROLE,
+    expected=(),
+    read=(),
+    assessable=True,
+    applicable=_AUTO,
+    detail=None,
+    undeclared=(),
+):
+    """One `SessionReads` rollup as the reader would emit it.
+
+    `applicable` defaults to the reader's own rule (a dev session that declared a
+    non-empty set) so a test only states it when contradicting that.
+    """
+    docs = tuple(PrefetchDoc(path=p, read=p in read) for p in expected)
+    if applicable is _AUTO:
+        applicable = bool(expected) and role == DEV_ROLE
+    found = sum(1 for d in docs if d.read)
+    scored = assessable and applicable
+    return SessionReads(
+        session_id=sid,
+        role=role,
+        kind=SESSION_KIND,
+        available=True,
+        assessable=assessable,
+        applicable=applicable,
+        expected=tuple(expected),
+        docs=docs,
+        coverage=(found / len(expected)) if scored else None,
+        complete=(found == len(expected)) if scored else None,
+        trace=tuple(
+            MemoryRead(path=p, order=i, actor="root", method="read",
+                       declared_prefetch=p in expected)
+            for i, p in enumerate(tuple(read) + tuple(undeclared))
+        ),
+        detail=detail,
+    )
+
+
+def reads_report(*sessions, available=True, warnings=()):
+    p = pack(tgt=mk_target(COMPLETED, source=SOURCE_ARCHIVED))
+    p = replace(
+        p,
+        reads=ReadBehavior(
+            available=available, sessions=tuple(sessions), warnings=tuple(warnings)
+        ),
+    )
+    return evaluator().build_report(p)
+
+
+A, B, C = ".ai/modules/core.md", ".ai/glossary.md", ".ai/features/index.md"
+
+
+def test_prefetch_read_score_is_the_fraction_of_complete_sessions():
+    # Four measured sessions, two of which read their whole declared set. The
+    # score is that fraction — not the fraction of *documents* read, which would
+    # let one thorough session cover for two that read nothing.
+    report = reads_report(
+        session_reads("s1", expected=(A, B), read=(A, B)),
+        session_reads("s2", expected=(A, B), read=(A,)),
+        session_reads("s3", expected=(A,), read=()),
+        session_reads("s4", expected=(A, B, C), read=(A, B, C)),
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score == 0.5 and sc.confidence == 1.0
+    assert report.reads.scored_count == 4 and report.reads.complete_count == 2
+    # The warning names which session missed which doc — a bare 0.5 is not
+    # actionable.
+    assert any("s2 missed .ai/glossary.md" in w for w in sc.warnings)
+    assert any("s3 missed .ai/modules/core.md" in w for w in sc.warnings)
+
+
+def test_prefetch_read_rollup_keeps_per_session_coverage():
+    report = reads_report(
+        session_reads("s1", expected=(A, B), read=(A, B), undeclared=(C,)),
+        session_reads("s2", expected=(A, B, C, ".ai/map.md"), read=(A,)),
+    )
+    by_id = {s.session_id: s for s in report.reads.sessions}
+
+    assert by_id["s1"].coverage == 1.0 and by_id["s1"].complete is True
+    assert by_id["s1"].undeclared_read_count == 1
+    assert by_id["s2"].coverage == 0.25 and by_id["s2"].complete is False
+    assert by_id["s2"].missing == (B, C, ".ai/map.md")
+    assert by_id["s2"].expected_count == 4 and by_id["s2"].read_count == 1
+    # The ordered trace and its timing anchors are Layer 2 evidence and stay in
+    # the pack; the deterministic report must not imply it scored them.
+    assert "trace" not in json.dumps(report.reads.to_dict())
+
+
+def test_unmeasurable_sessions_lower_confidence_not_the_score():
+    # One session read its whole set; a second could not be measured at all. The
+    # measured result stands, at half confidence — the unmeasured session must
+    # not read as one that ignored its memory.
+    report = reads_report(
+        session_reads("s1", expected=(A, B), read=(A, B)),
+        session_reads("s2", expected=(), assessable=False, applicable=None,
+                      detail="no session transcript found"),
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score == 1.0 and sc.confidence == 0.5
+    assert report.reads.scored_count == 1 and report.reads.unknown_applicable_count == 1
+    assert any("could not be measured" in w for w in sc.warnings)
+
+
+def test_sessions_with_nothing_to_comply_with_are_in_neither_denominator():
+    # A review session (the instruction never reaches it) and a dev session that
+    # declared no lazy doc: both have no obligation, so neither the score nor its
+    # confidence may express an opinion about them.
+    report = reads_report(
+        session_reads("s1", expected=(A,), read=(A,)),
+        session_reads("s2", role=REVIEW_ROLE, expected=(), applicable=False),
+        session_reads("s3", expected=(), applicable=False),
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score == 1.0 and sc.confidence == 1.0
+    assert report.reads.session_count == 3 and report.reads.applicable_count == 1
+
+
+def test_prefetch_read_axis_unassessable_without_read_evidence():
+    # No transcript store at all: the axis reports "not assessable", never 0.0.
+    report = reads_report(available=False)
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score is None and sc.confidence == 0.0
+    assert any("not assessable" in w for w in sc.warnings)
+
+
+def test_prefetch_read_axis_not_applicable_when_no_session_declared_a_set():
+    report = reads_report(
+        session_reads("s1", role=REVIEW_ROLE, expected=(), applicable=False),
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score is None and sc.confidence == 0.0
+    assert any("not applicable" in w for w in sc.warnings)
+
+
+def test_prefetch_read_axis_unassessable_when_no_candidate_was_measured():
+    # Every candidate degraded: there is a question to answer here, unlike the
+    # case above, and the honest answer is that the evidence could not answer it.
+    report = reads_report(
+        session_reads("s1", expected=(A,), assessable=False,
+                      detail="evidence incomplete (2 unreadable row(s))"),
+        session_reads("s2", expected=(), assessable=False, applicable=None,
+                      detail="session did not read its task file"),
+    )
+    sc = score(report, SCORE_PREFETCH_READS)
+
+    assert sc.score is None and sc.confidence == 0.0
+    assert report.reads.scored_count == 0
+    assert any("none was" in w for w in sc.warnings)
+
+
+def test_read_axis_does_not_reward_reading_more_than_declared():
+    # Two sessions, both complete; one also consulted three undeclared docs. Read
+    # count is not quality, so the axis cannot tell them apart.
+    lean = reads_report(session_reads("s1", expected=(A,), read=(A,)))
+    eager = reads_report(
+        session_reads("s1", expected=(A,), read=(A,), undeclared=(B, C, ".ai/map.md"))
+    )
+    assert score(lean, SCORE_PREFETCH_READS) == score(eager, SCORE_PREFETCH_READS)
+
+
+def test_read_section_warnings_travel_into_the_rollup():
+    report = reads_report(
+        session_reads("s1", expected=(A,), read=(A,)),
+        warnings=["read behavior: session s2: no session transcript found"],
+    )
+    assert report.reads.warnings == (
+        "read behavior: session s2: no session transcript found",
+    )
+    # ...but they are the read section's own degradation notes, not the pack's
+    # evidence-degradation list, which stays what it was.
+    assert report.warnings == ()
+
+
 # -- absent task content: report still built ----------------------------------
 
 
@@ -1170,11 +1373,23 @@ def test_report_ties_to_pack_and_serializes():
     data = report.to_dict()
     assert json.loads(json.dumps(data)) == data  # deterministic, no exotic types
     assert data["evaluation_id"] == "e1"
+    assert data["schema_version"] == STATIC_SCHEMA_VERSION
     assert {s["name"] for s in data["scores"]} == {
-        SCORE_PROTOCOL, SCORE_RELIABILITY, SCORE_HANDOFF, SCORE_ESTIMATE, SCORE_KNOWLEDGE
+        SCORE_PROTOCOL, SCORE_RELIABILITY, SCORE_HANDOFF, SCORE_ESTIMATE,
+        SCORE_KNOWLEDGE, SCORE_PREFETCH_READS,
     }
     assert data["runs"]["run_count"] == 1
     assert data["protocol"]["entry_count"] == 4
+    assert data["reads"] == {
+        "available": False,
+        "session_count": 0,
+        "applicable_count": 0,
+        "unknown_applicable_count": 0,
+        "scored_count": 0,
+        "complete_count": 0,
+        "sessions": [],
+        "warnings": [],
+    }
 
 
 def test_top_level_warnings_are_evidence_degradation_only():
@@ -1269,8 +1484,15 @@ def test_generate_metrics_persists_report_beside_evidence(tmp_path):
     assert persisted["evaluation_id"] == report.evaluation_id
     assert persisted["task_id"] == TASK and persisted["target_source"] == SOURCE_ARCHIVED
     assert persisted["runs"]["run_count"] == 1 and persisted["runs"]["clean_count"] == 1
-    # The archived completed task scores clean across every axis.
-    assert all(s["score"] == 1.0 for s in persisted["scores"])
+    # The archived completed task scores clean across every axis it has evidence
+    # for; there is no transcript store under this tmp_path, so the read axis is
+    # unassessable rather than zero.
+    assert all(
+        s["score"] == 1.0
+        for s in persisted["scores"]
+        if s["name"] != SCORE_PREFETCH_READS
+    )
+    assert persisted["reads"]["available"] is False
 
 
 def test_generate_metrics_cleans_up_dir_on_write_failure(tmp_path, monkeypatch):

@@ -3282,7 +3282,7 @@
   const evalSemanticJobPath = (repo, taskId) =>
     evalListPath(repo, taskId) + "/semantic/job";
 
-  // Human labels for the five deterministic score axes (machine keys from the
+  // Human labels for the deterministic score axes (machine keys from the
   // report); an unknown key passes through so a new axis still renders.
   const SCORE_LABELS = {
     protocol: "Protocol",
@@ -3290,6 +3290,7 @@
     handoff: "Handoff",
     estimate: "Estimate",
     knowledge: "Knowledge",
+    prefetch_set_read_completeness: "Prefetch set read",
   };
   const scoreLabel = (name) => SCORE_LABELS[name] || name;
 
@@ -3299,6 +3300,7 @@
   const SEMANTIC_DIM_LABELS = {
     knowledge_signal_density: "Knowledge signal density",
     ai_freshness_utility: ".ai/ freshness & utility",
+    retrieval_effectiveness: "Retrieval effectiveness",
     handoff_completeness: "Handoff completeness",
     decision_trace: "Decision trace",
     acceptance_coverage: "Acceptance coverage",

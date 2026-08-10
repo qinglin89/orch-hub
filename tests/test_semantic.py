@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -44,6 +45,13 @@ from orch_hub.models import (
     SemanticScore,
 )
 from orch_hub.report_catalog import ReportCatalog
+from orch_hub.session_reads import (
+    Activity,
+    MemoryRead,
+    PrefetchDoc,
+    ReadBehavior,
+    SessionReads,
+)
 from orch_hub.semantic import (
     SEMANTIC_BACKEND_CLAUDE,
     SEMANTIC_END,
@@ -102,7 +110,8 @@ def run_ev(run_id: str = "r1", *, log: LogSnapshot | None = None, warnings=()) -
     return RunEvidence(record=record, log=log, warnings=tuple(warnings))
 
 
-def pack(*runs: RunEvidence, tgt=None, warnings=(), git=None, ai=None) -> EvidencePack:
+def pack(*runs: RunEvidence, tgt=None, warnings=(), git=None, ai=None,
+         reads=None) -> EvidencePack:
     return EvidencePack(
         evaluation_id="e1",
         generated_ts=START,
@@ -110,6 +119,7 @@ def pack(*runs: RunEvidence, tgt=None, warnings=(), git=None, ai=None) -> Eviden
         runs=tuple(runs),
         git=git,
         ai=ai,
+        reads=reads,
         warnings=tuple(warnings),
     )
 
@@ -281,7 +291,8 @@ def semantic_evaluator(
 def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = False,
                 ai_snippets: bool = False, present: bool = True,
                 docs=(), diff: AiDiff | None = None,
-                schema: str | None = None) -> SemanticEvidence:
+                schema: str | None = None,
+                reads: ReadBehavior | None = None) -> SemanticEvidence:
     return SemanticEvidence(
         evaluation_id="e1",
         repo_name="alpha",
@@ -297,7 +308,65 @@ def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = Fal
         omissions=(),
         ai_docs=tuple(docs),
         ai_diff=diff,
+        reads=reads,
         evidence_schema_version=schema,
+    )
+
+
+def session_reads(sid: str = "s1", *, role: str = "dev", expected=(), read=(),
+                  trace=(), assessable: bool = True, applicable=True,
+                  detail: str | None = None, activity: Activity | None = None,
+                  closeout: bool = False, writeback=(), skipped: int = 0,
+                  truncated: bool = False) -> SessionReads:
+    """One session rollup as the reader emits it (the semantic layer only renders
+    what it is handed, so these are built directly rather than scanned)."""
+    docs = tuple(PrefetchDoc(path=p, read=p in read) for p in expected)
+    found = sum(1 for d in docs if d.read)
+    scored = assessable and applicable is True
+    return SessionReads(
+        session_id=sid,
+        role=role,
+        kind="session",
+        available=True,
+        assessable=assessable,
+        applicable=applicable,
+        expected=tuple(expected),
+        docs=docs,
+        coverage=(found / len(expected)) if scored and expected else None,
+        complete=(found == len(expected)) if scored and expected else None,
+        trace=tuple(trace),
+        activity=activity or Activity(),
+        closeout_seen=closeout,
+        writeback_excluded=tuple(writeback),
+        skipped_rows=skipped,
+        truncated=truncated,
+        detail=detail,
+    )
+
+
+def memory_read(path: str, order: int, *, declared: bool | None = True,
+                method: str = "read", actor: str = "root",
+                before: Activity | None = None, first_write: int | None = None,
+                write_uncertain: bool = False) -> MemoryRead:
+    return MemoryRead(
+        path=path,
+        order=order,
+        actor=actor,
+        method=method,
+        declared_prefetch=declared,
+        before=before or Activity(),
+        first_write=first_write,
+        write_uncertain=write_uncertain,
+    )
+
+
+def mk_reads(*sessions: SessionReads, available: bool = True, warnings=(),
+             detail: str | None = None) -> ReadBehavior:
+    return ReadBehavior(
+        available=available,
+        sessions=tuple(sessions),
+        warnings=tuple(warnings),
+        detail=detail,
     )
 
 
@@ -339,7 +408,10 @@ def test_report_to_dict_is_json_serializable_and_stable():
     data = report.to_dict()
     json.dumps(data)  # must not raise
     assert data["evaluation_id"] == FIXED_ID
-    assert data["evaluator"] == {"backend": "fake", "model": "fake-model", "schema_version": "1"}
+    assert data["evaluator"] == {
+        "backend": "fake", "model": "fake-model",
+        "schema_version": SEMANTIC_SCHEMA_VERSION,
+    }
     assert data["scores"][0]["rationale"] == "complete"  # never a naked score
     assert data["findings"][0]["severity"] == "low"
     assert data["findings"][0]["evidence_refs"] == ["sid-b"]
@@ -405,22 +477,28 @@ def test_prompt_is_evidence_bounded_and_marks_ai_freshness_unassessable():
     # No invitation to read the repository outside the persisted evidence boundary...
     assert "may read the repository" not in prompt.lower()
     # ...and the .ai/ freshness dimension is explicitly flagged unassessable.
-    assert "unassessable" in prompt.lower()
+    # (Named precisely: more than one dimension can be marked so, and each must
+    # move with its own evidence.)
+    assert "freshness/utility is unassessable" in prompt
     assert "ai_freshness_utility" in prompt
 
 
 def test_confidence_penalty_grows_as_evidence_thins():
-    full = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=True)
-    no_static = mk_evidence(static=None, ai_diffs=True, ai_snippets=True)
-    warned = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=True,
-                         warnings=("w1", "w2", "w3"))
+    every = dict(ai_diffs=True, ai_snippets=True, reads=mk_reads(session_reads()))
+    full = mk_evidence(static={"scores": []}, **every)
+    no_static = mk_evidence(static=None, **every)
+    warned = mk_evidence(static={"scores": []}, warnings=("w1", "w2", "w3"), **every)
 
     assert full.confidence_penalty() == 0.0
     assert no_static.confidence_penalty() == pytest.approx(0.30)
     assert warned.confidence_penalty() == pytest.approx(0.15)
     # A missing .ai/ snippet set is its own degradation, parallel to missing diffs.
-    no_snippets = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=False)
+    no_snippets = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=False,
+                              reads=mk_reads(session_reads()))
     assert no_snippets.confidence_penalty() == pytest.approx(0.10)
+    # ...as is a missing read-behavior section, which gates its own dimension.
+    no_reads = mk_evidence(static={"scores": []}, ai_diffs=True, ai_snippets=True)
+    assert no_reads.confidence_penalty() == pytest.approx(0.10)
     # Even the thinnest evidence keeps some confidence (task file is the subject).
     thin = mk_evidence(static=None, ai_diffs=False, ai_snippets=False,
                        warnings=tuple(f"w{i}" for i in range(20)))
@@ -435,8 +513,9 @@ def test_confidence_penalty_grows_as_evidence_thins():
 
 
 def test_evidence_computes_ai_flags_from_the_pack_snapshot():
-    p = pack(run_ev(), ai=ai_snapshot(ai_doc(), ai_doc("overview.md", content="# o\n"),
-                                      diff=ai_diff()))
+    p = pack(run_ev(), reads=mk_reads(session_reads()),
+             ai=ai_snapshot(ai_doc(), ai_doc("overview.md", content="# o\n"),
+                            diff=ai_diff()))
 
     evidence = build_semantic_evidence(p, static_report=None)
 
@@ -504,7 +583,7 @@ def test_evidence_flags_are_false_when_a_readable_snapshot_carried_no_content():
 def test_an_absent_ai_snapshot_is_priced_once_not_three_times():
     # The absent-snapshot warning only restates what both flags already price, so
     # it must not also be charged as an evidence-degradation warning.
-    p = pack(run_ev(), ai=absent_ai_snapshot())
+    p = pack(run_ev(), ai=absent_ai_snapshot(), reads=mk_reads(session_reads()))
 
     evidence = build_semantic_evidence(p, static_report=StubStatic())
 
@@ -515,7 +594,7 @@ def test_an_absent_ai_snapshot_is_priced_once_not_three_times():
 def test_a_partially_degraded_snapshot_charges_its_warnings():
     # Here the flags say "grounded", so the warnings are the only carrier of the
     # partial loss (a truncated/unreadable/dropped doc) and are priced as such.
-    p = pack(run_ev(), ai=ai_snapshot(
+    p = pack(run_ev(), reads=mk_reads(session_reads()), ai=ai_snapshot(
         ai_doc(),
         ai_doc("architecture.md", content="# a\n", size=99999, truncated=True),
         diff=ai_diff(),
@@ -543,7 +622,7 @@ def test_prompt_grounds_ai_freshness_when_the_snapshot_is_carried():
     assert "DIFF-MARKER" in prompt
     assert ROLE_PREFETCH in prompt
     # ...and is told to assess the dimension rather than to skip it.
-    assert "unassessable" not in prompt.lower()
+    assert "freshness/utility is unassessable" not in prompt
     assert "Assess `ai_freshness_utility` and `knowledge_signal_density`" in prompt
     # Still bounded: the snapshot is a copy, not an invitation to read the repo.
     assert "not a live repository read" in prompt
@@ -558,7 +637,8 @@ def test_prompt_grounds_the_snapshot_even_when_the_patches_are_missing():
     prompt = build_prompt(build_semantic_evidence(p, static_report=None))
 
     assert "ROUTER-MARKER" in prompt
-    assert "unassessable" not in prompt.lower()  # snippets alone ground the axis
+    # Snippets alone ground the axis.
+    assert "freshness/utility is unassessable" not in prompt
     assert "patches for the run window are NOT available" in prompt
     assert "git history unavailable" in prompt
 
@@ -567,7 +647,7 @@ def test_prompt_still_marks_ai_freshness_unassessable_without_a_snapshot():
     prompt = build_prompt(build_semantic_evidence(pack(run_ev(), ai=absent_ai_snapshot()),
                                                   static_report=None))
 
-    assert "unassessable" in prompt.lower()
+    assert "freshness/utility is unassessable" in prompt
     assert "ai_freshness_utility" in prompt
     assert "no `.ai/` snapshot in this evidence" in prompt
 
@@ -600,6 +680,164 @@ def test_prompt_marks_unavailable_and_truncated_docs_with_their_reason():
     assert "--- .ai/conventions.md (eager) — content budget exhausted ---" in prompt
     # The model is told which of those is a project fact and which is an evidence gap.
     assert "is a gap in THIS evidence, not a defect" in prompt
+
+
+# -- session read behavior consumption ----------------------------------------
+# The read side's Layer 2 half: the pack's ordered per-session trace reaches the
+# prompt with the anchors that make its timing legible, the dimension that judges
+# it moves with the evidence, and none of it may become a penalty for a session
+# whose reading simply could not be observed.
+
+
+def test_evidence_carries_the_pack_read_behavior_and_grounds_the_dimension():
+    section = mk_reads(session_reads(expected=(".ai/map.md",), read=(".ai/map.md",)))
+    p = pack(run_ev(), reads=section)
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.reads is section  # verbatim: the pack already bounded it
+    assert evidence.reads_available is True
+    assert not [o for o in evidence.omissions if o.startswith("session .ai/ read")]
+    assert evidence.to_dict()["reads_available"] is True
+
+
+def test_evidence_records_the_omission_when_no_read_behavior_was_observed():
+    p = pack(run_ev(), reads=mk_reads(available=False, detail="no session transcript found"))
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.reads_available is False
+    assert any(
+        "retrieval_effectiveness is unassessable" in o and "no session transcript found" in o
+        for o in evidence.omissions
+    )
+
+
+def test_evidence_reads_absent_section_reads_as_a_pack_that_predates_it():
+    # A v1/v2 pack read back from disk carries no `reads` key at all.
+    evidence = build_semantic_evidence(pack(run_ev()), static_report=None)
+
+    assert evidence.reads is None and evidence.reads_available is False
+    assert any("predates the session read-behavior section" in o for o in evidence.omissions)
+
+
+def test_prompt_renders_the_ordered_trace_with_its_timing_anchors():
+    prompt = build_prompt(mk_evidence(reads=mk_reads(session_reads(
+        "sid-a",
+        expected=(".ai/map.md", ".ai/modules/web.md"),
+        read=(".ai/map.md",),
+        activity=Activity(code_reads=12, searches=1, edits=7, task_edits=2, shell=30),
+        trace=(
+            memory_read(".ai/map.md", 8, before=Activity(code_reads=0, shell=2)),
+            memory_read(".ai/features/dashboard.md", 91, declared=False,
+                        actor="subagent", method="injected",
+                        before=Activity(code_reads=11, edits=5, shell=22)),
+        ),
+    ))))
+
+    assert "--- session sid-a (role=dev, session) ---" in prompt
+    assert "declared prefetch: .ai/map.md, .ai/modules/web.md" in prompt
+    assert "read 1/2; missing: .ai/modules/web.md (complete=false)" in prompt
+    # The anchors are what let a judge tell read-then-do from do-then-read: an
+    # early read against no work, a late one against eleven files already read.
+    assert "#8 .ai/map.md [declared] read/root — before: code_reads=0" in prompt
+    assert ("#91 .ai/features/dashboard.md [undeclared] injected/subagent"
+            " — before: code_reads=11") in prompt
+    assert "session totals: code_reads=12 searches=1 edits=7 task_edits=2 shell=30" in prompt
+
+
+def test_prompt_bounds_the_retrieval_judgment_against_its_four_failure_modes():
+    prompt = build_prompt(mk_evidence(reads=mk_reads(session_reads())))
+
+    assert "retrieval_effectiveness" in prompt
+    assert "reading nothing beyond the declared set is NOT a defect" in prompt
+    assert "check the `.ai/` patches before any missed-retrieval finding" in prompt
+    assert "not a settled retrieval" in prompt
+    assert "missing evidence, never bad behavior" in prompt
+    # ...and rediscovery_risk is told to rest on this evidence, not on the task file.
+    assert "ground `rediscovery_risk` in what the" in prompt
+
+
+def test_prompt_marks_retrieval_unassessable_without_read_evidence():
+    prompt = build_prompt(mk_evidence())
+
+    assert "`retrieval_effectiveness` is unassessable from this evidence" in prompt
+    assert "do not treat the absence as evidence that memory went unread" in prompt
+    assert "no session read behavior available" in prompt
+    # The other dimension's own marker must not move with this one.
+    assert "freshness/utility is unassessable" in prompt
+
+
+def test_prompt_shows_an_unmeasured_session_as_missing_evidence_not_as_a_miss():
+    prompt = build_prompt(mk_evidence(reads=mk_reads(
+        session_reads("sid-a", expected=(".ai/map.md",), read=(),
+                      assessable=False,
+                      detail="evidence incomplete (2 unreadable row(s))"),
+        session_reads("sid-b", role="review", expected=(), applicable=False),
+        warnings=("read behavior: session sid-a: evidence incomplete",),
+    )))
+
+    assert "prefetch reading NOT MEASURED: evidence incomplete (2 unreadable row(s))" in prompt
+    assert "declared prefetch: none (nothing was expected of this session)" in prompt
+    assert "NOTE — read-evidence degradation:" in prompt
+    # A withheld verdict must never render as a completed one.
+    assert "complete=false" not in prompt
+
+
+def test_prompt_never_renders_an_unobserved_session_as_zero_activity():
+    # A session with no transcript has unknown counts, not zero ones. Rendering
+    # its empty rollup as measurements is the "read nothing" misreading the whole
+    # availability split exists to prevent.
+    unobserved = replace(
+        session_reads("sid-b", role="review", expected=(), applicable=False),
+        available=False, assessable=False, detail="no session transcript found",
+    )
+    prompt = build_prompt(mk_evidence(reads=mk_reads(
+        session_reads("sid-a", expected=(".ai/map.md",), read=(".ai/map.md",),
+                      trace=(memory_read(".ai/map.md", 3),)),
+        unobserved,
+    )))
+
+    assert "READ BEHAVIOR NOT OBSERVED: no session transcript found" in prompt
+    assert "nothing was expected of it" in prompt
+    # "none observed" is a measurement and belongs only to the session that was.
+    assert "`.ai/` reads: none observed in this session" not in prompt
+    assert prompt.count("session totals:") == 1  # only the observed session's
+
+
+def test_prompt_carries_the_write_back_and_unsettled_ordering_marks():
+    prompt = build_prompt(mk_evidence(reads=mk_reads(session_reads(
+        "sid-a",
+        expected=(".ai/map.md",),
+        read=(".ai/map.md",),
+        trace=(
+            memory_read(".ai/map.md", 4, first_write=40),
+            memory_read(".ai/overview.md", 9, declared=False, write_uncertain=True),
+        ),
+        writeback=(".ai/index.md",),
+        closeout=True,
+        skipped=2,
+    ))))
+
+    assert "this session later wrote it at #40" in prompt      # read-then-update
+    assert "WRITE-ORDER UNSETTLED" in prompt
+    assert "read back after this session wrote it (not counted as consultation)" in prompt
+    assert "close-out reached (later reads excluded)" in prompt
+    assert "evidence gaps: 2 unreadable row(s)" in prompt
+
+
+def test_prompt_never_carries_transcript_text_only_the_rollup():
+    # The whole reason the pack keeps a rollup: the transcript holds prompts,
+    # human answers, and tool output, none of which may reach the evaluator.
+    prompt = build_prompt(mk_evidence(reads=mk_reads(session_reads(
+        expected=(".ai/map.md",), read=(".ai/map.md",),
+        trace=(memory_read(".ai/map.md", 3),),
+    ))))
+    section = prompt.split("== SESSION `.ai/` READ BEHAVIOR")[1].split("== EVIDENCE OMISSIONS")[0]
+
+    for line in section.strip().splitlines():
+        assert len(line) < 200, line  # rollup lines are short and structured
+    assert "content" not in section and "assistant" not in section
 
 
 # -- envelope parse / schema validation ---------------------------------------
@@ -1174,7 +1412,9 @@ def test_evaluate_prompt_carries_the_repos_ai_snapshot_from_the_persisted_pack(t
     prompt = backend.prompts[0]
     assert carried[0]["content"] in prompt          # the pack's bytes, verbatim
     assert "# overview\nsignal" in prompt
-    assert "unassessable" not in prompt.lower()     # the axis is grounded now
+    # The .ai/ axis is grounded now (this repo has no transcript store, so the
+    # read axis is separately and correctly still unassessable).
+    assert "freshness/utility is unassessable" not in prompt
 
     # `_fake_git` fails, so the patch stream degrades on its own while the docs
     # survive — and the report prices exactly that, plus the snapshot's own
@@ -1233,7 +1473,8 @@ def test_render_report_md_has_all_sections():
     ))
 
     assert f"# Semantic Task Evaluation — {TASK}" in md
-    assert "fake / fake-model (schema v1)" in md  # evaluator provenance from context
+    # evaluator provenance from context
+    assert f"fake / fake-model (schema v{SEMANTIC_SCHEMA_VERSION})" in md
     assert "## Summary" in md and "handled cleanly" in md
     assert "## Scores" in md and "| handoff_completeness | 0.90 | 0.80 | log complete |" in md
     assert "### [LOW] rediscovery_risk — thin note" in md
