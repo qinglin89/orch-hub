@@ -228,7 +228,9 @@ and ends as a bare ``done``. Reading ``do`` as the command word would make every
 loop unclassifiable — and a survey of the task files written as a loop is
 exactly the entry-checklist shape this reader must not lose."""
 
-_REDIRECT = re.compile(r"(?<![-<>\w])(?:\d+|&)?>>?\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))")
+_REDIRECT = re.compile(
+    r"(?<![-=<>\w])(?:\d+|&)?>>?(?!=)\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))"
+)
 """An output redirection and the file it writes, if any. Without this a shell
 append is read as just another path the command *names*, which lets a
 session-log write through ``printf ... >> .ai-tasks/<id>.md`` land in the entry
@@ -239,10 +241,16 @@ since the whole match is cut out of the statement — it also stops being read a
 an argument of the command it trails, which would otherwise turn ``ls .ai/
 2>&1`` into a listing of something called ``2>&1``.
 
-The lookbehind keeps prose and code out of it: ``echo "(ignored -> won't dirty
-tree)"`` and an ``awk`` program's ``if(b>m)`` are not redirections, and reading
-them as writes of ``won't`` or ``m)`` would make an entry-checklist echo the
-moment a session started working."""
+The lookbehind and lookahead keep prose and code out of it: ``echo "(ignored ->
+won't dirty tree)"``, an ``awk`` program's ``if(b>m)``, a SQL heredoc's
+``closed_at >= $2``, and a JavaScript arrow ``r=>r.json()`` are not
+redirections. Reading them as writes of ``won't``, ``m)``, ``=``, or ``r.json``
+would make an entry-checklist echo — or a database query — look like the moment
+a session started working. Comparison and arrow operators are the shapes a
+``>`` wears when it is not a redirection, and both of its sides are checked
+because both spellings occur. Quoting is the other half of that guard and
+cannot be expressed here, because a quoted string spans the separators
+statements are split on (:func:`_quoted_spans`)."""
 
 _NUMERIC_FLAG = re.compile(r"^-\d+$")
 """``git log -8``: a count, spelled as a flag. Normalized to ``-n``."""
@@ -1749,9 +1757,14 @@ def _classify_command(
     # Every path the command names anywhere, as the context a reader statement
     # that names none of its own is placed against (:data:`READ_COMMANDS`).
     context = tuple(_command_paths(command, repo_root))
+    # Quoting is read over the whole command, not per statement: a quoted string
+    # may span the separators this reader splits on (``psql -c "\nSELECT ...
+    # WHERE a > b"``), and a statement that starts mid-string would otherwise
+    # see that ``>`` standing unquoted.
+    quoted = _quoted_spans(command)
     verdicts = []
     cwd: str | None = ""
-    for statement in _STATEMENTS.split(command):
+    for statement, offset in _statements(command):
         # A ``cd`` reaches forward, not back: the statements after it are read
         # against the directory it moved to, while the ones before it stay
         # exactly as observed.
@@ -1764,6 +1777,8 @@ def _classify_command(
                 records_decision=records_decision,
                 cwd=cwd,
                 context=context,
+                quoted=quoted,
+                offset=offset,
             )
         )
     for wanted in (COMMAND_WORK, COMMAND_UNCLEAR):
@@ -1771,6 +1786,20 @@ def _classify_command(
             if verdict == wanted:
                 return verdict, kind
     return COMMAND_NEUTRAL, "shell"
+
+
+def _statements(command: str) -> Iterator[tuple[str, int]]:
+    """Each statement of a command with its offset into the command.
+
+    The offset is what lets a statement be read against the whole command's
+    quoting: a separator inside a string still splits the text here, so a
+    statement's own view of where its quotes are is not to be trusted.
+    """
+    start = 0
+    for separator in _STATEMENTS.finditer(command):
+        yield command[start : separator.start()], start
+        start = separator.end()
+    yield command[start:], start
 
 
 def _classify_statement(
@@ -1781,6 +1810,8 @@ def _classify_statement(
     records_decision: bool,
     cwd: str | None = "",
     context: tuple[str, ...] = (),
+    quoted: tuple[tuple[int, int], ...] = (),
+    offset: int = 0,
 ) -> tuple[str, str]:
     """Place one shell statement as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
 
@@ -1813,7 +1844,9 @@ def _classify_statement(
         # The move is the caller's business (:func:`_next_cwd`); the statement
         # itself puts nothing in context.
         return COMMAND_NEUTRAL, "shell"
-    writes, body = _split_redirects(statement, root, cwd=cwd)
+    writes, body = _split_redirects(
+        statement, root, cwd=cwd, quoted=quoted, offset=offset
+    )
     if cwd is None:
         # A ``cd`` left the repo, so every relative token is measured against a
         # directory this reader cannot name; only what was named absolutely
@@ -1866,29 +1899,79 @@ def _classify_statement(
 
 
 def _split_redirects(
-    statement: str, root: str, *, cwd: str | None = ""
+    statement: str,
+    root: str,
+    *,
+    cwd: str | None = "",
+    quoted: tuple[tuple[int, int], ...] = (),
+    offset: int = 0,
 ) -> tuple[list[str], str]:
     """``(in-repo write targets, statement without its redirections)``.
 
     The targets are removed from the text the rest of the classification reads,
     so a write is weighed as a write and not counted a second time as a path the
-    command merely names. Only a target that looks like a file is kept: this is
-    a heuristic over unparsed argv, and a bare word picked out of prose is far
-    more likely to be prose than a write.
+    command merely names.
+
+    Whatever a real ``>`` points at is a file: ``echo generated > Makefile`` and
+    ``printf 1.4.0 > VERSION`` write this repo exactly as ``> notes.txt`` does,
+    and asking whether the target *looked* like a filename dropped the
+    extensionless ones — leaving the write to inherit the neutral verdict of the
+    ``echo`` in front of it. So the shape test is gone, and the only question
+    left is whether the ``>`` is a redirection at all: inside a string it is
+    prose (``echo "0.5 > 0.4"``), which :func:`_quoted_spans` decides from the
+    quoting rather than from what the target is called.
     """
     writes: list[str] = []
 
     def swallow(match: re.Match) -> str:
+        position = offset + match.start()
+        if any(start <= position < end for start, end in quoted):
+            # Inside a string: text that happens to contain ``>``. Neither a
+            # write nor — since ``echo "0.5 > 0.4"`` names no file — a path the
+            # command reads, so the whole of it drops out of the reading.
+            return " "
         target = match.group("target")
         if target is None:
             return " "
         place, rel, absolute = _place_token(target, root)
         placeable = absolute or cwd is not None
-        if place == _PLACE_IN and rel and _pathlike(rel) and placeable:
+        if place == _PLACE_IN and rel and placeable:
             writes.append(_under(rel, absolute, cwd))
         return " "
 
     return writes, _REDIRECT.sub(swallow, statement)
+
+
+def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
+    """The ``[start, end)`` ranges of a command's quoted strings.
+
+    Read over the whole command, because that is the only place the quoting is
+    intact: statements are split on separators that a string may contain
+    (``psql -c "\\nSELECT ..."``), so a statement beginning mid-string carries no
+    sign that it is inside one.
+
+    Only closed pairs count. An opening quote with no partner is not evidence
+    that everything after it is a string — the shapes that reach this reader
+    unbalanced are heredoc bodies, which carry ordinary apostrophes (``- Done:
+    the session's plan``). Reading the rest of the command as quoted would hide
+    a genuine redirection behind any prose apostrophe before it, which is the
+    false neutral this guard exists to close.
+
+    A quote inside another quote is a character, not a delimiter, so the scan
+    tracks which one opened the string it is in.
+    """
+    spans: list[tuple[int, int]] = []
+    quote = ""
+    start = 0
+    for index, char in enumerate(command):
+        if quote:
+            if char == quote:
+                spans.append((start, index))
+                quote = ""
+        elif char in "\"'":
+            quote = char
+            start = index
+    return tuple(spans)
 
 
 def _next_cwd(cwd: str | None, statement: str, root: str) -> str | None:
@@ -1989,20 +2072,43 @@ def _git_flag_verdict(statement: str) -> str:
     own flags are read — a pipe's tail carries its own (``| head -40``), and
     attributing those to the query would place it on the strength of another
     command's argv.
+
+    A content flag anywhere settles it: seeing ``-p`` is an observation that the
+    patch was printed, and an unrecognized flag beside it does not make that less
+    true. Uncertainty is only what is left when nothing was observed to print
+    content and something could not be placed.
     """
+    unknown = False
     for token in statement.split("|", 1)[0].split():
-        name = _flag_name(token)
-        if name is None:
-            continue
-        if name in GIT_CONTENT_FLAGS:
-            return COMMAND_WORK
-        if name not in GIT_METADATA_FLAGS:
-            return COMMAND_UNCLEAR
-    return COMMAND_NEUTRAL
+        for name in _flag_names(token):
+            if name in GIT_CONTENT_FLAGS:
+                return COMMAND_WORK
+            if name not in GIT_METADATA_FLAGS:
+                unknown = True
+    return COMMAND_UNCLEAR if unknown else COMMAND_NEUTRAL
 
 
-def _flag_name(token: str) -> str | None:
-    """An argv token's flag name, or ``None`` when it is not a flag.
+_VALUED_SHORT_FLAGS = frozenset("CGLnSU")
+"""Short options whose value may be written attached to them, so that what
+follows inside the same token is that value rather than more flags: ``-n5``,
+``-S"symbol"``, ``-U3``, ``-L1,20:file``.
+
+Deliberately short. Naming a flag here swallows the rest of its token, so a
+wrong entry could hide a real content flag — while a *missing* one only leaves
+value characters to be read as flags this reader does not know, which costs
+uncertainty and never credits a pre-load."""
+
+
+def _flag_names(token: str) -> tuple[str, ...]:
+    """Every flag one argv token spells, or ``()`` when it is not a flag.
+
+    A token is not always one flag. Short options cluster, so ``git log -sp -1``
+    is ``-s`` *and* ``-p`` — a patch wearing a metadata spelling — and
+    ``git log -sSsession`` searches file diffs under the same disguise. Reading
+    only the leading pair credited both as metadata-only ``-s``, which is the
+    false neutral this reader must not produce; a cluster is therefore read out
+    to its end, or to the first flag whose value it carries
+    (:data:`_VALUED_SHORT_FLAGS`).
 
     Normalized so one spelling stands for one flag: an attached value is dropped
     (``--format='%h'``, ``-S"symbol"``), and a bare count is the count flag
@@ -2012,13 +2118,18 @@ def _flag_name(token: str) -> str | None:
     """
     token = token.strip("\"'`,;")
     if not token.startswith("-") or token in ("-", "--"):
-        return None
+        return ()
     name = token.split("=", 1)[0]
     if _NUMERIC_FLAG.match(name):
-        return "-n"
-    if not name.startswith("--") and len(name) > 2:
-        return name[:2]
-    return name
+        return ("-n",)
+    if name.startswith("--"):
+        return (name,)
+    names: list[str] = []
+    for char in name[1:]:
+        names.append(f"-{char}")
+        if char in _VALUED_SHORT_FLAGS:
+            break
+    return tuple(names)
 
 
 def _command_paths(

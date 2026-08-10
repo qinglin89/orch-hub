@@ -876,6 +876,87 @@ def test_a_git_query_is_placed_by_its_flags_not_by_its_head(tmp_path):
     assert "boundary not determinable" in rolled["unknown-sid"].detail
 
 
+def test_a_git_flag_cluster_is_read_out_past_its_first_letter(tmp_path):
+    repo = make_repo(tmp_path)
+    content = {
+        "patch-sid": "git log -sp -1",
+        "pickaxe-sid": "git log -sSsession -1",
+    }
+    metadata = {
+        "pair-sid": "git status -sb",
+        "count-sid": "git log -n5 --oneline",
+    }
+    for sid, command in {**content, **metadata}.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="q")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in {**content, **metadata}}
+
+    # Short options cluster, so one token can spell more than one flag: ``-sp``
+    # prints the patch and ``-sSsession`` searches file diffs, both while wearing
+    # the metadata-only ``-s`` that reading the leading pair alone would see.
+    for sid in content:
+        assert (rolled[sid].complete, rolled[sid].late) == (False, (FEATURES,)), sid
+        assert rolled[sid].activity == Activity(shell=1), sid
+    # Reading the cluster out is not a licence to invent flags: every letter of
+    # ``-sb`` is metadata, and what follows ``-n`` is its count, not more flags.
+    for sid in metadata:
+        assert rolled[sid].complete is True, sid
+        assert rolled[sid].entry_boundary is None, sid
+        assert rolled[sid].boundary_unsure is None, sid
+
+
+def test_a_redirect_target_is_a_write_whatever_it_is_named(tmp_path):
+    repo = make_repo(tmp_path)
+    writes = {
+        "make-sid": "echo generated > Makefile",
+        "version-sid": "printf '1.4.0' > VERSION",
+    }
+    # A ``>`` inside a string is the text the command was handed, not a
+    # redirection — including when the string spans a statement separator, which
+    # is where a per-statement reading of the quoting loses it.
+    quoted = {
+        "prose-sid": 'echo "coverage rose > baseline"',
+        "pattern-sid": 'grep -n "^\\.list\\|> \\.list" orch_hub/web/styles.css',
+        "arrow-sid": (
+            'node -e "\nfetch(url).then(r=>r.json()).then(j=>{\n'
+            '  console.log(j.total);\n});"'
+        ),
+    }
+    for sid, command in {**writes, **quoted}.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in {**writes, **quoted}}
+
+    # ``Makefile`` and ``VERSION`` are this repo's files however plain their
+    # names are; asking whether the target *looked* like a filename left the
+    # write wearing the neutral verdict of the ``echo`` in front of it.
+    for sid in writes:
+        assert (rolled[sid].complete, rolled[sid].late) == (False, (FEATURES,)), sid
+        assert rolled[sid].activity == Activity(edits=1), sid
+    assert rolled["prose-sid"].complete is True
+    assert rolled["prose-sid"].entry_boundary is None
+    assert rolled["prose-sid"].activity == Activity()
+    # These two do reach the code — by reading and by running it. That is what
+    # ends context assembly; neither of them wrote ``.list`` or ``r.json``.
+    for sid in ("pattern-sid", "arrow-sid"):
+        assert (rolled[sid].complete, rolled[sid].late) == (False, (FEATURES,)), sid
+        assert rolled[sid].activity == Activity(shell=1), sid
+
+
 def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
     repo = make_repo(tmp_path)
     task_file = f"{repo.path}/.ai-tasks/{TASK}.md"

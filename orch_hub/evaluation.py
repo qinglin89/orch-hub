@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "6"
+EVIDENCE_SCHEMA_VERSION = "7"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -109,9 +109,14 @@ show: a listing of this repo's tree and a patch-emitting ``git`` query become
 work, a write to the task file is weighed like the edit it stands in for, and
 anything the classifier cannot place — an unknown ``git`` flag, a command run
 after leaving the repo — becomes uncertainty rather than a credited pre-load,
-while operations on another tree stop counting as this repo's work at all. A
-persisted pack with no ``schema_version`` key is version 1 and predates all of
-it.
+while operations on another tree stop counting as this repo's work at all. ``7``
+closes the last two shapes that could still print file content or write the repo
+while reading as metadata — a clustered short ``git`` flag (``-sp`` is a patch,
+not the metadata-only ``-s`` its first letter spells) and a redirection to a
+plainly named file (``> Makefile``) — and, so that the second of those does not
+turn a quoted ``>`` into a write, reads quoting across the whole command rather
+than per statement. A persisted pack with no ``schema_version`` key is version 1
+and predates all of it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
