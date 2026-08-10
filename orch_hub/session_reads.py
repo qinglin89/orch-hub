@@ -218,6 +218,47 @@ _ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 """A leading ``VAR=value`` prefix, skipped so ``PATH=... npm run build`` is read
 as ``npm`` rather than as an unrecognizable head."""
 
+_KEYWORDS = frozenset(
+    {"do", "done", "then", "else", "elif", "fi", "esac", "!", "{", "}"}
+)
+"""Shell keywords that introduce or close a statement without being a command.
+
+Statements are split on separators, so a loop body arrives as ``do echo ...``
+and ends as a bare ``done``. Reading ``do`` as the command word would make every
+loop unclassifiable — and a survey of the task files written as a loop is
+exactly the entry-checklist shape this reader must not lose."""
+
+_REDIRECT = re.compile(r"(?<![-<>\w])(?:\d+|&)?>>?\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))")
+"""An output redirection and the file it writes, if any. Without this a shell
+append is read as just another path the command *names*, which lets a
+session-log write through ``printf ... >> .ai-tasks/<id>.md`` land in the entry
+scope and count as context assembly.
+
+A stream duplication (``2>&1``) matches with no target: it writes no file, and —
+since the whole match is cut out of the statement — it also stops being read as
+an argument of the command it trails, which would otherwise turn ``ls .ai/
+2>&1`` into a listing of something called ``2>&1``.
+
+The lookbehind keeps prose and code out of it: ``echo "(ignored -> won't dirty
+tree)"`` and an ``awk`` program's ``if(b>m)`` are not redirections, and reading
+them as writes of ``won't`` or ``m)`` would make an entry-checklist echo the
+moment a session started working."""
+
+_NUMERIC_FLAG = re.compile(r"^-\d+$")
+"""``git log -8``: a count, spelled as a flag. Normalized to ``-n``."""
+
+_PLACE_IN = "in"
+"""An argv token that names something inside the managed repo."""
+
+_PLACE_OUT = "out"
+"""An argv token that names something outside the repo — another checkout,
+``/tmp``, a home-relative path. It says nothing about this repo's code."""
+
+_PLACE_UNKNOWN = "unknown"
+"""An argv token this reader cannot place at all: a variable it would have to
+run a shell to expand. Not silently dropped — for a command whose operands are
+paths, an unplaceable one is why the command's verdict must be uncertain."""
+
 _DECISION_MARKER = re.compile(
     r"^\s*(?:#{2,3}\s|- (?:Done|Next|Open|Plan-slice|Verdict|Group|Findings"
     r"|Dispute-unresolved):)",
@@ -258,28 +299,36 @@ classified three ways (:func:`_classify_command`) and the one it cannot decide
 is recorded as boundary uncertainty rather than guessed in either direction."""
 
 COMMAND_NEUTRAL = "neutral"
-"""A shell command recognized as entry-checklist or repo-metadata work: the
-clock, ``git`` status/history metadata, or an operation confined to the entry
-scope. It puts no repo content in context, so it does not end context assembly."""
+"""A shell command *demonstrably* confined to metadata or context assembly: the
+clock, a ``git`` query whose every flag is known to print commit/worktree
+metadata, or an operation whose named paths all sit in the entry scope. It puts
+no repo content in context, so it does not end context assembly.
+
+The word to hold onto is demonstrable. This verdict credits every memory
+delivery after it as a pre-load, so it may only be reached by a shape this
+reader can show is harmless — never by "nothing said otherwise"."""
 
 COMMAND_WORK = "work"
-"""A shell command that reaches into the code: it names a repo path outside the
-entry scope, or it runs a content command (read, search, build, test). This is
-the shell spelling of the same signal a ``Read`` or ``Grep`` carries."""
+"""A shell command that reaches into the code: it names or writes a repo path
+outside the entry scope, lists this repo's tree, carries a flag that emits file
+content, or runs a content command (read, search, build, test). This is the
+shell spelling of the same signal a ``Read`` or ``Grep`` carries."""
 
 COMMAND_UNCLEAR = "unclear"
-"""Neither — an unrecognized command with no repo path to place it. Treating it
-as neutral would credit a pre-load that may have followed real work; treating it
-as work would invent a missed doc for a session that merely ran a tool this
-reader has not seen. Both are claims the evidence does not support, so it is
-recorded as uncertainty and refuses only the verdicts that rest on it."""
+"""Neither — a shape this reader cannot place: an unrecognized command with no
+repo path, a ``git`` flag it does not know, a write to the task file whose
+content it cannot see, or anything relative that follows a ``cd`` out of the
+repo. Treating it as neutral would credit a pre-load that may have followed real
+work; treating it as work would invent a missed doc for a session that merely
+ran a tool this reader has not seen. Both are claims the evidence does not
+support, so it is recorded as uncertainty and refuses only the verdicts that
+rest on it."""
 
 NEUTRAL_COMMANDS = frozenset(
     {
         "cd",
         "date",
         "echo",
-        "ls",
         "printf",
         "pwd",
         "sleep",
@@ -294,31 +343,180 @@ NEUTRAL_COMMANDS = frozenset(
         "git status",
     }
 )
-"""Command heads that carry no repo content. The protocol's own entry and
-session-end steps are here (``date -u`` for the claim timestamp, ``git status
---porcelain`` for the clean-tree check) plus navigation and ``git`` metadata:
-commit subjects and hashes are what the evidence pack itself treats as display
-metadata, so reading them is not reading the code."""
+"""Command heads whose output cannot carry repo content. The protocol's own entry
+and session-end steps are here (``date -u`` for the claim timestamp, ``git
+status --porcelain`` for the clean-tree check) plus ``git`` metadata: commit
+subjects and hashes are what the evidence pack itself treats as display
+metadata, so reading them is not reading the code.
 
-CONTENT_COMMANDS = frozenset(
+The head alone settles only the non-``git`` ones, whose output is fixed by the
+command. A ``git`` query's is not — ``git log -p`` prints patches under the same
+head — so those are settled by their flags (:data:`GIT_METADATA_FLAGS`).
+
+``ls`` is gone deliberately: it prints a listing *of this repo*, which is repo
+material and not metadata (:data:`LISTING_COMMANDS`). ``cd`` stays — it prints
+nothing — but only as a statement; what it does to the relative paths *around*
+it is a separate question (:func:`_changes_dir`)."""
+
+LISTING_COMMANDS = frozenset({"ls"})
+"""Commands whose output is a listing of whatever tree they are pointed at.
+
+Not metadata: a tree listing is repo material, and it is what a ``Glob`` returns
+— which this reader already treats as ending context assembly. So a listing is
+placed by its target rather than by its head, and its operands are read as paths
+even when they carry no separator or suffix (``ls tests`` names a directory
+where ``git status`` does not). Pointed at nothing it lists the session's cwd,
+which is the repo root; pointed at another checkout it says nothing about this
+repo at all."""
+
+GIT_CONTENT_FLAGS = frozenset(
+    {
+        "-p",
+        "--patch",
+        "-u",
+        "--unified",
+        "-U",
+        "--raw",
+        "--stat",
+        "--numstat",
+        "--shortstat",
+        "--dirstat",
+        "--name-only",
+        "--name-status",
+        "--word-diff",
+        "--function-context",
+        "-W",
+        "-S",
+        "-G",
+        "-L",
+        "--pickaxe-regex",
+    }
+)
+"""Flags that make an otherwise metadata-only ``git`` query emit or search file
+content: patches, diffstats, changed-file lists, and the pickaxe/line-log
+searches. ``git log -p -1`` is a source read wearing a metadata head, and the
+head-only reading credited it as an entry-checklist step."""
+
+GIT_METADATA_FLAGS = frozenset(
+    {
+        "-n",
+        "-C",
+        "-a",
+        "-b",
+        "-i",
+        "-l",
+        "-q",
+        "-r",
+        "-s",
+        "-v",
+        "--abbrev-commit",
+        "--abbrev-ref",
+        "--after",
+        "--all",
+        "--author",
+        "--before",
+        "--branch",
+        "--branches",
+        "--cached",
+        "--color",
+        "--committer",
+        "--contains",
+        "--date",
+        "--date-order",
+        "--decorate",
+        "--diff-filter",
+        "--first-parent",
+        "--follow",
+        "--format",
+        "--get",
+        "--git-dir",
+        "--global",
+        "--graph",
+        "--grep",
+        "--ignored",
+        "--list",
+        "--local",
+        "--long",
+        "--max-count",
+        "--merged",
+        "--merges",
+        "--no-abbrev-commit",
+        "--no-color",
+        "--no-decorate",
+        "--no-merged",
+        "--no-merges",
+        "--no-pager",
+        "--oneline",
+        "--porcelain",
+        "--pretty",
+        "--quiet",
+        "--remotes",
+        "--reverse",
+        "--short",
+        "--show-current",
+        "--show-toplevel",
+        "--since",
+        "--skip",
+        "--stdin",
+        "--symbolic-full-name",
+        "--tags",
+        "--topo-order",
+        "--until",
+        "--untracked-files",
+        "--verify",
+    }
+)
+"""Flags a neutral ``git`` query may carry while staying confined to commit and
+worktree metadata — every one observed on those heads across the measured
+corpus, plus their obvious siblings.
+
+An allow-list, not a deny-list, and that asymmetry is the point: a ``git`` flag
+this reader has never seen may well print file content, so assuming metadata for
+it would manufacture exactly the false neutral this classifier exists to avoid.
+An unrecognized flag makes the command :data:`COMMAND_UNCLEAR` instead, which
+costs confidence rather than inventing a verdict."""
+
+READ_COMMANDS = frozenset(
     {
         "awk",
-        "cargo",
         "cat",
-        "cp",
-        "curl",
         "diff",
         "egrep",
-        "find",
         "fgrep",
-        "gofmt",
-        "go",
+        "find",
         "grep",
         "head",
         "jq",
         "less",
-        "make",
         "more",
+        "rg",
+        "sed",
+        "sort",
+        "tail",
+        "uniq",
+        "wc",
+        "git blame",
+        "git diff",
+        "git grep",
+        "git show",
+    }
+)
+"""Content commands that only *read* what they are pointed at.
+
+Separated from the ones that run or change things because only a reader can be
+placed by the paths standing beside it. ``for f in .ai-tasks/a.md
+.ai-tasks/b.md; do sed -n '1,12p' "$f"; done`` reads the task files the same
+command names — the loop variable is unresolvable on its own, and reading the
+statement alone would turn a survey of the entry scope into code work."""
+
+CONTENT_COMMANDS = READ_COMMANDS | frozenset(
+    {
+        "cargo",
+        "cp",
+        "curl",
+        "go",
+        "gofmt",
+        "make",
         "mv",
         "mypy",
         "node",
@@ -328,26 +526,19 @@ CONTENT_COMMANDS = frozenset(
         "pytest",
         "python",
         "python3",
-        "rg",
         "rm",
         "ruff",
-        "sed",
-        "sort",
-        "tail",
         "tsc",
-        "uniq",
-        "wc",
         "yarn",
         "git apply",
-        "git blame",
-        "git diff",
-        "git grep",
-        "git show",
     }
 )
 """Command heads that put repo content in context or act on it. Consulted only
-when the command names no repo path at all — ``cat .ai/index.md`` is routed
-memory, not code, and the path decides that before the head is looked at."""
+when the statement names no repo path at all — ``cat .ai/index.md`` is routed
+memory, not code, and the path decides that before the head is looked at.
+
+The non-reader half is work wherever it appears: building, testing, running, or
+moving files is not something the entry scope explains away."""
 
 
 @dataclass(frozen=True)
@@ -382,7 +573,10 @@ class Activity:
     plan/session-log ones are the closest observable marker of *a decision was
     already recorded* that a transcript offers. ``shell`` counts only the shell
     commands that were not recognized as entry-checklist or metadata operations,
-    since ``date -u`` is not work a retrieval could be late relative to.
+    since ``date -u`` is not work a retrieval could be late relative to — and a
+    command that *writes* is counted where its write belongs (``edits``,
+    ``task_edits``), so a session-log append reads the same whether it went
+    through ``Edit`` or through a redirection.
     """
 
     code_reads: int = 0
@@ -1428,7 +1622,13 @@ def _absorb_row(
             elif name in _SEARCH_TOOLS:
                 _absorb_search(args, scan, order=order, repo_root=repo_root)
             elif name in _SHELL_TOOLS:
-                _absorb_command(args, scan, order=order, repo_root=repo_root)
+                _absorb_command(
+                    args,
+                    scan,
+                    order=order,
+                    repo_root=repo_root,
+                    task_paths=task_paths,
+                )
         return False
 
     if kind == "user":
@@ -1507,56 +1707,331 @@ def _records_decision(args: dict) -> bool:
     )
 
 
-def _absorb_command(args: dict, scan: _Scan, *, order: int, repo_root: Path) -> None:
+def _absorb_command(
+    args: dict,
+    scan: _Scan,
+    *,
+    order: int,
+    repo_root: Path,
+    task_paths: tuple[str, ...],
+) -> None:
     """Fold one shell command into the boundary, or into its uncertainty."""
     command = args.get("command")
-    verdict = _classify_command(command if isinstance(command, str) else "", repo_root)
+    verdict, kind = _classify_command(
+        command if isinstance(command, str) else "",
+        repo_root,
+        task_paths=task_paths,
+    )
     if verdict == COMMAND_WORK:
-        scan.note_work(order, "shell")
+        scan.note_work(order, kind)
     elif verdict == COMMAND_UNCLEAR:
-        scan.note_activity("shell")
+        scan.note_activity(kind)
         scan.note_unsure(order)
 
 
-def _classify_command(command: str, repo_root: Path) -> str:
-    """Place one shell command as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
+def _classify_command(
+    command: str, repo_root: Path, *, task_paths: tuple[str, ...]
+) -> tuple[str, str]:
+    """Place one shell command, as ``(verdict, activity kind)``.
 
-    A best-effort reading of argv, in the order that keeps the common shapes
-    right. The repo paths a command names decide it first — ``cat .ai/index.md``
-    is routed memory whatever ``cat`` usually means, and ``sed -n 1,40p
-    src/api.ts`` is the code whatever ``sed`` usually means. Only a command that
-    names no repo path falls through to its head word, and only a command whose
-    head word is unrecognized falls through to uncertainty.
+    Statement by statement, because a command is a sequence of them and the
+    strongest signal in it is the command's: ``date -u && sed -n 1,40p
+    src/api.ts`` is a code read that happens to start with the clock. Work wins
+    over uncertainty, and uncertainty over neutrality — the ordering that never
+    lets an unplaceable statement be read as harmless.
+
+    The ``activity kind`` is which :class:`Activity` counter the command feeds,
+    so a session-log write through the shell lands where the same write through
+    ``Edit`` would.
+    """
+    records_decision = bool(_DECISION_MARKER.search(command))
+    root = repo_root.as_posix()
+    # Every path the command names anywhere, as the context a reader statement
+    # that names none of its own is placed against (:data:`READ_COMMANDS`).
+    context = tuple(_command_paths(command, repo_root))
+    verdicts = []
+    cwd: str | None = ""
+    for statement in _STATEMENTS.split(command):
+        # A ``cd`` reaches forward, not back: the statements after it are read
+        # against the directory it moved to, while the ones before it stay
+        # exactly as observed.
+        cwd = _next_cwd(cwd, statement, root)
+        verdicts.append(
+            _classify_statement(
+                statement,
+                repo_root,
+                task_paths=task_paths,
+                records_decision=records_decision,
+                cwd=cwd,
+                context=context,
+            )
+        )
+    for wanted in (COMMAND_WORK, COMMAND_UNCLEAR):
+        for verdict, kind in verdicts:
+            if verdict == wanted:
+                return verdict, kind
+    return COMMAND_NEUTRAL, "shell"
+
+
+def _classify_statement(
+    statement: str,
+    repo_root: Path,
+    *,
+    task_paths: tuple[str, ...],
+    records_decision: bool,
+    cwd: str | None = "",
+    context: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Place one shell statement as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
+
+    A best-effort reading of argv, asked in the order that keeps the common
+    shapes right:
+
+    1. what it *writes* — a write to the task file is the shell spelling of the
+       session-log edit that marks a recorded decision, and reading it as just
+       another entry-scope path would let it pass as context assembly;
+    2. what it *names* — ``cat .ai/index.md`` is routed memory whatever ``cat``
+       usually means, and ``sed -n 1,40p src/api.ts`` is the code whatever
+       ``sed`` usually means, with a listing's operands read as the paths they
+       are (:func:`_listing_targets`);
+    3. whether everything it touched is somewhere else on the machine, which is
+       nothing this repo's measurement can conclude anything from;
+    4. its head word, and — where the head alone does not fix the output — its
+       flags (:func:`_git_flag_verdict`) or the paths standing beside it
+       (:data:`READ_COMMANDS`).
 
     This is not a shell parser and does not pretend to be one: quoting, command
-    substitution, and functions are not interpreted. It is safe because a
+    substitution, and functions are not interpreted. It is safe because every
     misreading has somewhere to go — :data:`COMMAND_UNCLEAR` — instead of having
     to become one of the two verdicts that carry a claim.
     """
-    if not command.strip():
-        return COMMAND_NEUTRAL
-    paths = _command_paths(command, repo_root)
-    if paths:
-        return (
-            COMMAND_NEUTRAL
-            if all(_entry_scope(path) for path in paths)
-            else COMMAND_WORK
-        )
-    heads = _statement_heads(command)
-    if any(head in CONTENT_COMMANDS for head in heads):
-        return COMMAND_WORK
-    if heads and all(head in NEUTRAL_COMMANDS for head in heads):
-        return COMMAND_NEUTRAL
-    return COMMAND_UNCLEAR
+    if not statement.strip():
+        return COMMAND_NEUTRAL, "shell"
+    root = repo_root.as_posix()
+    head = _statement_head(statement)
+    if head == "cd":
+        # The move is the caller's business (:func:`_next_cwd`); the statement
+        # itself puts nothing in context.
+        return COMMAND_NEUTRAL, "shell"
+    writes, body = _split_redirects(statement, root, cwd=cwd)
+    if cwd is None:
+        # A ``cd`` left the repo, so every relative token is measured against a
+        # directory this reader cannot name; only what was named absolutely
+        # still means what it says.
+        named = _command_paths(body, repo_root, cwd=cwd)
+        if any(not _entry_scope(rel) for rel in named):
+            return COMMAND_WORK, "shell"
+        return COMMAND_UNCLEAR, "shell"
+    for rel in writes:
+        if rel in task_paths:
+            # The shell's answer to ``_records_decision``. A write whose content
+            # this reader cannot classify is not shown to be bookkeeping, so it
+            # does not get the benefit of the doubt the claim edit gets.
+            if records_decision:
+                return COMMAND_WORK, "task_edits"
+            return COMMAND_UNCLEAR, "task_edits"
+        if not _entry_scope(rel):
+            return COMMAND_WORK, "edits"
+    listed, unplaced = _listing_targets(body, root, cwd=cwd)
+    named = _command_paths(body, repo_root, cwd=cwd) + listed
+    if any(not _entry_scope(rel) for rel in named):
+        return COMMAND_WORK, "shell"
+    if unplaced:
+        return COMMAND_UNCLEAR, "shell"
+    if named or writes:
+        return COMMAND_NEUTRAL, "shell"
+    if _names_outside(body, root, cwd=cwd):
+        # Everything it touched is somewhere else on the machine — another
+        # checkout, ``/tmp``. The tool side already ignores such a read (it never
+        # resolves to a repo path), and the shell spelling of it is no different.
+        return COMMAND_NEUTRAL, "shell"
+    if head in CONTENT_COMMANDS:
+        if head in READ_COMMANDS and context and all(map(_entry_scope, context)):
+            # It named nothing itself, but everything this command names is the
+            # session's instructions, so that is what it read.
+            return COMMAND_NEUTRAL, "shell"
+        return COMMAND_WORK, "shell"
+    if head in LISTING_COMMANDS:
+        # Everything it was pointed at is outside the repo (``ls ~``, ``ls ..``);
+        # an in-repo target, the cwd included, was decided above.
+        return COMMAND_NEUTRAL, "shell"
+    if head in NEUTRAL_COMMANDS:
+        verdict = _git_flag_verdict(body) if head.startswith("git ") else COMMAND_NEUTRAL
+        return verdict, "shell"
+    if head is None:
+        # A statement with no command word at all — a loop's ``done``, a stray
+        # brace. It ran nothing, so there is nothing to be uncertain about.
+        return COMMAND_NEUTRAL, "shell"
+    return COMMAND_UNCLEAR, "shell"
 
 
-def _command_paths(command: str, repo_root: Path) -> list[str]:
+def _split_redirects(
+    statement: str, root: str, *, cwd: str | None = ""
+) -> tuple[list[str], str]:
+    """``(in-repo write targets, statement without its redirections)``.
+
+    The targets are removed from the text the rest of the classification reads,
+    so a write is weighed as a write and not counted a second time as a path the
+    command merely names. Only a target that looks like a file is kept: this is
+    a heuristic over unparsed argv, and a bare word picked out of prose is far
+    more likely to be prose than a write.
+    """
+    writes: list[str] = []
+
+    def swallow(match: re.Match) -> str:
+        target = match.group("target")
+        if target is None:
+            return " "
+        place, rel, absolute = _place_token(target, root)
+        placeable = absolute or cwd is not None
+        if place == _PLACE_IN and rel and _pathlike(rel) and placeable:
+            writes.append(_under(rel, absolute, cwd))
+        return " "
+
+    return writes, _REDIRECT.sub(swallow, statement)
+
+
+def _next_cwd(cwd: str | None, statement: str, root: str) -> str | None:
+    """Where a statement's ``cd`` leaves the shell, as a repo-relative directory.
+
+    Every relative token in a command is read against the session's cwd, because
+    the orchestrator launches it in the repo root. A ``cd`` moves that ground,
+    and the two directions it can move are not the same fact: into ``web/`` the
+    tokens are still this repo's (``cat package.json`` is source, read under the
+    new prefix), while out to ``~/.claude/projects`` they name nothing here at
+    all — ``ls 9073*.jsonl`` there is not this repo's tree, and reading it as one
+    would invent work and, with it, a missed prefetch doc.
+
+    ``None`` is that second case: the cwd left the repo, or landed somewhere this
+    reader cannot name (``cd -``, ``cd`` with no argument at all).
+    """
+    tokens = statement.split()
+    for index, token in enumerate(tokens):
+        if token != "cd" or cwd is None:
+            continue
+        if index + 1 >= len(tokens):
+            return None
+        place, rel, absolute = _place_token(tokens[index + 1], root)
+        if place != _PLACE_IN or rel == "-":
+            return None
+        cwd = _under(rel, absolute, cwd)
+    return cwd
+
+
+def _under(rel: str, absolute: bool, cwd: str | None) -> str:
+    """A token's repo-relative path once the shell's cwd is accounted for."""
+    if absolute or not cwd:
+        return rel
+    return f"{cwd}/{rel}" if rel else cwd
+
+
+def _listing_targets(
+    statement: str, root: str, *, cwd: str | None = ""
+) -> tuple[list[str], bool]:
+    """``(in-repo trees a listing prints, whether an operand was unplaceable)``.
+
+    Empty for anything but a listing head. A listing's operands are paths by
+    definition, so they are read as such without the shape test a general argv
+    token has to pass — that test exists to keep ``git status``'s subcommand from
+    being read as a file, and it is what let ``ls tests`` pass as metadata. With
+    no operand at all the listing prints the session's cwd, which is the repo
+    root: the widest tree listing there is, and the shape the head-only reading
+    called neutral.
+    """
+    if _statement_head(statement) not in LISTING_COMMANDS:
+        return [], False
+    operands = _head_operands(statement)
+    if not operands:
+        return [_under("", False, cwd)], False
+    targets: list[str] = []
+    unplaced = False
+    for token in operands:
+        place, rel, absolute = _place_token(token, root)
+        if place == _PLACE_IN:
+            targets.append(_under(rel, absolute, cwd))
+        elif place == _PLACE_UNKNOWN:
+            unplaced = True
+    return targets, unplaced
+
+
+def _names_outside(statement: str, root: str, *, cwd: str | None = "") -> bool:
+    """Whether the statement names a path, and every one it names is outside.
+
+    ``ls`` handles its own operands (:func:`_listing_targets`); this is the same
+    question for every other command, and it is what keeps ``rm -rf /tmp/probe``
+    or a read of a *different* repo from being read as work in this one.
+    """
+    outside = False
+    for token in statement.replace("\n", " ").split():
+        if token.startswith("-") or _ASSIGNMENT.match(token):
+            continue
+        place, rel, absolute = _place_token(token, root)
+        if place == _PLACE_OUT and _pathlike(token.strip("\"'`();{}")):
+            outside = True
+        elif place == _PLACE_IN and rel and _pathlike(rel):
+            return False
+    return outside
+
+
+def _head_operands(statement: str) -> list[str]:
+    """The non-flag arguments of a statement's own command, before any pipe."""
+    tokens = statement.split("|", 1)[0].split()
+    while tokens and _ASSIGNMENT.match(tokens[0]):
+        tokens = tokens[1:]
+    return [token for token in tokens[1:] if not token.startswith("-")]
+
+
+def _git_flag_verdict(statement: str) -> str:
+    """Place a metadata ``git`` query by the flags it actually carries.
+
+    The head says ``git log``; whether that prints commit subjects or the diff
+    of every one of them is decided entirely by the flags. Only the statement's
+    own flags are read — a pipe's tail carries its own (``| head -40``), and
+    attributing those to the query would place it on the strength of another
+    command's argv.
+    """
+    for token in statement.split("|", 1)[0].split():
+        name = _flag_name(token)
+        if name is None:
+            continue
+        if name in GIT_CONTENT_FLAGS:
+            return COMMAND_WORK
+        if name not in GIT_METADATA_FLAGS:
+            return COMMAND_UNCLEAR
+    return COMMAND_NEUTRAL
+
+
+def _flag_name(token: str) -> str | None:
+    """An argv token's flag name, or ``None`` when it is not a flag.
+
+    Normalized so one spelling stands for one flag: an attached value is dropped
+    (``--format='%h'``, ``-S"symbol"``), and a bare count is the count flag
+    (``git log -8`` is ``-n``). Surrounding punctuation is stripped because
+    commands reach this reader as they were typed, quotes and trailing commas
+    included.
+    """
+    token = token.strip("\"'`,;")
+    if not token.startswith("-") or token in ("-", "--"):
+        return None
+    name = token.split("=", 1)[0]
+    if _NUMERIC_FLAG.match(name):
+        return "-n"
+    if not name.startswith("--") and len(name) > 2:
+        return name[:2]
+    return name
+
+
+def _command_paths(
+    command: str, repo_root: Path, *, cwd: str | None = ""
+) -> list[str]:
     """Repo-relative paths a command names, as repo-relative POSIX strings.
 
     Textual, unlike :func:`_repo_rel`: a command token is a hint about intent,
     not a file this reader opens, and resolving one would put filesystem state
     from *now* into a judgment about *then*. Relative tokens are read against the
-    repo because that is the cwd every orchestrator session is launched with.
+    repo because that is the cwd every orchestrator session is launched with,
+    or against wherever a ``cd`` has since left it (``cwd``; ``None`` = outside
+    the repo, where only absolute tokens still say anything).
 
     Two arguments are deliberately not read targets: ``-C``'s and ``cd``'s, which
     name a working directory. Counting ``git -C <repo> status`` as touching the
@@ -1575,25 +2050,54 @@ def _command_paths(command: str, repo_root: Path) -> list[str]:
             continue
         if token.startswith("-") or _ASSIGNMENT.match(token):
             continue
-        rel = _command_rel(token.strip("\"'`();{}"), root)
+        rel = _command_rel(token, root, cwd=cwd)
         if rel is not None:
             paths.append(rel)
     return paths
 
 
-def _command_rel(token: str, root: str) -> str | None:
+def _command_rel(token: str, root: str, *, cwd: str | None = "") -> str | None:
     """One argv token as a repo-relative path, or ``None`` when it is not one.
 
-    Anything outside the repo drops out first — another checkout, ``/tmp``, the
-    machine's own config — because it says nothing about this repo's code.
+    Anything outside the repo drops out first — another checkout, ``/tmp``, a
+    ``~``-relative path — because it says nothing about this repo's code. So does
+    the repo root itself: naming it is not naming a file in it, and the one shape
+    where it matters (a listing pointed at the whole tree) is read separately.
     """
-    if token.startswith(f"{root}/"):
-        token = token[len(root) + 1 :]
-    elif token == root or token.startswith("/"):
+    place, rel, absolute = _place_token(token, root)
+    if place != _PLACE_IN or (cwd is None and not absolute):
         return None
+    if not rel or not _pathlike(rel):
+        return None
+    return _under(rel, absolute, cwd)
+
+
+def _place_token(token: str, root: str) -> tuple[str, str, bool]:
+    """``(place, repo-relative path, named absolutely)`` for one argv token.
+
+    The single place argv tokens are located, so every caller agrees on what
+    counts as "in this repo". ``~`` and ``..`` are outside it: they resolve
+    against the home directory and the repo's parent, neither of which is this
+    repo's code, and reading them as repo-relative would invent work.
+    """
+    token = token.strip("\"'`();{}")
+    if not token or "$" in token:
+        return _PLACE_UNKNOWN, "", False
+    if token.startswith("~"):
+        return _PLACE_OUT, "", True
+    if token in (root, f"{root}/"):
+        return _PLACE_IN, "", True
+    if token.startswith(f"{root}/"):
+        return _PLACE_IN, token[len(root) + 1 :].rstrip("/"), True
+    if token.startswith("/"):
+        return _PLACE_OUT, "", True
     if token.startswith("./"):
         token = token[2:]
-    return token if _pathlike(token) else None
+    if token in (".", "./"):
+        return _PLACE_IN, "", False
+    if token == ".." or token.startswith("../"):
+        return _PLACE_OUT, "", False
+    return _PLACE_IN, token.rstrip("/"), False
 
 
 def _pathlike(token: str) -> bool:
@@ -1615,20 +2119,10 @@ def _pathlike(token: str) -> bool:
     return "." in token.lstrip(".")
 
 
-def _statement_heads(command: str) -> list[str]:
-    """The head word of each statement in a command, ``git`` subcommands included."""
-    heads = []
-    for statement in _STATEMENTS.split(command):
-        head = _statement_head(statement)
-        if head is not None:
-            heads.append(head)
-    return heads
-
-
 def _statement_head(statement: str) -> str | None:
     """One statement's command word, or ``None`` when it has none."""
     tokens = statement.split("|", 1)[0].split()
-    while tokens and _ASSIGNMENT.match(tokens[0]):
+    while tokens and (_ASSIGNMENT.match(tokens[0]) or tokens[0] in _KEYWORDS):
         tokens = tokens[1:]
     if not tokens:
         return None

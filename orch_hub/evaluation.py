@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "5"
+EVIDENCE_SCHEMA_VERSION = "6"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -104,8 +104,14 @@ read, a v4 pack's does not; ``5`` moves that boundary again, by reading shell
 commands and plan/session-log writes as work and by refusing the completeness
 verdict where lost evidence or an unclassifiable command could have placed the
 boundary elsewhere, so a v4 session that is ``complete`` may be ``late`` or
-unassessable in v5. A persisted pack with no ``schema_version`` key is version 1
-and predates all of it.
+unassessable in v5. ``6`` narrows that shell reading to what it can actually
+show: a listing of this repo's tree and a patch-emitting ``git`` query become
+work, a write to the task file is weighed like the edit it stands in for, and
+anything the classifier cannot place — an unknown ``git`` flag, a command run
+after leaving the repo — becomes uncertainty rather than a credited pre-load,
+while operations on another tree stop counting as this repo's work at all. A
+persisted pack with no ``schema_version`` key is version 1 and predates all of
+it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the

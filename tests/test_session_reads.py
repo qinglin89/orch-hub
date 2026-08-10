@@ -805,6 +805,196 @@ def test_an_unclassifiable_command_refuses_only_what_follows_it(tmp_path):
     assert before.assessable is True and before.complete is True
 
 
+def test_listing_this_repo_ends_context_assembly_but_a_routed_listing_does_not(tmp_path):
+    repo = make_repo(tmp_path)
+    work = {
+        "bare-sid": "ls",
+        "flags-sid": "ls -la",
+        "tree-sid": "ls tests",
+    }
+    assembly = {
+        "routed-sid": "ls .ai/features/",
+        "abs-sid": f"ls -la {repo.path}/.ai-tasks/ 2>/dev/null | head -50",
+        "elsewhere-sid": "ls -la ~/.claude/projects/",
+    }
+    for sid, command in {**work, **assembly}.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in {**work, **assembly}}
+
+    # A listing is a tree, which is what a search returns: pointed at this repo's
+    # source it is the same work signal, so a declared doc opened afterwards is a
+    # late recovery rather than a pre-load.
+    for sid in work:
+        assert (rolled[sid].complete, rolled[sid].late) == (False, (FEATURES,)), sid
+        assert rolled[sid].activity == Activity(shell=1), sid
+    # Pointed at the session's own instructions — or at another tree entirely —
+    # it says nothing about this repo's code.
+    for sid in assembly:
+        assert rolled[sid].complete is True, sid
+        assert rolled[sid].entry_boundary is None, sid
+        assert rolled[sid].boundary_unsure is None, sid
+
+
+def test_a_git_query_is_placed_by_its_flags_not_by_its_head(tmp_path):
+    repo = make_repo(tmp_path)
+    cases = {
+        "patch-sid": "git log -p -1",
+        "pickaxe-sid": 'git log --oneline -S "RunManager"',
+        "meta-sid": "git log --oneline -8 --format='%h %s' && git status --porcelain",
+        "unknown-sid": "git log --some-flag-this-reader-has-never-seen -1",
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="q")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # ``git log`` prints commit subjects or the whole diff of every commit
+    # depending on one flag; the head cannot tell them apart.
+    for sid in ("patch-sid", "pickaxe-sid"):
+        assert (rolled[sid].complete, rolled[sid].late) == (False, (FEATURES,)), sid
+    assert rolled["meta-sid"].complete is True
+    assert rolled["meta-sid"].entry_boundary is None
+    # An unrecognized flag may print anything, so it buys uncertainty rather than
+    # the benefit of the doubt.
+    assert rolled["unknown-sid"].assessable is False
+    assert rolled["unknown-sid"].boundary_unsure == 2
+    assert "boundary not determinable" in rolled["unknown-sid"].detail
+
+
+def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
+    repo = make_repo(tmp_path)
+    task_file = f"{repo.path}/.ai-tasks/{TASK}.md"
+    cases = {
+        "log-sid": (
+            f"cat >> {task_file} <<'EOF'\n"
+            f"### 2026-08-10 / {SID} / (in_progress → in_progress)\n"
+            "- Done: remediated the boundary\nEOF"
+        ),
+        "claim-sid": f"printf 'claimed-by: x@2026-08-10T00:00:00Z\\n' >> {task_file}",
+        "source-sid": "echo 'generated' > orch_hub/generated.py",
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # A session-log append is the recorded decision whether it is written through
+    # ``Edit`` or through the shell, and the entry scope of its path does not
+    # make it context assembly.
+    assert (rolled["log-sid"].complete, rolled["log-sid"].late) == (False, (FEATURES,))
+    assert rolled["log-sid"].activity == Activity(task_edits=1)
+    # A shell write whose content this reader cannot classify is not shown to be
+    # the claim, so it does not get the claim's exemption either.
+    assert rolled["claim-sid"].assessable is False
+    assert rolled["claim-sid"].boundary_unsure == 2
+    assert rolled["claim-sid"].activity == Activity(task_edits=1)
+    # Writing source is work by the same rule the ``Edit`` path applies.
+    assert (rolled["source-sid"].complete, rolled["source-sid"].late) == (
+        False,
+        (FEATURES,),
+    )
+    assert rolled["source-sid"].activity == Activity(edits=1)
+
+
+def test_shell_work_on_another_tree_is_not_this_repo_s_work(tmp_path):
+    repo = make_repo(tmp_path)
+    cases = {
+        "scratch-sid": "rm -rf /tmp/orchhub-probe && cat ~/.claude/settings.json",
+        "sibling-sid": f"sed -n '1,40p' {tmp_path}/repos/beta/src/main.py",
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # The tool side simply drops a read that resolves outside the repo; the shell
+    # spelling of it cannot mean more. Otherwise a scratch file in ``/tmp`` would
+    # invent a missed prefetch doc for a session that never touched the code.
+    for sid, session in rolled.items():
+        assert session.complete is True, sid
+        assert session.entry_boundary is None, sid
+
+
+def test_a_cd_keeps_shell_work_visible_inside_the_repo_and_uncertain_outside(tmp_path):
+    repo = make_repo(tmp_path)
+    cases = {
+        "inside-sid": f"cd {repo.path}/web && cat package.json",
+        "outside-sid": "cd ~/.claude/projects && ls -la *.jsonl",
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # Moved inside the repo, the relative path still names this repo's source.
+    assert (rolled["inside-sid"].complete, rolled["inside-sid"].late) == (
+        False,
+        (FEATURES,),
+    )
+    # Moved out of it, ``*.jsonl`` names nothing here — reading it as this repo's
+    # tree would invent work, so the partition is uncertain instead.
+    assert rolled["outside-sid"].assessable is False
+    assert rolled["outside-sid"].boundary_unsure == 2
+
+
+def test_a_reader_over_the_entry_scope_is_still_context_assembly(tmp_path):
+    repo = make_repo(tmp_path)
+    survey = (
+        "for f in .ai-tasks/2026-07-05-im-bot-adapter.md .ai-tasks/index.md; do\n"
+        'echo "===== $f ====="; sed -n \'1,9p\' "$f"; done'
+    )
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [bash_row(survey, uid="survey")]
+        + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The loop variable is unresolvable on its own, but every path this command
+    # names is the session's own instructions, so that is what its reader read.
+    assert session.complete is True
+    assert session.entry_boundary is None and session.boundary_unsure is None
+
+
 def test_a_session_log_write_ends_context_assembly_but_a_claim_does_not(tmp_path):
     repo = make_repo(tmp_path)
     task_file = repo.path / ".ai-tasks" / f"{TASK}.md"
