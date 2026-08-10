@@ -2,12 +2,13 @@
 
 Covers what the rollup has to get right: the *session-time* expected prefetch set
 (never today's task file), an operational definition of "read" that credits
-caller-injected delivery and refuses a failed tool call, an ordered mid-flight
-trace that excludes the eager set and the close-out write path, applicability
-that is decided by role rather than by whether evidence happened to survive, the
-caps — enforced at the read, not after it — and total degradation: an absent,
-unparseable, or read-less transcript yields an unassessable session with a
-detail, never a zero.
+caller-injected delivery and refuses a failed tool call, the observable boundary
+that keeps entry pre-loading and mid-flight retrieval from collapsing into each
+other, an ordered trace that excludes the eager set and the close-out write path,
+applicability that is decided by role rather than by whether evidence happened to
+survive, the caps — enforced at the read, not after it — and total degradation:
+an absent, unparseable, read-less, or *holed* transcript yields an unassessable
+session with a detail, never a zero.
 
 Transcripts are fixtures under ``tmp_path`` in the CLI's real on-disk shape, so
 no test reads an operator's real Claude home and none of them needs a running
@@ -28,7 +29,10 @@ from orch_hub.session_reads import (
     MAX_EXPECTED_DOCS,
     METHOD_INJECTED,
     METHOD_READ_TOOL,
+    PHASE_ENTRY,
+    PHASE_WORK,
     SOURCE_TRANSCRIPT_TASK_READ,
+    Activity,
     ReadBehavior,
     SessionRef,
     _iter_rows,
@@ -148,6 +152,34 @@ def entry_rows(repo: ManagedRepo, prefetch: str | None) -> list[dict]:
     return read_rows(
         repo.path / ".ai-tasks" / f"{TASK}.md", content=task_md(prefetch), uid="task"
     )
+
+
+def work_rows(repo: ManagedRepo, *, uid: str = "code", path: str = "orch_hub/runs.py") -> list[dict]:
+    """A read of repo source: the observable moment context assembly ends."""
+    return read_rows(repo.path / path, content="def start_run():\n    ...\n", uid=uid)
+
+
+def tool_row(name: str, args: dict, *, uid: str = "t") -> dict:
+    """One assistant tool call, as the transcript records it."""
+    return {
+        "type": "assistant",
+        "timestamp": TS,
+        "message": {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": uid, "name": name, "input": args}],
+        },
+    }
+
+
+def edit_row(abs_path: Path | str, *, uid: str = "e", name: str = "Edit") -> dict:
+    return tool_row(name, {"file_path": str(abs_path)}, uid=uid)
+
+
+def search_row(path: Path | str | None = None, *, uid: str = "g") -> dict:
+    args: dict = {"pattern": "RunManager"}
+    if path is not None:
+        args["path"] = str(path)
+    return tool_row("Grep", args, uid=uid)
 
 
 def dev(run_id: str = "run-1", sid: str = SID) -> SessionRef:
@@ -442,6 +474,7 @@ def test_midflight_trace_is_ordered_and_excludes_prefetch_and_eager_docs(tmp_pat
         repo,
         entry_rows(repo, f"[{FEATURES}]")
         + read_rows(repo.path / FEATURES, content="# eval", uid="a")
+        + work_rows(repo)  # work begins: everything after it is retrieval
         + read_rows(repo.path / ".ai/index.md", content="# router", uid="b")
         + read_rows(repo.path / ".ai/design/index.md", content="# design", uid="c")
         + read_rows(repo.path / ".ai/apis/index.md", content="# apis", uid="d")
@@ -458,6 +491,7 @@ def test_midflight_trace_is_ordered_and_excludes_prefetch_and_eager_docs(tmp_pat
         read.order for read in session.midflight
     )
     assert {read.actor for read in session.midflight} == {ACTOR_ROOT}
+    assert session.complete is True  # the declared doc was still a pre-load
 
 
 def test_subagent_reads_count_as_consultation_and_are_attributed(tmp_path):
@@ -466,6 +500,7 @@ def test_subagent_reads_count_as_consultation_and_are_attributed(tmp_path):
         tmp_path,
         repo,
         entry_rows(repo, f"[{FEATURES}]")
+        + work_rows(repo)
         + read_rows(repo.path / SIDECAR, content="# sidecar", sidechain=True, uid="s"),
     )
 
@@ -501,7 +536,7 @@ def test_no_midflight_reads_is_an_empty_trace_not_a_defect(tmp_path):
 
 def test_midflight_trace_is_capped_and_says_so(tmp_path):
     repo = make_repo(tmp_path)
-    rows = entry_rows(repo, f"[{FEATURES}]")
+    rows = entry_rows(repo, f"[{FEATURES}]") + work_rows(repo)
     for n in range(5):
         rows += read_rows(repo.path / f".ai/features/f{n}.md", content="x", uid=f"u{n}")
     write_transcript(tmp_path, repo, rows)
@@ -513,14 +548,168 @@ def test_midflight_trace_is_capped_and_says_so(tmp_path):
 
 def test_midflight_trace_survives_an_unrecoverable_expected_set(tmp_path):
     repo = make_repo(tmp_path)
-    write_transcript(tmp_path, repo, read_rows(repo.path / SIDECAR, content="# sidecar"))
+    write_transcript(
+        tmp_path,
+        repo,
+        read_rows(repo.path / RUNTIME, content="# runtime", uid="pre")
+        + work_rows(repo)
+        + read_rows(repo.path / SIDECAR, content="# sidecar"),
+    )
 
     session = only(roll(tmp_path, repo, [dev()]))
 
-    # Prefetch is unassessable, but the retrieval evidence still exists; it is not
-    # discarded just because the set it would have been filtered against is gone.
+    # Prefetch is unassessable, but the observed loading and retrieval still are:
+    # both traces come off the phase boundary, not off a set we never recovered.
     assert session.assessable is False
+    assert session.entry_extra == (RUNTIME,)
     assert [read.path for read in session.midflight] == [SIDECAR]
+
+
+# -- the entry / work partition -----------------------------------------------
+
+
+def test_a_declared_doc_read_only_after_work_began_is_late_not_a_preload(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + work_rows(repo)  # went to the code first
+        + read_rows(repo.path / FEATURES, content="# eval", uid="late"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Reaching for a declared doc after reading the code is a recovery, not the
+    # pre-load the instruction asked for — but it is not "never consulted" either.
+    assert session.complete is False and session.coverage == 0.0
+    assert session.missing == (FEATURES,) and session.late == (FEATURES,)
+    assert session.loads[0].phase == PHASE_WORK
+    assert [read.path for read in session.midflight] == [FEATURES]
+
+
+def test_an_undeclared_doc_delivered_at_entry_is_not_a_midflight_retrieval(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [injected_row(repo.path / FEATURES, "# eval")]
+        + [injected_row(repo.path / SIDECAR, "# sidecar")]  # undeclared, at entry
+        + work_rows(repo)
+        + read_rows(repo.path / SIDECAR, content="# sidecar again", uid="re"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # It was already in context when work started, so nothing was retrieved
+    # mid-flight — but the extra pre-load is real behavior and is kept.
+    assert session.midflight == ()
+    assert session.entry_extra == (SIDECAR,)
+    assert session.complete is True
+
+
+def test_the_claim_edit_does_not_end_context_assembly(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [edit_row(repo.path / ".ai-tasks" / f"{TASK}.md", uid="claim")]
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The entry checklist puts the claim edit before the pre-load; treating it as
+    # work would fail every compliant session.
+    assert session.entry_boundary is None
+    assert session.complete is True
+    assert session.activity == Activity(task_edits=1)
+
+
+def test_editing_anything_else_ends_context_assembly(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [edit_row(repo.path / "orch_hub" / "runs.py", uid="w", name="Write")]
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.complete is False and session.late == (FEATURES,)
+    assert session.activity == Activity(edits=1)
+
+
+def test_a_repo_search_ends_context_assembly_but_a_scoped_one_does_not(tmp_path):
+    repo = make_repo(tmp_path)
+    rows = entry_rows(repo, f"[{FEATURES}]")
+    cases = {
+        "scoped-sid": search_row(repo.path / ".ai", uid="scoped"),  # routed lookup
+        "elsewhere-sid": search_row(tmp_path / "other", uid="away"),  # another tree
+        "wide-sid": search_row(uid="wide"),  # unscoped: a search of the code
+    }
+    for sid, row in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            rows + [row] + read_rows(repo.path / FEATURES, content="# eval", uid="ok"),
+            sid=sid,
+        )
+
+    rolled = {
+        sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases
+    }
+
+    assert rolled["scoped-sid"].complete is True
+    assert rolled["elsewhere-sid"].complete is True  # not this repo's code
+    assert rolled["wide-sid"].complete is False
+    assert rolled["wide-sid"].late == (FEATURES,)
+
+
+def test_midflight_reads_carry_the_work_done_before_them(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(repo.path / FEATURES, content="# eval", uid="pre")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="early")  # still entry
+        + work_rows(repo)
+        + [edit_row(repo.path / "orch_hub" / "runs.py", uid="edit")]
+        + read_rows(repo.path / RUNTIME, content="# runtime", uid="late"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The anchor is what survives the transcript: this doc was opened only after
+    # the code had been read and changed, which a bare row order cannot say.
+    assert [read.path for read in session.midflight] == [RUNTIME]
+    assert session.midflight[0].before == Activity(code_reads=1, edits=1)
+    assert session.activity == Activity(code_reads=1, edits=1)
+    assert session.entry_extra == (SIDECAR,)  # pre-loaded before any of it
+
+
+def test_a_parallel_entry_batch_is_not_split_by_its_own_first_code_read(tmp_path):
+    repo = make_repo(tmp_path)
+    doc_call, doc_result = read_rows(repo.path / FEATURES, content="# eval", uid="doc")
+    code_call, code_result = work_rows(repo)
+    write_transcript(
+        tmp_path,
+        repo,
+        # Both requested in the entry batch; the code result happens to land first.
+        entry_rows(repo, f"[{FEATURES}]") + [doc_call, code_call, code_result, doc_result],
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The doc was asked for while still assembling context, so a sibling call's
+    # result landing first does not turn it into a late recovery.
+    assert session.complete is True
+    assert session.loads[0].phase == PHASE_ENTRY
 
 
 # -- close-out exclusion ------------------------------------------------------
@@ -628,6 +817,110 @@ def test_a_backend_that_exposes_no_reads_is_unassessable_not_scratch_first(tmp_p
     assert session.complete is None
 
 
+def test_a_hole_in_the_entry_evidence_refuses_the_completeness_verdict(tmp_path):
+    repo = make_repo(tmp_path)
+    rows = entry_rows(repo, f"[{FEATURES}, {SIDECAR}]")
+    rows += read_rows(repo.path / FEATURES, content="# eval", uid="a")
+    path = write_transcript(tmp_path, repo, rows)
+    # A row the reader cannot use, before any work began: the missing doc may be
+    # exactly what it held.
+    path.write_text(
+        path.read_text(encoding="utf-8") + "{not json\n" + '"a string row"\n',
+        encoding="utf-8",
+    )
+
+    behavior = roll(tmp_path, repo, [dev()])
+    session = only(behavior)
+
+    assert session.skipped_rows == 2
+    assert session.assessable is False
+    assert session.coverage is None and session.complete is None
+    assert session.applicable is True  # it was still a session we should measure
+    assert session.loaded == (FEATURES,) and session.missing == (SIDECAR,)
+    assert "entry-phase evidence incomplete" in session.detail
+    assert behavior.warnings
+
+
+def test_holes_after_the_boundary_leave_the_entry_measurement_standing(tmp_path):
+    repo = make_repo(tmp_path)
+    rows = entry_rows(repo, f"[{FEATURES}]")
+    rows += read_rows(repo.path / FEATURES, content="# eval", uid="a")
+    rows += work_rows(repo)
+    path = write_transcript(tmp_path, repo, rows)
+    text = path.read_text(encoding="utf-8")
+    # Mixed damage, all of it in the work phase: a malformed row, a row past the
+    # per-row cap, and a byte budget that cuts the last row in half.
+    damaged = (
+        "{oops\n" + json.dumps({"type": "user", "pad": "x" * 9000}) + "\n" + "{tail\n"
+    )
+    path.write_text(text + damaged, encoding="utf-8")
+
+    session = only(
+        roll(
+            tmp_path,
+            repo,
+            [dev()],
+            max_bytes=len(text) + len(damaged) - 3,
+            max_line_bytes=4000,
+        )
+    )
+
+    assert (session.skipped_rows, session.truncated) == (3, True)
+    assert session.entry_boundary is not None
+    # Nothing after the session reached the code can change what it had loaded
+    # before that, so the pre-load verdict is still owed.
+    assert session.assessable is True and session.complete is True
+
+
+def test_a_task_read_cut_mid_frontmatter_does_not_supply_the_expected_set(tmp_path):
+    repo = make_repo(tmp_path)
+    body = task_md(f"[{FEATURES}, {SIDECAR}]")
+    write_transcript(
+        tmp_path,
+        repo,
+        read_rows(
+            repo.path / ".ai-tasks" / f"{TASK}.md",
+            content=body.split("prefetch:")[0],  # fence never closes
+            uid="task",
+        )
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # A body cut inside the frontmatter would parse as "declared nothing" and
+    # quietly drop the session out of the measurement instead of reporting a gap.
+    assert session.assessable is False and session.expected == ()
+    assert "expected set unrecoverable" in session.detail
+
+
+def test_an_injected_task_file_supplies_the_expected_set(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        [injected_row(repo.path / ".ai-tasks" / f"{TASK}.md", task_md(f"[{FEATURES}]"))]
+        + [injected_row(repo.path / FEATURES, "# eval")],
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.expected == (FEATURES,) and session.complete is True
+    assert session.loads[0].method == METHOD_INJECTED
+
+
+def test_blank_rows_are_not_evidence_holes(tmp_path):
+    repo = make_repo(tmp_path)
+    rows = entry_rows(repo, f"[{FEATURES}]") + read_rows(repo.path / FEATURES, content="# eval")
+    path = write_transcript(tmp_path, repo, rows)
+    path.write_text(path.read_text(encoding="utf-8") + "\n   \n", encoding="utf-8")
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.skipped_rows == 0
+    assert session.assessable is True and session.complete is True
+
+
 def test_no_sessions_reads_nothing_and_says_why(tmp_path):
     repo = make_repo(tmp_path)
 
@@ -716,7 +1009,11 @@ def test_an_oversize_row_is_skipped_rather_than_parsed(tmp_path):
 
     # The giant row is dropped whole; the rows on either side are still read, so
     # the scan resumed on a real row boundary rather than on fragments.
-    assert session.complete is True
+    assert session.events_scanned == 4 and session.skipped_rows == 1
+    assert session.loaded == (FEATURES,)
+    # But a hole in the entry evidence is not a measurement: the load is reported
+    # as an observation while the score stays unclaimed.
+    assert session.assessable is False and session.complete is None
 
 
 def test_the_byte_budget_stops_the_scan_and_is_recorded(tmp_path):
@@ -730,6 +1027,11 @@ def test_the_byte_budget_stops_the_scan_and_is_recorded(tmp_path):
 
     assert session.truncated is True
     assert session.events_scanned < len(rows)
+    # The session never reached the code, so the cut tail is inside the entry
+    # phase and could hold the missing load: no completeness verdict is owed.
+    assert session.entry_boundary is None
+    assert session.assessable is False and session.complete is None
+    assert session.missing == (FEATURES,)  # the observation survives the refusal
 
 
 def test_iter_rows_never_reads_past_the_byte_budget(tmp_path):

@@ -1048,6 +1048,9 @@ def test_build_evidence_carries_the_per_session_read_rollup(tmp_path):
             "task",
         )
         + read_pair(repo.path / ".ai" / "features" / "evaluation.md", "# Evaluation\n", "doc")
+        # Then it goes to the code, and only afterwards fetches a further doc:
+        # the pre-load and the mid-flight retrieval are on opposite sides of that.
+        + read_pair(repo.path / "orch_hub" / "evaluation.py", "def build():\n", "code")
         + read_pair(repo.path / ".ai" / "modules" / "sidecar.md", "# Sidecar\n", "mid"),
     )
 
