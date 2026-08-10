@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-10
-verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # Features: Task Evaluation
@@ -16,8 +16,8 @@ Description: Build optional read-only evidence packs for one active or archived
 task so static metrics and semantic evaluators have bounded task/run/git/`.ai/`
 input without changing normal run-control state.
 
-Modules: evaluation, ai_snapshot, config, task_store, runs, history, sessions,
-logs, git_meta, subprocess_utils, models.
+Modules: evaluation, ai_snapshot, session_reads, config, task_store, runs,
+history, sessions, logs, git_meta, subprocess_utils, models.
 
 APIs: internal `EvaluationService.resolve_target`, `related_runs`,
 `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`,
@@ -41,14 +41,21 @@ Implemented behavior:
   and `spawn.out` excerpts with size/truncation metadata, terminal record fields,
   explicit warnings, best-effort git commit-window metadata, and a producer-
   bounded `.ai/` view: the full eager set, task-declared prefetch docs, and a
-  `.ai/`-scoped patch stream over the same run window. Each memory part carries
-  availability, size/truncation metadata, and degradation warnings.
+  `.ai/`-scoped patch stream over the same run window. They also carry a bounded
+  per-session read-behavior section derived from Claude transcripts under
+  `ORCH_HUB_CLAUDE_HOME`: the session-time lazy prefetch set, deterministic
+  completeness facts, and one ordered declared/undeclared `.ai/` trace with
+  activity, write-order, close-out, cap, and observability evidence. No raw
+  transcript content is retained. Each part carries independent availability
+  and degradation warnings.
 - Eager memory topics resolve through `.ai/index.md` routing before file-shape
   fallback (`topic.md` versus `topic/index.md`). Snapshot roots and child reads
   stay inside the managed repo; document/router reads and git patch output are
   bounded at their producers, and a failed patch read preserves collected docs.
-- `evidence.json` records its shape as schema v2; pre-version packs remain
-  readable as v1-shaped artifacts.
+- `evidence.json` records its shape as schema v15; pre-version and older-schema
+  packs remain readable as additive earlier shapes. Schema 15 accounts for
+  capped and unobserved sessions so downstream confidence does not silently
+  narrow to the transcripts that happened to be readable.
 - Git evidence uses ambient commit-date history reachable from HEAD over the
   run lifecycle window, capped at 50 commits and 64KB at the subprocess
   producer. A byte cut drops its partial trailing record and marks the evidence
@@ -82,7 +89,7 @@ Status: implemented
 Description: Compute deterministic, non-semantic Layer 1 task-quality metrics
 from one evidence pack and persist the report beside the pack.
 
-Modules: static_metrics, evaluation, config, models.
+Modules: static_metrics, evaluation, session_reads, config, models.
 
 APIs: internal `StaticEvaluator.run_metrics`, `build_report`,
 `generate_metrics`, and `STATIC_METRICS_NAME`; protected
@@ -103,11 +110,15 @@ Implemented behavior:
   required sections, session-log entry counts, review coverage, verdict and
   remediation counts, blocker/fix-set/prefetch facts, status-transition
   continuity, final-status match, and completed-task final `Open: none`.
-- Static reports carry five transparent score axes: protocol,
+- Static reports carry six transparent score axes: protocol,
   reliability/diagnostics, handoff structure, estimate fit, and
-  knowledge-maintenance signals. Penalties append evidence-naming warnings;
-  missing or partial evidence lowers confidence or makes an axis not
-  assessable instead of crashing.
+  knowledge-maintenance signals, plus `prefetch_set_read_completeness`. The read
+  score is the fraction of assessable applicable sessions whose complete
+  session-time lazy set was read; its confidence is measured candidates over all
+  candidates, including sessions dropped by the reader cap. Penalties append
+  evidence-naming warnings; missing or partial evidence lowers confidence or
+  makes an axis not assessable instead of crashing. `static_metrics.json`
+  stamps static schema v3 so score-set cohorts remain separable.
 - Two knowledge signals are intentionally omitted because the evidence pack
   cannot derive them: per-commit touched file paths and archived-task blocker
   references across other tasks.
@@ -136,8 +147,8 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: semantic_jobs, semantic, ai_snapshot, static_metrics, evaluation,
-config, models, notifications, api, cli, web.
+Modules: semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics,
+evaluation, config, models, notifications, api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`,
@@ -158,10 +169,13 @@ Implemented behavior:
   evaluator identity, linked input ids, input evidence-schema cohort, summary,
   and suggested improvements.
 - Bounded prompt evidence includes the task file, static metrics, capped commit
-  subjects, the pack's bounded `.ai/` docs and patch stream, warnings, and
-  explicit omissions. Snippet/diff availability is computed independently from
-  what the pack carries: snippets ground `ai_freshness_utility`; missing parts
-  remain omitted and lower confidence rather than failing. Raw logs stay out.
+  subjects, the pack's bounded `.ai/` docs/patch stream and ordered session-read
+  rollups, warnings, and explicit omissions. Snippet/diff/read availability is
+  computed independently from what the pack carries: snippets ground
+  `ai_freshness_utility`; the ordered trace grounds semantic-schema-v2
+  `retrieval_effectiveness` and `rediscovery_risk`. Missing or partial parts
+  remain omitted or lower confidence rather than failing; unobserved sessions
+  are missing evidence, never bad behavior. Raw logs stay out.
 - Reports stamp `input_evidence_schema`; confidence comparisons must remain
   within one evidence-schema cohort because a new evaluator input moves the
   confidence baseline.

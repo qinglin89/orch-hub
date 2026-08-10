@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-10
-verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -52,7 +52,7 @@ and return `None` for absent or unsafe content.
 Input: managed repo, exact task id, and optional evaluation id.
 
 Output: `EvaluationTarget`, `RelatedRun` values, or a bounded `EvidencePack`
-persisted as `evidence.json` under the hub data dir.
+persisted as schema-v15 `evidence.json` under the hub data dir.
 
 Behavior: `EvaluationService` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` from every operation when disabled. Target resolution
@@ -60,7 +60,11 @@ checks active task files before archive files. Related-run aggregation loads
 persisted run records read-only via `runs.load_records` and matches exact
 `(repo_path, task_id)`. Evidence building reads run events, session snapshots,
 bounded orchestrator logs, bounded `spawn.out`, terminal record fields, and
-producer-bounded best-effort git-window commits; per-run artifact failures
+producer-bounded best-effort git-window commits. It also reads persisted session
+ids against the Claude transcript root derived from `ORCH_HUB_CLAUDE_HOME` and
+adds bounded session-time prefetch facts plus one ordered declared/undeclared
+`.ai/` read trace; absent, lost, capped, or unobserved evidence is explicit and
+raw transcript content is never retained. Per-run/secondary artifact failures
 become warnings, while target task IO errors fail the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
@@ -89,8 +93,11 @@ count, dev/review/plan-gate session counts, context/turn/duration aggregates,
 warning count, and target active/archive source. `build_report(pack)` parses
 the task file content from the pack for frontmatter legality, required
 sections, session-log structure, review coverage, verdict/remediation counts,
-status-transition path, and completion hygiene, then returns five transparent
-score components with evidence-backed warnings and confidence. `generate_metrics`
+status-transition path, and completion hygiene, then returns six transparent
+score components with evidence-backed warnings and confidence. The sixth,
+`prefetch_set_read_completeness`, scores complete applicable/assessable
+session-time sets while keeping unmeasured and reader-capped candidates in the
+confidence denominator only. Reports stamp static schema v3. `generate_metrics`
 delegates to `EvaluationService.generate_evidence`, writes `static_metrics.json`
 atomically into the same evaluation artifact directory, and removes the
 reserved dir on report-write failure. It mints evidence with retention deferred
@@ -111,10 +118,13 @@ provenance includes the input evidence-schema cohort.
 Behavior: `SemanticEvaluator` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` when disabled. `build_semantic_evidence(pack, static)`
 constructs a bounded model input from the task file, static metrics, capped git
-subjects, the pack's producer-bounded `.ai/` docs and same-window patches, and
-explicit omissions. Snippet/diff availability is computed independently from
-the persisted section; unavailable parts and raw logs are omitted and lower
-confidence rather than failing. `build_prompt` requires a
+subjects, the pack's producer-bounded `.ai/` docs/same-window patches and ordered
+session-read rollups, and explicit omissions. Snippet/diff/read availability is
+computed independently from the persisted sections; unavailable or partial
+parts and raw logs are omitted or lower confidence rather than failing.
+Semantic schema v2 adds `retrieval_effectiveness` over all declared/undeclared
+reads and grounds `rediscovery_risk` in the same timing evidence; unobserved
+sessions are missing evidence, never bad behavior. `build_prompt` requires a
 sentinel-wrapped JSON report. `parse_report` stamps provenance from the harness,
 requires scored rationales and evidence-backed findings, and treats malformed
 model output as `SemanticEvaluationError`. `evaluate(repo, task_id)` mints a

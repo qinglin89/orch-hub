@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-10
-verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # Modules
@@ -10,7 +10,7 @@ Full responsibilities live in the detail files below.
 | Module | Location | Description |
 |---|---|---|
 | CLI | `orch_hub/cli.py` | `repos` readiness output; launchd/notify/eval-doctor dispatch |
-| Config | `orch_hub/config.py` | env defaults/overrides; token/Bark/eval/Codex settings; derived paths |
+| Config | `orch_hub/config.py` | env defaults/overrides; token/Bark/eval/Claude/Codex settings; derived paths |
 | Launchd operations | `orch_hub/launchd.py` | deploy/update/lifecycle/status; Bark URL surfacing |
 | Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | managed repo discovery from `aii-2` or registry file |
@@ -22,8 +22,9 @@ Full responsibilities live in the detail files below.
 | Repo admission | `orch_hub/admission.py` | per-repo atomic run↔intake admission; persisted occupancy probes; structured conflicts |
 | Evaluation | `orch_hub/evaluation.py` | evidence targets/packs; artifact persistence/retention/reads |
 | AI snapshot evidence | `orch_hub/ai_snapshot.py` | producer-bounded routed `.ai/` docs and same-window patch evidence |
-| Static metrics | `orch_hub/static_metrics.py` | deterministic metrics over evidence packs; `static_metrics.json` |
-| Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation; backend isolation; doctor |
+| Session read evidence | `orch_hub/session_reads.py` | bounded transcript-derived prefetch facts and ordered `.ai/` read traces |
+| Static metrics | `orch_hub/static_metrics.py` | deterministic six-axis metrics over evidence packs; `static_metrics.json` |
+| Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation incl. retrieval effectiveness; backend isolation; doctor |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
 | Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained bundle reads |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
@@ -71,6 +72,9 @@ Full responsibilities live in the detail files below.
 - AI snapshot evidence resolves memory through the target router/file shape,
   enforces repo containment and byte bounds at every read producer, and degrades
   docs and patches independently; it never writes the target snapshot.
+- Session-read evidence derives bounded ordered facts from configured Claude
+  transcripts, excludes close-out/read-back events, and reports missing or
+  uncertain evidence instead of inventing behavior; it retains no raw transcript.
 - Static metrics read evidence packs; write only contained
   `static_metrics.json` in the same evaluation dir; no target/run/protocol
   mutation.

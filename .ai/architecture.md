@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-10
-verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # Architecture
@@ -135,13 +135,17 @@ off the state-critical path when Bark is configured.
 Task evaluation: exact active/archive id → read-only aggregation of every
 `(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics,
 a producer-bounded best-effort git window, and a producer-bounded `.ai/`
-eager/prefetch snapshot plus same-window `.ai/` patches → versioned
-`evidence.json` under the hub data dir.
-Static metrics adds deterministic run/session, taskfile/session-log, score,
-confidence, and warning rollups as `static_metrics.json` beside it. The
+eager/prefetch snapshot plus same-window `.ai/` patches, plus bounded ordered
+session read behavior from persisted ids and the configured Claude transcript
+store → schema-v15 `evidence.json` under the hub data dir.
+Static metrics adds deterministic run/session, taskfile/session-log, six-axis
+score (including prefetch-set read completeness), confidence, and warning
+rollups as static-schema-v3 `static_metrics.json` beside it. The
 semantic layer builds a model prompt from the persisted evidence/static chain,
-including the bounded `.ai/` copy and its independently available patch stream;
-missing parts and raw logs are recorded as confidence degradation. It persists
+including the bounded `.ai/` copy, independently available patch stream, and
+ordered read trace; semantic-schema-v2 retrieval effectiveness is distinct and
+grounds rediscovery risk. Missing/partial/unobserved parts and raw logs are
+recorded as omission or confidence degradation, never poor behavior. It persists
 `semantic_report.json` + `report.md` in the same dir and stamps the evidence
 schema cohort on the report. The default Claude CLI backend runs from an empty
 non-repo cwd with tools disabled, safe mode, no session persistence, and

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-10
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # Project Overview
@@ -32,7 +32,8 @@ review, and fresh completed/failed semantic-evaluation jobs, and run a confirmed
 remote intake loop that drafts a task before writing it to the target repo,
 generate bounded read-only task evidence packs
 under the hub data dir for active or archived tasks, compute deterministic
-protocol/reliability/handoff/estimate/knowledge-maintenance static reports as
+protocol/reliability/handoff/estimate/knowledge-maintenance/prefetch-reading
+static reports as
 `static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
 CLI semantic evaluator through persisted async job records that prevent
 duplicate in-flight model calls and link completed jobs to `semantic_report.json`
@@ -85,16 +86,19 @@ and links back to existing per-task detail.
 - Draft, revise, confirm, or cancel new task proposals remotely while keeping
   target repo `.ai-tasks/` files unchanged until explicit confirmation.
 - Generate bounded, read-only evidence packs for active or archived tasks from
-  task files, related run records/events/sessions/log diagnostics, and
-  best-effort git commit windows.
+  task files, related run records/events/sessions/log diagnostics, best-effort
+  git commit windows, `.ai/` snapshots/patches, and transcript-derived ordered
+  session memory-read behavior without retaining raw transcripts.
 - Compute deterministic static task-quality reports from evidence packs,
-  including run/session rollups, taskfile/session-log protocol metrics, five
-  score axes, evidence-backed warnings, and `static_metrics.json` persistence
-  in the hub-owned evaluation artifact directory.
+  including run/session rollups, taskfile/session-log protocol metrics, six
+  score axes (including prefetch-set read completeness), evidence-backed
+  warnings, and versioned `static_metrics.json` persistence in the hub-owned
+  evaluation artifact directory.
 - Run optional semantic task evaluations from the same bounded evidence/static
-  chain, invoking Claude CLI from an isolated empty cwd with tools disabled so
-  reports are reproducible from persisted artifacts and cannot read target repo
-  files outside the prompt.
+  chain, including retrieval effectiveness over ordered `.ai/` reads and
+  evidence-grounded rediscovery risk, while invoking Claude CLI from an isolated
+  empty cwd with tools disabled so reports are reproducible from persisted
+  artifacts and cannot read target repo files outside the prompt.
 - Show Claude and Codex subscription usage as display-only capacity data:
   provider windows, used/remaining percentages, reset time, freshness, and
   unavailable/stale reasons, without starting model turns, directly opening

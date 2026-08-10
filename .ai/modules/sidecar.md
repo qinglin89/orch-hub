@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-10
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -23,8 +23,14 @@ from task content, related run records, metadata-only events, persisted session
 snapshots, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
 best-effort git-window commits, and a bounded `.ai/` snapshot. The memory
 section contains the routed eager set, task-declared prefetch docs, and a
-`.ai/`-scoped patch stream over the same git window; per-part failures degrade
-independently, and every doc/router/diff bound is enforced at its producer.
+`.ai/`-scoped patch stream over the same git window. A separate schema-v15
+`reads` section uses persisted session ids plus Claude transcripts rooted at
+`Config.claude_transcripts_dir` to retain bounded session-time prefetch facts
+and one ordered declared/undeclared `.ai/` read trace with activity/write-order
+anchors, but no transcript text. Transcript absence, lost rows, trace/session
+caps, and unobserved sessions degrade explicitly; per-part failures remain
+independent, and every doc/router/diff/transcript bound is enforced at its
+producer.
 `generate_evidence` mints an evaluation id
 and atomically writes `evidence.json` under
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. `list_evaluations`
@@ -58,9 +64,13 @@ run/session/event/diagnostic rollups from bounded pack evidence, including
 evidence-only run outcome partitioning, failure/diagnostic counts,
 human-input count, dev/review/plan-gate session counts, context/duration
 aggregates, target source, and warning count. `build_report(pack)` adds
-taskfile/session-log protocol facts, five transparent score axes
-(`protocol`, `reliability`, `handoff`, `estimate`, `knowledge`), confidence
-values, and evidence-backed warnings. `generate_metrics(repo, task_id,
+taskfile/session-log protocol facts, six transparent score axes
+(`protocol`, `reliability`, `handoff`, `estimate`, `knowledge`,
+`prefetch_set_read_completeness`), confidence values, per-session read
+diagnosis, and evidence-backed warnings. The read axis scores complete
+session-time sets only across applicable assessable sessions and keeps missing
+or capped candidates in confidence rather than quality. Static schema v3 cohorts
+the score set. `generate_metrics(repo, task_id,
 evaluation_id=None)` delegates to `EvaluationService.generate_evidence`, writes
 `static_metrics.json` atomically in the same evaluation dir, and cleans the
 reserved dir if the report write fails. `api.py` exposes this as the protected
@@ -85,11 +95,13 @@ persist `semantic_report.json` and `report.md` beside `evidence.json` and
 `static_metrics.json` in a fresh evaluation dir. `SemanticEvaluator` shares the
 evaluation gate and raises `EvaluationDisabledError` when disabled. Its evidence
 distillation includes the task file, static report, capped git commit subjects,
-the pack's bounded `.ai/` docs and windowed patches, and explicit omissions.
-The two `.ai/` availability flags come from what the pack actually carries:
-snippets make `ai_freshness_utility` assessable, while each unavailable part
-stays out and lowers confidence independently. Raw orchestrator/spawn logs stay
-out of the prompt.
+the pack's bounded `.ai/` docs/windowed patches, its ordered session-read
+rollups, and explicit omissions. Independent snapshot/read availability comes
+from what the pack actually carries: snippets make `ai_freshness_utility`
+assessable, while the read trace grounds semantic-schema-v2
+`retrieval_effectiveness` and `rediscovery_risk`. Missing, unobserved, or
+partially lost read evidence lowers confidence rather than becoming bad session
+behavior. Raw orchestrator/spawn logs stay out of the prompt.
 
 The report parser requires sentinel-wrapped JSON, stamps task/evaluation
 provenance itself (including the evidence-pack schema cohort), rejects malformed

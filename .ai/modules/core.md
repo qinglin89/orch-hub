@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-10
-verified-against: 0d5d485298f31e24f76f67b81327ce60f1d71da7
+verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 ---
 
 # Modules: Core
@@ -61,8 +61,8 @@ ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
 `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
-`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CODEX_HOME`, and derived
-`aii-2`/registry file paths:
+`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CLAUDE_HOME`, `ORCH_HUB_CODEX_HOME`, and
+derived Claude transcript, `aii-2`, and registry file paths:
 
 ```text
 /Users/linqing/workplace/github.com/qinglin89/ai-native-development
@@ -89,6 +89,8 @@ constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
 to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
 values raise `ValueError`. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
 used only for read-only subscription-usage scans of Codex session rollouts.
+`ORCH_HUB_CLAUDE_HOME` defaults to `~/.claude`; evaluation derives its
+`projects/` transcript root from it for bounded session-read evidence.
 
 ## Models
 
