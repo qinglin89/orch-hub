@@ -3,36 +3,47 @@
 The evidence pack already carries the **write** side of project memory
 (:mod:`orch_hub.ai_snapshot`: the snapshot as it stands plus the patches the run
 window produced). This module carries the **read** side, which nothing else
-observes: whether each session actually loaded the lazy docs its task declared,
-and — ordered — which further lazy docs it went and fetched while working.
+observes: which of the lazy docs a session's task declared actually reached its
+context, and — ordered — every other ``.ai/`` doc it consulted along the way.
 
-Two distinct mechanisms, kept distinct here because they are scored differently
-downstream:
+The measurement model
+---------------------
 
-- **entry prefetch completeness** — the taskfile schema's ``prefetch:`` list is
-  a *pre-load at start* instruction, and the orchestrator instantiates it in the
-  dev entry checklist. Loading one of three declared docs is not compliance, so
-  this records the whole expected set, what was loaded, and what was missed.
-- **mid-flight retrieval** — an ordered trace of the lazy ``.ai/`` docs a
-  session consulted *while working*. It is deliberately **not** scored here:
-  zero mid-flight reads is the correct behavior for a session whose prefetch was
-  sufficient, and more reads is not better. The trace exists so a semantic judge
-  can ask whether a new knowledge need arose and whether memory was consulted
-  before the knowledge was re-derived from code.
+**One ordered trace, not two mechanisms.** Every qualifying ``.ai/`` read is one
+event in a single sequence, and ``declared_prefetch`` is an *attribute* of the
+event rather than a phase it belongs to. The task's ``prefetch:`` list supplies
+only the session-time expected set; the deterministic question asked of it is
+whether a qualifying read exists **anywhere** in the session, never where it
+happened.
 
-The two are separated by an observable boundary rather than by declaration
-membership (:data:`ENTRY_SCOPE_DIRS`): a session is assembling context until
-it first *works* — reads or shells out to repo source, searches the tree, edits
-a file outside its instructions, or records a decision in its own task file.
-Without that partition the two mechanisms collapse into each other in both
-directions: a declared doc opened only after the code was already read would
-score as a completed pre-load, and a lazy doc the harness injected at entry
-would read as a mid-flight retrieval that never happened. A declared doc first
-delivered after the boundary is therefore recorded as a *late* recovery — not a
-pre-load, and visible in the retrieval trace where it belongs.
+A read qualifies exactly when::
 
-Evidence source and boundary
-----------------------------
+    content successfully entered context
+    AND before the close-out marker
+    AND no write to the same path preceded it
+
+Each clause is here because dropping it would credit a read that never informed
+any work:
+
+- *entered context* — a successful read result or caller injection. A failed or
+  unanswered call put nothing in the context to be used.
+- *before close-out* — reads after the close-out marker are absorption walking
+  ``.ai/`` in order to update it (the write path), not knowledge used while
+  working.
+- *no earlier write* — a read of a doc this session wrote first is at most a
+  read-back of its own text, not use of existing project memory. Read-then-write
+  is the opposite case and does count: knowledge used, then the memory updated.
+
+**When a read happened is evidence, not a verdict.** This module records each
+read's order, the first-write position for the same path, and bounded counts of
+the work the session had already done, then leaves "early enough", "relevant",
+and "actually useful" to the semantic layer, which can weigh them against the
+work the session was doing. Nothing here infers a phase, an entry/work boundary,
+or the meaning of a shell command: the extractor reports order and lets the judge
+judge.
+
+Evidence source
+---------------
 
 The only observation surface is the agent CLI's own conversation transcript.
 Claude Code writes one JSONL file per session at
@@ -45,9 +56,9 @@ governs the session parser.
 What crosses into the pack is a **rollup**, never the transcript: paths,
 booleans, counts, and an ordered event list. That is the existing
 bounded-evidence rule, and the precedent is ``has_diagnostic``-style
-summarization of logs the pack never ships. The transcript is also the one
-place a session's *own* conversation content lives — prompts, human answers,
-tool output — so shipping it would be both unbounded and a disclosure change.
+summarization of logs the pack never ships. The transcript is also the one place
+a session's *own* conversation content lives — prompts, human answers, tool
+output — so shipping it would be both unbounded and a disclosure change.
 
 Session-time truth
 ------------------
@@ -64,35 +75,41 @@ Degradation
 -----------
 
 Every gap is a first-class recorded state, never a penalty: a session with no
-transcript (a Codex-backed review session has none in this store), an
+transcript (a Codex-backed review session leaves none in this store), an
 unparseable one, a backend whose events do not expose file reads, a session that
 never re-read its own task file — each yields ``assessable=False`` with a
 ``detail``, and the downstream layers are expected to drop it from the quality
 denominator and lower confidence instead.
 
-That extends to *partial* evidence, which is the subtler case: this reader skips
-a malformed or over-long row and stops at a byte budget, so a load it never saw
-is indistinguishable from one that never happened. A missing doc reported
-against evidence known to have holes would be a fabricated negative, so the
-prefetch verdict is refused whenever the evidence it rests on was not read whole
-(:func:`_entry_verdict_refusal`) — while the retrieval facts the same scan did
-collect are kept, since they stand on their own. Three things can undermine that
-verdict, and each is tracked positionally rather than as one blanket flag:
+Partial evidence is the subtler case, and it turns on one asymmetry: a read is
+*positive* evidence, so a row this reader could not use can only ever hide a
+read, never invent one. That gives two rules and no bookkeeping about where the
+damage sits relative to anything (:func:`_verdict_refusal`):
 
-- a hole *inside* the entry phase, which could hide either a load or the work
-  signal that would have ended the phase earlier;
-- a hole anywhere after a still-unanswered entry-phase request, which could be
-  the delivery that request was waiting for — phase comes from the row a read
-  was *asked* for, so an entry-phase result can legitimately land late;
-- a shell command this reader cannot classify, which could be the work the
-  boundary should have been drawn at (:func:`_classify_command`).
+- a declared doc reported **missing** cannot be claimed once any evidence was
+  lost, because the lost part may hold exactly the read that would have found it;
+- a declared doc reported **read** cannot be claimed when evidence was lost
+  before that read, because the lost part may hold an earlier write to the same
+  path or the close-out marker — the two order-dependent clauses of the success
+  condition above.
 
-The last of those is deliberately a wide net. The reader models a small,
-explicitly bounded subset of the shell and refuses every command outside it
-(:func:`_shell_shape`) rather than approximating one more construct each time a
-new spelling turns up. Approximation has no stopping point and fails silently in
-whichever direction the guess falls; refusal costs confidence, which is the
-error this measurement is allowed to make.
+Either way the observed facts stay in the rollup and only the verdict is
+withheld.
+
+Known limits, recorded rather than approximated
+-----------------------------------------------
+
+Writes are observed from structured edit tool calls only. A ``.ai/`` doc rewritten
+through a shell redirection is therefore invisible as a write, because telling a
+shell write from a mention of the same path requires interpreting a shell — the
+approximation this reader is deliberately without. The protocol makes that
+narrow: sessions do not edit ``.ai/`` mid-task, and close-out absorption is
+already excluded by its marker.
+
+Close-out is observable only as an invocation of the close-out skill
+(:data:`CLOSEOUT_SKILL`). An absorption performed without it is not visible, and
+reads after it would be credited; a session that never closes out is the benign
+case, since then every read is genuinely pre-close-out.
 """
 
 from __future__ import annotations
@@ -121,14 +138,17 @@ top of the same dev prompt, so it carries the instruction too — hence the role
 not the kind, is the predicate.
 
 This is what makes ``applicable`` decidable *without* a transcript: a review
-session was never asked to pre-load anything, so it is not a missing measurement
+session was never asked to load anything, so it is not a missing measurement
 that should lower confidence — it is outside the measurement.
 """
 
 CLOSEOUT_SKILL = "ai-sync-v2"
-"""The task-completion closeout skill. Reads after it are absorption (the write
-path) walking ``.ai/`` to update it, not consultation, so the scan stops there —
-the retired session-audit skill drew the same divider for the same reason."""
+"""The task-completion closeout skill, and the one observable close-out marker.
+
+Reads after it are absorption walking ``.ai/`` to update it — the write path —
+rather than knowledge used while working, so the scan stops there. The retired
+session-audit skill drew the same divider for the same reason.
+"""
 
 MAX_SESSIONS = 24
 """Cap on sessions rolled up per pack. A long task's runs can carry many
@@ -137,10 +157,8 @@ sessions; the rollup is per session, so the count is the unbounded dimension."""
 MAX_TRANSCRIPT_BYTES = 8 * 1024 * 1024
 """Byte cap on one transcript scan. Measured transcripts run ~1MB median and
 ~18MB at the tail, so a conforming session is read whole and a runaway one costs
-a bounded read. A cut is recorded (``truncated``) and costs only the mid-flight
-tail: a transcript large enough to hit this cap reached the code long before it,
-so the entry-phase evidence the prefetch measurement rests on is behind the cut,
-not in front of it (:func:`_entry_evidence_intact`)."""
+a bounded read. A cut is recorded (``truncated``) and counts as lost evidence
+like any other hole."""
 
 MAX_LINE_BYTES = 1024 * 1024
 """Per-line cap inside a transcript. One JSONL row holds one message, and a
@@ -148,42 +166,17 @@ tool result can be arbitrarily large — a whole-file cap alone would still let 
 single row be read into memory unbounded. An over-long row is skipped, not
 parsed."""
 
-MAX_MIDFLIGHT_EVENTS = 40
-"""Cap on the ordered mid-flight trace per session. Only the *first* consult of
-each path is recorded, so this bounds distinct docs, not repeat reads."""
+MAX_READ_EVENTS = 64
+"""Cap on the ordered read trace per session. Only the *first* qualifying read of
+each path is recorded, so this bounds distinct docs rather than repeat reads. It
+is comfortably above :data:`MAX_EXPECTED_DOCS` because the trace carries declared
+and undeclared reads alike — a session with a full declared set has room left for
+what it went and fetched besides."""
 
 MAX_EXPECTED_DOCS = 32
 """Cap on the declared prefetch set a session is measured against. A larger
 declared set is not truncated into a coverage fraction — that would score a
 session against a partial expectation — the session is reported unassessable."""
-
-PHASE_ENTRY = "entry"
-"""Delivered while the session was still assembling its starting context, i.e.
-before the first observed work signal. This is the phase the ``prefetch:``
-pre-load instruction is about."""
-
-PHASE_WORK = "work"
-"""Delivered after the session began working. A declared doc arriving here is a
-late recovery, not a pre-load; an undeclared one is a mid-flight retrieval."""
-
-ENTRY_SCOPE_DIRS = (AI_DIRNAME, ".ai-tasks", ".ai-protocol", ".claude")
-"""Repo subtrees whose contents are the session's *instructions*, not its work.
-
-Memory, task files, the protocol contracts, and the deployed skills are what a
-session loads to know what it is doing; touching them is context assembly at any
-point in the session. Everything else in the repo — source, tests, docs — is the
-material the task acts on, so reaching for it is the observable start of work.
-
-Chosen wide on purpose. The failure directions are not symmetric: a boundary
-drawn too late merely credits a late pre-load, while one drawn too early invents
-a missed prefetch doc for a session that read it seconds later, and the task
-forbids scoring a session badly on an artifact of the measurement.
-"""
-
-ENTRY_SCOPE_NAMES = ("CLAUDE.md",)
-"""Filenames that are instructions wherever they sit, matched by basename so a
-subtree's own ``CLAUDE.md`` (which the harness injects when a session reads
-inside that subtree) is not mistaken for work material."""
 
 ACTOR_ROOT = "root"
 """A read performed by the session's own turn."""
@@ -204,6 +197,24 @@ SOURCE_TRANSCRIPT_TASK_READ = "transcript_task_read"
 """The expected prefetch set came from the session's own first full read of the
 task file, i.e. the frontmatter exactly as it stood at that session's entry."""
 
+INSTRUCTION_DIRS = (AI_DIRNAME, ".ai-tasks", ".ai-protocol", ".claude")
+"""Repo subtrees holding a session's *instructions* rather than its work material.
+
+Memory, task files, the protocol contracts, and the deployed skills are what a
+session reads to know what it is doing; everything else in the repo — source,
+tests, docs — is the material the task acts on.
+
+This decides only what the :class:`Activity` anchors count as work, so that "the
+session had already read code / searched the tree" is legible next to a read.
+It is **not** a phase boundary: no verdict in this module turns on it, and a
+misplaced path costs an anchor count, not a score.
+"""
+
+INSTRUCTION_NAMES = ("CLAUDE.md",)
+"""Filenames that are instructions wherever they sit, matched by basename so a
+subtree's own ``CLAUDE.md`` (which the harness injects when a session reads
+inside that subtree) is not counted as work material."""
+
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 """Session ids reach us from persisted run state and are used as a filename, so
 they are validated as a single benign segment before any path is built."""
@@ -216,113 +227,6 @@ _COMMAND_NAME = re.compile(r"<command-name>\s*/?([A-Za-z0-9._-]+)\s*</command-na
 """Slash-command invocations as the transcript records them; the other spelling
 of a skill invocation beside a ``Skill`` tool call."""
 
-_STATEMENTS = re.compile(r"&&|\|\||[;\n]")
-"""Statement separators inside one shell command. A single ``|`` is deliberately
-absent: a pipeline's tail filters the head's output rather than reaching for
-anything of its own, so only the text before the first pipe names the command."""
-
-_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-"""A leading ``VAR=value`` prefix, skipped so ``PATH=... npm run build`` is read
-as ``npm`` rather than as an unrecognizable head."""
-
-_KEYWORDS = frozenset(
-    {"do", "done", "then", "else", "elif", "fi", "esac", "!", "{", "}"}
-)
-"""Shell keywords that introduce or close a statement without being a command.
-
-Statements are split on separators, so a loop body arrives as ``do echo ...``
-and ends as a bare ``done``. Reading ``do`` as the command word would make every
-loop unclassifiable — and a survey of the task files written as a loop is
-exactly the entry-checklist shape this reader must not lose."""
-
-_REDIRECT = re.compile(
-    r"(?<![-=<>\\])(?:\d+|&)?>>?(?!=)\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))"
-)
-"""An output redirection and the file it writes, if any. Without this a shell
-append is read as just another path the command *names*, which lets a
-session-log write through ``printf ... >> .ai-tasks/<id>.md`` land in the entry
-scope and count as context assembly.
-
-A stream duplication (``2>&1``) matches with no target: it writes no file, and —
-since the whole match is cut out of the statement — it also stops being read as
-an argument of the command it trails, which would otherwise turn ``ls .ai/
-2>&1`` into a listing of something called ``2>&1``.
-
-Whitespace is not part of the shape. ``>`` is a shell metacharacter: it ends the
-word in front of it by itself, so ``echo generated>Makefile`` and ``printf
-1.4.0>>VERSION`` write this repo exactly as their spaced spellings do. Requiring
-a gap left both of them wearing the neutral verdict of the ``echo`` in front,
-which is the same false neutral asking what the target was *called* produced.
-
-What the lookbehind and lookahead still keep out are the shapes a ``>`` wears
-when it is not a redirection at all: a SQL heredoc's ``closed_at >= $2``, an
-arrow in prose (``echo "(ignored -> won't dirty tree)"``), a JavaScript
-``r=>r.json()``, and a backslash-escaped ``\\>``, which the shell hands to the
-command as the character it is. Reading those as writes of ``=``, ``won't``,
-``r.json``, or the word behind the escape would make an entry-checklist echo —
-or a database query — look like the moment a session started working. Both
-sides are checked because both spellings occur.
-
-One more guard cannot be expressed here, because it covers spans rather than
-neighbouring characters and a span crosses the separators statements are split
-on: quoting (:func:`_shell_shape`), which covers the operators that wear no
-punctuation — an ``awk`` program's ``if(b>m)`` among them. The remaining
-spellings of a ``>`` that writes nothing need more than quoting to place — the
-shell's own ``((count>max))`` among them — and are not weighed here at all: the
-commands carrying them are not read (:data:`_UNMODELED_SHAPES`)."""
-
-_UNMODELED_SHAPES = ("((", "<<", "<(", ">(", "$'", '$"')
-"""Shell constructs this reader does not interpret, outside any quoting.
-
-Arithmetic, heredocs and here-strings, process substitution, and Bash's ANSI-C
-and locale quoting. Each of them changes what the characters after it *mean* —
-``>`` compares inside ``((...))``, a heredoc body is text rather than argv, and
-``$'...'`` reads escapes an ordinary ``'...'`` does not — so reading a command
-that carries one requires interpreting the construct.
-
-This reader stops instead. Approximating them one spelling at a time is how a
-``>`` in arithmetic became a write to ``max``, and each approximation that got a
-shape wrong got it wrong silently, in whichever direction the regex happened to
-fall. A command carrying one of these is :data:`COMMAND_UNCLEAR`: the reader
-says it cannot read it, which costs confidence rather than inventing either a
-work signal or a credited pre-load. What remains — plain argv, ordinary
-quoting, escapes, redirections — is small enough to read exactly."""
-
-_EXPANSIONS = ("$(", "`")
-"""Command substitution, in both spellings. Kept apart from
-:data:`_UNMODELED_SHAPES` because these two also expand *inside* a double-quoted
-string, where everything else on that list is literal text: ``echo "$(ls >
-out.txt)"`` runs a command and writes a file from inside what would otherwise
-read as a quoted, inert string."""
-
-_NUMERIC_FLAG = re.compile(r"^-\d+$")
-"""``git log -8``: a count, spelled as a flag. Normalized to ``-n``."""
-
-_PLACE_IN = "in"
-"""An argv token that names something inside the managed repo."""
-
-_PLACE_OUT = "out"
-"""An argv token that names something outside the repo — another checkout,
-``/tmp``, a home-relative path. It says nothing about this repo's code."""
-
-_PLACE_UNKNOWN = "unknown"
-"""An argv token this reader cannot place at all: a variable it would have to
-run a shell to expand. Not silently dropped — for a command whose operands are
-paths, an unplaceable one is why the command's verdict must be uncertain."""
-
-_DECISION_MARKER = re.compile(
-    r"^\s*(?:#{2,3}\s|- (?:Done|Next|Open|Plan-slice|Verdict|Group|Findings"
-    r"|Dispute-unresolved):)",
-    re.MULTILINE,
-)
-"""Task-file content that records a decision rather than claiming the task.
-
-The taskfile schema's own shapes: a section or session-entry heading, or one of
-the session-log fields. A session's entry checklist writes frontmatter (claim,
-estimate, status) — no headings, no field lines — so this separates the
-prescribed entry bookkeeping from the plan and session-log writes that are the
-closest thing a transcript has to *a decision was recorded here*."""
-
 _READ_TOOLS = ("Read",)
 """Tool names whose successful result puts a named file's content into context.
 Deliberately narrow: a shell command that happens to mention a path is not
@@ -330,279 +234,18 @@ evidence that its content was read, and crediting one would turn ``ls .ai/``
 into a consultation."""
 
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
-"""Tools that mutate a file. Mutating anything but the session's own task file
-is work by definition — the claim/session-log edits the entry checklist
-prescribes are the exception, and they are counted separately as protocol
-bookkeeping rather than treated as the start of work."""
+"""Tools that mutate a file. A mutation of a ``.ai/`` doc is also the write that
+the write-before-read clause is about, so these are the one place this reader
+learns that a session wrote its own memory before reading it back."""
 
 _SEARCH_TOOLS = ("Grep", "Glob")
-"""Tools that search the tree. A repo-wide search is the canonical *rediscover
-it from the code* move this measurement exists to distinguish from consulting
-memory, so it ends context assembly; a search explicitly scoped to an
-entry-scope path does not (the memory contract's routed reads are not a hunt)."""
+"""Tools that search the tree. Rediscovering knowledge from the code is the
+behavior a retrieval is judged against, so a search is an activity anchor."""
 
 _SHELL_TOOLS = ("Bash",)
-"""Tools that run a shell command. Their argv is not reliably parseable, but
-ignoring them is not an option either: measured sessions grep, ``sed``, and run
-test suites through the shell, and doing that before opening memory is exactly
-the scratch-first behavior this measurement exists to catch. So a command is
-classified three ways (:func:`_classify_command`) and the one it cannot decide
-is recorded as boundary uncertainty rather than guessed in either direction.
-
-"Not reliably parseable" is the design, not a caveat on it: the reader models a
-deliberately small subset of the shell and refuses everything outside it
-(:func:`_shell_shape`). A reader that instead approximated the rest would keep
-finding new spellings to get wrong, one review round at a time, and each of them
-would be wrong silently."""
-
-COMMAND_NEUTRAL = "neutral"
-"""A shell command *demonstrably* confined to metadata or context assembly: the
-clock, a ``git`` query whose every flag is known to print commit/worktree
-metadata, or an operation whose named paths all sit in the entry scope. It puts
-no repo content in context, so it does not end context assembly.
-
-The word to hold onto is demonstrable. This verdict credits every memory
-delivery after it as a pre-load, so it may only be reached by a shape this
-reader can show is harmless — never by "nothing said otherwise"."""
-
-COMMAND_WORK = "work"
-"""A shell command that reaches into the code: it names or writes a repo path
-outside the entry scope, lists this repo's tree, carries a flag that emits file
-content, or runs a content command (read, search, build, test). This is the
-shell spelling of the same signal a ``Read`` or ``Grep`` carries."""
-
-COMMAND_UNCLEAR = "unclear"
-"""Neither — a shape this reader cannot place: a command carrying a construct it
-does not interpret (:data:`_UNMODELED_SHAPES`), an unrecognized command with no
-repo path, a ``git`` flag it does not know, a write to the task file whose
-content it cannot see, or anything relative that follows a ``cd`` out of the
-repo. Treating it as neutral would credit a pre-load that may have followed real
-work; treating it as work would invent a missed doc for a session that merely
-ran a tool this reader has not seen. Both are claims the evidence does not
-support, so it is recorded as uncertainty and refuses only the verdicts that
-rest on it.
-
-This is the verdict the other two are measured against: ``neutral`` and ``work``
-are claims about what a command did, and each may only be reached from a shape
-this reader can show it read whole. Everything else lands here — which is what
-keeps the reader finite. It is not obliged to grow a shell parser to stay
-correct; it is obliged to know what it cannot read."""
-
-NEUTRAL_COMMANDS = frozenset(
-    {
-        "cd",
-        "date",
-        "echo",
-        "printf",
-        "pwd",
-        "sleep",
-        "true",
-        "which",
-        "git branch",
-        "git check-ignore",
-        "git config",
-        "git log",
-        "git remote",
-        "git rev-parse",
-        "git status",
-    }
-)
-"""Command heads whose output cannot carry repo content. The protocol's own entry
-and session-end steps are here (``date -u`` for the claim timestamp, ``git
-status --porcelain`` for the clean-tree check) plus ``git`` metadata: commit
-subjects and hashes are what the evidence pack itself treats as display
-metadata, so reading them is not reading the code.
-
-The head alone settles only the non-``git`` ones, whose output is fixed by the
-command. A ``git`` query's is not — ``git log -p`` prints patches under the same
-head — so those are settled by their flags (:data:`GIT_METADATA_FLAGS`).
-
-``ls`` is gone deliberately: it prints a listing *of this repo*, which is repo
-material and not metadata (:data:`LISTING_COMMANDS`). ``cd`` stays — it prints
-nothing — but only as a statement; what it does to the relative paths *around*
-it is a separate question (:func:`_changes_dir`)."""
-
-LISTING_COMMANDS = frozenset({"ls"})
-"""Commands whose output is a listing of whatever tree they are pointed at.
-
-Not metadata: a tree listing is repo material, and it is what a ``Glob`` returns
-— which this reader already treats as ending context assembly. So a listing is
-placed by its target rather than by its head, and its operands are read as paths
-even when they carry no separator or suffix (``ls tests`` names a directory
-where ``git status`` does not). Pointed at nothing it lists the session's cwd,
-which is the repo root; pointed at another checkout it says nothing about this
-repo at all."""
-
-GIT_CONTENT_FLAGS = frozenset(
-    {
-        "-p",
-        "--patch",
-        "-u",
-        "--unified",
-        "-U",
-        "--raw",
-        "--stat",
-        "--numstat",
-        "--shortstat",
-        "--dirstat",
-        "--name-only",
-        "--name-status",
-        "--word-diff",
-        "--function-context",
-        "-W",
-        "-S",
-        "-G",
-        "-L",
-        "--pickaxe-regex",
-    }
-)
-"""Flags that make an otherwise metadata-only ``git`` query emit or search file
-content: patches, diffstats, changed-file lists, and the pickaxe/line-log
-searches. ``git log -p -1`` is a source read wearing a metadata head, and the
-head-only reading credited it as an entry-checklist step."""
-
-GIT_METADATA_FLAGS = frozenset(
-    {
-        "-n",
-        "-C",
-        "-a",
-        "-b",
-        "-i",
-        "-l",
-        "-q",
-        "-r",
-        "-s",
-        "-v",
-        "--abbrev-commit",
-        "--abbrev-ref",
-        "--after",
-        "--all",
-        "--author",
-        "--before",
-        "--branch",
-        "--branches",
-        "--cached",
-        "--color",
-        "--committer",
-        "--contains",
-        "--date",
-        "--date-order",
-        "--decorate",
-        "--diff-filter",
-        "--first-parent",
-        "--follow",
-        "--format",
-        "--get",
-        "--git-dir",
-        "--global",
-        "--graph",
-        "--grep",
-        "--ignored",
-        "--list",
-        "--local",
-        "--long",
-        "--max-count",
-        "--merged",
-        "--merges",
-        "--no-abbrev-commit",
-        "--no-color",
-        "--no-decorate",
-        "--no-merged",
-        "--no-merges",
-        "--no-pager",
-        "--oneline",
-        "--porcelain",
-        "--pretty",
-        "--quiet",
-        "--remotes",
-        "--reverse",
-        "--short",
-        "--show-current",
-        "--show-toplevel",
-        "--since",
-        "--skip",
-        "--stdin",
-        "--symbolic-full-name",
-        "--tags",
-        "--topo-order",
-        "--until",
-        "--untracked-files",
-        "--verify",
-    }
-)
-"""Flags a neutral ``git`` query may carry while staying confined to commit and
-worktree metadata — every one observed on those heads across the measured
-corpus, plus their obvious siblings.
-
-An allow-list, not a deny-list, and that asymmetry is the point: a ``git`` flag
-this reader has never seen may well print file content, so assuming metadata for
-it would manufacture exactly the false neutral this classifier exists to avoid.
-An unrecognized flag makes the command :data:`COMMAND_UNCLEAR` instead, which
-costs confidence rather than inventing a verdict."""
-
-READ_COMMANDS = frozenset(
-    {
-        "awk",
-        "cat",
-        "diff",
-        "egrep",
-        "fgrep",
-        "find",
-        "grep",
-        "head",
-        "jq",
-        "less",
-        "more",
-        "rg",
-        "sed",
-        "sort",
-        "tail",
-        "uniq",
-        "wc",
-        "git blame",
-        "git diff",
-        "git grep",
-        "git show",
-    }
-)
-"""Content commands that only *read* what they are pointed at.
-
-Separated from the ones that run or change things because only a reader can be
-placed by the paths standing beside it. ``for f in .ai-tasks/a.md
-.ai-tasks/b.md; do sed -n '1,12p' "$f"; done`` reads the task files the same
-command names — the loop variable is unresolvable on its own, and reading the
-statement alone would turn a survey of the entry scope into code work."""
-
-CONTENT_COMMANDS = READ_COMMANDS | frozenset(
-    {
-        "cargo",
-        "cp",
-        "curl",
-        "go",
-        "gofmt",
-        "make",
-        "mv",
-        "mypy",
-        "node",
-        "npm",
-        "npx",
-        "pnpm",
-        "pytest",
-        "python",
-        "python3",
-        "rm",
-        "ruff",
-        "tsc",
-        "yarn",
-        "git apply",
-    }
-)
-"""Command heads that put repo content in context or act on it. Consulted only
-when the statement names no repo path at all — ``cat .ai/index.md`` is routed
-memory, not code, and the path decides that before the head is looked at.
-
-The non-reader half is work wherever it appears: building, testing, running, or
-moving files is not something the entry scope explains away."""
+"""Tools that run a shell command. Counted, never interpreted: a raw count is a
+fact about the session, while any statement about what a command *did* would be
+the shell approximation this reader is deliberately without."""
 
 
 @dataclass(frozen=True)
@@ -624,23 +267,18 @@ class SessionRef:
 class Activity:
     """Content-free counts of the work a session had done at some point in it.
 
-    The anchor the retrieval trace is read against. Row order alone cannot answer
-    the timing question the judgment needs — *did this retrieval come before the
-    code work it informs, or after that work had already derived the same
-    knowledge?* — because order 40 means nothing without knowing what happened in
-    the first 39 rows. Once the transcript is discarded these counts are the only
-    surviving answer, so they travel with each read.
+    The anchor each read is read against. Order alone cannot answer the question
+    the judgment needs — *did this read come before the work it informs, or after
+    that work had already derived the same knowledge?* — because event 40 means
+    nothing without knowing what happened in the first 39. Once the transcript is
+    discarded these counts are the only surviving answer, so they travel with each
+    read; the work done *after* it is the session totals minus them.
 
     Counts, never content: no paths, no commands, no text. ``task_edits`` is
     separate from ``edits`` because writing the session's own task file is
-    protocol bookkeeping — the claim, a plan, the session-log entry — and the
-    plan/session-log ones are the closest observable marker of *a decision was
-    already recorded* that a transcript offers. ``shell`` counts only the shell
-    commands that were not recognized as entry-checklist or metadata operations,
-    since ``date -u`` is not work a retrieval could be late relative to — and a
-    command that *writes* is counted where its write belongs (``edits``,
-    ``task_edits``), so a session-log append reads the same whether it went
-    through ``Edit`` or through a redirection.
+    protocol bookkeeping (the claim, the plan, the session-log entry) rather than
+    work on the repo. ``shell`` counts shell commands as commands — this reader
+    does not claim to know what any of them did.
     """
 
     code_reads: int = 0
@@ -663,47 +301,45 @@ class Activity:
 
 
 @dataclass(frozen=True)
-class PrefetchLoad:
-    """One declared prefetch doc and whether the session pre-loaded it.
+class PrefetchDoc:
+    """One declared prefetch doc and whether a qualifying read of it exists.
 
-    ``loaded`` is specifically *delivered during entry context assembly*, which
-    is what the ``prefetch:`` instruction asks for. ``phase`` distinguishes the
-    two ways it can be False: :data:`PHASE_WORK` means the doc did reach the
-    session, but only after it had started working (a late recovery, which the
-    retrieval trace also carries), while ``None`` means it never arrived at all.
-    Conflating those would hide the difference between a session that ignored a
-    declared doc and one that reached for it too late.
-
-    ``order``/``method`` describe the delivering event, so a reader can tell
-    caller-injected delivery from an explicit read without a second lookup.
+    ``read`` is the ruling's success condition applied to this path anywhere in
+    the session: content entered context, before close-out, with no earlier write
+    to it. Where in the session it happened is deliberately not encoded here —
+    ``order``/``method`` describe the delivering event so the judgment layer can
+    ask that question against the trace, and so a reader can tell caller-injected
+    delivery from an explicit read without a second lookup.
     """
 
     path: str
-    loaded: bool
+    read: bool
     method: str | None = None
     order: int | None = None
-    phase: str | None = None
 
     def to_dict(self) -> dict:
         return {
             "path": self.path,
-            "loaded": self.loaded,
+            "read": self.read,
             "method": self.method,
             "order": self.order,
-            "phase": self.phase,
         }
 
 
 @dataclass(frozen=True)
 class MemoryRead:
-    """One mid-flight consultation of a lazy ``.ai/`` doc.
+    """One qualifying read of a lazy ``.ai/`` doc, with the timing evidence for it.
 
-    ``order`` is the event's position in the session's own transcript and
-    ``before`` is the work the session had already done when it happened. The
-    pair is the whole point of the trace: a doc opened before the code that would
-    have re-derived it, and the same doc opened after that code was read and
-    edited, are different behaviors that a bare set of paths cannot distinguish.
-    Work done *after* the read is ``SessionReads.activity`` minus ``before``.
+    ``order`` is the event's position in the session's own transcript, ``before``
+    is the work the session had already done when it happened, and ``first_write``
+    is where this session first wrote the same path (always *after* ``order``,
+    since a read preceded by a write does not qualify at all). Together they are
+    what lets a judge separate read-then-do from do-then-read from
+    read-then-update without the transcript.
+
+    ``declared_prefetch`` marks the read as delivery of a declared doc; it is
+    ``None`` when the session-time expected set could not be recovered, since
+    membership is then unknown rather than false.
     """
 
     path: str
@@ -711,7 +347,9 @@ class MemoryRead:
     actor: str
     method: str
     ts: str | None = None
+    declared_prefetch: bool | None = None
     before: Activity = Activity()
+    first_write: int | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -720,7 +358,9 @@ class MemoryRead:
             "actor": self.actor,
             "method": self.method,
             "ts": self.ts,
+            "declared_prefetch": self.declared_prefetch,
             "before": self.before.to_dict(),
+            "first_write": self.first_write,
         }
 
 
@@ -731,13 +371,13 @@ class SessionReads:
     Three independent availability facts, kept separate on purpose:
 
     - ``available`` — a transcript was located and parsed at all.
-    - ``assessable`` — *and* the session-time expected set was recovered from
-      evidence with no holes in its entry phase, so prefetch completeness is a
-      measurement rather than a guess.
-    - ``applicable`` — the session was one the prefetch instruction was
-      delivered to *and* it declared a non-empty set. ``False`` for a role that
-      never receives it (nothing to comply with); ``None`` when the declared set
-      could not be recovered, so applicability itself is unknown.
+    - ``assessable`` — *and* the session-time expected set was recovered, with no
+      lost evidence able to change the per-doc verdict, so prefetch completeness
+      is a measurement rather than a guess.
+    - ``applicable`` — the session was one the prefetch instruction is delivered
+      to *and* it declared a non-empty set. ``False`` for a role that never
+      receives it (nothing to comply with); ``None`` when the declared set could
+      not be recovered, so applicability itself is unknown.
 
     The split is what keeps a missing transcript from being read as bad behavior:
     a downstream score takes ``applicable and assessable`` as its denominator and
@@ -746,15 +386,11 @@ class SessionReads:
     ``coverage``/``complete`` are ``None`` unless the session is assessable and
     applicable; there is no default-to-zero, because a zero is a claim.
 
-    ``entry_boundary`` is where context assembly ended (``None`` = the session
-    never reached for anything outside its instructions, so the whole scan is
-    entry). ``boundary_unsure`` is the earliest row from which that partition is
-    no longer certain — an unclassifiable shell command, or a lost result for a
-    request that would have moved the boundary — so a reader can see that a long
-    "entry" phase was inferred rather than observed. ``entry_extra`` holds the
-    lazy docs loaded at entry beyond the declared set — good behavior that would
-    otherwise vanish from the evidence once those reads stopped being counted as
-    mid-flight retrievals.
+    ``trace`` is every qualifying lazy-``.ai/`` read in order, declared and
+    undeclared alike. ``writeback_excluded`` names the docs whose only reads
+    followed this session's own write to them: excluded from the trace by the
+    success condition, but recorded rather than silently dropped, since "read
+    back what it just wrote" is itself a fact about the session.
     """
 
     session_id: str
@@ -766,15 +402,12 @@ class SessionReads:
     applicable: bool | None = None
     expected: tuple[str, ...] = ()
     expected_source: str | None = None
-    loads: tuple[PrefetchLoad, ...] = ()
+    docs: tuple[PrefetchDoc, ...] = ()
     coverage: float | None = None
     complete: bool | None = None
-    entry_boundary: int | None = None
-    boundary_unsure: int | None = None
-    entry_extra: tuple[str, ...] = ()
-    entry_extra_truncated: bool = False
-    midflight: tuple[MemoryRead, ...] = ()
-    midflight_truncated: bool = False
+    trace: tuple[MemoryRead, ...] = ()
+    trace_truncated: bool = False
+    writeback_excluded: tuple[str, ...] = ()
     activity: Activity = Activity()
     closeout_seen: bool = False
     events_scanned: int = 0
@@ -783,22 +416,24 @@ class SessionReads:
     detail: str | None = None
 
     @property
-    def loaded(self) -> tuple[str, ...]:
-        return tuple(load.path for load in self.loads if load.loaded)
+    def read(self) -> tuple[str, ...]:
+        """Declared docs a qualifying read was found for."""
+        return tuple(doc.path for doc in self.docs if doc.read)
 
     @property
     def missing(self) -> tuple[str, ...]:
-        return tuple(load.path for load in self.loads if not load.loaded)
+        """Declared docs no qualifying read was found for."""
+        return tuple(doc.path for doc in self.docs if not doc.read)
 
     @property
-    def late(self) -> tuple[str, ...]:
-        """Declared docs that arrived, but only after work had begun.
+    def undeclared_reads(self) -> tuple[str, ...]:
+        """Traced docs the task never declared, in read order.
 
-        A subset of ``missing``: missing *as a pre-load*, which is what the
-        instruction asked for, while still consulted — the distinction a reader
-        needs before concluding the session ignored the doc.
+        Not a defect and not a merit on its own: a sufficient prefetch set with no
+        new need arising yields none, and count is not quality. It is the evidence
+        a judge needs to ask whether a knowledge need arose and was met.
         """
-        return tuple(load.path for load in self.loads if load.phase == PHASE_WORK)
+        return tuple(read.path for read in self.trace if read.declared_prefetch is False)
 
     def to_dict(self) -> dict:
         return {
@@ -811,18 +446,15 @@ class SessionReads:
             "applicable": self.applicable,
             "expected": list(self.expected),
             "expected_source": self.expected_source,
-            "loaded": list(self.loaded),
+            "read": list(self.read),
             "missing": list(self.missing),
-            "late": list(self.late),
-            "loads": [load.to_dict() for load in self.loads],
+            "docs": [doc.to_dict() for doc in self.docs],
             "coverage": self.coverage,
             "complete": self.complete,
-            "entry_boundary": self.entry_boundary,
-            "boundary_unsure": self.boundary_unsure,
-            "entry_extra": list(self.entry_extra),
-            "entry_extra_truncated": self.entry_extra_truncated,
-            "midflight": [read.to_dict() for read in self.midflight],
-            "midflight_truncated": self.midflight_truncated,
+            "trace": [read.to_dict() for read in self.trace],
+            "trace_truncated": self.trace_truncated,
+            "undeclared_reads": list(self.undeclared_reads),
+            "writeback_excluded": list(self.writeback_excluded),
             "activity": self.activity.to_dict(),
             "closeout_seen": self.closeout_seen,
             "events_scanned": self.events_scanned,
@@ -915,7 +547,7 @@ def read_session_behavior(
     max_sessions: int = MAX_SESSIONS,
     max_bytes: int = MAX_TRANSCRIPT_BYTES,
     max_line_bytes: int = MAX_LINE_BYTES,
-    max_midflight: int = MAX_MIDFLIGHT_EVENTS,
+    max_reads: int = MAX_READ_EVENTS,
 ) -> ReadBehavior:
     """Roll up read behavior for ``sessions``, bounded and total.
 
@@ -954,7 +586,7 @@ def read_session_behavior(
             transcript_root=transcript_root,
             max_bytes=max_bytes,
             max_line_bytes=max_line_bytes,
-            max_midflight=max_midflight,
+            max_reads=max_reads,
             warnings=warnings,
         )
         rollups.append(rollup)
@@ -1012,7 +644,7 @@ def _session_rollup(
     transcript_root: Path,
     max_bytes: int,
     max_line_bytes: int,
-    max_midflight: int,
+    max_reads: int,
     warnings: list[str],
 ) -> SessionReads:
     """Locate, scan, and summarize one session's transcript."""
@@ -1044,31 +676,19 @@ def _session_rollup(
         skipped_rows=scan.skipped,
         truncated=scan.truncated,
         closeout_seen=scan.closeout_seen,
-        entry_boundary=scan.boundary,
-        boundary_unsure=scan.boundary_unsure,
         activity=scan.activity,
+        writeback_excluded=tuple(scan.writeback[:max_reads]),
     )
     if scan.rows == 0:
         return _degraded(base, "session transcript exposed no readable events", warnings)
 
     expected, expected_detail = _expected_set(scan.task_content)
-    # The two mechanisms degrade independently, like the ``.ai/`` section's docs
-    # and patch stream: an unrecoverable expected set makes prefetch completeness
-    # unassessable, but what the session was observed to load and consult is still
-    # real and is not thrown away with it. Both traces are read off the phase
-    # boundary alone; the declared set only decides which entry loads are already
-    # reported as ``loads`` and so need not repeat as extras.
-    midflight, midflight_truncated = _midflight_trace(scan.reads, limit=max_midflight)
-    entry_extra, entry_extra_truncated = _entry_extra(
-        scan.reads, expected=expected or (), limit=max_midflight
-    )
-    base = _replace(
-        base,
-        midflight=midflight,
-        midflight_truncated=midflight_truncated,
-        entry_extra=entry_extra,
-        entry_extra_truncated=entry_extra_truncated,
-    )
+    # The trace and the prefetch verdict degrade independently, like the ``.ai/``
+    # section's docs and patch stream: an unrecoverable expected set only costs
+    # the trace its ``declared_prefetch`` attribution, since which docs were read
+    # and in what order stands on its own evidence.
+    trace, trace_truncated = _trace(scan.reads, expected=expected, limit=max_reads)
+    base = _replace(base, trace=trace, trace_truncated=trace_truncated)
     if expected is None:
         return _degraded(
             base,
@@ -1076,30 +696,30 @@ def _session_rollup(
             warnings,
         )
 
-    loads = _prefetch_loads(expected, scan.reads)
+    docs = _prefetch_docs(expected, scan.reads)
     applicable = bool(expected) and _prefetch_role(ref.role)
     base = _replace(
         base,
         applicable=applicable,
         expected=expected,
         expected_source=SOURCE_TRANSCRIPT_TASK_READ,
-        loads=loads,
+        docs=docs,
         detail=expected_detail,
     )
-    # Facts stay, the score does not: lost evidence could hold the very load that
-    # would flip this verdict — or the work signal that would move one of the
-    # loads we did see out of the entry phase — so the observed loads are
-    # reported as diagnosis while coverage stays unclaimed.
-    refusal = _entry_verdict_refusal(scan, loads) if expected else None
+    # Facts stay, the verdict does not: lost evidence could hold the very read
+    # that would flip a missing doc, or the write that would disqualify one we
+    # counted, so what was observed is reported as diagnosis while coverage stays
+    # unclaimed.
+    refusal = _verdict_refusal(scan, docs) if expected else None
     if refusal is not None:
         return _degraded(base, refusal, warnings)
 
-    loaded = sum(1 for load in loads if load.loaded)
+    found = sum(1 for doc in docs if doc.read)
     return _replace(
         base,
         assessable=True,
-        coverage=(loaded / len(expected)) if applicable else None,
-        complete=(loaded == len(expected)) if applicable else None,
+        coverage=(found / len(expected)) if applicable else None,
+        complete=(found == len(expected)) if applicable else None,
     )
 
 
@@ -1108,83 +728,47 @@ def _prefetch_role(role: str | None) -> bool:
     return role in PREFETCH_ROLES
 
 
-def _entry_verdict_refusal(
-    scan: "_Scan", loads: Sequence[PrefetchLoad]
-) -> str | None:
+def _verdict_refusal(scan: "_Scan", docs: Sequence[PrefetchDoc]) -> str | None:
     """Why this session's prefetch verdict cannot be claimed, or ``None``.
 
-    Three questions, each about a different way the evidence can fail to support
-    the verdict, and each asked only of the part of the evidence that verdict
-    actually rests on. A blanket "any damage anywhere makes the session
-    unassessable" would be simpler and much more expensive: transcripts big
-    enough to hit the byte cap reached the code long before it, so the cut is
-    always in the work phase, and the pre-load evidence in front of it is intact.
+    Reads are positive evidence, so a row this reader could not use can only hide
+    a read. That makes the two questions asymmetric, and neither of them needs to
+    know *where* the damage sits relative to anything but the read itself:
+
+    - a **missing** doc rests on the absence of a read, which any lost evidence
+      anywhere could be concealing;
+    - a **found** doc rests on the two order-dependent clauses of the success
+      condition, so only evidence lost *before* that read can undermine it: a
+      lost row there could carry an earlier write to the same path, or the
+      close-out marker that would have ended the scan before it.
     """
-    if not _entry_evidence_intact(scan):
-        return _gap_detail(scan)
-    lost = {load.path for load in loads if not load.loaded} & scan.lost_entry
-    if lost:
+    holes = scan.skipped > 0 or scan.truncated
+    if holes and any(not doc.read for doc in docs):
         return (
-            f"entry-phase evidence incomplete ({len(lost)} declared doc(s) were"
-            " requested before the boundary and their results did not survive the"
-            " scan); prefetch loading not measured"
+            f"evidence incomplete ({_gap_detail(scan)}); a declared doc reported"
+            " missing could have been read in what was lost, so prefetch reading"
+            " is not measured"
         )
-    unsure = {load.path for load in loads if load.loaded} & _unsure_entry_paths(scan)
-    if unsure:
+    if scan.first_gap is not None and any(
+        doc.read and doc.order is not None and doc.order >= scan.first_gap
+        for doc in docs
+    ):
         return (
-            f"entry boundary not determinable ({len(unsure)} declared doc(s) were"
-            " delivered after activity this reader could not classify); prefetch"
-            " loading not measured"
+            f"evidence incomplete ({_gap_detail(scan)}) before a declared doc's"
+            " read; an earlier write to it or the close-out marker could be in"
+            " what was lost, so prefetch reading is not measured"
         )
     return None
 
 
-def _entry_evidence_intact(scan: "_Scan") -> bool:
-    """Whether the scanned prefix that decides entry prefetch was read whole.
-
-    Only the entry phase matters, so this is positional rather than a blanket
-    "any hole anywhere": a row skipped or a tail cut *after* the session began
-    working can hide a late recovery or a mid-flight read (both already reported
-    as their own bounded, flagged facts) but cannot change what was in context
-    before the boundary — with the one exception the caller checks next, a read
-    asked for before the boundary whose result landed in the damage.
-
-    With no boundary observed, the entry phase is the whole scan and any hole is
-    inside it — including a truncated tail, which is why a cut with no boundary
-    is not measurable while a cut after one is.
-    """
-    if scan.first_gap is not None and (
-        scan.boundary is None or scan.first_gap <= scan.boundary
-    ):
-        return False
-    return not (scan.truncated and scan.boundary is None)
-
-
-def _unsure_entry_paths(scan: "_Scan") -> set[str]:
-    """Paths whose entry-phase credit rests on an undetermined boundary.
-
-    A doc delivered *before* the first unclassifiable activity is a pre-load
-    whatever that activity turns out to have been; only what came after it is in
-    question, so the refusal stays as narrow as the doubt.
-    """
-    if scan.boundary_unsure is None:
-        return set()
-    return {
-        read.path
-        for read in scan.reads
-        if read.phase == PHASE_ENTRY and read.requested_at >= scan.boundary_unsure
-    }
-
-
 def _gap_detail(scan: "_Scan") -> str:
-    """Why the entry-phase evidence is incomplete, in the reader's own terms."""
+    """What was lost from this scan, in the reader's own terms."""
     parts = []
     if scan.skipped:
         parts.append(f"{scan.skipped} unreadable row(s)")
     if scan.truncated:
         parts.append("a truncated tail")
-    holes = " and ".join(parts) or "incomplete evidence"
-    return f"entry-phase evidence incomplete ({holes}); prefetch loading not measured"
+    return " and ".join(parts) or "incomplete evidence"
 
 
 def _degraded(base: SessionReads, detail: str, warnings: list[str]) -> SessionReads:
@@ -1211,12 +795,20 @@ def _expected_set(content: str | None) -> tuple[tuple[str, ...] | None, str | No
     ``content`` is the task file exactly as the session read it at entry. Entries
     are normalized through the one prefetch-path rule
     (:func:`orch_hub.ai_snapshot.prefetch_doc_path`), so a malformed entry cannot
-    be counted as a doc that could have been loaded; it is noted in the detail
+    be counted as a doc that could have been read; it is noted in the detail
     instead, because a reader comparing ``expected`` against the raw frontmatter
     would otherwise see an unexplained gap.
 
+    An **eager** doc is dropped for the same reason, and it is the one that bites
+    in practice. ``prefetch:`` is lazy-only by the taskfile schema, but tasks do
+    declare eager docs, and the eager set reaches a session through the system
+    prompt — which the transcript does not record. Such an entry is therefore
+    unobservable by construction: keeping it in the denominator would score a
+    session down for a doc the loading contract had already put in its context,
+    which is precisely the measurement artifact this reader must not produce.
+
     A recovered-but-empty set is ``()``, not ``None``: a task that declared no
-    prefetch has nothing to comply with, which is a measurement, whereas an
+    lazy doc has nothing to comply with, which is a measurement, whereas an
     unrecovered set is the absence of one.
     """
     if content is None:
@@ -1224,10 +816,14 @@ def _expected_set(content: str | None) -> tuple[tuple[str, ...] | None, str | No
     entries = parse_prefetch(content)
     expected: list[str] = []
     malformed = 0
+    eager = 0
     for entry in entries:
         rel = prefetch_doc_path(entry)
         if rel is None:
             malformed += 1
+            continue
+        if is_eager_doc(rel):
+            eager += 1
             continue
         if rel not in expected:
             expected.append(rel)
@@ -1236,98 +832,69 @@ def _expected_set(content: str | None) -> tuple[tuple[str, ...] | None, str | No
             f"declared prefetch set of {len(expected)} docs exceeds the"
             f" {MAX_EXPECTED_DOCS}-doc cap; not measured"
         )
-    detail = (
-        f"{malformed} malformed prefetch entr{'y' if malformed == 1 else 'ies'} ignored"
-        if malformed
-        else None
-    )
-    return tuple(expected), detail
+    notes = []
+    if malformed:
+        notes.append(
+            f"{malformed} malformed prefetch entr{'y' if malformed == 1 else 'ies'} ignored"
+        )
+    if eager:
+        notes.append(
+            f"{eager} eager doc(s) declared in prefetch ignored; the eager set"
+            " reaches a session outside the transcript"
+        )
+    return tuple(expected), "; ".join(notes) or None
 
 
-def _prefetch_loads(
+def _prefetch_docs(
     expected: Sequence[str], reads: Sequence["_Read"]
-) -> tuple[PrefetchLoad, ...]:
-    """Pair each expected doc with the event that delivered it, and in which phase.
+) -> tuple[PrefetchDoc, ...]:
+    """Pair each declared doc with the qualifying read that delivered it, if any.
 
-    Order *within* the entry phase is not required: the checklist's pre-load step
-    competes with the claim edit and other entry bookkeeping, so a prefetch doc
-    read a few events in is still a pre-load. Crossing the boundary is what
-    counts — a doc first delivered once the session was already reading code is a
-    late recovery, not compliance with an instruction to pre-load — and an entry
-    delivery always wins over a later one for the same path.
+    Position in the session is deliberately not a criterion: the ruling asks
+    whether a qualifying read exists *anywhere*, and a doc opened late is complete
+    here and left for the semantic layer to call late from the trace. Only reads
+    that survived the success condition reach this function at all, so a doc read
+    back after this session wrote it, or read after close-out, is not paired.
     """
-    entry = _first_by_path(reads, PHASE_ENTRY)
-    work = _first_by_path(reads, PHASE_WORK)
-    loads = []
+    first: dict[str, _Read] = {}
+    for read in reads:
+        first.setdefault(read.path, read)
+    docs = []
     for path in expected:
-        read = entry.get(path) or work.get(path)
-        loads.append(
-            PrefetchLoad(
+        read = first.get(path)
+        docs.append(
+            PrefetchDoc(
                 path=path,
-                loaded=path in entry,
+                read=read is not None,
                 method=read.method if read else None,
                 order=read.order if read else None,
-                phase=read.phase if read else None,
             )
         )
-    return tuple(loads)
+    return tuple(docs)
 
 
-def _entry_extra(
-    reads: Sequence["_Read"], *, expected: Sequence[str], limit: int
-) -> tuple[tuple[str, ...], bool]:
-    """Lazy ``.ai/`` docs pre-loaded at entry beyond the declared set, in order.
-
-    Kept because the phase partition would otherwise make them disappear: they
-    are not prefetch compliance (undeclared) and not mid-flight retrieval (no
-    work had begun), yet loading memory the task never declared is exactly the
-    behavior the read side exists to see. Paths only — the timing question these
-    would answer is trivially "before any work".
-    """
-    declared = set(expected)
-    paths: list[str] = []
-    truncated = False
-    for read in reads:
-        if read.phase != PHASE_ENTRY or not _lazy_memory_doc(read.path):
-            continue
-        if read.path in declared or read.path in paths:
-            continue
-        if len(paths) >= limit:
-            truncated = True
-            continue
-        paths.append(read.path)
-    return tuple(paths), truncated
-
-
-def _midflight_trace(
-    reads: Sequence["_Read"], *, limit: int
+def _trace(
+    reads: Sequence["_Read"], *, expected: Sequence[str] | None, limit: int
 ) -> tuple[tuple[MemoryRead, ...], bool]:
-    """The ordered first-consult trace of lazy ``.ai/`` docs read while working.
+    """The ordered trace of qualifying lazy-``.ai/`` reads, declared and undeclared.
 
-    Membership is decided by the observable phase boundary, not by the declared
-    set: a doc already in context when work began is not being retrieved (that
-    covers both the declared pre-loads and anything the harness injected at
-    entry), while a *declared* doc first opened after the boundary is a genuine
-    retrieval — a late one — and belongs in the trace it was recovered in.
+    One sequence, because the ruling made attribution an attribute rather than a
+    partition: a declared doc and one the session went and found are the same kind
+    of event, and only ``declared_prefetch`` tells them apart.
 
-    The eager set is excluded throughout: it is in every session's context by the
-    loading contract, so reading it is not retrieval and skipping it is not a
-    missed consultation. Needing no expected set, the trace survives a session
-    whose declared set could not be recovered at all.
+    The eager set is excluded: it is in every session's context by the loading
+    contract, so reading it is not retrieval and not reading it is not a missed
+    consultation.
     """
-    in_context = {read.path for read in reads if read.phase == PHASE_ENTRY}
-    seen: set[str] = set()
+    declared = None if expected is None else set(expected)
     trace: list[MemoryRead] = []
     truncated = False
     for read in reads:
-        if read.phase != PHASE_WORK or not _lazy_memory_doc(read.path):
+        if not _lazy_memory_doc(read.path):
             continue
-        if read.path in in_context or read.path in seen:
-            continue
-        seen.add(read.path)
         if len(trace) >= limit:
             truncated = True
-            continue
+            break
         trace.append(
             MemoryRead(
                 path=read.path,
@@ -1335,7 +902,9 @@ def _midflight_trace(
                 actor=read.actor,
                 method=read.method,
                 ts=read.ts,
+                declared_prefetch=None if declared is None else read.path in declared,
                 before=read.before,
+                first_write=read.first_write,
             )
         )
     return tuple(trace), truncated
@@ -1346,184 +915,122 @@ def _lazy_memory_doc(rel: str) -> bool:
     return rel.startswith(f"{AI_DIRNAME}/") and not is_eager_doc(rel)
 
 
-def _first_by_path(reads: Sequence["_Read"], phase: str) -> dict[str, "_Read"]:
-    """First delivery of each path within one phase."""
-    first: dict[str, _Read] = {}
-    for read in reads:
-        if read.phase == phase:
-            first.setdefault(read.path, read)
-    return first
-
-
 @dataclass(frozen=True)
 class _Read:
-    """One observed delivery of a repo file's content into a session's context.
+    """One qualifying delivery of a ``.ai/`` doc's content into a session's context.
 
-    ``order`` is the row the content landed in; ``phase`` is decided from
-    ``requested_at``, the row the session *asked* for it, so a parallel batch
-    issued during context assembly stays entry-phase even when its results
-    trickle in after the batch's own code read already closed the boundary. Both
-    rows are kept because that split is exactly what makes a late-landing result
-    vulnerable to a hole the entry phase itself never had.
+    ``order`` is the row the content landed in, ``before`` the work already done
+    by then, and ``first_write`` where this session first wrote the same path —
+    filled at the end of the scan, and necessarily after ``order``, since a read
+    a write preceded never becomes a ``_Read`` at all.
     """
 
     path: str
     order: int
-    requested_at: int
     actor: str
     method: str
-    phase: str
     ts: str | None = None
     before: Activity = Activity()
+    first_write: int | None = None
 
 
 @dataclass
 class _Scan:
     """Raw facts extracted from one transcript, before any judgment.
 
-    ``pending`` is scanning scaffolding, not an extracted fact: it holds each
-    read tool call's repo-relative path and row only until its result arrives, so
-    a call that never returned is dropped rather than credited. What it leaves
-    behind at the end of the scan is evidence in its own right — see
-    :meth:`close_pending`.
+    ``pending`` is scanning scaffolding rather than an extracted fact: it holds a
+    read tool call's repo-relative path only until its result arrives, so a call
+    that never returned is dropped rather than credited.
 
-    ``first_gap``/``last_gap`` are the row positions of the earliest and latest
-    hole — a malformed row, a row past the per-row cap. Positions rather than a
-    flag because that is what decides which verdicts a hole can undermine
-    (:func:`_entry_verdict_refusal`): the earliest says whether entry-phase
-    evidence was lost, the latest whether a still-unanswered request could have
-    been answered inside one. A truncated tail is recorded separately since it is
-    always after everything.
+    ``first_gap`` is the row position of the earliest hole — a malformed row, a
+    row past the per-row cap. A position rather than a flag because that is what
+    decides which credited reads a hole can undermine
+    (:func:`_verdict_refusal`); a truncated tail is recorded separately since it
+    is always after everything.
     """
 
     reads: list[_Read] = field(default_factory=list)
+    writes: dict[str, int] = field(default_factory=dict)
+    writeback: list[str] = field(default_factory=list)
     task_content: str | None = None
     closeout_seen: bool = False
     rows: int = 0
     truncated: bool = False
     skipped: int = 0
     first_gap: int | None = None
-    last_gap: int | None = None
-    boundary: int | None = None
-    boundary_unsure: int | None = None
-    lost_entry: set[str] = field(default_factory=set)
     activity: Activity = Activity()
     error: str | None = None
-    pending: dict[str, tuple[str | None, int]] = field(default_factory=dict)
-    seen: set[tuple[str, str]] = field(default_factory=set)
+    pending: dict[str, str | None] = field(default_factory=dict)
+    seen: set[str] = field(default_factory=set)
 
     def note_gap(self) -> None:
         """Record a row this reader could not use, at the position it would hold."""
         self.skipped += 1
         if self.first_gap is None:
             self.first_gap = self.rows
-        self.last_gap = self.rows
 
     def note_activity(self, kind: str) -> None:
-        """Count one observed activity without ending context assembly.
-
-        The claim edit the entry checklist prescribes happens *during* assembly,
-        so treating it as work would end the entry phase before the pre-load it
-        is there to measure — but it is still activity the retrieval trace is
-        read against.
-        """
+        """Count one observed activity, as the anchor later reads are read against."""
         self.activity = self.activity.bump(kind)
 
-    def note_work(self, order: int, kind: str) -> None:
-        """Count one observed activity and close context assembly."""
-        self.note_activity(kind)
-        if self.boundary is None:
-            self.boundary = order
+    def note_write(self, path: str, order: int) -> None:
+        """Record where this session first wrote a ``.ai/`` doc.
 
-    def note_unsure(self, order: int) -> None:
-        """Record that from ``order`` on, the entry/work partition is a guess.
-
-        Only meaningful while context assembly is still open: once work has been
-        observed the boundary is already placed, and nothing later can move it
-        earlier.
+        Only the first matters: the success condition asks whether a write
+        *preceded* the read, and if the first one did not, no later one did.
         """
-        if self.boundary is not None and self.boundary <= order:
-            return
-        if self.boundary_unsure is None or order < self.boundary_unsure:
-            self.boundary_unsure = order
-
-    def phase_at(self, order: int) -> str:
-        """Which phase a delivery requested at ``order`` belongs to."""
-        return (
-            PHASE_ENTRY
-            if self.boundary is None or order < self.boundary
-            else PHASE_WORK
-        )
+        self.writes.setdefault(path, order)
 
     def add_read(
         self,
         *,
         path: str,
         order: int,
-        requested_at: int,
         actor: str,
         method: str,
         ts: str | None,
     ) -> None:
-        """Keep the first delivery of each ``(path, phase)``; drop repeats.
+        """Keep the first qualifying read of each ``.ai/`` path; drop the rest.
 
-        Only ``.ai/`` docs are retained: a read is evidence only insofar as it is
-        memory the session loaded, and every other read has already been folded
-        into the boundary and the activity counters by the time it gets here.
-        Two entries per path at most, which is what bounds this list — the first
-        pre-load and the first later consult are the whole story; the tenth
-        reread of the same doc adds nothing and would grow with the session.
+        Only ``.ai/`` docs are retained: a read is evidence here only insofar as
+        it is memory the session loaded, and every other read has already been
+        folded into the activity anchors by the time it gets here. Repeat reads of
+        the same doc add nothing the first does not and would grow with the
+        session — which is also why the dedup is asked *first*: a doc read, then
+        updated, then re-read already has its qualifying read, and calling that
+        re-read a read-back would contradict the trace it is standing in.
         """
         if not path.startswith(f"{AI_DIRNAME}/"):
             return
-        phase = self.phase_at(requested_at)
-        if (path, phase) in self.seen:
+        if path in self.seen:
             return
-        self.seen.add((path, phase))
+        if path in self.writes:
+            # Nothing qualifying was read for this path, and this session wrote it
+            # first: at most a read-back of its own text. Recorded rather than
+            # dropped, since that is itself a fact about the session.
+            if path not in self.writeback:
+                self.writeback.append(path)
+            return
+        self.seen.add(path)
         self.reads.append(
             _Read(
                 path=path,
                 order=order,
-                requested_at=requested_at,
                 actor=actor,
                 method=method,
-                phase=phase,
                 ts=ts,
                 before=self.activity,
             )
         )
 
-    def close_pending(self) -> None:
-        """Turn the requests that never got a result into evidence about the gaps.
-
-        A read whose result never arrived normally means nothing entered the
-        context — a turn cut off mid-flight is not a load. But if this scan lost
-        rows *after* that request, the result may be exactly what it lost, and
-        then two different conclusions become unsafe:
-
-        - an unanswered request for a memory doc, issued while assembling
-          context, could be a declared doc this rollup would otherwise report as
-          never loaded — a fabricated negative;
-        - an unanswered request for repo source could be the delivery that would
-          have ended context assembly, leaving every later "pre-load" credited
-          against a boundary that should have closed earlier.
-
-        Both are recorded and left for :func:`_entry_verdict_refusal` to weigh
-        against what the session actually declared.
-        """
-        for rel, requested_at in self.pending.values():
-            if rel is None or self.phase_at(requested_at) != PHASE_ENTRY:
-                continue
-            if not (
-                self.truncated
-                or (self.last_gap is not None and self.last_gap > requested_at)
-            ):
-                continue
-            if rel.startswith(f"{AI_DIRNAME}/"):
-                self.lost_entry.add(rel)
-            elif not _entry_scope(rel):
-                self.note_unsure(requested_at)
+    def finish(self) -> None:
+        """Attach each read's later same-path write, then drop scanning scaffolding."""
+        self.reads = [
+            replace(read, first_write=self.writes.get(read.path))
+            for read in self.reads
+        ]
         self.pending.clear()
+        self.seen.clear()
 
 
 def _scan_transcript(
@@ -1541,9 +1048,9 @@ def _scan_transcript(
     memory, and only the small extracted facts are retained — never a row, never
     the file.
 
-    The scan stops at the close-out marker rather than filtering afterwards, so
-    a long absorption phase costs nothing and no post-close-out read can leak
-    into either measurement.
+    The scan stops at the close-out marker rather than filtering afterwards, so a
+    long absorption phase costs nothing and no post-close-out read can leak into
+    the measurement.
 
     Rows this reader cannot use — malformed, non-object, or past the per-row cap
     — are counted and positioned rather than silently dropped: what is missing
@@ -1579,8 +1086,7 @@ def _scan_transcript(
                     break
     except OSError as err:
         return _Scan(error=f"session transcript unreadable ({err})")
-    scan.close_pending()
-    scan.seen.clear()
+    scan.finish()
     return scan
 
 
@@ -1651,16 +1157,15 @@ def _absorb_row(
 ) -> bool:
     """Fold one row into ``scan``; return True when it is the close-out marker.
 
-    Reads are credited from the **result** side, never the request: a ``Read``
-    call that failed put nothing into context, and crediting the call would let a
-    typo'd path count as a loaded prefetch doc. The pending map holds the
+    Reads are credited from the **result** side, never the request: a read call
+    that failed put nothing into context, and crediting the call would let a
+    typo'd path count as a declared doc that was read. The pending map holds the
     requested path only until its result arrives, and an unanswered request (a
     session cut off mid-turn) is simply never credited.
 
     Mutations and searches are read from the **call** side instead, because that
-    is where the session's intent to work is expressed and their results carry
-    nothing this reader needs. Either way the row that first shows work closes
-    context assembly.
+    is where the session's intent is expressed and their results carry nothing
+    this reader needs.
     """
     kind = row.get("type")
     actor = ACTOR_SUBAGENT if row.get("isSidechain") else ACTOR_ROOT
@@ -1676,23 +1181,19 @@ def _absorb_row(
             if name == "Skill" and args.get("skill") == CLOSEOUT_SKILL:
                 return True
             if name in _READ_TOOLS and isinstance(block_id, str):
-                scan.pending[block_id] = (
-                    _repo_rel(args.get("file_path"), repo_root),
-                    order,
-                )
+                scan.pending[block_id] = _repo_rel(args.get("file_path"), repo_root)
             elif name in _EDIT_TOOLS:
-                _absorb_edit(args, scan, order=order, repo_root=repo_root,
-                             task_paths=task_paths)
-            elif name in _SEARCH_TOOLS:
-                _absorb_search(args, scan, order=order, repo_root=repo_root)
-            elif name in _SHELL_TOOLS:
-                _absorb_command(
+                _absorb_edit(
                     args,
                     scan,
                     order=order,
                     repo_root=repo_root,
                     task_paths=task_paths,
                 )
+            elif name in _SEARCH_TOOLS:
+                _absorb_search(args, scan, repo_root=repo_root)
+            elif name in _SHELL_TOOLS:
+                scan.note_activity("shell")
         return False
 
     if kind == "user":
@@ -1730,662 +1231,35 @@ def _absorb_edit(
     repo_root: Path,
     task_paths: tuple[str, ...],
 ) -> None:
-    """Count one file mutation, and close context assembly unless it is bookkeeping.
+    """Count one file mutation, and record it when it writes project memory.
 
-    Writing the session's own task file splits in two. The claim — status,
-    estimate, ``claimed-by`` — is the entry checklist's own first step and must
-    not end the phase it precedes. A plan or session-log write is the opposite:
-    it is the transcript's clearest evidence that a decision has been made, so a
-    doc opened after it is not informing that decision. Both are counted as
-    ``task_edits``; only the second one closes context assembly.
-
-    Writing anything else inside the repo is work; writing outside it (a scratch
-    file in ``/tmp``) is not this repo's work at all.
+    Writing the session's own task file is protocol bookkeeping — the claim, the
+    plan, the session-log entry — so it is counted apart from work on the repo.
+    Writing a ``.ai/`` doc is additionally the write the success condition asks
+    about: a later read of that path is this session reading back its own text.
     """
     rel = _repo_rel(args.get("file_path") or args.get("notebook_path"), repo_root)
     if rel is None:
         return
-    if rel in task_paths:
-        if _records_decision(args):
-            scan.note_work(order, "task_edits")
-        else:
-            scan.note_activity("task_edits")
-    elif not _entry_scope(rel):
-        scan.note_work(order, "edits")
+    scan.note_activity("task_edits" if rel in task_paths else "edits")
+    if rel.startswith(f"{AI_DIRNAME}/"):
+        scan.note_write(rel, order)
 
 
-def _records_decision(args: dict) -> bool:
-    """Whether a task-file edit writes plan/session-log content rather than a claim.
-
-    Reads the edit's replacement text only to classify its *shape*
-    (:data:`_DECISION_MARKER`); nothing about it is retained. ``MultiEdit``
-    carries its replacements one level down, and a whole-file ``Write`` of a task
-    file necessarily contains the session log, so both are covered.
-    """
-    values = [args.get("new_string"), args.get("content")]
-    edits = args.get("edits")
-    if isinstance(edits, list):
-        values += [edit.get("new_string") for edit in edits if isinstance(edit, dict)]
-    return any(
-        isinstance(value, str) and _DECISION_MARKER.search(value) for value in values
-    )
-
-
-def _absorb_command(
-    args: dict,
-    scan: _Scan,
-    *,
-    order: int,
-    repo_root: Path,
-    task_paths: tuple[str, ...],
-) -> None:
-    """Fold one shell command into the boundary, or into its uncertainty."""
-    command = args.get("command")
-    verdict, kind = _classify_command(
-        command if isinstance(command, str) else "",
-        repo_root,
-        task_paths=task_paths,
-    )
-    if verdict == COMMAND_WORK:
-        scan.note_work(order, kind)
-    elif verdict == COMMAND_UNCLEAR:
-        scan.note_activity(kind)
-        scan.note_unsure(order)
-
-
-def _classify_command(
-    command: str, repo_root: Path, *, task_paths: tuple[str, ...]
-) -> tuple[str, str]:
-    """Place one shell command, as ``(verdict, activity kind)``.
-
-    A command carrying a construct this reader does not interpret
-    (:data:`_UNMODELED_SHAPES`) is not read at all — not statement by statement,
-    not partially. Its unread part decides what the rest of it means, so any
-    verdict drawn from the readable remainder is a guess wearing a claim: that
-    is how an arithmetic ``>`` became a write, and how a substitution's own
-    redirection hides inside a string that looks inert.
-
-    What is read is read statement by statement, because a command is a sequence
-    of them and the strongest signal in it is the command's: ``date -u && sed -n
-    1,40p src/api.ts`` is a code read that happens to start with the clock. Work
-    wins over uncertainty, and uncertainty over neutrality — the ordering that
-    never lets an unplaceable statement be read as harmless.
-
-    The ``activity kind`` is which :class:`Activity` counter the command feeds,
-    so a session-log write through the shell lands where the same write through
-    ``Edit`` would.
-    """
-    # Quoting is read over the whole command, not per statement: a quoted string
-    # may span the separators this reader splits on (``psql -c "\nSELECT ...
-    # WHERE a > b"``), and a statement that starts mid-string would otherwise
-    # see that ``>`` standing unquoted. The same pass answers whether this
-    # command is one the reader may place at all.
-    quoted = _shell_shape(command)
-    if quoted is None:
-        return COMMAND_UNCLEAR, "shell"
-    records_decision = bool(_DECISION_MARKER.search(command))
-    root = repo_root.as_posix()
-    # Every path the command names anywhere, as the context a reader statement
-    # that names none of its own is placed against (:data:`READ_COMMANDS`).
-    context = tuple(_command_paths(command, repo_root))
-    verdicts = []
-    cwd: str | None = ""
-    for statement, offset in _statements(command):
-        # A ``cd`` reaches forward, not back: the statements after it are read
-        # against the directory it moved to, while the ones before it stay
-        # exactly as observed.
-        cwd = _next_cwd(cwd, statement, root)
-        verdicts.append(
-            _classify_statement(
-                statement,
-                repo_root,
-                task_paths=task_paths,
-                records_decision=records_decision,
-                cwd=cwd,
-                context=context,
-                quoted=quoted,
-                offset=offset,
-            )
-        )
-    for wanted in (COMMAND_WORK, COMMAND_UNCLEAR):
-        for verdict, kind in verdicts:
-            if verdict == wanted:
-                return verdict, kind
-    return COMMAND_NEUTRAL, "shell"
-
-
-def _statements(command: str) -> Iterator[tuple[str, int]]:
-    """Each statement of a command with its offset into the command.
-
-    The offset is what lets a statement be read against the whole command's
-    quoting: a separator inside a string still splits the text here, so a
-    statement's own view of where its quotes are is not to be trusted.
-    """
-    start = 0
-    for separator in _STATEMENTS.finditer(command):
-        yield command[start : separator.start()], start
-        start = separator.end()
-    yield command[start:], start
-
-
-def _classify_statement(
-    statement: str,
-    repo_root: Path,
-    *,
-    task_paths: tuple[str, ...],
-    records_decision: bool,
-    cwd: str | None = "",
-    context: tuple[str, ...] = (),
-    quoted: tuple[tuple[int, int], ...] = (),
-    offset: int = 0,
-) -> tuple[str, str]:
-    """Place one shell statement as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
-
-    A best-effort reading of argv, asked in the order that keeps the common
-    shapes right:
-
-    1. what it *writes* — a write to the task file is the shell spelling of the
-       session-log edit that marks a recorded decision, and reading it as just
-       another entry-scope path would let it pass as context assembly;
-    2. what it *names* — ``cat .ai/index.md`` is routed memory whatever ``cat``
-       usually means, and ``sed -n 1,40p src/api.ts`` is the code whatever
-       ``sed`` usually means, with a listing's operands read as the paths they
-       are (:func:`_listing_targets`);
-    3. whether everything it touched is somewhere else on the machine, which is
-       nothing this repo's measurement can conclude anything from;
-    4. its head word, and — where the head alone does not fix the output — its
-       flags (:func:`_git_flag_verdict`) or the paths standing beside it
-       (:data:`READ_COMMANDS`).
-
-    This is not a shell parser and does not pretend to be one. What it reads is
-    the subset its caller has already shown to be readable — plain argv with
-    ordinary quoting (:func:`_shell_shape`) — and within that subset every
-    misreading still has somewhere to go, :data:`COMMAND_UNCLEAR`, instead of
-    having to become one of the two verdicts that carry a claim.
-    """
-    if not statement.strip():
-        return COMMAND_NEUTRAL, "shell"
-    root = repo_root.as_posix()
-    head = _statement_head(statement)
-    if head == "cd":
-        # The move is the caller's business (:func:`_next_cwd`); the statement
-        # itself puts nothing in context.
-        return COMMAND_NEUTRAL, "shell"
-    writes, body = _split_redirects(
-        statement, root, cwd=cwd, quoted=quoted, offset=offset
-    )
-    if cwd is None:
-        # A ``cd`` left the repo, so every relative token is measured against a
-        # directory this reader cannot name; only what was named absolutely
-        # still means what it says.
-        named = _command_paths(body, repo_root, cwd=cwd)
-        if any(not _entry_scope(rel) for rel in named):
-            return COMMAND_WORK, "shell"
-        return COMMAND_UNCLEAR, "shell"
-    for rel in writes:
-        if rel in task_paths:
-            # The shell's answer to ``_records_decision``. A write whose content
-            # this reader cannot classify is not shown to be bookkeeping, so it
-            # does not get the benefit of the doubt the claim edit gets.
-            if records_decision:
-                return COMMAND_WORK, "task_edits"
-            return COMMAND_UNCLEAR, "task_edits"
-        if not _entry_scope(rel):
-            return COMMAND_WORK, "edits"
-    listed, unplaced = _listing_targets(body, root, cwd=cwd)
-    named = _command_paths(body, repo_root, cwd=cwd) + listed
-    if any(not _entry_scope(rel) for rel in named):
-        return COMMAND_WORK, "shell"
-    if unplaced:
-        return COMMAND_UNCLEAR, "shell"
-    if named or writes:
-        return COMMAND_NEUTRAL, "shell"
-    if _names_outside(body, root, cwd=cwd):
-        # Everything it touched is somewhere else on the machine — another
-        # checkout, ``/tmp``. The tool side already ignores such a read (it never
-        # resolves to a repo path), and the shell spelling of it is no different.
-        return COMMAND_NEUTRAL, "shell"
-    if head in CONTENT_COMMANDS:
-        if head in READ_COMMANDS and context and all(map(_entry_scope, context)):
-            # It named nothing itself, but everything this command names is the
-            # session's instructions, so that is what it read.
-            return COMMAND_NEUTRAL, "shell"
-        return COMMAND_WORK, "shell"
-    if head in LISTING_COMMANDS:
-        # Everything it was pointed at is outside the repo (``ls ~``, ``ls ..``);
-        # an in-repo target, the cwd included, was decided above.
-        return COMMAND_NEUTRAL, "shell"
-    if head in NEUTRAL_COMMANDS:
-        verdict = _git_flag_verdict(body) if head.startswith("git ") else COMMAND_NEUTRAL
-        return verdict, "shell"
-    if head is None:
-        # A statement with no command word at all — a loop's ``done``, a stray
-        # brace. It ran nothing, so there is nothing to be uncertain about.
-        return COMMAND_NEUTRAL, "shell"
-    return COMMAND_UNCLEAR, "shell"
-
-
-def _split_redirects(
-    statement: str,
-    root: str,
-    *,
-    cwd: str | None = "",
-    quoted: tuple[tuple[int, int], ...] = (),
-    offset: int = 0,
-) -> tuple[list[str], str]:
-    """``(in-repo write targets, statement without its redirections)``.
-
-    The targets are removed from the text the rest of the classification reads,
-    so a write is weighed as a write and not counted a second time as a path the
-    command merely names.
-
-    Whatever a real ``>`` points at is a file: ``echo generated > Makefile`` and
-    ``printf 1.4.0 > VERSION`` write this repo exactly as ``> notes.txt`` does,
-    and asking whether the target *looked* like a filename dropped the
-    extensionless ones — leaving the write to inherit the neutral verdict of the
-    ``echo`` in front of it. So the shape test is gone, and the only question
-    left is whether the ``>`` is a redirection at all: inside a string it is
-    prose (``echo "0.5 > 0.4"``), which :func:`_shell_shape` decides from the
-    quoting rather than from what the target is called. The spellings where it
-    is an operator of the language instead (``((count>max))``) never reach here:
-    their command is unreadable and was refused whole.
-    """
-    writes: list[str] = []
-
-    def swallow(match: re.Match) -> str:
-        position = offset + match.start()
-        if _in_span(position, quoted):
-            # Inside a string: text that happens to contain ``>``. Neither a
-            # write nor — since ``echo "0.5 > 0.4"`` names no file — a path the
-            # command reads, so the whole of it drops out of the reading.
-            return " "
-        target = match.group("target")
-        if target is None:
-            return " "
-        place, rel, absolute = _place_token(target, root)
-        placeable = absolute or cwd is not None
-        if place == _PLACE_IN and rel and placeable:
-            writes.append(_under(rel, absolute, cwd))
-        return " "
-
-    return writes, _REDIRECT.sub(swallow, statement)
-
-
-def _shell_shape(command: str) -> tuple[tuple[int, int], ...] | None:
-    """A command's quoted ``[start, end)`` spans, or ``None`` if it is unreadable.
-
-    One pass answering the two questions the classification rests on: *may this
-    command be read at all*, and *where are its strings*. They are one pass
-    because they are one question — the quoting is what decides whether a
-    construct is a construct or the text of a string (``echo "((x))"``), and a
-    construct is what decides whether the quoting can be trusted to end where it
-    seems to.
-
-    Read over the whole command, because that is the only place the quoting is
-    intact: statements are split on separators that a string may contain
-    (``psql -c "\\nSELECT ..."``), so a statement beginning mid-string carries no
-    sign that it is inside one.
-
-    ``None`` — unreadable — has three causes, and they share one reason:
-
-    - a construct on :data:`_UNMODELED_SHAPES`, outside quoting;
-    - a command substitution (:data:`_EXPANSIONS`), which also runs inside a
-      double-quoted string;
-    - a quote with no partner, which leaves everything after it undecided.
-
-    Each of them means some region of the command is text this reader does not
-    interpret, and an uninterpreted region can hold anything — a redirection, a
-    whole second command, an operator that only looks like one. A verdict drawn
-    from the rest is a guess with a claim's authority, in whichever direction
-    the reading happens to fall. Refusing costs confidence instead, which is the
-    error this measurement can afford (:data:`COMMAND_UNCLEAR`).
-
-    What it *does* read is ordinary quoting, exactly. A quote inside another
-    quote is a character, not a delimiter, so the scan tracks which one opened
-    the string it is in — and so is an *escaped* one, which is why the backslash
-    is read as the shell reads it: it escapes outside a string and inside a
-    double-quoted one, and inside ``'...'`` nothing escapes at all. In ``echo
-    "coverage \\" > baseline"`` the middle quote is a character in the string,
-    and taking it for the closing delimiter leaves the still-quoted ``>``
-    standing as a write to ``baseline``: an entry-checklist echo turned into the
-    moment the session started working, and with it a complete prefetch turned
-    into a false miss. Outside a string the same backslash means the quote never
-    opened one (``echo \\" > baseline`` really does write the file), and it is
-    also what tells ``$'`` from an escaped dollar beside an ordinary quote:
-    ``echo \\$'a \\' > Makefile 'b'`` writes ``Makefile``, because the escape
-    consumed the ``$`` before it could open anything.
-    """
-    spans: list[tuple[int, int]] = []
-    quote = ""
-    # Outside a string the backslash escapes, so the scan starts honoring it.
-    escapes = True
-    start = 0
-    index = 0
-    while index < len(command):
-        char = command[index]
-        if char == "\\" and escapes:
-            index += 2
-            continue
-        if quote != "'":
-            # A substitution expands inside a double-quoted string as well as
-            # outside one; the rest of the constructs are text in there.
-            pair = command[index : index + 2]
-            if pair in _EXPANSIONS or char in _EXPANSIONS:
-                return None
-            if not quote and pair in _UNMODELED_SHAPES:
-                return None
-        if quote:
-            if char == quote:
-                spans.append((start, index))
-                quote = ""
-                escapes = True
-        elif char in "\"'":
-            quote = char
-            escapes = char == '"'
-            start = index
-        index += 1
-    if quote:
-        return None
-    return tuple(spans)
-
-
-def _in_span(position: int, spans: tuple[tuple[int, int], ...]) -> bool:
-    """Whether a character position falls inside one of ``spans``."""
-    return any(start <= position < end for start, end in spans)
-
-
-def _next_cwd(cwd: str | None, statement: str, root: str) -> str | None:
-    """Where a statement's ``cd`` leaves the shell, as a repo-relative directory.
-
-    Every relative token in a command is read against the session's cwd, because
-    the orchestrator launches it in the repo root. A ``cd`` moves that ground,
-    and the two directions it can move are not the same fact: into ``web/`` the
-    tokens are still this repo's (``cat package.json`` is source, read under the
-    new prefix), while out to ``~/.claude/projects`` they name nothing here at
-    all — ``ls 9073*.jsonl`` there is not this repo's tree, and reading it as one
-    would invent work and, with it, a missed prefetch doc.
-
-    ``None`` is that second case: the cwd left the repo, or landed somewhere this
-    reader cannot name (``cd -``, ``cd`` with no argument at all).
-    """
-    tokens = statement.split()
-    for index, token in enumerate(tokens):
-        if token != "cd" or cwd is None:
-            continue
-        if index + 1 >= len(tokens):
-            return None
-        place, rel, absolute = _place_token(tokens[index + 1], root)
-        if place != _PLACE_IN or rel == "-":
-            return None
-        cwd = _under(rel, absolute, cwd)
-    return cwd
-
-
-def _under(rel: str, absolute: bool, cwd: str | None) -> str:
-    """A token's repo-relative path once the shell's cwd is accounted for."""
-    if absolute or not cwd:
-        return rel
-    return f"{cwd}/{rel}" if rel else cwd
-
-
-def _listing_targets(
-    statement: str, root: str, *, cwd: str | None = ""
-) -> tuple[list[str], bool]:
-    """``(in-repo trees a listing prints, whether an operand was unplaceable)``.
-
-    Empty for anything but a listing head. A listing's operands are paths by
-    definition, so they are read as such without the shape test a general argv
-    token has to pass — that test exists to keep ``git status``'s subcommand from
-    being read as a file, and it is what let ``ls tests`` pass as metadata. With
-    no operand at all the listing prints the session's cwd, which is the repo
-    root: the widest tree listing there is, and the shape the head-only reading
-    called neutral.
-    """
-    if _statement_head(statement) not in LISTING_COMMANDS:
-        return [], False
-    operands = _head_operands(statement)
-    if not operands:
-        return [_under("", False, cwd)], False
-    targets: list[str] = []
-    unplaced = False
-    for token in operands:
-        place, rel, absolute = _place_token(token, root)
-        if place == _PLACE_IN:
-            targets.append(_under(rel, absolute, cwd))
-        elif place == _PLACE_UNKNOWN:
-            unplaced = True
-    return targets, unplaced
-
-
-def _names_outside(statement: str, root: str, *, cwd: str | None = "") -> bool:
-    """Whether the statement names a path, and every one it names is outside.
-
-    ``ls`` handles its own operands (:func:`_listing_targets`); this is the same
-    question for every other command, and it is what keeps ``rm -rf /tmp/probe``
-    or a read of a *different* repo from being read as work in this one.
-    """
-    outside = False
-    for token in statement.replace("\n", " ").split():
-        if token.startswith("-") or _ASSIGNMENT.match(token):
-            continue
-        place, rel, absolute = _place_token(token, root)
-        if place == _PLACE_OUT and _pathlike(token.strip("\"'`();{}")):
-            outside = True
-        elif place == _PLACE_IN and rel and _pathlike(rel):
-            return False
-    return outside
-
-
-def _head_operands(statement: str) -> list[str]:
-    """The non-flag arguments of a statement's own command, before any pipe."""
-    tokens = statement.split("|", 1)[0].split()
-    while tokens and _ASSIGNMENT.match(tokens[0]):
-        tokens = tokens[1:]
-    return [token for token in tokens[1:] if not token.startswith("-")]
-
-
-def _git_flag_verdict(statement: str) -> str:
-    """Place a metadata ``git`` query by the flags it actually carries.
-
-    The head says ``git log``; whether that prints commit subjects or the diff
-    of every one of them is decided entirely by the flags. Only the statement's
-    own flags are read — a pipe's tail carries its own (``| head -40``), and
-    attributing those to the query would place it on the strength of another
-    command's argv.
-
-    A content flag anywhere settles it: seeing ``-p`` is an observation that the
-    patch was printed, and an unrecognized flag beside it does not make that less
-    true. Uncertainty is only what is left when nothing was observed to print
-    content and something could not be placed.
-    """
-    unknown = False
-    for token in statement.split("|", 1)[0].split():
-        for name in _flag_names(token):
-            if name in GIT_CONTENT_FLAGS:
-                return COMMAND_WORK
-            if name not in GIT_METADATA_FLAGS:
-                unknown = True
-    return COMMAND_UNCLEAR if unknown else COMMAND_NEUTRAL
-
-
-_VALUED_SHORT_FLAGS = frozenset("CGLnSU")
-"""Short options whose value may be written attached to them, so that what
-follows inside the same token is that value rather than more flags: ``-n5``,
-``-S"symbol"``, ``-U3``, ``-L1,20:file``.
-
-Deliberately short. Naming a flag here swallows the rest of its token, so a
-wrong entry could hide a real content flag — while a *missing* one only leaves
-value characters to be read as flags this reader does not know, which costs
-uncertainty and never credits a pre-load."""
-
-
-def _flag_names(token: str) -> tuple[str, ...]:
-    """Every flag one argv token spells, or ``()`` when it is not a flag.
-
-    A token is not always one flag. Short options cluster, so ``git log -sp -1``
-    is ``-s`` *and* ``-p`` — a patch wearing a metadata spelling — and
-    ``git log -sSsession`` searches file diffs under the same disguise. Reading
-    only the leading pair credited both as metadata-only ``-s``, which is the
-    false neutral this reader must not produce; a cluster is therefore read out
-    to its end, or to the first flag whose value it carries
-    (:data:`_VALUED_SHORT_FLAGS`).
-
-    Normalized so one spelling stands for one flag: an attached value is dropped
-    (``--format='%h'``, ``-S"symbol"``), and a bare count is the count flag
-    (``git log -8`` is ``-n``). Surrounding punctuation is stripped because
-    commands reach this reader as they were typed, quotes and trailing commas
-    included.
-    """
-    token = token.strip("\"'`,;")
-    if not token.startswith("-") or token in ("-", "--"):
-        return ()
-    name = token.split("=", 1)[0]
-    if _NUMERIC_FLAG.match(name):
-        return ("-n",)
-    if name.startswith("--"):
-        return (name,)
-    names: list[str] = []
-    for char in name[1:]:
-        names.append(f"-{char}")
-        if char in _VALUED_SHORT_FLAGS:
-            break
-    return tuple(names)
-
-
-def _command_paths(
-    command: str, repo_root: Path, *, cwd: str | None = ""
-) -> list[str]:
-    """Repo-relative paths a command names, as repo-relative POSIX strings.
-
-    Textual, unlike :func:`_repo_rel`: a command token is a hint about intent,
-    not a file this reader opens, and resolving one would put filesystem state
-    from *now* into a judgment about *then*. Relative tokens are read against the
-    repo because that is the cwd every orchestrator session is launched with,
-    or against wherever a ``cd`` has since left it (``cwd``; ``None`` = outside
-    the repo, where only absolute tokens still say anything).
-
-    Two arguments are deliberately not read targets: ``-C``'s and ``cd``'s, which
-    name a working directory. Counting ``git -C <repo> status`` as touching the
-    repo root would make the single most common entry-checklist command in the
-    measured corpus read as work.
-    """
-    root = repo_root.as_posix()
-    paths: list[str] = []
-    skip = False
-    for token in command.replace("\n", " ").split():
-        if skip:
-            skip = False
-            continue
-        if token in ("-C", "cd"):
-            skip = True
-            continue
-        if token.startswith("-") or _ASSIGNMENT.match(token):
-            continue
-        rel = _command_rel(token, root, cwd=cwd)
-        if rel is not None:
-            paths.append(rel)
-    return paths
-
-
-def _command_rel(token: str, root: str, *, cwd: str | None = "") -> str | None:
-    """One argv token as a repo-relative path, or ``None`` when it is not one.
-
-    Anything outside the repo drops out first — another checkout, ``/tmp``, a
-    ``~``-relative path — because it says nothing about this repo's code. So does
-    the repo root itself: naming it is not naming a file in it, and the one shape
-    where it matters (a listing pointed at the whole tree) is read separately.
-    """
-    place, rel, absolute = _place_token(token, root)
-    if place != _PLACE_IN or (cwd is None and not absolute):
-        return None
-    if not rel or not _pathlike(rel):
-        return None
-    return _under(rel, absolute, cwd)
-
-
-def _place_token(token: str, root: str) -> tuple[str, str, bool]:
-    """``(place, repo-relative path, named absolutely)`` for one argv token.
-
-    The single place argv tokens are located, so every caller agrees on what
-    counts as "in this repo". ``~`` and ``..`` are outside it: they resolve
-    against the home directory and the repo's parent, neither of which is this
-    repo's code, and reading them as repo-relative would invent work.
-    """
-    token = token.strip("\"'`();{}")
-    if not token or "$" in token:
-        return _PLACE_UNKNOWN, "", False
-    if token.startswith("~"):
-        return _PLACE_OUT, "", True
-    if token in (root, f"{root}/"):
-        return _PLACE_IN, "", True
-    if token.startswith(f"{root}/"):
-        return _PLACE_IN, token[len(root) + 1 :].rstrip("/"), True
-    if token.startswith("/"):
-        return _PLACE_OUT, "", True
-    if token.startswith("./"):
-        token = token[2:]
-    if token in (".", "./"):
-        return _PLACE_IN, "", False
-    if token == ".." or token.startswith("../"):
-        return _PLACE_OUT, "", False
-    return _PLACE_IN, token.rstrip("/"), False
-
-
-def _pathlike(token: str) -> bool:
-    """Whether an argv token names a file or subtree at all.
-
-    A token counts when it has a separator, names an entry-scope root outright,
-    or carries a suffix. A bare glob (``find -name '*.md'``) is a pattern rather
-    than a path, and a token holding a variable cannot be resolved to one
-    without running the shell — neither may decide a verdict.
-    """
-    if not token or token in (".", "..") or "$" in token:
-        return False
-    if "*" in token or "?" in token:
-        return "/" in token
-    if "/" in token:
-        return True
-    if token in ENTRY_SCOPE_DIRS or token in ENTRY_SCOPE_NAMES:
-        return True
-    return "." in token.lstrip(".")
-
-
-def _statement_head(statement: str) -> str | None:
-    """One statement's command word, or ``None`` when it has none."""
-    tokens = statement.split("|", 1)[0].split()
-    while tokens and (_ASSIGNMENT.match(tokens[0]) or tokens[0] in _KEYWORDS):
-        tokens = tokens[1:]
-    if not tokens:
-        return None
-    head = tokens[0].strip("\"'`(){}").rsplit("/", 1)[-1]
-    if head != "git":
-        return head
-    rest = iter(tokens[1:])
-    for token in rest:
-        if token == "-C":
-            next(rest, None)
-            continue
-        if token.startswith("-"):
-            continue
-        return f"git {token}"
-    return head
-
-
-def _absorb_search(args: dict, scan: _Scan, *, order: int, repo_root: Path) -> None:
+def _absorb_search(args: dict, scan: _Scan, *, repo_root: Path) -> None:
     """Count one tree search, unless its scope says it is not searching this code.
 
     An unscoped search runs from the session's cwd — the repo — so it is a search
-    of the code and ends context assembly. A search scoped to the entry paths is
-    routed memory or task lookup, which assembly legitimately does, and one
-    scoped somewhere else on the machine is not this repo's work at all; neither
-    is a signal here.
+    of the code. One scoped to the instruction paths is routed memory or task
+    lookup, and one scoped elsewhere on the machine is not this repo's work at
+    all; neither is work a later read could be late relative to.
     """
     path = args.get("path")
     if isinstance(path, str) and path:
         rel = _repo_rel(path, repo_root)
-        if rel is None or _entry_scope(rel):
+        if rel is None or _instruction_path(rel):
             return
-    scan.note_work(order, "searches")
+    scan.note_activity("searches")
 
 
 def _absorb_tool_results(
@@ -2402,14 +1276,10 @@ def _absorb_tool_results(
 
     The path comes from the call that was answered, not from the row-level result
     body: a row carries at most one result in practice, but attributing a body's
-    ``filePath`` to a second block would credit a file that block never read.
-    The body is only consulted when the request itself is unavailable (a
-    transcript whose head was cut) and, for the task file, only when it agrees
-    about which file it holds.
-
-    A delivery of repo content from outside the entry scope is the session
-    reaching into the code, which both counts as work and — as the moment the
-    content actually entered the context — closes context assembly.
+    ``filePath`` to a second block would credit a file that block never read. The
+    body is only consulted when the request itself is unavailable (a transcript
+    whose head was cut) and, for the task file, only when it agrees about which
+    file it holds.
     """
     pending = scan.pending
     result = row.get("toolUseResult")
@@ -2419,18 +1289,17 @@ def _absorb_tool_results(
     for block in _content_blocks(row):
         if block.get("type") != "tool_result":
             continue
-        requested, requested_at = pending.pop(block.get("tool_use_id"), (None, order))
+        requested = pending.pop(block.get("tool_use_id"), None)
         if block.get("is_error"):
             continue
         rel = requested or result_rel
         if rel is None:
             continue
-        if not _entry_scope(rel):
-            scan.note_work(order, "code_reads")
+        if not _instruction_path(rel):
+            scan.note_activity("code_reads")
         scan.add_read(
             path=rel,
             order=order,
-            requested_at=requested_at,
             actor=actor,
             method=METHOD_READ_TOOL,
             ts=ts,
@@ -2466,12 +1335,11 @@ def _absorb_attachment(
     rel = _repo_rel(attachment.get("path"), repo_root)
     if rel is None:
         return
-    if not _entry_scope(rel):
-        scan.note_work(order, "code_reads")
+    if not _instruction_path(rel):
+        scan.note_activity("code_reads")
     scan.add_read(
         path=rel,
         order=order,
-        requested_at=order,
         actor=actor,
         method=METHOD_INJECTED,
         ts=ts,
@@ -2536,15 +1404,15 @@ def _complete_frontmatter(content: str) -> bool:
     return any(line.strip() == "---" for line in lines[1:])
 
 
-def _entry_scope(rel: str) -> bool:
+def _instruction_path(rel: str) -> bool:
     """Whether a repo-relative path is instructions rather than work material.
 
     Matches the directories themselves as well as what is inside them, since a
     search is scoped by naming the directory.
     """
-    if rel.rsplit("/", 1)[-1] in ENTRY_SCOPE_NAMES:
+    if rel.rsplit("/", 1)[-1] in INSTRUCTION_NAMES:
         return True
-    return any(rel == d or rel.startswith(f"{d}/") for d in ENTRY_SCOPE_DIRS)
+    return any(rel == d or rel.startswith(f"{d}/") for d in INSTRUCTION_DIRS)
 
 
 def _repo_rel(value: object, repo_root: Path) -> str | None:

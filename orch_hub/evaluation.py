@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "10"
+EVIDENCE_SCHEMA_VERSION = "11"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -97,39 +97,20 @@ cohorts instead of being compared across a moved baseline. ``2`` added the
 ``ai`` section (:class:`orch_hub.ai_snapshot.AiSnapshot`); ``3`` added the
 ``reads`` section (:class:`orch_hub.session_reads.ReadBehavior`), which is the
 first evidence about how sessions *read* memory rather than what they wrote to
-it; ``4`` split that section's reads at the observable entry/work boundary, which
-moves the meaning of its completeness and retrieval facts rather than only adding
-to them — a v3 pack's ``complete`` counts a doc opened long after the code was
-read, a v4 pack's does not; ``5`` moves that boundary again, by reading shell
-commands and plan/session-log writes as work and by refusing the completeness
-verdict where lost evidence or an unclassifiable command could have placed the
-boundary elsewhere, so a v4 session that is ``complete`` may be ``late`` or
-unassessable in v5. ``6`` narrows that shell reading to what it can actually
-show: a listing of this repo's tree and a patch-emitting ``git`` query become
-work, a write to the task file is weighed like the edit it stands in for, and
-anything the classifier cannot place — an unknown ``git`` flag, a command run
-after leaving the repo — becomes uncertainty rather than a credited pre-load,
-while operations on another tree stop counting as this repo's work at all. ``7``
-closes the last two shapes that could still print file content or write the repo
-while reading as metadata — a clustered short ``git`` flag (``-sp`` is a patch,
-not the metadata-only ``-s`` its first letter spells) and a redirection to a
-plainly named file (``> Makefile``) — and, so that the second of those does not
-turn a quoted ``>`` into a write, reads quoting across the whole command rather
-than per statement. ``8`` finishes that redirection reading on both sides: a
-write spelled without a gap (``echo generated>Makefile``) is the write it is,
-and an escaped quote inside a string (``echo "coverage \\" > baseline"``) no
-longer ends the string early and turns its quoted ``>`` into one. ``9`` stops
-the two remaining ``>`` spellings that are not redirections at all from reading
-as writes — the shell's own arithmetic operators (``if ((count>max))``,
-``echo $((count>>1))``) and a ``>`` inside Bash's ANSI-C ``$'...'`` quoting,
-where the backslash escapes the delimiter as it does in a double-quoted string.
-``10`` stops approximating the shell at all: a command carrying a construct the
-reader does not interpret — arithmetic, a command substitution, a heredoc,
-process substitution, ANSI-C quoting, an unclosed quote — is no longer read
-partially but refused whole, so its session lowers confidence instead of taking
-a verdict drawn from the part that happened to parse. A v9 session may therefore
-be assessable where a v10 one is not, and a v9 activity count may name an edit
-where v10 names a command it could not read.
+it; ``4`` split that section's reads at an observable entry/work boundary, so a
+declared doc opened after the code was already read stopped counting as a
+pre-load; ``5`` through ``10`` successively moved that boundary and the shell
+reading it rested on, each one changing which sessions are ``complete``,
+``late``, or unassessable rather than only adding fields. ``11`` removes the
+partition entirely, on a human ruling: there is no entry/work phase, no boundary
+and no shell classification left in the section. A read now counts wherever it
+happened, provided its content entered context before the close-out marker with
+no earlier write to the same path, and every qualifying read — declared prefetch
+or not — is one event in a single ordered trace carrying the timing evidence
+(order, per-path first write, surrounding activity counts) for the semantic layer
+to judge. A v10 session with a ``late`` doc is therefore ``complete`` in v11,
+while a doc this session wrote before reading back stops counting at all, so the
+two versions are not comparable in either direction.
 A persisted pack with no ``schema_version`` key is version 1 and predates all of
 it.
 
@@ -357,8 +338,9 @@ class EvidencePack:
     downstream evaluator judge knowledge maintenance from what the task actually
     left behind rather than from commit subjects. ``reads`` is its counterpart on
     the read side (:class:`orch_hub.session_reads.ReadBehavior`): a per-session
-    rollup of entry-prefetch loading and ordered mid-flight ``.ai/`` retrieval,
-    derived from each session's own transcript and carrying none of it.
+    rollup of which declared prefetch docs were read and one ordered trace of
+    every qualifying ``.ai/`` read, derived from each session's own transcript and
+    carrying none of it.
     ``warnings`` collects
     pack-level degradation (per-run warnings live on each :class:`RunEvidence`,
     ``.ai/`` warnings on the snapshot). ``summary`` (computed in

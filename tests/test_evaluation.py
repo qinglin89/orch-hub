@@ -1048,8 +1048,8 @@ def test_build_evidence_carries_the_per_session_read_rollup(tmp_path):
             "task",
         )
         + read_pair(repo.path / ".ai" / "features" / "evaluation.md", "# Evaluation\n", "doc")
-        # Then it goes to the code, and only afterwards fetches a further doc:
-        # the pre-load and the mid-flight retrieval are on opposite sides of that.
+        # Then it goes to the code, and only afterwards fetches a further doc: one
+        # ordered trace carries both, with the work between them as the anchor.
         + read_pair(repo.path / "orch_hub" / "evaluation.py", "def build():\n", "code")
         + read_pair(repo.path / ".ai" / "modules" / "sidecar.md", "# Sidecar\n", "mid"),
     )
@@ -1061,7 +1061,11 @@ def test_build_evidence_carries_the_per_session_read_rollup(tmp_path):
     assert session.session_id == "sid-1"
     assert session.run_id == "20260722T090000Z-alpha-task"
     assert session.complete is True and session.coverage == 1.0
-    assert [read.path for read in session.midflight] == [".ai/modules/sidecar.md"]
+    assert [(read.path, read.declared_prefetch) for read in session.trace] == [
+        (".ai/features/evaluation.md", True),
+        (".ai/modules/sidecar.md", False),
+    ]
+    assert session.trace[1].before.code_reads == 1
     summary = pack.to_dict()["summary"]
     assert summary["reads_available"] is True
     assert summary["reads_session_count"] == 1
