@@ -229,7 +229,7 @@ loop unclassifiable — and a survey of the task files written as a loop is
 exactly the entry-checklist shape this reader must not lose."""
 
 _REDIRECT = re.compile(
-    r"(?<![-=<>])(?:\d+|&)?>>?(?!=)\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))"
+    r"(?<![-=<>\\])(?:\d+|&)?>>?(?!=)\s*(?:&\d+|(?P<target>[^\s;|&<>()]+))"
 )
 """An output redirection and the file it writes, if any. Without this a shell
 append is read as just another path the command *names*, which lets a
@@ -249,14 +249,18 @@ which is the same false neutral asking what the target was *called* produced.
 
 What the lookbehind and lookahead still keep out are the shapes a ``>`` wears
 when it is not a redirection at all: a SQL heredoc's ``closed_at >= $2``, an
-arrow in prose (``echo "(ignored -> won't dirty tree)"``), and a JavaScript
-``r=>r.json()``. Reading those as writes of ``=``, ``won't``, or ``r.json``
-would make an entry-checklist echo — or a database query — look like the moment
-a session started working. Both sides are checked because both spellings occur.
-Quoting is the other half of that guard and cannot be expressed here, because a
-quoted string spans the separators statements are split on
-(:func:`_quoted_spans`) — and it is what covers the operators that wear no
-punctuation, an ``awk`` program's ``if(b>m)`` among them."""
+arrow in prose (``echo "(ignored -> won't dirty tree)"``), a JavaScript
+``r=>r.json()``, and a backslash-escaped ``\\>``, which the shell hands to the
+command as the character it is. Reading those as writes of ``=``, ``won't``,
+``r.json``, or the word behind the escape would make an entry-checklist echo —
+or a database query — look like the moment a session started working. Both
+sides are checked because both spellings occur.
+
+Two more guards cannot be expressed here, because they cover spans rather than
+neighbouring characters and a span crosses the separators statements are split
+on: quoting (:func:`_quoted_spans`), which covers the operators that wear no
+punctuation — an ``awk`` program's ``if(b>m)`` among them — and arithmetic
+(:func:`_arithmetic_spans`), where ``>`` compares and ``>>`` shifts."""
 
 _NUMERIC_FLAG = re.compile(r"^-\d+$")
 """``git log -8``: a count, spelled as a flag. Normalized to ``-n``."""
@@ -1768,6 +1772,9 @@ def _classify_command(
     # WHERE a > b"``), and a statement that starts mid-string would otherwise
     # see that ``>`` standing unquoted.
     quoted = _quoted_spans(command)
+    # Read over the whole command for the same reason, and after the quoting
+    # because a string may contain a stray ``((``.
+    arithmetic = _arithmetic_spans(command, quoted)
     verdicts = []
     cwd: str | None = ""
     for statement, offset in _statements(command):
@@ -1784,6 +1791,7 @@ def _classify_command(
                 cwd=cwd,
                 context=context,
                 quoted=quoted,
+                arithmetic=arithmetic,
                 offset=offset,
             )
         )
@@ -1817,6 +1825,7 @@ def _classify_statement(
     cwd: str | None = "",
     context: tuple[str, ...] = (),
     quoted: tuple[tuple[int, int], ...] = (),
+    arithmetic: tuple[tuple[int, int], ...] = (),
     offset: int = 0,
 ) -> tuple[str, str]:
     """Place one shell statement as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
@@ -1851,7 +1860,7 @@ def _classify_statement(
         # itself puts nothing in context.
         return COMMAND_NEUTRAL, "shell"
     writes, body = _split_redirects(
-        statement, root, cwd=cwd, quoted=quoted, offset=offset
+        statement, root, cwd=cwd, quoted=quoted, arithmetic=arithmetic, offset=offset
     )
     if cwd is None:
         # A ``cd`` left the repo, so every relative token is measured against a
@@ -1910,6 +1919,7 @@ def _split_redirects(
     *,
     cwd: str | None = "",
     quoted: tuple[tuple[int, int], ...] = (),
+    arithmetic: tuple[tuple[int, int], ...] = (),
     offset: int = 0,
 ) -> tuple[list[str], str]:
     """``(in-repo write targets, statement without its redirections)``.
@@ -1925,13 +1935,20 @@ def _split_redirects(
     ``echo`` in front of it. So the shape test is gone, and the only question
     left is whether the ``>`` is a redirection at all: inside a string it is
     prose (``echo "0.5 > 0.4"``), which :func:`_quoted_spans` decides from the
-    quoting rather than from what the target is called.
+    quoting rather than from what the target is called, and inside ``((...))``
+    it is the shell's own comparison or shift (:func:`_arithmetic_spans`).
     """
     writes: list[str] = []
 
     def swallow(match: re.Match) -> str:
         position = offset + match.start()
-        if any(start <= position < end for start, end in quoted):
+        if _in_span(position, arithmetic):
+            # An operator of the language, writing nothing. Left standing
+            # exactly as typed, unlike a quoted ``>``: what follows one here is
+            # arithmetic rather than prose, and blanking it out would also blank
+            # whatever the rest of the reading would have made of it.
+            return match.group(0)
+        if _in_span(position, quoted):
             # Inside a string: text that happens to contain ``>``. Neither a
             # write nor — since ``echo "0.5 > 0.4"`` names no file — a path the
             # command reads, so the whole of it drops out of the reading.
@@ -1973,28 +1990,99 @@ def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
     into a false miss. Outside a string the same backslash means the quote never
     opened one (``echo \\" > baseline`` really does write the file).
 
-    Only a double-quoted string reads escapes, because only it has them: inside
-    single quotes every character stands for itself, the backslash included, and
-    honoring one there would run the span past its real end.
+    Whether a string reads escapes is decided by how it *opened*, which is the
+    one thing the two single-quote forms do not share. In an ordinary ``'...'``
+    every character stands for itself, the backslash included, and honoring one
+    there would run the span past its real end. In Bash's ANSI-C ``$'...'`` the
+    backslash escapes exactly as it does in a double-quoted string — ``\\'`` is
+    an apostrophe, not the delimiter — so closing the span there leaves the rest
+    of the string unmasked and any ``>`` in it standing as a write.
     """
     spans: list[tuple[int, int]] = []
     quote = ""
+    # Outside a string the backslash escapes, so the scan starts honoring it.
+    escapes = True
     start = 0
     index = 0
     while index < len(command):
         char = command[index]
-        if char == "\\" and quote != "'":
+        if char == "\\" and escapes:
             index += 2
             continue
         if quote:
             if char == quote:
                 spans.append((start, index))
                 quote = ""
+                escapes = True
         elif char in "\"'":
             quote = char
+            escapes = char == '"' or command[index - 1 : index] == "$"
             start = index
         index += 1
     return tuple(spans)
+
+
+def _arithmetic_spans(
+    command: str, quoted: tuple[tuple[int, int], ...]
+) -> tuple[tuple[int, int], ...]:
+    """The ``[start, end)`` ranges of a command's arithmetic contexts.
+
+    Bash gives ``>`` a second meaning inside them: ``if ((count>max))`` compares
+    and ``echo $((count>>1))`` shifts, and neither writes a file. Read as
+    redirections they become a write to ``max`` and to ``1`` — a work signal
+    invented out of arithmetic, which closes the entry phase early and reports
+    the memory delivered after it as a late recovery rather than a pre-load.
+
+    Both spellings are the same shape, ``((`` through its matching ``))``, and
+    parens nest inside (``$(((a+b)>c))``), so the end is found by depth rather
+    than by the first ``))``. An unbalanced opening yields no span at all, for
+    the reason only closed quote pairs count: treating the rest of the command
+    as arithmetic would hide a genuine redirection behind a stray paren.
+
+    Command position is not checked, because in valid Bash ``((`` needs no
+    checking — outside arithmetic it is a syntax error, so a command that ran
+    and left a transcript row cannot contain one that means anything else. (The
+    conditional ``[[ $a > $b ]]``, where ``>`` compares strings, is *not* handled
+    here for exactly that reason: ``[[`` is a keyword only in command position,
+    and elsewhere ``echo [[a > b]]`` really does redirect.)
+
+    Quoting is decided first and skipped: an opening ``((`` inside a string is
+    text, and reading it as arithmetic would run a span past a real write.
+    """
+    spans: list[tuple[int, int]] = []
+    index = command.find("((")
+    while index != -1:
+        end = None if _in_span(index, quoted) else _balanced_end(command, index, quoted)
+        if end is None:
+            index = command.find("((", index + 1)
+            continue
+        spans.append((index, end))
+        index = command.find("((", end)
+    return tuple(spans)
+
+
+def _balanced_end(
+    command: str, start: int, quoted: tuple[tuple[int, int], ...]
+) -> int | None:
+    """Just past the paren that closes the one opened at ``start``, or ``None``."""
+    depth = 0
+    index = start
+    while index < len(command):
+        char = command[index]
+        if not _in_span(index, quoted):
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+        index += 1
+    return None
+
+
+def _in_span(position: int, spans: tuple[tuple[int, int], ...]) -> bool:
+    """Whether a character position falls inside one of ``spans``."""
+    return any(start <= position < end for start, end in spans)
 
 
 def _next_cwd(cwd: str | None, statement: str, root: str) -> str | None:

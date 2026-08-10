@@ -1031,6 +1031,102 @@ def test_an_escaped_quote_is_a_character_not_the_end_of_its_string(tmp_path):
     assert rolled["write-sid"].activity == Activity(edits=1)
 
 
+def test_shell_arithmetic_compares_and_shifts_rather_than_writing(tmp_path):
+    repo = make_repo(tmp_path)
+    # Inside ``((...))`` the shell reads ``>`` as its own comparison and ``>>``
+    # as its shift. Neither names a file, so neither is the moment work began.
+    arithmetic = {
+        "shift-sid": "echo $((count>>1))",
+        "nested-sid": "echo $(((total+1)>limit))",
+    }
+    # The same statement with a redirection *after* the arithmetic still writes.
+    write = {"write-sid": "echo $((count>>1)) > shift.txt"}
+    for sid, command in {**arithmetic, **write}.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="a")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in {**arithmetic, **write}}
+
+    # Nothing was written to ``max``, to ``1``, or to ``limit``: reading an
+    # arithmetic operator as a redirection invents the work signal that closes
+    # the entry phase, and with it turns a complete prefetch into a false miss.
+    for sid in arithmetic:
+        assert rolled[sid].complete is True, sid
+        assert rolled[sid].entry_boundary is None, sid
+        assert rolled[sid].activity == Activity(), sid
+    assert (rolled["write-sid"].complete, rolled["write-sid"].late) == (
+        False,
+        (FEATURES,),
+    )
+    assert rolled["write-sid"].activity == Activity(edits=1)
+
+
+def test_an_arithmetic_comparison_is_never_read_as_a_write(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [bash_row("if ((count>max)); then echo over; fi", uid="a")]
+        + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # ``if`` is a head this reader does not place, so the command buys the
+    # uncertainty an unrecognized shape always buys — but not an ``edits``
+    # count, not a boundary, and not a doc reported late. Uncertainty costs
+    # confidence; a fabricated write costs the score.
+    assert session.activity == Activity(shell=1)
+    assert session.entry_boundary is None
+    assert session.late == ()
+    assert session.assessable is False and session.complete is None
+    assert "boundary not determinable" in (session.detail or "")
+
+
+def test_ansi_c_quoting_escapes_its_own_delimiter(tmp_path):
+    repo = make_repo(tmp_path)
+    cases = {
+        # ``$'...'`` is Bash's ANSI-C quoting, where the backslash escapes as it
+        # does in a double-quoted string: the string runs past ``\'`` to the
+        # last quote, and the ``>`` inside it is text ``echo`` was handed.
+        "ansi-sid": "echo $'coverage \\' > baseline'",
+        # An ordinary ``'...'`` has no escapes at all, so it really does end at
+        # that quote and what follows really is a redirection.
+        "write-sid": "echo 'coverage \\' > baseline'",
+    }
+    for sid, command in cases.items():
+        write_transcript(
+            tmp_path,
+            repo,
+            entry_rows(repo, f"[{FEATURES}]")
+            + [bash_row(command, uid="w")]
+            + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
+            sid=sid,
+        )
+
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
+
+    # Closing the ANSI-C string at its escaped delimiter leaves the still-quoted
+    # ``>`` standing as a write to ``baseline``, which is the same false miss
+    # the double-quoted spelling produced — the two quotes differ in whether the
+    # backslash escapes, not in whether the guard applies.
+    assert rolled["ansi-sid"].complete is True
+    assert rolled["ansi-sid"].entry_boundary is None
+    assert rolled["ansi-sid"].activity == Activity()
+    assert (rolled["write-sid"].complete, rolled["write-sid"].late) == (
+        False,
+        (FEATURES,),
+    )
+    assert rolled["write-sid"].activity == Activity(edits=1)
+
+
 def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
     repo = make_repo(tmp_path)
     task_file = f"{repo.path}/.ai-tasks/{TASK}.md"

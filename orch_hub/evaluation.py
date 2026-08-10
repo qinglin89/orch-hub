@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "8"
+EVIDENCE_SCHEMA_VERSION = "9"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -118,8 +118,13 @@ turn a quoted ``>`` into a write, reads quoting across the whole command rather
 than per statement. ``8`` finishes that redirection reading on both sides: a
 write spelled without a gap (``echo generated>Makefile``) is the write it is,
 and an escaped quote inside a string (``echo "coverage \\" > baseline"``) no
-longer ends the string early and turns its quoted ``>`` into one. A persisted
-pack with no ``schema_version`` key is version 1 and predates all of it.
+longer ends the string early and turns its quoted ``>`` into one. ``9`` stops
+the two remaining ``>`` spellings that are not redirections at all from reading
+as writes — the shell's own arithmetic operators (``if ((count>max))``,
+``echo $((count>>1))``) and a ``>`` inside Bash's ANSI-C ``$'...'`` quoting,
+where the backslash escapes the delimiter as it does in a double-quoted string.
+A persisted pack with no ``schema_version`` key is version 1 and predates all of
+it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
