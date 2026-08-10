@@ -1031,75 +1031,76 @@ def test_an_escaped_quote_is_a_character_not_the_end_of_its_string(tmp_path):
     assert rolled["write-sid"].activity == Activity(edits=1)
 
 
-def test_shell_arithmetic_compares_and_shifts_rather_than_writing(tmp_path):
+def test_a_command_this_reader_cannot_read_decides_nothing(tmp_path):
     repo = make_repo(tmp_path)
-    # Inside ``((...))`` the shell reads ``>`` as its own comparison and ``>>``
-    # as its shift. Neither names a file, so neither is the moment work began.
-    arithmetic = {
+    # One spelling per construct the reader does not interpret. Each of them
+    # hides a region where anything at all could stand — a redirection, a whole
+    # second command, an operator that only looks like one — so none of them may
+    # decide either verdict that carries a claim.
+    unreadable = {
+        # ``>`` compares and ``>>`` shifts in arithmetic: read as redirections
+        # they invent a write to ``max`` and to ``1``.
+        "arith-sid": "if ((count>max)); then echo over; fi",
         "shift-sid": "echo $((count>>1))",
-        "nested-sid": "echo $(((total+1)>limit))",
+        # A substitution's own work is invisible: this reads as a harmless
+        # ``rm`` of nothing, and the deletion target is never seen.
+        "subst-sid": 'rm -rf "$(cat /tmp/target-path)" && git status --porcelain',
+        "backtick-sid": "grep -n RunManager `ls orch_hub/*.py`",
+        # A heredoc body is text rather than argv, and a here-string's operator
+        # is not a redirection.
+        "heredoc-sid": (
+            f"cat >> {repo.path}/.ai-tasks/{TASK}.md <<'EOF'\n"
+            "### 2026-08-10 / sid / (in_progress → in_progress)\n"
+            "- Done: remediated the boundary\nEOF"
+        ),
+        # ANSI-C quoting reads escapes an ordinary ``'...'`` does not, so where
+        # its string ends — and whether the ``>`` in it is a write — depends on
+        # a rule this reader no longer tries to apply.
+        "ansi-sid": "echo $'coverage \\' > baseline'",
+        # A quote with no partner leaves everything after it undecided.
+        "unbalanced-sid": "echo 'coverage > baseline",
+        # Process substitution: the inner commands are never seen either.
+        "procsub-sid": "diff <(sort a.txt) <(sort b.txt)",
     }
-    # The same statement with a redirection *after* the arithmetic still writes.
-    write = {"write-sid": "echo $((count>>1)) > shift.txt"}
-    for sid, command in {**arithmetic, **write}.items():
+    for sid, command in unreadable.items():
         write_transcript(
             tmp_path,
             repo,
             entry_rows(repo, f"[{FEATURES}]")
-            + [bash_row(command, uid="a")]
+            + [bash_row(command, uid="u")]
             + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
             sid=sid,
         )
 
-    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in {**arithmetic, **write}}
+    rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in unreadable}
 
-    # Nothing was written to ``max``, to ``1``, or to ``limit``: reading an
-    # arithmetic operator as a redirection invents the work signal that closes
-    # the entry phase, and with it turns a complete prefetch into a false miss.
-    for sid in arithmetic:
-        assert rolled[sid].complete is True, sid
-        assert rolled[sid].entry_boundary is None, sid
-        assert rolled[sid].activity == Activity(), sid
-    assert (rolled["write-sid"].complete, rolled["write-sid"].late) == (
-        False,
-        (FEATURES,),
-    )
-    assert rolled["write-sid"].activity == Activity(edits=1)
-
-
-def test_an_arithmetic_comparison_is_never_read_as_a_write(tmp_path):
-    repo = make_repo(tmp_path)
-    write_transcript(
-        tmp_path,
-        repo,
-        entry_rows(repo, f"[{FEATURES}]")
-        + [bash_row("if ((count>max)); then echo over; fi", uid="a")]
-        + read_rows(repo.path / FEATURES, content="# eval", uid="doc"),
-    )
-
-    session = only(roll(tmp_path, repo, [dev()]))
-
-    # ``if`` is a head this reader does not place, so the command buys the
-    # uncertainty an unrecognized shape always buys — but not an ``edits``
-    # count, not a boundary, and not a doc reported late. Uncertainty costs
-    # confidence; a fabricated write costs the score.
-    assert session.activity == Activity(shell=1)
-    assert session.entry_boundary is None
-    assert session.late == ()
-    assert session.assessable is False and session.complete is None
-    assert "boundary not determinable" in (session.detail or "")
+    for sid, session in rolled.items():
+        # Not credited: the declared doc that followed may well have followed
+        # real work, so the completeness verdict is refused rather than given.
+        assert session.assessable is False, sid
+        assert session.complete is None and session.coverage is None, sid
+        assert "boundary not determinable" in (session.detail or ""), sid
+        # And not penalized either: no invented write, no boundary, no doc
+        # reported late. Uncertainty costs confidence; a guess costs the score.
+        assert session.activity == Activity(shell=1), sid
+        assert session.entry_boundary is None, sid
+        assert session.late == (), sid
+        # The observation itself still stands — only the verdict is withheld.
+        assert session.loaded == (FEATURES,), sid
 
 
-def test_ansi_c_quoting_escapes_its_own_delimiter(tmp_path):
+def test_an_escaped_dollar_leaves_an_ordinary_quote_and_a_real_redirection(tmp_path):
     repo = make_repo(tmp_path)
     cases = {
-        # ``$'...'`` is Bash's ANSI-C quoting, where the backslash escapes as it
-        # does in a double-quoted string: the string runs past ``\'`` to the
-        # last quote, and the ``>`` inside it is text ``echo`` was handed.
-        "ansi-sid": "echo $'coverage \\' > baseline'",
-        # An ordinary ``'...'`` has no escapes at all, so it really does end at
-        # that quote and what follows really is a redirection.
-        "write-sid": "echo 'coverage \\' > baseline'",
+        # ``\$`` is a literal dollar, so the quote after it opens an ordinary
+        # ``'...'`` that ends at its next quote — and ``> Makefile`` past that
+        # is a redirection standing in the open. Reading the ``$`` as an ANSI-C
+        # opener spans the string through the redirection and hands the command
+        # back as harmless, which credits every memory delivered after a write.
+        "escaped-sid": "echo \\$'coverage \\' > Makefile 'tail'",
+        # The valid contrast, same quoting without the escape: an ordinary
+        # single-quoted string, then a real redirection after it.
+        "plain-sid": "echo 'coverage' > baseline",
     }
     for sid, command in cases.items():
         write_transcript(
@@ -1113,18 +1114,11 @@ def test_ansi_c_quoting_escapes_its_own_delimiter(tmp_path):
 
     rolled = {sid: only(roll(tmp_path, repo, [dev(sid=sid)])) for sid in cases}
 
-    # Closing the ANSI-C string at its escaped delimiter leaves the still-quoted
-    # ``>`` standing as a write to ``baseline``, which is the same false miss
-    # the double-quoted spelling produced — the two quotes differ in whether the
-    # backslash escapes, not in whether the guard applies.
-    assert rolled["ansi-sid"].complete is True
-    assert rolled["ansi-sid"].entry_boundary is None
-    assert rolled["ansi-sid"].activity == Activity()
-    assert (rolled["write-sid"].complete, rolled["write-sid"].late) == (
-        False,
-        (FEATURES,),
-    )
-    assert rolled["write-sid"].activity == Activity(edits=1)
+    # Both wrote the repo before the declared doc arrived, so both report it as
+    # the late recovery it is.
+    for sid, session in rolled.items():
+        assert (session.complete, session.late) == (False, (FEATURES,)), sid
+        assert session.activity == Activity(edits=1), sid
 
 
 def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
@@ -1132,9 +1126,8 @@ def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
     task_file = f"{repo.path}/.ai-tasks/{TASK}.md"
     cases = {
         "log-sid": (
-            f"cat >> {task_file} <<'EOF'\n"
-            f"### 2026-08-10 / {SID} / (in_progress → in_progress)\n"
-            "- Done: remediated the boundary\nEOF"
+            f'echo "### 2026-08-10 / {SID} / (in_progress → in_progress)\n'
+            f'- Done: remediated the boundary" >> {task_file}'
         ),
         "claim-sid": f"printf 'claimed-by: x@2026-08-10T00:00:00Z\\n' >> {task_file}",
         "source-sid": "echo 'generated' > orch_hub/generated.py",
@@ -1153,7 +1146,9 @@ def test_a_shell_write_is_weighed_like_the_tool_edit_it_stands_in_for(tmp_path):
 
     # A session-log append is the recorded decision whether it is written through
     # ``Edit`` or through the shell, and the entry scope of its path does not
-    # make it context assembly.
+    # make it context assembly. (Only where the shell spelling is one this reader
+    # may read: the same append through a heredoc is unreadable, and buys the
+    # uncertainty every unreadable command buys instead of this anchor.)
     assert (rolled["log-sid"].complete, rolled["log-sid"].late) == (False, (FEATURES,))
     assert rolled["log-sid"].activity == Activity(task_edits=1)
     # A shell write whose content this reader cannot classify is not shown to be

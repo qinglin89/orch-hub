@@ -86,6 +86,13 @@ verdict, and each is tracked positionally rather than as one blanket flag:
   was *asked* for, so an entry-phase result can legitimately land late;
 - a shell command this reader cannot classify, which could be the work the
   boundary should have been drawn at (:func:`_classify_command`).
+
+The last of those is deliberately a wide net. The reader models a small,
+explicitly bounded subset of the shell and refuses every command outside it
+(:func:`_shell_shape`) rather than approximating one more construct each time a
+new spelling turns up. Approximation has no stopping point and fails silently in
+whichever direction the guess falls; refusal costs confidence, which is the
+error this measurement is allowed to make.
 """
 
 from __future__ import annotations
@@ -256,11 +263,37 @@ command as the character it is. Reading those as writes of ``=``, ``won't``,
 or a database query — look like the moment a session started working. Both
 sides are checked because both spellings occur.
 
-Two more guards cannot be expressed here, because they cover spans rather than
+One more guard cannot be expressed here, because it covers spans rather than
 neighbouring characters and a span crosses the separators statements are split
-on: quoting (:func:`_quoted_spans`), which covers the operators that wear no
-punctuation — an ``awk`` program's ``if(b>m)`` among them — and arithmetic
-(:func:`_arithmetic_spans`), where ``>`` compares and ``>>`` shifts."""
+on: quoting (:func:`_shell_shape`), which covers the operators that wear no
+punctuation — an ``awk`` program's ``if(b>m)`` among them. The remaining
+spellings of a ``>`` that writes nothing need more than quoting to place — the
+shell's own ``((count>max))`` among them — and are not weighed here at all: the
+commands carrying them are not read (:data:`_UNMODELED_SHAPES`)."""
+
+_UNMODELED_SHAPES = ("((", "<<", "<(", ">(", "$'", '$"')
+"""Shell constructs this reader does not interpret, outside any quoting.
+
+Arithmetic, heredocs and here-strings, process substitution, and Bash's ANSI-C
+and locale quoting. Each of them changes what the characters after it *mean* —
+``>`` compares inside ``((...))``, a heredoc body is text rather than argv, and
+``$'...'`` reads escapes an ordinary ``'...'`` does not — so reading a command
+that carries one requires interpreting the construct.
+
+This reader stops instead. Approximating them one spelling at a time is how a
+``>`` in arithmetic became a write to ``max``, and each approximation that got a
+shape wrong got it wrong silently, in whichever direction the regex happened to
+fall. A command carrying one of these is :data:`COMMAND_UNCLEAR`: the reader
+says it cannot read it, which costs confidence rather than inventing either a
+work signal or a credited pre-load. What remains — plain argv, ordinary
+quoting, escapes, redirections — is small enough to read exactly."""
+
+_EXPANSIONS = ("$(", "`")
+"""Command substitution, in both spellings. Kept apart from
+:data:`_UNMODELED_SHAPES` because these two also expand *inside* a double-quoted
+string, where everything else on that list is literal text: ``echo "$(ls >
+out.txt)"`` runs a command and writes a file from inside what would otherwise
+read as a quoted, inert string."""
 
 _NUMERIC_FLAG = re.compile(r"^-\d+$")
 """``git log -8``: a count, spelled as a flag. Normalized to ``-n``."""
@@ -314,7 +347,13 @@ ignoring them is not an option either: measured sessions grep, ``sed``, and run
 test suites through the shell, and doing that before opening memory is exactly
 the scratch-first behavior this measurement exists to catch. So a command is
 classified three ways (:func:`_classify_command`) and the one it cannot decide
-is recorded as boundary uncertainty rather than guessed in either direction."""
+is recorded as boundary uncertainty rather than guessed in either direction.
+
+"Not reliably parseable" is the design, not a caveat on it: the reader models a
+deliberately small subset of the shell and refuses everything outside it
+(:func:`_shell_shape`). A reader that instead approximated the rest would keep
+finding new spellings to get wrong, one review round at a time, and each of them
+would be wrong silently."""
 
 COMMAND_NEUTRAL = "neutral"
 """A shell command *demonstrably* confined to metadata or context assembly: the
@@ -333,14 +372,21 @@ content, or runs a content command (read, search, build, test). This is the
 shell spelling of the same signal a ``Read`` or ``Grep`` carries."""
 
 COMMAND_UNCLEAR = "unclear"
-"""Neither — a shape this reader cannot place: an unrecognized command with no
+"""Neither — a shape this reader cannot place: a command carrying a construct it
+does not interpret (:data:`_UNMODELED_SHAPES`), an unrecognized command with no
 repo path, a ``git`` flag it does not know, a write to the task file whose
 content it cannot see, or anything relative that follows a ``cd`` out of the
 repo. Treating it as neutral would credit a pre-load that may have followed real
 work; treating it as work would invent a missed doc for a session that merely
 ran a tool this reader has not seen. Both are claims the evidence does not
 support, so it is recorded as uncertainty and refuses only the verdicts that
-rest on it."""
+rest on it.
+
+This is the verdict the other two are measured against: ``neutral`` and ``work``
+are claims about what a command did, and each may only be reached from a shape
+this reader can show it read whole. Everything else lands here — which is what
+keeps the reader finite. It is not obliged to grow a shell parser to stay
+correct; it is obliged to know what it cannot read."""
 
 NEUTRAL_COMMANDS = frozenset(
     {
@@ -1752,29 +1798,36 @@ def _classify_command(
 ) -> tuple[str, str]:
     """Place one shell command, as ``(verdict, activity kind)``.
 
-    Statement by statement, because a command is a sequence of them and the
-    strongest signal in it is the command's: ``date -u && sed -n 1,40p
-    src/api.ts`` is a code read that happens to start with the clock. Work wins
-    over uncertainty, and uncertainty over neutrality — the ordering that never
-    lets an unplaceable statement be read as harmless.
+    A command carrying a construct this reader does not interpret
+    (:data:`_UNMODELED_SHAPES`) is not read at all — not statement by statement,
+    not partially. Its unread part decides what the rest of it means, so any
+    verdict drawn from the readable remainder is a guess wearing a claim: that
+    is how an arithmetic ``>`` became a write, and how a substitution's own
+    redirection hides inside a string that looks inert.
+
+    What is read is read statement by statement, because a command is a sequence
+    of them and the strongest signal in it is the command's: ``date -u && sed -n
+    1,40p src/api.ts`` is a code read that happens to start with the clock. Work
+    wins over uncertainty, and uncertainty over neutrality — the ordering that
+    never lets an unplaceable statement be read as harmless.
 
     The ``activity kind`` is which :class:`Activity` counter the command feeds,
     so a session-log write through the shell lands where the same write through
     ``Edit`` would.
     """
+    # Quoting is read over the whole command, not per statement: a quoted string
+    # may span the separators this reader splits on (``psql -c "\nSELECT ...
+    # WHERE a > b"``), and a statement that starts mid-string would otherwise
+    # see that ``>`` standing unquoted. The same pass answers whether this
+    # command is one the reader may place at all.
+    quoted = _shell_shape(command)
+    if quoted is None:
+        return COMMAND_UNCLEAR, "shell"
     records_decision = bool(_DECISION_MARKER.search(command))
     root = repo_root.as_posix()
     # Every path the command names anywhere, as the context a reader statement
     # that names none of its own is placed against (:data:`READ_COMMANDS`).
     context = tuple(_command_paths(command, repo_root))
-    # Quoting is read over the whole command, not per statement: a quoted string
-    # may span the separators this reader splits on (``psql -c "\nSELECT ...
-    # WHERE a > b"``), and a statement that starts mid-string would otherwise
-    # see that ``>`` standing unquoted.
-    quoted = _quoted_spans(command)
-    # Read over the whole command for the same reason, and after the quoting
-    # because a string may contain a stray ``((``.
-    arithmetic = _arithmetic_spans(command, quoted)
     verdicts = []
     cwd: str | None = ""
     for statement, offset in _statements(command):
@@ -1791,7 +1844,6 @@ def _classify_command(
                 cwd=cwd,
                 context=context,
                 quoted=quoted,
-                arithmetic=arithmetic,
                 offset=offset,
             )
         )
@@ -1825,7 +1877,6 @@ def _classify_statement(
     cwd: str | None = "",
     context: tuple[str, ...] = (),
     quoted: tuple[tuple[int, int], ...] = (),
-    arithmetic: tuple[tuple[int, int], ...] = (),
     offset: int = 0,
 ) -> tuple[str, str]:
     """Place one shell statement as :data:`COMMAND_NEUTRAL`/``WORK``/``UNCLEAR``.
@@ -1846,10 +1897,11 @@ def _classify_statement(
        flags (:func:`_git_flag_verdict`) or the paths standing beside it
        (:data:`READ_COMMANDS`).
 
-    This is not a shell parser and does not pretend to be one: quoting, command
-    substitution, and functions are not interpreted. It is safe because every
-    misreading has somewhere to go — :data:`COMMAND_UNCLEAR` — instead of having
-    to become one of the two verdicts that carry a claim.
+    This is not a shell parser and does not pretend to be one. What it reads is
+    the subset its caller has already shown to be readable — plain argv with
+    ordinary quoting (:func:`_shell_shape`) — and within that subset every
+    misreading still has somewhere to go, :data:`COMMAND_UNCLEAR`, instead of
+    having to become one of the two verdicts that carry a claim.
     """
     if not statement.strip():
         return COMMAND_NEUTRAL, "shell"
@@ -1860,7 +1912,7 @@ def _classify_statement(
         # itself puts nothing in context.
         return COMMAND_NEUTRAL, "shell"
     writes, body = _split_redirects(
-        statement, root, cwd=cwd, quoted=quoted, arithmetic=arithmetic, offset=offset
+        statement, root, cwd=cwd, quoted=quoted, offset=offset
     )
     if cwd is None:
         # A ``cd`` left the repo, so every relative token is measured against a
@@ -1919,7 +1971,6 @@ def _split_redirects(
     *,
     cwd: str | None = "",
     quoted: tuple[tuple[int, int], ...] = (),
-    arithmetic: tuple[tuple[int, int], ...] = (),
     offset: int = 0,
 ) -> tuple[list[str], str]:
     """``(in-repo write targets, statement without its redirections)``.
@@ -1934,20 +1985,15 @@ def _split_redirects(
     extensionless ones — leaving the write to inherit the neutral verdict of the
     ``echo`` in front of it. So the shape test is gone, and the only question
     left is whether the ``>`` is a redirection at all: inside a string it is
-    prose (``echo "0.5 > 0.4"``), which :func:`_quoted_spans` decides from the
-    quoting rather than from what the target is called, and inside ``((...))``
-    it is the shell's own comparison or shift (:func:`_arithmetic_spans`).
+    prose (``echo "0.5 > 0.4"``), which :func:`_shell_shape` decides from the
+    quoting rather than from what the target is called. The spellings where it
+    is an operator of the language instead (``((count>max))``) never reach here:
+    their command is unreadable and was refused whole.
     """
     writes: list[str] = []
 
     def swallow(match: re.Match) -> str:
         position = offset + match.start()
-        if _in_span(position, arithmetic):
-            # An operator of the language, writing nothing. Left standing
-            # exactly as typed, unlike a quoted ``>``: what follows one here is
-            # arithmetic rather than prose, and blanking it out would also blank
-            # whatever the rest of the reading would have made of it.
-            return match.group(0)
         if _in_span(position, quoted):
             # Inside a string: text that happens to contain ``>``. Neither a
             # write nor — since ``echo "0.5 > 0.4"`` names no file — a path the
@@ -1965,38 +2011,49 @@ def _split_redirects(
     return writes, _REDIRECT.sub(swallow, statement)
 
 
-def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
-    """The ``[start, end)`` ranges of a command's quoted strings.
+def _shell_shape(command: str) -> tuple[tuple[int, int], ...] | None:
+    """A command's quoted ``[start, end)`` spans, or ``None`` if it is unreadable.
+
+    One pass answering the two questions the classification rests on: *may this
+    command be read at all*, and *where are its strings*. They are one pass
+    because they are one question — the quoting is what decides whether a
+    construct is a construct or the text of a string (``echo "((x))"``), and a
+    construct is what decides whether the quoting can be trusted to end where it
+    seems to.
 
     Read over the whole command, because that is the only place the quoting is
     intact: statements are split on separators that a string may contain
     (``psql -c "\\nSELECT ..."``), so a statement beginning mid-string carries no
     sign that it is inside one.
 
-    Only closed pairs count. An opening quote with no partner is not evidence
-    that everything after it is a string — the shapes that reach this reader
-    unbalanced are heredoc bodies, which carry ordinary apostrophes (``- Done:
-    the session's plan``). Reading the rest of the command as quoted would hide
-    a genuine redirection behind any prose apostrophe before it, which is the
-    false neutral this guard exists to close.
+    ``None`` — unreadable — has three causes, and they share one reason:
 
-    A quote inside another quote is a character, not a delimiter, so the scan
-    tracks which one opened the string it is in — and so is an *escaped* one,
-    which is why the backslash is read as the shell reads it. In ``echo
+    - a construct on :data:`_UNMODELED_SHAPES`, outside quoting;
+    - a command substitution (:data:`_EXPANSIONS`), which also runs inside a
+      double-quoted string;
+    - a quote with no partner, which leaves everything after it undecided.
+
+    Each of them means some region of the command is text this reader does not
+    interpret, and an uninterpreted region can hold anything — a redirection, a
+    whole second command, an operator that only looks like one. A verdict drawn
+    from the rest is a guess with a claim's authority, in whichever direction
+    the reading happens to fall. Refusing costs confidence instead, which is the
+    error this measurement can afford (:data:`COMMAND_UNCLEAR`).
+
+    What it *does* read is ordinary quoting, exactly. A quote inside another
+    quote is a character, not a delimiter, so the scan tracks which one opened
+    the string it is in — and so is an *escaped* one, which is why the backslash
+    is read as the shell reads it: it escapes outside a string and inside a
+    double-quoted one, and inside ``'...'`` nothing escapes at all. In ``echo
     "coverage \\" > baseline"`` the middle quote is a character in the string,
     and taking it for the closing delimiter leaves the still-quoted ``>``
     standing as a write to ``baseline``: an entry-checklist echo turned into the
     moment the session started working, and with it a complete prefetch turned
     into a false miss. Outside a string the same backslash means the quote never
-    opened one (``echo \\" > baseline`` really does write the file).
-
-    Whether a string reads escapes is decided by how it *opened*, which is the
-    one thing the two single-quote forms do not share. In an ordinary ``'...'``
-    every character stands for itself, the backslash included, and honoring one
-    there would run the span past its real end. In Bash's ANSI-C ``$'...'`` the
-    backslash escapes exactly as it does in a double-quoted string — ``\\'`` is
-    an apostrophe, not the delimiter — so closing the span there leaves the rest
-    of the string unmasked and any ``>`` in it standing as a write.
+    opened one (``echo \\" > baseline`` really does write the file), and it is
+    also what tells ``$'`` from an escaped dollar beside an ordinary quote:
+    ``echo \\$'a \\' > Makefile 'b'`` writes ``Makefile``, because the escape
+    consumed the ``$`` before it could open anything.
     """
     spans: list[tuple[int, int]] = []
     quote = ""
@@ -2009,6 +2066,14 @@ def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
         if char == "\\" and escapes:
             index += 2
             continue
+        if quote != "'":
+            # A substitution expands inside a double-quoted string as well as
+            # outside one; the rest of the constructs are text in there.
+            pair = command[index : index + 2]
+            if pair in _EXPANSIONS or char in _EXPANSIONS:
+                return None
+            if not quote and pair in _UNMODELED_SHAPES:
+                return None
         if quote:
             if char == quote:
                 spans.append((start, index))
@@ -2016,68 +2081,12 @@ def _quoted_spans(command: str) -> tuple[tuple[int, int], ...]:
                 escapes = True
         elif char in "\"'":
             quote = char
-            escapes = char == '"' or command[index - 1 : index] == "$"
+            escapes = char == '"'
             start = index
         index += 1
+    if quote:
+        return None
     return tuple(spans)
-
-
-def _arithmetic_spans(
-    command: str, quoted: tuple[tuple[int, int], ...]
-) -> tuple[tuple[int, int], ...]:
-    """The ``[start, end)`` ranges of a command's arithmetic contexts.
-
-    Bash gives ``>`` a second meaning inside them: ``if ((count>max))`` compares
-    and ``echo $((count>>1))`` shifts, and neither writes a file. Read as
-    redirections they become a write to ``max`` and to ``1`` — a work signal
-    invented out of arithmetic, which closes the entry phase early and reports
-    the memory delivered after it as a late recovery rather than a pre-load.
-
-    Both spellings are the same shape, ``((`` through its matching ``))``, and
-    parens nest inside (``$(((a+b)>c))``), so the end is found by depth rather
-    than by the first ``))``. An unbalanced opening yields no span at all, for
-    the reason only closed quote pairs count: treating the rest of the command
-    as arithmetic would hide a genuine redirection behind a stray paren.
-
-    Command position is not checked, because in valid Bash ``((`` needs no
-    checking — outside arithmetic it is a syntax error, so a command that ran
-    and left a transcript row cannot contain one that means anything else. (The
-    conditional ``[[ $a > $b ]]``, where ``>`` compares strings, is *not* handled
-    here for exactly that reason: ``[[`` is a keyword only in command position,
-    and elsewhere ``echo [[a > b]]`` really does redirect.)
-
-    Quoting is decided first and skipped: an opening ``((`` inside a string is
-    text, and reading it as arithmetic would run a span past a real write.
-    """
-    spans: list[tuple[int, int]] = []
-    index = command.find("((")
-    while index != -1:
-        end = None if _in_span(index, quoted) else _balanced_end(command, index, quoted)
-        if end is None:
-            index = command.find("((", index + 1)
-            continue
-        spans.append((index, end))
-        index = command.find("((", end)
-    return tuple(spans)
-
-
-def _balanced_end(
-    command: str, start: int, quoted: tuple[tuple[int, int], ...]
-) -> int | None:
-    """Just past the paren that closes the one opened at ``start``, or ``None``."""
-    depth = 0
-    index = start
-    while index < len(command):
-        char = command[index]
-        if not _in_span(index, quoted):
-            if char == "(":
-                depth += 1
-            elif char == ")":
-                depth -= 1
-                if depth == 0:
-                    return index + 1
-        index += 1
-    return None
 
 
 def _in_span(position: int, spans: tuple[tuple[int, int], ...]) -> bool:

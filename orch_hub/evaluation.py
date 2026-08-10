@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "9"
+EVIDENCE_SCHEMA_VERSION = "10"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -123,6 +123,13 @@ the two remaining ``>`` spellings that are not redirections at all from reading
 as writes — the shell's own arithmetic operators (``if ((count>max))``,
 ``echo $((count>>1))``) and a ``>`` inside Bash's ANSI-C ``$'...'`` quoting,
 where the backslash escapes the delimiter as it does in a double-quoted string.
+``10`` stops approximating the shell at all: a command carrying a construct the
+reader does not interpret — arithmetic, a command substitution, a heredoc,
+process substitution, ANSI-C quoting, an unclosed quote — is no longer read
+partially but refused whole, so its session lowers confidence instead of taking
+a verdict drawn from the part that happened to parse. A v9 session may therefore
+be assessable where a v10 one is not, and a v9 activity count may name an edit
+where v10 names a command it could not read.
 A persisted pack with no ``schema_version`` key is version 1 and predates all of
 it.
 
