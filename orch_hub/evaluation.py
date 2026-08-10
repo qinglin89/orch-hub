@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "14"
+EVIDENCE_SCHEMA_VERSION = "15"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -123,9 +123,14 @@ about its own ordering; a v13 one does. ``14`` makes the section account for wha
 it could not carry: the sessions its own cap dropped (``dropped_sessions`` /
 ``dropped_candidates``), and — as a warning per session — evidence a *measured*
 session lost to a hole or a cap. In v13 both were invisible to a consumer, so a
-partly-read task and a wholly-read one presented identical coverage.
-A persisted pack with no ``schema_version`` key is version 1 and predates all of
-it.
+partly-read task and a wholly-read one presented identical coverage. ``15``
+finishes that accounting for the sessions nothing was read from at all
+(``unobserved_sessions``, and one warning for the whole class): v14 recorded only
+the ones a prefetch obligation reached, so a task whose review sessions ran on a
+backend that leaves no transcript reported the same read evidence as one observed
+in every session — while the trace the semantic layer judges was short by all of
+them. A persisted pack with no ``schema_version`` key is version 1 and predates
+all of it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the

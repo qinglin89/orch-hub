@@ -317,7 +317,7 @@ def test_an_empty_declared_set_is_recovered_but_not_applicable(tmp_path):
     assert session.coverage is None and session.complete is None
 
 
-def test_a_review_session_is_not_applicable_and_does_not_warn(tmp_path):
+def test_a_review_session_owes_no_prefetch_but_its_missing_trace_is_recorded(tmp_path):
     repo = make_repo(tmp_path)  # a Codex-backed review session leaves no transcript
 
     behavior = roll(
@@ -325,10 +325,13 @@ def test_a_review_session_is_not_applicable_and_does_not_warn(tmp_path):
     )
     session = only(behavior)
 
-    # It was never asked to pre-load anything, so its absence is outside the
-    # measurement rather than a gap that should lower confidence.
+    # It was never asked to pre-load anything, so no prefetch obligation is
+    # invented for it...
     assert session.applicable is False and session.assessable is False
-    assert behavior.warnings == ()
+    # ...but its `.ai/` reads are trace evidence all the same, and nothing was
+    # read from it, so the loss is on the record rather than silently absent.
+    assert behavior.unobserved_sessions == 1
+    assert any("left no readable transcript" in w for w in behavior.warnings)
 
 
 def test_a_parsed_transcript_that_yields_no_verdict_warns_whatever_the_role(tmp_path):
@@ -1235,6 +1238,50 @@ def test_section_availability_follows_what_was_actually_read(tmp_path):
     assert behavior.available is True  # one of the two was located
     assert [s.available for s in behavior.sessions] == [True, False]
     assert behavior.assessable_count == 1 and behavior.applicable_count == 1
+
+
+def test_an_observed_dev_session_beside_a_missing_review_one_is_partial_evidence(
+    tmp_path,
+):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"))
+
+    behavior = roll(
+        tmp_path,
+        repo,
+        [dev(), SessionRef(session_id="review-sid", run_id="run-1", role="review")],
+    )
+    measured, unread = behavior.sessions
+
+    # The task's ordinary shape under a two-backend orchestrator, and the section
+    # reads as available on the strength of the one transcript that parsed. What
+    # the other session read is simply not here, and only this note says so —
+    # without it a half-observed task prices identically to a whole one.
+    assert behavior.available is True
+    assert measured.assessable is True and unread.available is False
+    assert behavior.unobserved_sessions == 1
+    assert [w for w in behavior.warnings if "left no readable transcript" in w] == [
+        "read behavior: 1 session(s) left no readable transcript, so their `.ai/`"
+        " reads are absent from this evidence (no session transcript found)"
+    ]
+
+
+def test_unobserved_sessions_are_one_note_however_many_there_are(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"))
+    reviews = [
+        SessionRef(session_id=f"review-{n}", run_id="run-1", role="review")
+        for n in range(4)
+    ]
+
+    behavior = roll(tmp_path, repo, [dev(), *reviews])
+
+    # One structural fact — this backend leaves no transcript — priced once. A
+    # warning each would spend the semantic layer's whole warning budget on it and
+    # leave the degradations that differ between tasks unable to move confidence.
+    assert behavior.unobserved_sessions == 4
+    assert len([w for w in behavior.warnings if "left no readable" in w]) == 1
+    assert "4 session(s)" in behavior.warnings[0]
 
 
 def test_repeated_session_ids_are_rolled_up_once(tmp_path):

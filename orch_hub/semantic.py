@@ -181,10 +181,16 @@ _PENALTY_PER_WARNING = 0.05
 """Per evidence-degradation warning: a missing/corrupt run artifact, a
 *partially* degraded ``.ai/`` snapshot (a doc truncated, unreadable, or dropped
 for budget — the degradation the two booleans above cannot express), or the same
-partiality on the read side (a session with no transcript beside one that parsed,
-a scan that lost rows, a trace or a session list cut at its cap). A snapshot or a
-read section that is missing outright contributes no warning here, because the
-flags above already price exactly that fact."""
+partiality on the read side (sessions no transcript was read from beside one that
+parsed, a scan that lost rows, a trace or a session list cut at its cap). A
+snapshot or a read section that is missing outright contributes no warning here,
+because the flags above already price exactly that fact.
+
+Each warning is one degradation, so the reader deliberately reports the sessions
+it could not read at all as a single note rather than one per session: under a
+backend that leaves no transcript that class is present in nearly every task, and
+one warning per member would spend the whole :data:`_PENALTY_WARNING_CAP` on a
+constant, leaving the degradations that do vary unable to move the confidence."""
 _PENALTY_WARNING_CAP = 0.30
 """Cap on the summed per-warning penalty, so a flood of run warnings alone cannot
 zero confidence — the model still saw the task file."""
@@ -395,11 +401,14 @@ def build_semantic_evidence(
         # evidence has: ``reads_available`` is True as soon as *one* transcript
         # parsed, so a task whose other sessions left none, whose scan lost rows,
         # or whose trace stopped at its cap looks identical to one observed whole.
-        # The reader has already named each of those (:class:`ReadBehavior`
-        # warnings, at most one per session); pricing them here is what makes a
-        # judgment over half the reading honestly less certain. Withheld when the
-        # section carries nothing, because :data:`_PENALTY_NO_READS` already
-        # charges exactly that and its warnings would only restate it.
+        # The reader has already recorded each of those (:class:`ReadBehavior`
+        # warnings: by name for a session it read, once for the class it could not
+        # read at all, whatever role those sessions held — this layer judges reads
+        # from every session, not only from the ones that owed a declared set).
+        # Pricing them here is what makes a judgment over half the reading honestly
+        # less certain. Withheld when the section carries nothing, because
+        # :data:`_PENALTY_NO_READS` already charges exactly that and its warnings
+        # would only restate it.
         evidence_warnings += tuple(reads.warnings)
 
     omissions: list[str] = []

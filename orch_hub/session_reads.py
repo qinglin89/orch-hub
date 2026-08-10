@@ -509,10 +509,21 @@ class ReadBehavior:
     the reason.
 
     ``warnings`` are this section's degradation notes, aggregated into the pack's
-    warning count like the per-run and ``.ai/`` ones. Only sessions that *could*
-    have been measured warn — a review session with no transcript is expected,
-    not degraded — and each warns at most once, whether it could not be measured
-    at all or was measured over evidence this reader knows it lost.
+    warning count like the per-run and ``.ai/`` ones. They record two different
+    losses, and each session appears in exactly one of them:
+
+    - a session that *was* read and still yielded no verdict, or was measured
+      over evidence this reader knows it lost, warns by name — the reason is
+      specific to it;
+    - a session with no observable read behavior at all is counted, not narrated
+      (``unobserved_sessions``, one aggregate warning). Whether the prefetch
+      instruction reached it decides nothing here: it owes no declared set
+      either way, but its ``.ai/`` reads are trace evidence the semantic layer
+      judges from every session, so their absence is a hole in the evidence
+      whatever the role. Counted rather than listed because under a backend that
+      leaves no transcript this is a whole class of session — a warning each
+      would price one structural fact as many, exhausting the semantic layer's
+      warning budget with it (:data:`orch_hub.semantic._PENALTY_WARNING_CAP`).
 
     ``dropped_sessions``/``dropped_candidates`` account for what the
     :data:`MAX_SESSIONS` cap left out. The cap bounds the *rollups*, but a session
@@ -521,7 +532,9 @@ class ReadBehavior:
     counts are carried rather than the rollups. Without them a downstream
     denominator built from ``sessions`` silently narrows to what fit, and a task
     whose 25th session was never looked at reports the same evidence coverage as
-    one measured whole.
+    one measured whole. ``unobserved_sessions`` needs no such companion count:
+    unlike a dropped session, an unobserved one keeps its rollup here, so its
+    role, applicability, and reason are readable from ``sessions`` directly.
     """
 
     available: bool
@@ -530,6 +543,7 @@ class ReadBehavior:
     detail: str | None = None
     dropped_sessions: int = 0
     dropped_candidates: int = 0
+    unobserved_sessions: int = 0
 
     @property
     def assessable_count(self) -> int:
@@ -547,6 +561,7 @@ class ReadBehavior:
             "detail": self.detail,
             "dropped_sessions": self.dropped_sessions,
             "dropped_candidates": self.dropped_candidates,
+            "unobserved_sessions": self.unobserved_sessions,
         }
 
 
@@ -636,6 +651,9 @@ def read_session_behavior(
             warnings=warnings,
         )
         rollups.append(rollup)
+    unobserved = [rollup for rollup in rollups if not rollup.available]
+    if unobserved:
+        warnings.append(_unobserved_note(unobserved))
     # A dropped session is unmeasured, not absent: its role still says whether the
     # prefetch instruction reached it, which is all a confidence denominator needs
     # to keep counting it as a candidate it never got to look at.
@@ -660,6 +678,7 @@ def read_session_behavior(
         detail=None if available else "no session transcript could be read",
         dropped_sessions=len(dropped_refs),
         dropped_candidates=dropped_candidates,
+        unobserved_sessions=len(unobserved),
     )
 
 
@@ -886,21 +905,56 @@ def _gap_detail(scan: "_Scan") -> str:
 
 
 def _degraded(base: SessionReads, detail: str, warnings: list[str]) -> SessionReads:
-    """Record an unassessable session, warning only when it was measurable.
+    """Record an unassessable session, warning by name when it was read at all.
 
-    A role that never receives the prefetch instruction (a review session, whose
-    Codex-backed conversation leaves nothing in this store) is *expected* to have
-    no read evidence, so it is not degradation. A dev session with no usable
-    transcript is a real gap in the measurement and says so.
+    A transcript that *was* located and parsed and still yielded no verdict warns
+    for itself: the reason is particular to that session, and its reads are trace
+    evidence the semantic layer would otherwise be short of without knowing it.
 
-    ``available`` widens that to the one case the role test misses: a transcript
-    that *was* located and parsed and still yielded no verdict is a gap whatever
-    the role, because its reads are trace evidence the semantic layer would
-    otherwise be short of without knowing it.
+    A session with no readable transcript is the other loss, and it is not named
+    here — :func:`_unobserved_note` counts them as one fact for the whole section.
+    Role decides nothing either way: what is unobserved is unobserved whether or
+    not the prefetch instruction ever reached it.
     """
-    if _prefetch_role(base.role) or base.available:
+    if base.available:
         warnings.append(f"read behavior: session {base.session_id}: {detail}")
     return _replace(base, assessable=False, detail=detail)
+
+
+_UNOBSERVED_REASON_LIMIT = 3
+"""Distinct reasons named in :func:`_unobserved_note` before it stops listing.
+
+The note is one line however many sessions it covers, so the reasons are the only
+part that could grow with the session count — a scan error carries the failure's
+own text, and 24 different ones would put 24 of them in a warning.
+"""
+
+
+def _unobserved_note(unobserved: Sequence[SessionReads]) -> str:
+    """The section's one warning for sessions whose read behavior was never seen.
+
+    One line for the whole class rather than one per session, because that is what
+    it is: under a backend that leaves no transcript in this store, *every* session
+    of that kind is unobservable, and the fact does not get truer per session. The
+    semantic layer prices each warning it is given (and caps the sum), so narrating
+    them individually would spend that budget on one structural property and leave
+    nothing for the degradations that do vary between tasks.
+
+    What is lost is real all the same: those sessions' ``.ai/`` reads are absent
+    from the ordered trace the semantic layer judges, so a judgment made over the
+    sessions that *were* observed is a judgment over partial evidence. The count
+    and each session's own reason travel with it; the rollups themselves stay in
+    ``sessions``, where role and applicability are already readable.
+    """
+    reasons = sorted({s.detail for s in unobserved if s.detail})
+    listed = "; ".join(reasons[:_UNOBSERVED_REASON_LIMIT])
+    if len(reasons) > _UNOBSERVED_REASON_LIMIT:
+        listed += "; ..."
+    return (
+        f"read behavior: {len(unobserved)} session(s) left no readable transcript,"
+        " so their `.ai/` reads are absent from this evidence"
+        + (f" ({listed})" if listed else "")
+    )
 
 
 def _replace(base: SessionReads, **changes: object) -> SessionReads:

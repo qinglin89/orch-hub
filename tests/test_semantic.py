@@ -731,8 +731,37 @@ def test_partly_observed_reading_charges_the_sections_own_warnings():
     assert evidence.confidence_penalty() == pytest.approx(0.10)
 
 
+def test_a_session_no_transcript_was_read_from_costs_confidence_whatever_its_role():
+    # The Codex-backed review session: outside L1's prefetch denominator, because
+    # it owed no declared set — but this layer judges reads from every session, so
+    # the trace it never saw is missing evidence like any other. `reads_available`
+    # is True on the strength of the dev session, so the reader's note is the only
+    # thing standing between a half-observed task and a full-confidence report.
+    p = pack(
+        run_ev(),
+        ai=ai_snapshot(ai_doc(), diff=ai_diff()),
+        reads=mk_reads(
+            session_reads("s1", expected=(".ai/map.md",), read=(".ai/map.md",),
+                          trace=(memory_read(".ai/map.md", 3),)),
+            session_reads("s2", role="review", available=False, assessable=False,
+                          applicable=False, detail="no session transcript found"),
+            warnings=(
+                "read behavior: 1 session(s) left no readable transcript, so their"
+                " `.ai/` reads are absent from this evidence"
+                " (no session transcript found)",
+            ),
+        ),
+    )
+
+    evidence = build_semantic_evidence(p, static_report=StubStatic())
+
+    assert evidence.reads_available is True
+    assert len(evidence.evidence_warnings) == 1
+    assert evidence.confidence_penalty() == pytest.approx(0.05)
+
+
 def test_an_unobserved_read_section_is_priced_once_not_twice():
-    # With nothing observed at all, the per-session notes only restate what the
+    # With nothing observed at all, the section's notes only restate what the
     # missing-section penalty already charges — the same double-charge rule the
     # absent `.ai/` snapshot follows.
     p = pack(
@@ -740,7 +769,11 @@ def test_an_unobserved_read_section_is_priced_once_not_twice():
         ai=ai_snapshot(ai_doc(), diff=ai_diff()),
         reads=mk_reads(
             available=False,
-            warnings=("read behavior: session s1: no session transcript found",),
+            warnings=(
+                "read behavior: 1 session(s) left no readable transcript, so their"
+                " `.ai/` reads are absent from this evidence"
+                " (no session transcript found)",
+            ),
             detail="no session transcript could be read",
         ),
     )
