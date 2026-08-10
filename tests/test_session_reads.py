@@ -172,17 +172,40 @@ def tool_row(name: str, args: dict, *, uid: str = "t") -> dict:
     }
 
 
-def edit_row(
+def edit_rows(
     abs_path: Path | str,
     *,
     uid: str = "e",
     name: str = "Edit",
     new_string: str | None = None,
-) -> dict:
+    is_error: bool = False,
+    answered: bool = True,
+) -> list[dict]:
+    """An edit call plus the result that says whether it wrote, as recorded.
+
+    ``is_error=True`` is a refused edit (``File has not been read yet``, a stale
+    read, a missed match) and ``answered=False`` a call whose result never landed;
+    both are calls that changed no file. An edit's result carries its ``filePath``
+    at the top level rather than under ``file``, unlike a read's.
+    """
     args: dict = {"file_path": str(abs_path)}
     if new_string is not None:
         args["new_string"] = new_string
-    return tool_row(name, args, uid=uid)
+    call = tool_row(name, args, uid=uid)
+    if not answered:
+        return [call]
+    block = {"type": "tool_result", "tool_use_id": uid, "content": "ok"}
+    if is_error:
+        block["is_error"] = True
+    return [
+        call,
+        {
+            "type": "user",
+            "timestamp": TS,
+            "message": {"role": "user", "content": [block]},
+            "toolUseResult": {"filePath": str(abs_path), "structuredPatch": []},
+        },
+    ]
 
 
 def bash_row(command: str, *, uid: str = "sh") -> dict:
@@ -265,7 +288,7 @@ def test_a_declared_doc_read_late_is_still_read_and_says_when(tmp_path):
         repo,
         entry_rows(repo, f"[{FEATURES}]")
         + work_rows(repo)
-        + [edit_row(repo.path / "orch_hub" / "runs.py", name="Write", uid="w")]
+        + edit_rows(repo.path / "orch_hub" / "runs.py", name="Write", uid="w")
         + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
     )
 
@@ -423,7 +446,7 @@ def test_a_doc_this_session_wrote_first_is_a_read_back_not_a_consultation(tmp_pa
         tmp_path,
         repo,
         entry_rows(repo, f"[{FEATURES}]")
-        + [edit_row(repo.path / FEATURES, name="Write", uid="w")]
+        + edit_rows(repo.path / FEATURES, name="Write", uid="w")
         + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
     )
 
@@ -443,7 +466,7 @@ def test_read_then_write_counts_and_carries_the_later_write(tmp_path):
         repo,
         entry_rows(repo, f"[{FEATURES}]")
         + read_rows(repo.path / FEATURES, content="# eval", uid="a")
-        + [edit_row(repo.path / FEATURES, uid="w")]
+        + edit_rows(repo.path / FEATURES, uid="w")
         + read_rows(repo.path / FEATURES, content="# eval", uid="b"),
     )
 
@@ -456,7 +479,91 @@ def test_read_then_write_counts_and_carries_the_later_write(tmp_path):
     assert session.complete is True and session.writeback_excluded == ()
     assert len(session.trace) == 1
     read = session.trace[0]
-    assert read.order == 3 and read.first_write == 4
+    # The write is anchored where its result confirmed it, one row past the call.
+    assert read.order == 3 and read.first_write == 5
+
+
+def test_a_refused_edit_of_a_doc_does_not_make_a_later_read_a_read_back(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + edit_rows(repo.path / FEATURES, name="Write", uid="w", is_error=True)
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # An edit the tool refused wrote nothing, so nothing preceded this read: it is
+    # an ordinary consultation of memory the session did not author.
+    assert session.read == (FEATURES,) and session.missing == ()
+    assert (session.coverage, session.complete) == (1.0, True)
+    assert session.assessable and session.writeback_excluded == ()
+    assert [read.path for read in session.trace] == [FEATURES]
+    assert session.trace[0].first_write is None
+    # The attempt is still an anchor: what the session was doing does not depend
+    # on whether the tool let it.
+    assert session.activity.edits == 1
+
+
+def test_an_unanswered_edit_of_a_doc_withholds_the_verdict_but_keeps_the_read(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + edit_rows(repo.path / FEATURES, name="Write", uid="w", answered=False)
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Whether that edit wrote is simply unknown, so the read cannot be told from a
+    # read-back. Unknown is not a miss: the read stands as evidence and only the
+    # verdict is withheld.
+    assert session.available and not session.assessable
+    assert (session.coverage, session.complete) == (None, None)
+    assert session.writeback_excluded == ()
+    assert [read.path for read in session.trace] == [FEATURES]
+    assert "in flight" in (session.detail or "")
+
+
+def test_an_edit_result_landing_after_the_read_it_raced_withholds_the_verdict(tmp_path):
+    repo = make_repo(tmp_path)
+    call, result = edit_rows(repo.path / FEATURES, name="Write", uid="w")
+    read_call, read_result = read_rows(repo.path / FEATURES, content="# eval", uid="a")
+    write_transcript(
+        tmp_path,
+        repo,
+        # Both issued in one batch: the read's result lands first, so whether the
+        # file had already changed under it is not settled by their order.
+        entry_rows(repo, f"[{FEATURES}]") + [call, read_call, read_result, result],
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.available and not session.assessable
+    assert (session.coverage, session.complete) == (None, None)
+    assert [read.path for read in session.trace] == [FEATURES]
+
+
+def test_an_edit_of_another_doc_leaves_this_read_alone(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + edit_rows(repo.path / SIDECAR, name="Write", uid="w", answered=False)
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The clause is per path: an unsettled write to a different doc says nothing
+    # about this one.
+    assert (session.coverage, session.complete) == (1.0, True)
+    assert session.assessable
 
 
 def test_reads_after_the_closeout_skill_do_not_count_as_consultation(tmp_path):
@@ -792,8 +899,8 @@ def test_each_read_carries_the_work_done_before_it(tmp_path):
         + read_rows(repo.path / SIDECAR, content="# sidecar", uid="early")
         + work_rows(repo)
         + [search_row(uid="g"), bash_row("pytest -q", uid="sh")]
-        + [edit_row(repo.path / "orch_hub" / "runs.py", uid="w")]
-        + [edit_row(repo.path / ".ai-tasks" / f"{TASK}.md", uid="tw")]
+        + edit_rows(repo.path / "orch_hub" / "runs.py", uid="w")
+        + edit_rows(repo.path / ".ai-tasks" / f"{TASK}.md", uid="tw")
         + read_rows(repo.path / RUNTIME, content="# runtime", uid="late"),
     )
 

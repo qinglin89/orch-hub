@@ -88,7 +88,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "11"
+EVIDENCE_SCHEMA_VERSION = "12"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -110,7 +110,12 @@ or not — is one event in a single ordered trace carrying the timing evidence
 (order, per-path first write, surrounding activity counts) for the semantic layer
 to judge. A v10 session with a ``late`` doc is therefore ``complete`` in v11,
 while a doc this session wrote before reading back stops counting at all, so the
-two versions are not comparable in either direction.
+two versions are not comparable in either direction. ``12`` settles that write
+clause against the edit's *result* rather than its request: an edit that failed or
+was never answered wrote nothing, so in v11 it could report a genuinely read
+declared doc missing, and an in-flight edit now withholds the session's verdict
+instead of excluding the read. The per-read ``first_write`` also moves from the
+call row to the row that confirmed the write.
 A persisted pack with no ``schema_version`` key is version 1 and predates all of
 it.
 

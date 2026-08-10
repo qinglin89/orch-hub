@@ -99,12 +99,19 @@ withheld.
 Known limits, recorded rather than approximated
 -----------------------------------------------
 
-Writes are observed from structured edit tool calls only. A ``.ai/`` doc rewritten
-through a shell redirection is therefore invisible as a write, because telling a
-shell write from a mention of the same path requires interpreting a shell — the
-approximation this reader is deliberately without. The protocol makes that
-narrow: sessions do not edit ``.ai/`` mid-task, and close-out absorption is
-already excluded by its marker.
+Writes are observed from structured edit tool calls only, and — like reads — from
+the **result** rather than the request: an edit that failed or was never answered
+changed no file, so treating its request as a write would drop a genuine later
+read into the read-back bucket and report the declared doc missing. Where the
+outcome or the ordering cannot be established (a result that never arrived, or one
+that landed after the read it might have preceded), the read stays and the verdict
+is withheld instead — the ruling's uncertainty clause, not a negative.
+
+A ``.ai/`` doc rewritten through a shell redirection is invisible as a write,
+because telling a shell write from a mention of the same path requires
+interpreting a shell — the approximation this reader is deliberately without. The
+protocol makes that narrow: sessions do not edit ``.ai/`` mid-task, and close-out
+absorption is already excluded by its marker.
 
 Close-out is observable only as an invocation of the close-out skill
 (:data:`CLOSEOUT_SKILL`). An absorption performed without it is not visible, and
@@ -236,7 +243,8 @@ into a consultation."""
 _EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 """Tools that mutate a file. A mutation of a ``.ai/`` doc is also the write that
 the write-before-read clause is about, so these are the one place this reader
-learns that a session wrote its own memory before reading it back."""
+learns that a session wrote its own memory before reading it back — but only once
+the call's result confirms the mutation actually happened."""
 
 _SEARCH_TOOLS = ("Grep", "Glob")
 """Tools that search the tree. Rediscovering knowledge from the code is the
@@ -279,6 +287,11 @@ class Activity:
     protocol bookkeeping (the claim, the plan, the session-log entry) rather than
     work on the repo. ``shell`` counts shell commands as commands — this reader
     does not claim to know what any of them did.
+
+    Deliberately counted from the call, independently of whether it succeeded: as
+    an anchor, "the session was editing here" is true of an attempt, and no
+    verdict rests on these counts. Only the write-before-read clause needs a
+    mutation to have actually happened, and it asks the result separately.
     """
 
     code_reads: int = 0
@@ -332,10 +345,10 @@ class MemoryRead:
 
     ``order`` is the event's position in the session's own transcript, ``before``
     is the work the session had already done when it happened, and ``first_write``
-    is where this session first wrote the same path (always *after* ``order``,
-    since a read preceded by a write does not qualify at all). Together they are
-    what lets a judge separate read-then-do from do-then-read from
-    read-then-update without the transcript.
+    is where this session's first *confirmed* write of the same path landed
+    (always *after* ``order``, since a read a completed write preceded does not
+    qualify at all). Together they are what lets a judge separate read-then-do
+    from do-then-read from read-then-update without the transcript.
 
     ``declared_prefetch`` marks the read as delivery of a declared doc; it is
     ``None`` when the session-time expected set could not be recovered, since
@@ -388,9 +401,11 @@ class SessionReads:
 
     ``trace`` is every qualifying lazy-``.ai/`` read in order, declared and
     undeclared alike. ``writeback_excluded`` names the docs whose only reads
-    followed this session's own write to them: excluded from the trace by the
-    success condition, but recorded rather than silently dropped, since "read
-    back what it just wrote" is itself a fact about the session.
+    followed a *confirmed* write of this session's own: excluded from the trace by
+    the success condition, but recorded rather than silently dropped, since "read
+    back what it just wrote" is itself a fact about the session. A write this
+    reader could not confirm never excludes a read — it withholds the verdict
+    instead (:func:`_verdict_refusal`).
     """
 
     session_id: str
@@ -741,7 +756,19 @@ def _verdict_refusal(scan: "_Scan", docs: Sequence[PrefetchDoc]) -> str | None:
       condition, so only evidence lost *before* that read can undermine it: a
       lost row there could carry an earlier write to the same path, or the
       close-out marker that would have ended the scan before it.
+
+    An unresolved edit of the doc is the same withholding from a different source:
+    there the evidence arrived, but it does not settle whether the file had
+    already changed under the read. The read stays either way — refusing a
+    verdict is not the same as excluding evidence.
     """
+    uncertain = set(scan.uncertain_writes)
+    if uncertain and any(doc.read and doc.path in uncertain for doc in docs):
+        return (
+            "a write to a declared doc was in flight when it was read and its"
+            " outcome or order is unsettled, so the read cannot be told from a"
+            " read-back and prefetch reading is not measured"
+        )
     holes = scan.skipped > 0 or scan.truncated
     if holes and any(not doc.read for doc in docs):
         return (
@@ -920,9 +947,10 @@ class _Read:
     """One qualifying delivery of a ``.ai/`` doc's content into a session's context.
 
     ``order`` is the row the content landed in, ``before`` the work already done
-    by then, and ``first_write`` where this session first wrote the same path —
-    filled at the end of the scan, and necessarily after ``order``, since a read
-    a write preceded never becomes a ``_Read`` at all.
+    by then, and ``first_write`` where this session's first confirmed write of the
+    same path landed — filled at the end of the scan, and necessarily after
+    ``order``, since a read a confirmed write preceded never becomes a ``_Read``
+    at all.
     """
 
     path: str
@@ -938,20 +966,27 @@ class _Read:
 class _Scan:
     """Raw facts extracted from one transcript, before any judgment.
 
-    ``pending`` is scanning scaffolding rather than an extracted fact: it holds a
-    read tool call's repo-relative path only until its result arrives, so a call
-    that never returned is dropped rather than credited.
+    ``pending``/``pending_writes`` are scanning scaffolding rather than extracted
+    facts: each holds a tool call's repo-relative path only until its result
+    arrives, so a call that never returned is neither credited as a read nor
+    counted as a write.
 
     ``first_gap`` is the row position of the earliest hole — a malformed row, a
     row past the per-row cap. A position rather than a flag because that is what
     decides which credited reads a hole can undermine
     (:func:`_verdict_refusal`); a truncated tail is recorded separately since it
     is always after everything.
+
+    ``uncertain_writes`` is the same idea one level down: paths whose credited read
+    had a same-path write in flight, so whether the file had already changed under
+    it cannot be settled. Resolved in :meth:`finish`, because a write in flight
+    that later comes back failed turns out never to have happened.
     """
 
     reads: list[_Read] = field(default_factory=list)
     writes: dict[str, int] = field(default_factory=dict)
     writeback: list[str] = field(default_factory=list)
+    uncertain_writes: tuple[str, ...] = ()
     task_content: str | None = None
     closeout_seen: bool = False
     rows: int = 0
@@ -961,6 +996,9 @@ class _Scan:
     activity: Activity = Activity()
     error: str | None = None
     pending: dict[str, str | None] = field(default_factory=dict)
+    pending_writes: dict[str, str] = field(default_factory=dict)
+    failed_writes: set[str] = field(default_factory=set)
+    write_wait: dict[str, tuple[str, ...]] = field(default_factory=dict)
     seen: set[str] = field(default_factory=set)
 
     def note_gap(self) -> None:
@@ -974,12 +1012,39 @@ class _Scan:
         self.activity = self.activity.bump(kind)
 
     def note_write(self, path: str, order: int) -> None:
-        """Record where this session first wrote a ``.ai/`` doc.
+        """Record where this session's first confirmed write of a ``.ai/`` doc landed.
+
+        Called from the row that carries the edit's successful result, not from
+        the call: an edit that errored or was never answered mutated nothing, and
+        the success condition asks about a write that happened. ``order`` is
+        therefore the row the mutation was confirmed in, which is also what makes
+        "already written when this read was credited" a plain dict lookup.
 
         Only the first matters: the success condition asks whether a write
         *preceded* the read, and if the first one did not, no later one did.
         """
         self.writes.setdefault(path, order)
+
+    def note_write_request(self, path: str, block_id: object, order: int) -> None:
+        """Hold a ``.ai/`` edit call until its result says whether it wrote.
+
+        A call with no usable id gets a synthetic one derived from its row: no
+        result can ever match it, so it stays in flight to the end of the scan and
+        is treated as an unresolved write rather than as no write at all.
+        """
+        key = block_id if isinstance(block_id, str) and block_id else f"#row-{order}"
+        self.pending_writes.setdefault(key, path)
+
+    def resolve_write(self, block_id: str, *, order: int, errored: bool) -> bool:
+        """Settle one pending edit from its result row; False when it was not one."""
+        path = self.pending_writes.pop(block_id, None)
+        if path is None:
+            return False
+        if errored:
+            self.failed_writes.add(block_id)
+        else:
+            self.note_write(path, order)
+        return True
 
     def add_read(
         self,
@@ -1005,13 +1070,22 @@ class _Scan:
         if path in self.seen:
             return
         if path in self.writes:
-            # Nothing qualifying was read for this path, and this session wrote it
-            # first: at most a read-back of its own text. Recorded rather than
-            # dropped, since that is itself a fact about the session.
+            # Nothing qualifying was read for this path, and a confirmed write of
+            # this session's landed first: at most a read-back of its own text.
+            # Recorded rather than dropped, since that is itself a fact about the
+            # session.
             if path not in self.writeback:
                 self.writeback.append(path)
             return
         self.seen.add(path)
+        # An edit of this path is in flight: it may or may not have changed the
+        # file under this read. The read is evidence either way and stays; what
+        # cannot be claimed is a verdict resting on it.
+        waiting = tuple(
+            key for key, pending in self.pending_writes.items() if pending == path
+        )
+        if waiting:
+            self.write_wait[path] = waiting
         self.reads.append(
             _Read(
                 path=path,
@@ -1024,12 +1098,27 @@ class _Scan:
         )
 
     def finish(self) -> None:
-        """Attach each read's later same-path write, then drop scanning scaffolding."""
+        """Settle in-flight writes, attach each read's later write, drop scaffolding.
+
+        An edit still in flight when a read was credited only leaves the ordering
+        open if it really wrote: one whose result came back an error mutated
+        nothing, so the read it overlapped is clean after all. Anything else — a
+        success landing after the read, or a call whose result never arrived — is
+        the ruling's unresolvable order.
+        """
+        self.uncertain_writes = tuple(
+            path
+            for path, keys in self.write_wait.items()
+            if any(key not in self.failed_writes for key in keys)
+        )
         self.reads = [
             replace(read, first_write=self.writes.get(read.path))
             for read in self.reads
         ]
         self.pending.clear()
+        self.pending_writes.clear()
+        self.failed_writes.clear()
+        self.write_wait.clear()
         self.seen.clear()
 
 
@@ -1163,9 +1252,11 @@ def _absorb_row(
     requested path only until its result arrives, and an unanswered request (a
     session cut off mid-turn) is simply never credited.
 
-    Mutations and searches are read from the **call** side instead, because that
-    is where the session's intent is expressed and their results carry nothing
-    this reader needs.
+    A mutation is *counted* from the call side, because an attempted edit is as
+    good an activity anchor as a completed one, but *recorded as a write* only
+    when its result confirms it — the write-before-read clause is the one place
+    where whether the file actually changed decides something. A search has no
+    such second half and is read from the call alone.
     """
     kind = row.get("type")
     actor = ACTOR_SUBAGENT if row.get("isSidechain") else ACTOR_ROOT
@@ -1186,6 +1277,7 @@ def _absorb_row(
                 _absorb_edit(
                     args,
                     scan,
+                    block_id=block_id,
                     order=order,
                     repo_root=repo_root,
                     task_paths=task_paths,
@@ -1227,23 +1319,26 @@ def _absorb_edit(
     args: dict,
     scan: _Scan,
     *,
+    block_id: object,
     order: int,
     repo_root: Path,
     task_paths: tuple[str, ...],
 ) -> None:
-    """Count one file mutation, and record it when it writes project memory.
+    """Count one attempted file mutation, and follow it when it targets memory.
 
     Writing the session's own task file is protocol bookkeeping — the claim, the
     plan, the session-log entry — so it is counted apart from work on the repo.
-    Writing a ``.ai/`` doc is additionally the write the success condition asks
-    about: a later read of that path is this session reading back its own text.
+    Targeting a ``.ai/`` doc is additionally the write the success condition asks
+    about, and that question is about a mutation that *happened*: the call is only
+    put in flight here, and its result decides whether a later read of the path is
+    this session reading back its own text.
     """
     rel = _repo_rel(args.get("file_path") or args.get("notebook_path"), repo_root)
     if rel is None:
         return
     scan.note_activity("task_edits" if rel in task_paths else "edits")
     if rel.startswith(f"{AI_DIRNAME}/"):
-        scan.note_write(rel, order)
+        scan.note_write_request(rel, block_id, order)
 
 
 def _absorb_search(args: dict, scan: _Scan, *, repo_root: Path) -> None:
@@ -1272,7 +1367,7 @@ def _absorb_tool_results(
     repo_root: Path,
     task_paths: tuple[str, ...],
 ) -> None:
-    """Credit the reads whose results landed in this row.
+    """Credit the reads, and settle the writes, whose results landed in this row.
 
     The path comes from the call that was answered, not from the row-level result
     body: a row carries at most one result in practice, but attributing a body's
@@ -1280,6 +1375,10 @@ def _absorb_tool_results(
     body is only consulted when the request itself is unavailable (a transcript
     whose head was cut) and, for the task file, only when it agrees about which
     file it holds.
+
+    An edit's result carries its ``filePath`` at the top level rather than under
+    ``file``, so it never reaches the read-crediting fallback below even when its
+    own call row was lost — a mutation cannot be mistaken for a delivery.
     """
     pending = scan.pending
     result = row.get("toolUseResult")
@@ -1289,8 +1388,14 @@ def _absorb_tool_results(
     for block in _content_blocks(row):
         if block.get("type") != "tool_result":
             continue
-        requested = pending.pop(block.get("tool_use_id"), None)
-        if block.get("is_error"):
+        block_id = block.get("tool_use_id")
+        errored = bool(block.get("is_error"))
+        if isinstance(block_id, str) and scan.resolve_write(
+            block_id, order=order, errored=errored
+        ):
+            continue
+        requested = pending.pop(block_id, None)
+        if errored:
             continue
         rel = requested or result_rel
         if rel is None:
