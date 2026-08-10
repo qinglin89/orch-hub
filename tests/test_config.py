@@ -13,9 +13,11 @@ import pytest
 from orch_hub.config import (
     AI_NATIVE_PATH_ENV,
     BARK_URL_ENV,
+    CLAUDE_HOME_ENV,
     CODEX_HOME_ENV,
     DATA_DIR_ENV,
     DEFAULT_AI_NATIVE_PATH,
+    DEFAULT_CLAUDE_HOME,
     DEFAULT_CODEX_HOME,
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
@@ -157,6 +159,26 @@ def test_codex_home_from_env_expands_user():
 def test_codex_home_empty_or_whitespace_counts_as_unset():
     assert Config.from_env({CODEX_HOME_ENV: ""}).codex_home == DEFAULT_CODEX_HOME
     assert Config.from_env({CODEX_HOME_ENV: "   "}).codex_home == DEFAULT_CODEX_HOME
+
+
+def test_claude_home_defaults_when_env_absent():
+    assert Config.from_env({}).claude_home == DEFAULT_CLAUDE_HOME
+
+
+def test_claude_home_from_env_expands_user():
+    cfg = Config.from_env({CLAUDE_HOME_ENV: "~/alt-claude"})
+    assert cfg.claude_home == Path("~/alt-claude").expanduser()
+    assert not str(cfg.claude_home).startswith("~")
+
+
+def test_claude_home_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({CLAUDE_HOME_ENV: ""}).claude_home == DEFAULT_CLAUDE_HOME
+    assert Config.from_env({CLAUDE_HOME_ENV: "   "}).claude_home == DEFAULT_CLAUDE_HOME
+
+
+def test_claude_transcripts_dir_derives_from_the_home():
+    cfg = Config.from_env({CLAUDE_HOME_ENV: "/tmp/claude"})
+    assert cfg.claude_transcripts_dir == Path("/tmp/claude/projects")
 
 
 def test_bark_url_defaults_to_none():

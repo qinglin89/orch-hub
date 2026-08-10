@@ -74,6 +74,7 @@ from .models import (
     StoredEvaluation,
 )
 from .runs import load_records
+from .session_reads import ReadBehavior, SessionRef, read_session_behavior
 from .sessions import read_snapshot
 from .subprocess_utils import Runner, run_command
 from .task_store import parse_prefetch, read_archived_task_content, read_task_content
@@ -87,14 +88,17 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "2"
+EVIDENCE_SCHEMA_VERSION = "3"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
 over, so a batch of reports spanning the change can be split into coherent
 cohorts instead of being compared across a moved baseline. ``2`` added the
-``ai`` section (:class:`orch_hub.ai_snapshot.AiSnapshot`); a persisted pack with
-no ``schema_version`` key is version 1 and predates it.
+``ai`` section (:class:`orch_hub.ai_snapshot.AiSnapshot`); ``3`` added the
+``reads`` section (:class:`orch_hub.session_reads.ReadBehavior`), which is the
+first evidence about how sessions *read* memory rather than what they wrote to
+it. A persisted pack with no ``schema_version`` key is version 1 and predates
+both.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
@@ -318,11 +322,15 @@ class EvidencePack:
     repo's ``.ai/`` memory snapshot plus the ``.ai/``-scoped patches for that same
     window (:class:`orch_hub.ai_snapshot.AiSnapshot`) — the evidence that lets a
     downstream evaluator judge knowledge maintenance from what the task actually
-    left behind rather than from commit subjects. ``warnings`` collects
+    left behind rather than from commit subjects. ``reads`` is its counterpart on
+    the read side (:class:`orch_hub.session_reads.ReadBehavior`): a per-session
+    rollup of entry-prefetch loading and ordered mid-flight ``.ai/`` retrieval,
+    derived from each session's own transcript and carrying none of it.
+    ``warnings`` collects
     pack-level degradation (per-run warnings live on each :class:`RunEvidence`,
     ``.ai/`` warnings on the snapshot). ``summary`` (computed in
     :meth:`to_dict`) is the validating metadata — run/ended counts, whether task
-    content was found, git/``.ai/`` availability, and the total warning count
+    content was found, git/``.ai/``/read availability, and the total warning count
     across every section — enough to sanity-check a pack without walking it.
     ``evaluation_dir`` is the persisted location, set only by
     :meth:`EvaluationService.generate_evidence`; it is internal filesystem detail
@@ -335,12 +343,14 @@ class EvidencePack:
     runs: tuple[RunEvidence, ...] = ()
     git: EvidenceGit | None = None
     ai: AiSnapshot | None = None
+    reads: ReadBehavior | None = None
     warnings: tuple[str, ...] = ()
     evaluation_dir: Path | None = None
 
     def to_dict(self) -> dict:
         git = self.git if self.git is not None else EvidenceGit(available=False)
         ai = self.ai if self.ai is not None else AiSnapshot(present=False)
+        reads = self.reads if self.reads is not None else ReadBehavior(available=False)
         return {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "evaluation_id": self.evaluation_id,
@@ -349,11 +359,14 @@ class EvidencePack:
             "runs": [run.to_dict() for run in self.runs],
             "git": git.to_dict(),
             "ai": ai.to_dict(),
+            "reads": reads.to_dict(),
             "warnings": list(self.warnings),
-            "summary": self._summary(git, ai),
+            "summary": self._summary(git, ai, reads),
         }
 
-    def _summary(self, git: EvidenceGit, ai: AiSnapshot) -> dict:
+    def _summary(
+        self, git: EvidenceGit, ai: AiSnapshot, reads: ReadBehavior
+    ) -> dict:
         return {
             "run_count": len(self.runs),
             "runs_ended": sum(1 for run in self.runs if run.ended),
@@ -364,10 +377,15 @@ class EvidencePack:
             "ai_doc_count": sum(1 for doc in ai.docs if doc.present),
             "ai_snippets_available": ai.snippets_available,
             "ai_diffs_available": ai.diffs_available,
+            "reads_available": reads.available,
+            "reads_session_count": len(reads.sessions),
+            "reads_applicable_count": reads.applicable_count,
+            "reads_assessable_count": reads.assessable_count,
             "warning_count": (
                 len(self.warnings)
                 + sum(len(run.warnings) for run in self.runs)
                 + len(ai.warnings)
+                + len(reads.warnings)
             ),
         }
 
@@ -417,6 +435,28 @@ def _git_window(
     any_live = any(end is None for end in run_ends)
     until = None if any_live else max(run_ends).isoformat()
     return min(starts).isoformat(), until, None
+
+
+def _session_refs(runs: Sequence[RunEvidence]) -> list[SessionRef]:
+    """Every identified session across a pack's runs, oldest run first.
+
+    Sessions with no reconciled ``sid`` are skipped: the read rollup is keyed by
+    conversation id, and a session the orchestrator never learned the id of has
+    no transcript to attribute. Ordering follows the runs, which are already
+    oldest-first, so a task's sessions appear in the order they happened.
+    """
+    return [
+        SessionRef(
+            session_id=summary.sid,
+            run_id=run.record.run_id,
+            role=summary.role,
+            kind=summary.kind,
+        )
+        for run in runs
+        if run.sessions is not None
+        for summary in run.sessions.sessions
+        if summary.sid
+    ]
 
 
 def _write_evidence(path: Path, data: dict) -> None:
@@ -739,7 +779,9 @@ class EvaluationService:
         (active/archived/absent), every related run's aggregated evidence
         (:meth:`_run_evidence` — bounded logs, history events, session snapshot,
         each read isolated), a best-effort git-window (:meth:`_git_evidence`),
-        and the bounded ``.ai/`` snapshot view (:meth:`_ai_evidence`). The two
+        the bounded ``.ai/`` snapshot view (:meth:`_ai_evidence`), and the
+        per-session read-behavior rollup (:meth:`_reads_evidence`, which reads
+        the session ids the run evidence just collected). The two
         git-backed sections are handed the *same* window (:func:`_git_window`),
         computed once: a commit list and a ``.ai/`` patch stream that disagreed
         about which window they covered would be worse than either alone.
@@ -757,6 +799,7 @@ class EvaluationService:
         since, until, window_detail = _git_window(related)
         git = self._git_evidence(repo, since, until, window_detail)
         ai = self._ai_evidence(repo, target, since, until, window_detail)
+        reads = self._reads_evidence(repo, task_id, runs)
         return EvidencePack(
             evaluation_id=evaluation_id,
             generated_ts=self._clock().isoformat(),
@@ -764,6 +807,7 @@ class EvaluationService:
             runs=runs,
             git=git,
             ai=ai,
+            reads=reads,
         )
 
     def generate_evidence(
@@ -953,4 +997,34 @@ class EvaluationService:
                 diff=AiDiff(available=False, since=since, until=until, detail=detail),
                 warnings=(f".ai/: {detail}",),
                 detail=detail,
+            )
+
+    def _reads_evidence(
+        self, repo: ManagedRepo, task_id: str, runs: Sequence[RunEvidence]
+    ) -> ReadBehavior:
+        """Per-session read-behavior rollup for the sessions this pack knows about.
+
+        The session ids come from the run evidence already assembled above — the
+        persisted per-run session snapshots — so no new source of run state is
+        introduced and a live run (whose snapshot is written only at the
+        live-to-ended transition) simply contributes no sessions.
+
+        Isolated like the ``.ai/`` section and for the same reason: read behavior
+        is *secondary* evidence about how a task was worked, not what it is, so an
+        unexpected failure degrades this section alone rather than failing a pack
+        whose runs, task file, and memory snapshot are intact.
+        :func:`orch_hub.session_reads.read_session_behavior` already handles every
+        expected failure mode itself; this catches the rest.
+        """
+        try:
+            return read_session_behavior(
+                repo,
+                task_id=task_id,
+                sessions=_session_refs(runs),
+                transcript_root=self._config.claude_transcripts_dir,
+            )
+        except Exception as err:  # noqa: BLE001 - secondary evidence never fails a pack
+            detail = f"read behavior unreadable ({type(err).__name__}: {err})"
+            return ReadBehavior(
+                available=False, warnings=(f"read behavior: {detail}",), detail=detail
             )

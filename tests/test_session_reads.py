@@ -1,0 +1,766 @@
+"""Tests for the bounded per-session ``.ai/`` read-behavior reader.
+
+Covers what the rollup has to get right: the *session-time* expected prefetch set
+(never today's task file), an operational definition of "read" that credits
+caller-injected delivery and refuses a failed tool call, an ordered mid-flight
+trace that excludes the eager set and the close-out write path, applicability
+that is decided by role rather than by whether evidence happened to survive, the
+caps — enforced at the read, not after it — and total degradation: an absent,
+unparseable, or read-less transcript yields an unassessable session with a
+detail, never a zero.
+
+Transcripts are fixtures under ``tmp_path`` in the CLI's real on-disk shape, so
+no test reads an operator's real Claude home and none of them needs a running
+agent.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+from pathlib import Path
+
+from orch_hub.models import ManagedRepo
+from orch_hub.session_reads import (
+    ACTOR_ROOT,
+    ACTOR_SUBAGENT,
+    CLOSEOUT_SKILL,
+    MAX_EXPECTED_DOCS,
+    METHOD_INJECTED,
+    METHOD_READ_TOOL,
+    SOURCE_TRANSCRIPT_TASK_READ,
+    ReadBehavior,
+    SessionRef,
+    _iter_rows,
+    _Scan,
+    locate_transcript,
+    project_slug,
+    read_session_behavior,
+)
+
+TASK = "2026-08-10-memory-read-effectiveness"
+SID = "99c59409-eb38-42e4-923a-394a049456eb"
+TS = "2026-08-10T02:00:00.000Z"
+
+FEATURES = ".ai/features/evaluation.md"
+SIDECAR = ".ai/modules/sidecar.md"
+RUNTIME = ".ai/modules/runtime.md"
+
+
+def make_repo(tmp_path: Path, name: str = "alpha") -> ManagedRepo:
+    path = tmp_path / "repos" / name
+    path.mkdir(parents=True)
+    return ManagedRepo(name=name, path=path, manifest=path / ".ai-deploy-manifest.json")
+
+
+def transcript_root(tmp_path: Path) -> Path:
+    return tmp_path / "claude-home" / "projects"
+
+
+def task_md(prefetch: str | None, *, status: str = "in_progress") -> str:
+    """A task file as a session would have read it, with the given ``prefetch:``."""
+    lines = [f"id: {TASK}", f"status: {status}", "session-est: 1/2"]
+    if prefetch is not None:
+        lines.append(f"prefetch: {prefetch}")
+    return "---\n" + "\n".join(lines) + "\n---\n\n# Goal\n\nmeasure reads\n"
+
+
+def write_transcript(tmp_path: Path, repo: ManagedRepo, rows: list[dict], *, sid: str = SID) -> Path:
+    """Write ``rows`` as one JSONL transcript in Claude Code's on-disk layout."""
+    path = transcript_root(tmp_path) / project_slug(repo.path) / f"{sid}.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+    )
+    return path
+
+
+def read_rows(
+    abs_path: Path | str,
+    *,
+    content: str | None = None,
+    sidechain: bool = False,
+    uid: str = "t1",
+    start_line: int = 1,
+    is_error: bool = False,
+) -> list[dict]:
+    """A ``Read`` tool call plus its result, as the transcript records the pair.
+
+    ``content=None`` omits ``toolUseResult`` entirely, which is how a transcript
+    from a CLI version that does not persist read bodies looks — the requested
+    path is then the only evidence of what was delivered.
+    """
+    call = {
+        "type": "assistant",
+        "isSidechain": sidechain,
+        "timestamp": TS,
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": uid,
+                    "name": "Read",
+                    "input": {"file_path": str(abs_path)},
+                }
+            ],
+        },
+    }
+    block = {"type": "tool_result", "tool_use_id": uid, "content": "ok"}
+    if is_error:
+        block["is_error"] = True
+    result: dict = {
+        "type": "user",
+        "isSidechain": sidechain,
+        "timestamp": TS,
+        "message": {"role": "user", "content": [block]},
+    }
+    if content is not None:
+        result["toolUseResult"] = {
+            "type": "text",
+            "file": {
+                "filePath": str(abs_path),
+                "content": content,
+                "startLine": start_line,
+                "numLines": content.count("\n") + 1,
+                "totalLines": content.count("\n") + 1,
+            },
+        }
+    return [call, result]
+
+
+def injected_row(abs_path: Path | str, content: str) -> dict:
+    """A caller-injected memory attachment: a path plus the content it carries."""
+    return {
+        "type": "attachment",
+        "timestamp": TS,
+        "attachment": {
+            "type": "nested_memory",
+            "path": str(abs_path),
+            "content": content,
+            "displayPath": str(abs_path),
+        },
+    }
+
+
+def entry_rows(repo: ManagedRepo, prefetch: str | None) -> list[dict]:
+    """The session-entry task read that carries the session-time prefetch set."""
+    return read_rows(
+        repo.path / ".ai-tasks" / f"{TASK}.md", content=task_md(prefetch), uid="task"
+    )
+
+
+def dev(run_id: str = "run-1", sid: str = SID) -> SessionRef:
+    return SessionRef(session_id=sid, run_id=run_id, role="dev", kind="session")
+
+
+def roll(tmp_path: Path, repo: ManagedRepo, refs, **kwargs) -> ReadBehavior:
+    return read_session_behavior(
+        repo,
+        task_id=TASK,
+        sessions=refs,
+        transcript_root=transcript_root(tmp_path),
+        **kwargs,
+    )
+
+
+def only(behavior: ReadBehavior):
+    assert len(behavior.sessions) == 1
+    return behavior.sessions[0]
+
+
+# -- entry prefetch completeness ----------------------------------------------
+
+
+def test_complete_prefetch_load_is_complete_with_full_coverage(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}, {SIDECAR}]")
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="b"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.available is True and session.assessable is True
+    assert session.applicable is True
+    assert session.expected == (FEATURES, SIDECAR)
+    assert session.expected_source == SOURCE_TRANSCRIPT_TASK_READ
+    assert session.loaded == (FEATURES, SIDECAR)
+    assert session.missing == ()
+    assert session.coverage == 1.0 and session.complete is True
+
+
+def test_partial_prefetch_load_is_not_complete_and_names_the_missing_doc(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}, {SIDECAR}, {RUNTIME}]")
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Any-intersection is not compliance: one of three loaded is incomplete.
+    assert session.complete is False
+    assert session.coverage == 1 / 3
+    assert session.loaded == (FEATURES,)
+    assert session.missing == (SIDECAR, RUNTIME)
+
+
+def test_caller_injected_prefetch_counts_without_a_read_tool_call(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]") + [injected_row(repo.path / FEATURES, "# eval")],
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.complete is True
+    assert session.loads[0].method == METHOD_INJECTED
+
+
+def test_read_tool_delivery_is_credited_and_labelled(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]") + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    load = only(roll(tmp_path, repo, [dev()])).loads[0]
+
+    assert (load.loaded, load.method) == (True, METHOD_READ_TOOL)
+    assert load.order is not None
+
+
+def test_a_read_result_without_a_body_still_credits_the_requested_path(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(repo.path / FEATURES, content=None),  # no toolUseResult body
+    )
+
+    assert only(roll(tmp_path, repo, [dev()])).complete is True
+
+
+def test_a_failed_read_is_not_credited_as_loaded(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(repo.path / FEATURES, content=None, is_error=True),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # The call was made but nothing reached the context, so nothing was read.
+    assert session.complete is False and session.missing == (FEATURES,)
+
+
+def test_an_unanswered_read_call_is_not_credited(tmp_path):
+    repo = make_repo(tmp_path)
+    call, _result = read_rows(repo.path / FEATURES, content=None)
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]") + [call])
+
+    assert only(roll(tmp_path, repo, [dev()])).complete is False
+
+
+def test_reads_outside_the_repo_are_ignored(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(tmp_path / "elsewhere" / ".ai" / "features" / "evaluation.md",
+                    content="# other project"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.complete is False
+    assert session.midflight == ()
+
+
+def test_malformed_prefetch_entries_are_excluded_and_explained(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}, docs/not-memory.md]")
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.expected == (FEATURES,)
+    assert session.complete is True
+    assert "malformed" in (session.detail or "")
+
+
+# -- session-time truth -------------------------------------------------------
+
+
+def test_expected_set_is_the_session_time_one_not_the_current_task_file(tmp_path):
+    repo = make_repo(tmp_path)
+    # The task file on disk now names three docs (a later session backfilled it).
+    (repo.path / ".ai-tasks").mkdir(parents=True)
+    (repo.path / ".ai-tasks" / f"{TASK}.md").write_text(
+        task_md(f"[{FEATURES}, {SIDECAR}, {RUNTIME}]"), encoding="utf-8"
+    )
+    # This session read a task file that declared only one.
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]") + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.expected == (FEATURES,)
+    assert session.complete is True  # not judged against docs it never declared
+
+
+def test_a_session_that_never_read_its_task_file_is_unassessable(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, read_rows(repo.path / FEATURES, content="# eval"))
+
+    behavior = roll(tmp_path, repo, [dev()])
+    session = only(behavior)
+
+    assert session.available is True  # the transcript parsed fine
+    assert session.assessable is False and session.applicable is None
+    assert session.coverage is None and session.complete is None
+    assert "expected set unrecoverable" in session.detail
+    assert behavior.warnings  # a dev session we could not measure is a real gap
+
+
+def test_an_offset_task_read_does_not_supply_the_expected_set(tmp_path):
+    repo = make_repo(tmp_path)
+    body = task_md(f"[{FEATURES}]")
+    write_transcript(
+        tmp_path,
+        repo,
+        read_rows(
+            repo.path / ".ai-tasks" / f"{TASK}.md",
+            content=body.split("\n", 4)[-1],  # a slice with no frontmatter
+            start_line=40,
+        ),
+    )
+
+    assert only(roll(tmp_path, repo, [dev()])).assessable is False
+
+
+def test_an_archived_task_read_also_supplies_the_expected_set(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        read_rows(
+            repo.path / ".ai-tasks" / "archive" / f"{TASK}.md",
+            content=task_md(f"[{FEATURES}]"),
+            uid="task",
+        )
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    assert only(roll(tmp_path, repo, [dev()])).complete is True
+
+
+def test_an_empty_declared_set_is_recovered_but_not_applicable(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, entry_rows(repo, None))
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Recovered-and-empty is a measurement (nothing to comply with), not a gap.
+    assert session.assessable is True and session.applicable is False
+    assert session.expected == () and session.coverage is None
+
+
+def test_an_oversize_declared_set_is_refused_rather_than_partially_measured(tmp_path):
+    repo = make_repo(tmp_path)
+    docs = ", ".join(f".ai/features/f{n}.md" for n in range(MAX_EXPECTED_DOCS + 1))
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{docs}]"))
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.assessable is False and session.coverage is None
+    assert "cap" in session.detail
+
+
+# -- applicability ------------------------------------------------------------
+
+
+def test_a_review_session_is_not_applicable_and_does_not_warn(tmp_path):
+    repo = make_repo(tmp_path)  # no transcript at all: Codex leaves none here
+
+    behavior = roll(
+        tmp_path,
+        repo,
+        [SessionRef(session_id="019fe91c-878f-7db1-bd8a-f17eadab8249",
+                    run_id="run-1", role="review", kind="session")],
+    )
+    session = only(behavior)
+
+    assert session.applicable is False and session.assessable is False
+    assert behavior.warnings == ()  # never asked to pre-load; not a missing measurement
+
+
+def test_a_plan_gate_session_shares_the_dev_prefetch_expectation(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"), sid="plan-sid"
+    )
+
+    session = only(
+        roll(
+            tmp_path,
+            repo,
+            [SessionRef(session_id="plan-sid", role="dev", kind="plan-gate")],
+        )
+    )
+
+    assert session.applicable is True and session.complete is False
+
+
+# -- mid-flight retrieval trace -----------------------------------------------
+
+
+def test_midflight_trace_is_ordered_and_excludes_prefetch_and_eager_docs(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(repo.path / FEATURES, content="# eval", uid="a")
+        + read_rows(repo.path / ".ai/index.md", content="# router", uid="b")
+        + read_rows(repo.path / ".ai/design/index.md", content="# design", uid="c")
+        + read_rows(repo.path / ".ai/apis/index.md", content="# apis", uid="d")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="e")
+        + read_rows(repo.path / SIDECAR, content="# sidecar again", uid="f"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Eager docs (router, design entrypoint) and the declared prefetch doc are out;
+    # the rest appear once each, in the order they were consulted.
+    assert [read.path for read in session.midflight] == [".ai/apis/index.md", SIDECAR]
+    assert [read.order for read in session.midflight] == sorted(
+        read.order for read in session.midflight
+    )
+    assert {read.actor for read in session.midflight} == {ACTOR_ROOT}
+
+
+def test_subagent_reads_count_as_consultation_and_are_attributed(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", sidechain=True, uid="s"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert [(r.path, r.actor) for r in session.midflight] == [(SIDECAR, ACTOR_SUBAGENT)]
+
+
+def test_a_subagent_read_can_satisfy_a_prefetch_doc(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + read_rows(repo.path / FEATURES, content="# eval", sidechain=True, uid="s"),
+    )
+
+    assert only(roll(tmp_path, repo, [dev()])).complete is True
+
+
+def test_no_midflight_reads_is_an_empty_trace_not_a_defect(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]") + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.midflight == () and session.complete is True
+
+
+def test_midflight_trace_is_capped_and_says_so(tmp_path):
+    repo = make_repo(tmp_path)
+    rows = entry_rows(repo, f"[{FEATURES}]")
+    for n in range(5):
+        rows += read_rows(repo.path / f".ai/features/f{n}.md", content="x", uid=f"u{n}")
+    write_transcript(tmp_path, repo, rows)
+
+    session = only(roll(tmp_path, repo, [dev()], max_midflight=2))
+
+    assert len(session.midflight) == 2 and session.midflight_truncated is True
+
+
+def test_midflight_trace_survives_an_unrecoverable_expected_set(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, read_rows(repo.path / SIDECAR, content="# sidecar"))
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    # Prefetch is unassessable, but the retrieval evidence still exists; it is not
+    # discarded just because the set it would have been filtered against is gone.
+    assert session.assessable is False
+    assert [read.path for read in session.midflight] == [SIDECAR]
+
+
+# -- close-out exclusion ------------------------------------------------------
+
+
+def test_reads_after_the_closeout_skill_do_not_count_as_consultation(tmp_path):
+    repo = make_repo(tmp_path)
+    closeout = {
+        "type": "assistant",
+        "timestamp": TS,
+        "message": {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "sk",
+                    "name": "Skill",
+                    "input": {"skill": CLOSEOUT_SKILL},
+                }
+            ],
+        },
+    }
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [closeout]
+        + read_rows(repo.path / FEATURES, content="# eval", uid="late")
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="later"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.closeout_seen is True
+    assert session.complete is False  # absorption is the write path, not a pre-load
+    assert session.midflight == ()
+
+
+def test_a_closeout_slash_command_ends_the_scan_too(tmp_path):
+    repo = make_repo(tmp_path)
+    command = {
+        "type": "user",
+        "timestamp": TS,
+        "message": {
+            "role": "user",
+            "content": f"<command-name>/{CLOSEOUT_SKILL}</command-name>",
+        },
+    }
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [command]
+        + read_rows(repo.path / SIDECAR, content="# sidecar", uid="late"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.closeout_seen is True and session.midflight == ()
+
+
+# -- degradation --------------------------------------------------------------
+
+
+def test_an_absent_transcript_is_unassessable_never_incomplete(tmp_path):
+    repo = make_repo(tmp_path)  # nothing written under the transcript root
+
+    behavior = roll(tmp_path, repo, [dev()])
+    session = only(behavior)
+
+    assert behavior.available is False
+    assert session.available is False and session.assessable is False
+    assert session.complete is None and session.coverage is None
+    assert session.detail == "no session transcript found"
+    assert behavior.warnings and "no session transcript found" in behavior.warnings[0]
+
+
+def test_an_unparseable_transcript_yields_no_facts(tmp_path):
+    repo = make_repo(tmp_path)
+    path = transcript_root(tmp_path) / project_slug(repo.path) / f"{SID}.jsonl"
+    path.parent.mkdir(parents=True)
+    path.write_text("not json\n{also not\n", encoding="utf-8")
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.assessable is False and session.events_scanned == 0
+    assert "no readable events" in session.detail
+
+
+def test_a_backend_that_exposes_no_reads_is_unassessable_not_scratch_first(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(
+        tmp_path,
+        repo,
+        [
+            {"type": "user", "timestamp": TS, "message": {"role": "user", "content": "go"}},
+            {"type": "assistant", "timestamp": TS,
+             "message": {"role": "assistant", "content": [{"type": "text", "text": "done"}]}},
+        ],
+    )
+
+    session = only(roll(tmp_path, repo, [dev()]))
+
+    assert session.available is True and session.assessable is False
+    assert session.complete is None
+
+
+def test_no_sessions_reads_nothing_and_says_why(tmp_path):
+    repo = make_repo(tmp_path)
+
+    behavior = roll(tmp_path, repo, [])
+
+    assert behavior.available is False and behavior.sessions == ()
+    assert "no persisted session ids" in behavior.detail
+    assert behavior.warnings == ()
+
+
+def test_section_availability_follows_what_was_actually_read(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"))
+
+    behavior = roll(
+        tmp_path, repo, [dev(), SessionRef(session_id="missing-sid", role="dev")]
+    )
+
+    assert behavior.available is True  # one of the two was located
+    assert [s.available for s in behavior.sessions] == [True, False]
+    assert behavior.assessable_count == 1 and behavior.applicable_count == 1
+
+
+def test_repeated_session_ids_are_rolled_up_once(tmp_path):
+    repo = make_repo(tmp_path)
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"))
+
+    behavior = roll(tmp_path, repo, [dev(run_id="run-1"), dev(run_id="run-2")])
+
+    assert [s.run_id for s in behavior.sessions] == ["run-1"]
+
+
+def test_sessions_past_the_cap_are_dropped_with_a_warning(tmp_path):
+    repo = make_repo(tmp_path)
+    refs = [dev(sid=f"sid-{n}") for n in range(4)]
+    for ref in refs:
+        write_transcript(tmp_path, repo, entry_rows(repo, f"[{FEATURES}]"), sid=ref.session_id)
+
+    behavior = roll(tmp_path, repo, refs, max_sessions=2)
+
+    assert len(behavior.sessions) == 2
+    assert any("dropped past" in warning for warning in behavior.warnings)
+
+
+# -- containment and caps -----------------------------------------------------
+
+
+def test_a_crafted_session_id_cannot_escape_the_transcript_store(tmp_path):
+    repo = make_repo(tmp_path)
+    root = transcript_root(tmp_path)
+    root.mkdir(parents=True)
+    (tmp_path / "secret.jsonl").write_text("{}\n", encoding="utf-8")
+
+    assert locate_transcript(root, repo, "../../secret") is None
+    assert locate_transcript(root, repo, "") is None
+    assert locate_transcript(root, repo, "a/b") is None
+
+
+def test_locate_transcript_resolves_the_cwd_slug(tmp_path):
+    repo = make_repo(tmp_path)
+    path = write_transcript(tmp_path, repo, [])
+
+    assert locate_transcript(transcript_root(tmp_path), repo, SID) == path.resolve()
+    assert locate_transcript(transcript_root(tmp_path), repo, "other") is None
+
+
+def test_project_slug_matches_the_cli_layout():
+    assert project_slug(Path("/Users/x/workplace/github.com/y/orch-hub")) == (
+        "-Users-x-workplace-github-com-y-orch-hub"
+    )
+
+
+def test_an_oversize_row_is_skipped_rather_than_parsed(tmp_path):
+    repo = make_repo(tmp_path)
+    huge = {"type": "assistant", "message": {"role": "assistant",
+                                             "content": [{"type": "text", "text": "x" * 50_000}]}}
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [huge]
+        + read_rows(repo.path / FEATURES, content="# eval"),
+    )
+
+    session = only(roll(tmp_path, repo, [dev()], max_line_bytes=4000))
+
+    # The giant row is dropped whole; the rows on either side are still read, so
+    # the scan resumed on a real row boundary rather than on fragments.
+    assert session.complete is True
+
+
+def test_the_byte_budget_stops_the_scan_and_is_recorded(tmp_path):
+    repo = make_repo(tmp_path)
+    rows = entry_rows(repo, f"[{FEATURES}]")
+    for n in range(50):
+        rows += read_rows(repo.path / f".ai/features/f{n}.md", content="x" * 200, uid=f"u{n}")
+    write_transcript(tmp_path, repo, rows)
+
+    session = only(roll(tmp_path, repo, [dev()], max_bytes=2000))
+
+    assert session.truncated is True
+    assert session.events_scanned < len(rows)
+
+
+def test_iter_rows_never_reads_past_the_byte_budget(tmp_path):
+    """The bound is on the read itself, not on a buffer already in memory."""
+    payload = ("{}\n" * 5000).encode()
+    stream = io.BytesIO(payload)
+    scan = _Scan()
+
+    consumed = sum(len(raw) for raw, _ in _iter_rows(stream, scan, max_bytes=300,
+                                                     max_line_bytes=64))
+
+    assert consumed <= 300
+    assert stream.tell() <= 301  # the one-byte truncation probe
+    assert scan.truncated is True
+
+
+# -- what the rollup must not carry -------------------------------------------
+
+
+def test_the_rollup_carries_no_transcript_text(tmp_path):
+    repo = make_repo(tmp_path)
+    secret = "SENSITIVE-ANSWER-TEXT"
+    write_transcript(
+        tmp_path,
+        repo,
+        entry_rows(repo, f"[{FEATURES}]")
+        + [{"type": "user", "timestamp": TS, "message": {"role": "user", "content": secret}}]
+        + read_rows(repo.path / FEATURES, content=f"# eval {secret}"),
+    )
+
+    serialized = json.dumps(roll(tmp_path, repo, [dev()]).to_dict())
+
+    assert secret not in serialized
+    assert FEATURES in serialized  # paths and counts are the whole payload

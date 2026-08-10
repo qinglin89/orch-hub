@@ -27,6 +27,13 @@ own local rate-limit signal from its session rollouts under ``<codex_home>/
 sessions/`` — a read-only, no-network, no-credit-consuming source. Overridable so
 a non-default ``CODEX_HOME`` (or a test fixture dir) can be pointed at instead."""
 
+DEFAULT_CLAUDE_HOME = Path.home() / ".claude"
+"""Default Claude Code home. The task-evaluation evidence layer reads each dev
+session's own conversation transcript from ``<claude_home>/projects/`` to derive
+a bounded read-behavior rollup — read-only, and the transcript itself never
+enters an artifact. Overridable so a relocated Claude home (or a test fixture
+dir) can be pointed at instead."""
+
 AI_NATIVE_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
 """Environment variable overriding the ai-native-development path."""
 
@@ -48,6 +55,13 @@ CODEX_HOME_ENV = "ORCH_HUB_CODEX_HOME"
 Points the agent-subscription-usage Codex adapter at the Codex home whose
 ``sessions/`` rollouts carry the local rate-limit signal. Unset (or blank) means
 :data:`DEFAULT_CODEX_HOME`."""
+
+CLAUDE_HOME_ENV = "ORCH_HUB_CLAUDE_HOME"
+"""Environment variable overriding the Claude Code home (default ``~/.claude``).
+
+Points the evaluation read-behavior reader at the home whose ``projects/`` tree
+holds per-session conversation transcripts. Unset (or blank) means
+:data:`DEFAULT_CLAUDE_HOME`."""
 
 BARK_URL_ENV = "ORCH_HUB_BARK_URL"
 """Environment variable holding the Bark push endpoint (server + device key).
@@ -248,6 +262,16 @@ class Config:
     never the credit-spend path. Display-only; never gates any operation.
     """
 
+    claude_home: Path = DEFAULT_CLAUDE_HOME
+    """Claude Code home (``ORCH_HUB_CLAUDE_HOME``), default ``~/.claude``.
+
+    The evaluation evidence layer reads per-session conversation transcripts
+    from ``<claude_home>/projects/`` (see :attr:`claude_transcripts_dir`) to
+    derive a bounded read-behavior rollup. Read-only, and only ever a source of
+    *derived* facts — no transcript text reaches an artifact. Distinct from the
+    usage layer's ``~/.claude.json`` cache, which is a different file.
+    """
+
     bark_url: str | None = None
     """Bark push endpoint (``ORCH_HUB_BARK_URL``), or ``None`` when unset.
 
@@ -329,6 +353,7 @@ class Config:
         token = raw_token.strip() if raw_token else None
         raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()
         raw_codex_home = (env.get(CODEX_HOME_ENV) or "").strip()
+        raw_claude_home = (env.get(CLAUDE_HOME_ENV) or "").strip()
         raw_bark_url = env.get(BARK_URL_ENV)
         bark_url = raw_bark_url.strip() if raw_bark_url else None
         return cls(
@@ -339,6 +364,11 @@ class Config:
             data_dir=Path(raw_data_dir).expanduser() if raw_data_dir else DEFAULT_DATA_DIR,
             codex_home=(
                 Path(raw_codex_home).expanduser() if raw_codex_home else DEFAULT_CODEX_HOME
+            ),
+            claude_home=(
+                Path(raw_claude_home).expanduser()
+                if raw_claude_home
+                else DEFAULT_CLAUDE_HOME
             ),
             bark_url=bark_url or None,
             intake_model=(
@@ -365,6 +395,17 @@ class Config:
         on PATH, since it ships as a repo-local script, not a system install.
         """
         return self.ai_native_path / "aii-2"
+
+    @property
+    def claude_transcripts_dir(self) -> Path:
+        """Root of Claude Code's per-project conversation transcript store.
+
+        ``<claude_home>/projects/<slugged-cwd>/<session-id>.jsonl`` is the
+        CLI's own layout; the evaluation read-behavior reader resolves a session
+        id to its transcript there. Derived rather than configured separately so
+        one home override moves both this and any future Claude-local source.
+        """
+        return self.claude_home / "projects"
 
     @property
     def registry_file(self) -> Path:

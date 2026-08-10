@@ -31,6 +31,7 @@ from orch_hub.evaluation import (
     task_evaluations_dir,
 )
 from orch_hub.models import ManagedRepo, RunRecord, StoredEvaluation
+from orch_hub.session_reads import project_slug
 from orch_hub.subprocess_utils import CommandResult
 
 TASK = "2026-07-22-task-evaluation-foundation"
@@ -47,6 +48,9 @@ def make_config(
     return Config(
         ai_native_path=tmp_path / "ai-native",
         data_dir=tmp_path / "hub-data",
+        # A fixture Claude home, so the read-behavior section never reaches an
+        # operator's real transcript store.
+        claude_home=tmp_path / "claude-home",
         evaluation_enabled=enabled,
         **kwargs,
     )
@@ -479,6 +483,12 @@ def test_build_evidence_aggregates_active_task_and_its_runs(tmp_path):
         "ai_doc_count": 0,
         "ai_snippets_available": False,
         "ai_diffs_available": False,
+        # The session snapshot here carries no reconciled `sid`, so there is no
+        # session to attribute read behavior to and nothing is read.
+        "reads_available": False,
+        "reads_session_count": 0,
+        "reads_applicable_count": 0,
+        "reads_assessable_count": 0,
         "warning_count": 1,
     }
 
@@ -973,6 +983,125 @@ def test_pack_persisted_before_the_ai_section_still_reads_back(tmp_path):
     stored = service.list_evaluations(repo, TASK)
     assert [e.evaluation_id for e in stored] == [evaluation_id]
     assert stored[0].artifacts == (EVIDENCE_NAME,)
+
+
+# -- read-behavior section (per-session prefetch + mid-flight retrieval) ------
+
+
+def write_transcript(config: Config, repo: ManagedRepo, sid: str, rows: list[dict]) -> Path:
+    """Write one session transcript into the fixture Claude home."""
+    path = (
+        config.claude_transcripts_dir / project_slug(repo.path) / f"{sid}.jsonl"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+    return path
+
+
+def read_pair(abs_path: Path, content: str, uid: str) -> list[dict]:
+    """A ``Read`` call and its result, as a transcript records the pair."""
+    return [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": uid, "name": "Read",
+                     "input": {"file_path": str(abs_path)}}
+                ],
+            },
+        },
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": uid, "content": "ok"}],
+            },
+            "toolUseResult": {
+                "type": "text",
+                "file": {"filePath": str(abs_path), "content": content, "startLine": 1},
+            },
+        },
+    ]
+
+
+def test_build_evidence_carries_the_per_session_read_rollup(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo, **{"features/evaluation.md": "# Evaluation\n"})
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/features/evaluation.md]")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+    )
+    write_transcript(
+        config,
+        repo,
+        "sid-1",
+        read_pair(
+            repo.path / ".ai-tasks" / f"{TASK}.md",
+            "---\nid: x\nprefetch: [.ai/features/evaluation.md]\n---\n",
+            "task",
+        )
+        + read_pair(repo.path / ".ai" / "features" / "evaluation.md", "# Evaluation\n", "doc")
+        + read_pair(repo.path / ".ai" / "modules" / "sidecar.md", "# Sidecar\n", "mid"),
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.reads is not None and pack.reads.available is True
+    session = pack.reads.sessions[0]
+    assert session.session_id == "sid-1"
+    assert session.run_id == "20260722T090000Z-alpha-task"
+    assert session.complete is True and session.coverage == 1.0
+    assert [read.path for read in session.midflight] == [".ai/modules/sidecar.md"]
+    summary = pack.to_dict()["summary"]
+    assert summary["reads_available"] is True
+    assert summary["reads_session_count"] == 1
+    assert summary["reads_applicable_count"] == 1
+    assert summary["reads_assessable_count"] == 1
+
+
+def test_read_rollup_is_absent_without_session_ids(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/features/evaluation.md]")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session"}]},  # sid never revealed
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.reads.available is False and pack.reads.sessions == ()
+    assert pack.reads.warnings == ()  # nothing to attribute is not degradation
+
+
+def test_read_behavior_failure_degrades_alone(tmp_path, monkeypatch):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo)
+    write_active_task(repo, TASK, "# body")
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("transcript store exploded")
+
+    monkeypatch.setattr("orch_hub.evaluation.read_session_behavior", boom)
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.reads.available is False
+    assert "transcript store exploded" in pack.reads.detail
+    assert any("read behavior" in w for w in pack.reads.warnings)
+    # The rest of the pack is untouched by the failure.
+    assert pack.target.present is True and pack.ai.present is True
 
 
 def test_generate_evidence_id_is_timestamped_and_collision_safe(tmp_path):

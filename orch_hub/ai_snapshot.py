@@ -301,6 +301,44 @@ def resolve_entrypoint(ai_dir: Path, topic: str, router: Mapping[str, str]) -> s
     return flat
 
 
+def prefetch_doc_path(entry: str) -> str | None:
+    """Repo-relative ``.ai/...`` path for one frontmatter ``prefetch:`` entry.
+
+    The public spelling of this module's prefetch-entry grammar
+    (:func:`_prefetch_rel`), for the read-behavior reader
+    (:mod:`orch_hub.session_reads`), which must decide whether an observed file
+    read *is* one of the session's declared prefetch docs. It compares against
+    read paths, which are repo-relative, so it needs the ``.ai/``-prefixed form
+    rather than the snapshot-relative one the doc reader uses. Both spellings
+    come from the one rule here, so a malformed entry cannot be admitted by one
+    consumer and refused by the other.
+    """
+    rel = _prefetch_rel(entry)
+    return None if rel is None else f"{AI_DIRNAME}/{rel}"
+
+
+def is_eager_doc(repo_rel: str) -> bool:
+    """True when a repo-relative ``.ai/`` path belongs to the always-loaded eager set.
+
+    Membership is by *topic*, so both legal entrypoint forms of an eager content
+    topic answer True without consulting the repo — which is what a consumer
+    judging a historical session needs, since the form in effect back then may
+    not be the form on disk now.
+
+    The read-behavior reader uses this to exclude the eager set from its
+    mid-flight retrieval trace: the eager set is in every session's context
+    already (memory-protocol loading contract), so *not* reading it is not a
+    missed consultation and reading it is not a retrieval.
+    """
+    prefix = f"{AI_DIRNAME}/"
+    if not repo_rel.startswith(prefix):
+        return False
+    rel = repo_rel[len(prefix) :]
+    if rel in ROOT_DOCS:
+        return True
+    return any(rel in (f"{topic}.md", f"{topic}/index.md") for topic in EAGER_TOPICS)
+
+
 def read_ai_snapshot(
     repo: ManagedRepo,
     *,
