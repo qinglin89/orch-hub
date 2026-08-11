@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-11
+verified-against: ce19bb172c57eabbbbf7e83604ec3d6bff96733b
 ---
 
 # Features: Operations Surfaces
@@ -47,7 +47,10 @@ Implemented behavior:
   Failures retain the previous figures and their real `fetchedAtMs`.
 - `UsageService` ingests the cache first and the legacy statusLine sink second;
   both merge into `ClaudeUsageStore` per window, so existing wrapper
-  installations remain compatible without being required.
+  installations remain compatible without being required. Cross-carrier reset
+  instants within five minutes are treated as one jitter-tolerant window and
+  converge to the later identity; farther-apart instants preserve rollover
+  ordering, so same-window stale writers cannot lower the stored percentage.
 - The best-effort observer wired into intake and semantic `claude -p`
   stream-json backends sees no used-percentage on verified versions: 2.1.218
   emits no rate-limit signal, while 2.1.220 emits a percentage-less

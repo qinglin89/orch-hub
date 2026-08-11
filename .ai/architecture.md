@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-11
+verified-against: ce19bb172c57eabbbbf7e83604ec3d6bff96733b
 ---
 
 # Architecture
@@ -182,12 +182,14 @@ timeout bounded, runs `claude -p "/usage"` from an empty cwd, and accepts the
 turn only when its JSON envelope reports zero model turns and zero cost. Cache
 figures retain the CLI's real `fetchedAtMs` and come only from
 `limits[].percent` entries paired to window-map resets by kind and instant.
-Claude figures are keyed by store-internal `figure_instant`, so fallback writers
-cannot lower same-window usage, genuine rollovers replace old figures, legacy
-stores self-heal, and partial merges do not overstate freshness. The stream-json
-observer remains a boundary-only fallback on verified versions. Protected
-`GET /api/usage` returns both providers fail-soft; missing/stale/failed sources
-never feed attention, readiness, run state, or launch/intake gates.
+Claude figures are keyed by store-internal `figure_instant`; reset instants
+within five minutes share one jitter-tolerant identity that converges forward,
+so fallback writers cannot lower same-window usage while genuine rollovers still
+replace old figures. Legacy stores self-heal, and partial merges do not overstate
+freshness. The stream-json observer remains a boundary-only fallback on verified
+versions. Protected `GET /api/usage` returns both providers fail-soft;
+missing/stale/failed sources never feed attention, readiness, run state, or
+launch/intake gates.
 
 ## Component Boundaries
 

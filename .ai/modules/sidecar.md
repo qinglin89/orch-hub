@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-11
+verified-against: ce19bb172c57eabbbbf7e83604ec3d6bff96733b
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -169,12 +169,14 @@ the old observation with its original timestamp.
 `UsageService` ingests this cache first and the optional
 `<data_dir>/usage/claude-statusline.json` fallback second, merging both into
 `<data_dir>/usage/claude.json` per window. `merge_observations` keys each figure
-by store-internal `UsageWindow.figure_instant`, ignores older windows, replaces
-genuine rollovers, and takes `max(used_percent)` within one window. Legacy
-stores self-heal and partial merges floor provider freshness to the older
-source. Stale/empty reads dispatch a background collector refresh for the next
-read; the app also gives `RunManager` this request callable for each observed
-terminal transition. No verified stream-json version carries a percentage;
+by store-internal `UsageWindow.figure_instant`; known reset instants within five
+minutes are one jitter-tolerant identity whose stored instant converges forward,
+while farther-apart instants retain genuine-rollover ordering. Same-window
+figures take `max(used_percent)`, legacy stores self-heal, and partial merges
+floor provider freshness to the older source. Stale/empty reads dispatch a
+background collector refresh for the next read; the app also gives `RunManager`
+this request callable for each observed terminal transition. No verified
+stream-json version carries a percentage;
 2.1.220's percentage-less event may advance only a stored reset boundary.
 `ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
 so concurrent observations cannot collide; `UsageService` serializes Claude
