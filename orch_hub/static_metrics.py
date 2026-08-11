@@ -146,7 +146,7 @@ STATIC_METRICS_NAME = "static_metrics.json"
 """The persisted static-metrics report, written beside ``evidence.json`` in the
 evaluation's artifact dir (one dir per evaluation)."""
 
-STATIC_SCHEMA_VERSION = "3"
+STATIC_SCHEMA_VERSION = "4"
 """Version of the ``static_metrics.json`` shape, stamped into every report.
 
 The counterpart of :data:`orch_hub.evaluation.EVIDENCE_SCHEMA_VERSION` for this
@@ -165,7 +165,15 @@ unchanged — only how much of the population it speaks for — and the report
 carries no evidence-cohort key of its own, so the stamp is the only place that
 difference can be recorded. A persisted report with no ``schema_version`` key is
 version 1 and predates the stamp. Additive so far: consumers read named keys and
-tolerate absent ones."""
+tolerate absent ones.
+
+``4`` keeps the v3 score set but changes what two of its axes *measure*: a
+dev entry's ``pending -> final_review`` edge is legal (so a task finished in its
+first session no longer carries an illegal-transition penalty), and the estimate
+axis counts dev advancement sessions rather than all work sessions (so
+review-driven remediation no longer reads as an overrun). Both corrections raise
+scores for well-run tasks, which is exactly why the cohort must be separable: a
+population mixing v3 and v4 would read the fix as tasks having improved."""
 
 # -- score axes ---------------------------------------------------------------
 SCORE_PROTOCOL = "protocol"
@@ -198,6 +206,7 @@ SESSION_LOG_SECTION = "## Session log"
 _LEGAL_TRANSITIONS = frozenset(
     {
         ("pending", "in_progress"),  # first claim
+        ("pending", "final_review"),  # dev only: claim + whole scope, one session
         ("in_progress", "in_progress"),  # dev advancement / interim review
         ("in_progress", "final_review"),  # dev advancement completes scope
         ("final_review", "final_review"),  # final gate requests changes
@@ -210,7 +219,12 @@ _LEGAL_TRANSITIONS = frozenset(
 )
 """Legal ``(before, after)`` status edges from the taskfile transition table
 (§3), excluding the universal ``any -> blocked`` (handled in
-:func:`_transition_legal` since every legal status may be blocked)."""
+:func:`_transition_legal` since every legal status may be blocked).
+
+Two of these edges are entry-kind-dependent rather than universal, so membership
+here is necessary but not sufficient — :func:`_transition_legal` narrows them:
+``pending -> final_review`` is dev-only, and the ``final_review -> *`` forward
+edges are verdict-aware for review entries."""
 
 # -- score penalties (transparent: score = 1 - sum(penalties), floored at 0) ---
 # protocol axis
@@ -668,6 +682,7 @@ class _LogFacts:
     pass_verdict_count: int
     changes_requested_count: int
     remediation_count: int
+    advancement_entry_count: int
     blocked_entry_count: int
     dispute_unresolved_count: int
     incomplete_entries: tuple[str, ...]
@@ -730,6 +745,7 @@ def _parse_protocol(target: EvaluationTarget) -> ProtocolMetrics:
         pass_verdict_count=facts.pass_verdict_count,
         changes_requested_count=facts.changes_requested_count,
         remediation_count=facts.remediation_count,
+        advancement_entry_count=facts.advancement_entry_count,
         blocked_entry_count=facts.blocked_entry_count,
         dispute_unresolved_count=facts.dispute_unresolved_count,
         incomplete_entries=facts.incomplete_entries,
@@ -769,6 +785,7 @@ def _empty_protocol() -> ProtocolMetrics:
         pass_verdict_count=0,
         changes_requested_count=0,
         remediation_count=0,
+        advancement_entry_count=0,
         blocked_entry_count=0,
         dispute_unresolved_count=0,
         incomplete_entries=(),
@@ -789,8 +806,13 @@ def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFact
     uncovered = tuple(e.sid for e in work if e.sid and e.sid not in reviewed)
 
     # Remediation: a work session whose most recent *preceding* review requested
-    # changes (the taskfile remediation predicate). Walk in log order.
+    # changes (the taskfile remediation predicate). Walk in log order. The
+    # complement is advancement — work that moved planned scope. The verdict is
+    # *not* reset by an intervening work entry, so a fix set split across several
+    # sessions stays remediation for its whole run: what ends a convergence chain
+    # is the next review, not the next session.
     remediation = 0
+    advancement = 0
     last_verdict: str | None = None
     for entry in entries:
         if entry.malformed:
@@ -799,6 +821,8 @@ def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFact
             last_verdict = entry.verdict
         elif last_verdict == _VERDICT_CHANGES:
             remediation += 1
+        else:
+            advancement += 1
 
     incomplete = tuple(
         (e.sid or "?") for e in wellformed if not _entry_fields_ok(e)
@@ -832,6 +856,7 @@ def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFact
             1 for e in review if e.verdict == _VERDICT_CHANGES
         ),
         remediation_count=remediation,
+        advancement_entry_count=advancement,
         blocked_entry_count=sum(1 for e in wellformed if e.after == "blocked"),
         dispute_unresolved_count=sum(e.dispute_count for e in entries),
         incomplete_entries=incomplete,
@@ -916,6 +941,20 @@ def _transition_legal(entry: _LogEntry) -> bool:
     """True when ``entry``'s ``(before, after)`` status edge is legal (taskfile
     §3). Any legal status may transition to ``blocked``.
 
+    Legality is **entry-kind-aware**, because the taskfile table is written per
+    session kind and the raw status pair alone cannot say which kind wrote it.
+
+    ``pending -> final_review`` is legal for a **dev** entry only. A dev session
+    entering a `pending` task performs the claim (`pending -> in_progress`) as
+    mechanical bookkeeping, not as work; when that same session then completes
+    the whole scope, the entry's honest `status_before` is the status it *found*,
+    and the intermediate `in_progress` never existed as an observable state. The
+    collapsed edge is therefore the correct record of a one-session task, not a
+    skipped transition — reading it as illegal penalised exactly the tasks that
+    went best. For a **review** entry the same pair stays illegal: no review
+    session may claim a `pending` task, so the edge could only mean a lost dev
+    entry.
+
     Review **final-gate** entries (``before == final_review``) are verdict-aware:
     the taskfile table and the review contract (§6, "findings never downgrade a
     status") tie the forward edge to the verdict — a ``pass`` completes, a
@@ -928,6 +967,8 @@ def _transition_legal(entry: _LogEntry) -> bool:
         return before in LEGAL_STATUSES
     if (before, after) not in _LEGAL_TRANSITIONS:
         return False
+    if entry.is_review and (before, after) == ("pending", "final_review"):
+        return False  # only a dev session collapses the claim into completion
     if entry.is_review and before == "final_review":
         if after == "completed":
             return entry.verdict == _VERDICT_PASS  # only a pass completes
@@ -1180,9 +1221,20 @@ def _score_handoff(pm: ProtocolMetrics) -> ScoreComponent:
 
 
 def _score_estimate(pm: ProtocolMetrics) -> ScoreComponent:
-    """Session-est planned total vs actual dev sessions (session-log work
-    entries). Overrun scales the score by the ratio; remediation rounds are
-    surfaced as context (they already inflate the count)."""
+    """Session-est planned total vs actual dev **advancement** sessions. Overrun
+    scales the score by the ratio.
+
+    The actual count deliberately excludes remediation entries. ``session-est``
+    estimates the work of advancing planned scope, and review sessions do not
+    consume it (taskfile §4); a remediation session is the dev half of that same
+    review loop — it converges on findings instead of advancing a slice, so
+    charging it to the estimate measures how much review happened, not how well
+    the work was estimated. That penalised the review loop for doing its job:
+    a task whose findings took three sessions to fix scored worse than one
+    nobody reviewed closely. Remediation rounds stay in the report as a neutral
+    diagnostic warning, and any number of them against a plan of one is now a
+    fit. Ordinary continuations and scope-driven splits are advancement and still
+    count, so genuine underestimates score exactly as before."""
     est = pm.session_est
     if est is None or est.total <= 0:
         return ScoreComponent(
@@ -1200,16 +1252,18 @@ def _score_estimate(pm: ProtocolMetrics) -> ScoreComponent:
             ("no session log to count dev sessions; estimate fit not assessable",),
         )
     warnings: list[str] = []
-    planned, actual = est.total, pm.work_entry_count
+    planned, actual = est.total, pm.advancement_entry_count
     score = 1.0
     if actual > planned:
         score = planned / actual
         warnings.append(
-            f"{actual} dev session(s) exceeded the session-est total of {planned}"
+            f"{actual} dev advancement session(s) exceeded the session-est total"
+            f" of {planned}"
         )
     if pm.remediation_count:
         warnings.append(
-            f"{pm.remediation_count} remediation round(s) (changes-requested rework)"
+            f"{pm.remediation_count} remediation round(s) (changes-requested"
+            " rework; not charged to the estimate)"
         )
     return ScoreComponent(SCORE_ESTIMATE, _clamp01(score), 1.0, tuple(warnings))
 

@@ -907,6 +907,75 @@ def test_protocol_pass_final_review_reaching_completed_stays_legal():
     assert report_of(COMPLETED, source=SOURCE_ARCHIVED).protocol.illegal_transitions == ()
 
 
+# -- protocol score: the collapsed first-session edge --------------------------
+
+# A task finished in its first dev session: the session found the task `pending`,
+# performed the mechanical claim, and completed the whole scope, so its entry
+# records the status it found. The final gate then passes it.
+SINGLE_SESSION = """---
+id: 2026-07-22-task-static-quality-metrics
+status: completed
+session-est: 1/1
+blockers: []
+prefetch: [.ai/modules/core.md]
+claimed-by: sid-a@2026-07-22T10:00:00Z
+---
+
+# One-session task
+
+## Goal
+Compute metrics.
+
+## Scope
+- one
+
+## Acceptance
+- done
+
+## Session log
+
+### 2026-07-22 / sid-a / (pending → final_review)
+- Done: whole scope
+- Next: none
+- Open: none
+
+### 2026-07-22 / sid-r1 / review of sid-a / (final_review → completed)
+- Verdict: pass
+- Group: sid-a
+- Findings: none
+- Open: none
+"""
+
+
+def test_protocol_dev_pending_to_final_review_is_legal():
+    # The false positive: a task completed in its first session is the best case,
+    # not a skipped transition. The claim (pending -> in_progress) is mechanical
+    # bookkeeping, never an observable state of its own, so the collapsed edge is
+    # the honest record — and must cost nothing.
+    report = report_of(SINGLE_SESSION, source=SOURCE_ARCHIVED)
+    pm = report.protocol
+
+    assert pm.illegal_transitions == ()
+    assert pm.transition_continuity_ok and pm.final_status_matches
+    sp = score(report, SCORE_PROTOCOL)
+    assert sp.score == 1.0 and sp.warnings == ()
+    # ...and the one advancement session fits its budget of one.
+    assert pm.advancement_entry_count == 1
+    assert score(report, SCORE_ESTIMATE).score == 1.0
+
+
+def test_protocol_review_pending_to_final_review_stays_illegal():
+    # Entry-kind-aware, not blanket: no review session may claim a pending task,
+    # so the same pair from a review entry can only mean a lost dev entry.
+    review_claimed = SINGLE_SESSION.replace(
+        "### 2026-07-22 / sid-a / (pending → final_review)",
+        "### 2026-07-22 / sid-a / review of sid-z / (pending → final_review)",
+    ).replace("- Done: whole scope", "- Verdict: pass\n- Group: sid-z\n- Findings: none")
+    pm = report_of(review_claimed, source=SOURCE_ARCHIVED).protocol
+
+    assert "pending -> final_review" in pm.illegal_transitions
+
+
 def test_protocol_final_open_none_reads_the_final_entry():
     # `final_open_none` reflects the FINAL session-log entry only. A completed task
     # whose final (review) entry omits Open must NOT be rescued by an earlier work
@@ -1057,13 +1126,12 @@ def test_handoff_flags_unresolved_disputes():
 # -- estimate score (planned vs actual dev sessions) --------------------------
 
 
-def test_estimate_penalizes_overrun_and_reports_remediation():
-    # session-est total 1, but two dev sessions with a changes-requested round
-    # between them -> 1 remediation, overrun 2 vs 1.
-    overrun = """---
+def _est_log(*entries: str, est: str = "1/1") -> str:
+    """A minimal in-progress task file carrying `est` and the given log entries."""
+    return f"""---
 id: 2026-07-22-task-static-quality-metrics
 status: in_progress
-session-est: 1/1
+session-est: {est}
 blockers: []
 ---
 ## Goal
@@ -1073,30 +1141,90 @@ s
 ## Acceptance
 a
 ## Session log
+""" + "".join(entries)
 
-### 2026-07-22 / d1 / (pending → in_progress)
+
+_DEV = """
+### 2026-07-22 / {sid} / ({before} → {after})
 - Done: x
 - Next: y
 - Open: z
-
-### 2026-07-22 / r1 / review of d1 / (in_progress → in_progress)
-- Verdict: changes-requested
-- Group: d1
-- Findings: fix it
-
-### 2026-07-22 / d2 / (in_progress → in_progress)
-- Done: fixed
-- Next: y
-- Open: z
 """
-    report = report_of(overrun)
+_REVIEW = """
+### 2026-07-22 / {sid} / review of {of} / ({before} → {after})
+- Verdict: {verdict}
+- Group: {of}
+- Findings: f
+"""
+
+
+def test_estimate_excludes_remediation_from_the_actual_count():
+    # One advancement session plus a changes-requested round it then fixed. The
+    # remediation session is dev work, but it converges on review findings rather
+    # than advancing planned scope, so it must not read as an estimate overrun.
+    log = _est_log(
+        _DEV.format(sid="d1", before="pending", after="in_progress"),
+        _REVIEW.format(
+            sid="r1", of="d1", before="in_progress", after="in_progress",
+            verdict="changes-requested",
+        ),
+        _DEV.format(sid="d2", before="in_progress", after="in_progress"),
+    )
+    report = report_of(log)
     pm = report.protocol
+
     assert pm.work_entry_count == 2 and pm.changes_requested_count == 1
-    assert pm.remediation_count == 1
+    assert pm.remediation_count == 1 and pm.advancement_entry_count == 1
     se = score(report, SCORE_ESTIMATE)
-    assert se.score == 0.5  # planned 1 / actual 2
+    assert se.score == 1.0  # planned 1 / 1 advancement session
     joined = " ".join(se.warnings)
-    assert "exceeded" in joined and "remediation" in joined
+    assert "exceeded" not in joined  # no overrun...
+    assert "1 remediation round(s)" in joined  # ...but the round stays visible
+
+
+def test_estimate_remediation_chain_split_across_sessions_is_not_an_overrun():
+    # A fix set too large for one session: both dev sessions after the
+    # changes-requested verdict are remediation, because what ends a convergence
+    # chain is the next review, not the next session. Splitting a fix must not
+    # cost estimate score.
+    log = _est_log(
+        _DEV.format(sid="d1", before="pending", after="in_progress"),
+        _REVIEW.format(
+            sid="r1", of="d1", before="in_progress", after="in_progress",
+            verdict="changes-requested",
+        ),
+        _DEV.format(sid="d2", before="in_progress", after="in_progress"),
+        _DEV.format(sid="d3", before="in_progress", after="in_progress"),
+    )
+    report = report_of(log)
+    pm = report.protocol
+
+    assert pm.work_entry_count == 3
+    assert pm.remediation_count == 2 and pm.advancement_entry_count == 1
+    se = score(report, SCORE_ESTIMATE)
+    assert se.score == 1.0
+    assert any("2 remediation round(s)" in w for w in se.warnings)
+
+
+def test_estimate_still_penalizes_advancement_overrun():
+    # Guard against over-correction: two *advancement* sessions against a total of
+    # one keep the existing proportional overrun, with no remediation involved.
+    log = _est_log(
+        _DEV.format(sid="d1", before="pending", after="in_progress"),
+        _REVIEW.format(
+            sid="r1", of="d1", before="in_progress", after="in_progress",
+            verdict="pass",
+        ),
+        _DEV.format(sid="d2", before="in_progress", after="in_progress"),
+    )
+    report = report_of(log)
+    pm = report.protocol
+
+    assert pm.remediation_count == 0 and pm.advancement_entry_count == 2
+    se = score(report, SCORE_ESTIMATE)
+    assert se.score == 0.5  # planned 1 / actual 2 advancement sessions
+    joined = " ".join(se.warnings)
+    assert "exceeded" in joined and "remediation" not in joined
 
 
 def test_estimate_within_budget_is_perfect():

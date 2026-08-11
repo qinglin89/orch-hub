@@ -1191,7 +1191,10 @@ class ProtocolMetrics:
     ``uncovered_work_entries`` are work session ids with no ``review of <id>``
     entry; ``pass_verdict_count``/``changes_requested_count`` tally review
     verdicts; ``remediation_count`` is work entries whose most recent preceding
-    review requested changes (the taskfile remediation predicate);
+    review requested changes (the taskfile remediation predicate), and
+    ``advancement_entry_count`` is the complementary partition — the work entries
+    that advanced planned scope rather than converging on review findings, so
+    ``remediation_count + advancement_entry_count == work_entry_count``;
     ``blocked_entry_count`` is entries transitioning to ``blocked``;
     ``dispute_unresolved_count`` counts ``Dispute-unresolved`` markers;
     ``incomplete_entries`` are entry ids missing a required field.
@@ -1231,6 +1234,7 @@ class ProtocolMetrics:
     pass_verdict_count: int
     changes_requested_count: int
     remediation_count: int
+    advancement_entry_count: int
     blocked_entry_count: int
     dispute_unresolved_count: int
     incomplete_entries: tuple[str, ...]
@@ -1268,6 +1272,7 @@ class ProtocolMetrics:
             "pass_verdict_count": self.pass_verdict_count,
             "changes_requested_count": self.changes_requested_count,
             "remediation_count": self.remediation_count,
+            "advancement_entry_count": self.advancement_entry_count,
             "blocked_entry_count": self.blocked_entry_count,
             "dispute_unresolved_count": self.dispute_unresolved_count,
             "incomplete_entries": list(self.incomplete_entries),
