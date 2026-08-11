@@ -682,6 +682,72 @@ def test_merge_same_window_takes_the_higher_used_percent() -> None:
     assert merged.windows[0].figure_instant == WIN_A
 
 
+def test_merge_jitter_recovers_both_live_frozen_windows_on_first_ingest() -> None:
+    stored_ts = "2026-08-11T06:25:00+00:00"
+    fresh_ts = "2026-08-11T06:30:00+00:00"
+    stored = _two_window_obs(
+        stored_ts,
+        3.0,
+        16.0,
+        five_reset="2026-08-11T10:00:00.971341+00:00",
+        seven_reset="2026-08-14T22:00:01.016609+00:00",
+    )
+    candidate = _two_window_obs(
+        fresh_ts,
+        7.0,
+        41.0,
+        five_reset="2026-08-11T10:00:00.330475+00:00",
+        seven_reset="2026-08-14T22:00:00.330579+00:00",
+    )
+
+    merged = merge_observations(stored, candidate)
+
+    assert merged is not None
+    assert merged.observed_ts == fresh_ts
+    by_key = {window.key: window for window in merged.windows}
+    assert by_key["five_hour"].used_percent == 7.0
+    assert by_key["five_hour"].figure_instant == "2026-08-11T10:00:00.971341+00:00"
+    assert by_key["seven_day"].used_percent == 41.0
+    assert by_key["seven_day"].figure_instant == "2026-08-14T22:00:01.016609+00:00"
+
+
+def test_merge_jitter_takes_a_higher_candidate_with_the_later_instant() -> None:
+    earlier = "2026-08-14T22:00:00.330579+00:00"
+    later = "2026-08-14T22:00:01.016609+00:00"
+
+    merged = merge_observations(five_obs(16.0, earlier), five_obs(41.0, later))
+
+    assert merged is not None
+    assert merged.windows[0].used_percent == 41.0
+    assert merged.windows[0].figure_instant == later
+
+
+def test_merge_jitter_accepts_integer_statusline_and_fractional_cache_instants() -> None:
+    statusline_instant = "2026-08-14T22:00:00+00:00"
+    cache_instant = "2026-08-14T22:00:00.330579+00:00"
+
+    merged = merge_observations(
+        five_obs(40.0, statusline_instant), five_obs(41.0, cache_instant)
+    )
+
+    assert merged is not None
+    assert merged.windows[0].used_percent == 41.0
+    assert merged.windows[0].figure_instant == cache_instant
+
+
+def test_merge_jitter_tolerance_is_inclusive_and_never_lowers_usage() -> None:
+    current_instant = "2026-08-14T22:00:00+00:00"
+    tolerance_edge = "2026-08-14T22:05:00+00:00"
+
+    merged = merge_observations(
+        five_obs(41.0, current_instant), five_obs(40.0, tolerance_edge)
+    )
+
+    assert merged is not None
+    assert merged.windows[0].used_percent == 41.0
+    assert merged.windows[0].figure_instant == tolerance_edge
+
+
 def test_merge_rollover_replaces_even_with_a_lower_figure() -> None:
     # A newer window instant is a rollover: the fresh post-reset reading replaces
     # the old near-full figure, even though its used% is far lower.

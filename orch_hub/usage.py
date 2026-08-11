@@ -611,6 +611,13 @@ _CLAUDE_WINDOW_MINUTES = {"five_hour": 300, "seven_day": 10080}
 """Each window's duration. The CLI's shape carries no duration field — the window's
 key *is* its duration — so these supply the minutes and label the UI renders."""
 
+_CLAUDE_WINDOW_IDENTITY_TOLERANCE = dt.timedelta(minutes=5)
+"""Maximum reset-instant jitter still treated as one Claude rate-limit window.
+
+Observed cache and statusLine carriers can describe one logical reset a few seconds
+apart. Five minutes covers that recomputation jitter while remaining far below the
+shortest real window separation (five hours)."""
+
 
 def _first(data: dict, keys: Iterable[str]) -> object:
     """The first present, non-``None`` value among ``keys`` in ``data`` (else None)."""
@@ -1067,24 +1074,42 @@ def _merge_window(current: UsageWindow, candidate: UsageWindow) -> UsageWindow:
       candidate's real ``figure_instant``, and if the stored figure was in fact
       current (an idle reader supplied the lower candidate) the next current reading
       maxes it back;
-    * both instants known and different -> the newer instant is a rollover to a
-      later window, so take that side's figure even when its used% is lower (a
-      genuine post-reset reading), and never the older one (a pre-reset snapshot);
-    * same instant, or the candidate carries no identity -> take the higher used%
-      (the later measurement within one window, and the conservative
-      never-under-report choice when the two windows cannot be distinguished).
+    * both instants known and farther apart than the Claude identity tolerance ->
+      the newer instant is a rollover to a later window, so take that side's figure
+      even when its used% is lower (a genuine post-reset reading), and never the
+      older one (a pre-reset snapshot);
+    * same or tolerance-close instants, or the candidate carries no identity -> take
+      the higher used% (the later measurement within one window, and the
+      conservative never-under-report choice when the two windows cannot be
+      distinguished). Tolerance-close identities independently converge to the
+      later instant so subsequent observations compare against the forward-most
+      representation of that logical window.
 
     The displayed ``resets_at`` is always the forward-most of the two, so a
     boundary already advanced past the losing side is never regressed."""
     cur_instant = _parse_iso(current.figure_instant)
     cand_instant = _parse_iso(candidate.figure_instant)
+    same_known_window = (
+        cur_instant is not None
+        and cand_instant is not None
+        and abs(cand_instant - cur_instant) <= _CLAUDE_WINDOW_IDENTITY_TOLERANCE
+    )
     if cur_instant is None and cand_instant is not None:
         winner = candidate
-    elif cur_instant is not None and cand_instant is not None and cur_instant != cand_instant:
+    elif cur_instant is not None and cand_instant is not None and not same_known_window:
         winner = candidate if cand_instant > cur_instant else current
     else:
         winner = candidate if _used_at_least(candidate, current) else current
-    return replace(winner, resets_at=_later(current.resets_at, candidate.resets_at))
+    figure_instant = (
+        _later(current.figure_instant, candidate.figure_instant)
+        if same_known_window
+        else winner.figure_instant
+    )
+    return replace(
+        winner,
+        resets_at=_later(current.resets_at, candidate.resets_at),
+        figure_instant=figure_instant,
+    )
 
 
 def merge_observations(
@@ -1097,9 +1122,9 @@ def merge_observations(
     *own* last API response, so a sink's write stamp is not its measurement time.
     Replacing the store wholesale on write recency therefore lets an idle session's
     hours-old figure lower a current one. Instead each window is merged
-    independently by :func:`_merge_window` (identity from ``figure_instant``, ties
-    by ``max(used_percent)``); a window the store never had is added, and one the
-    candidate omits is kept untouched.
+    independently by :func:`_merge_window` (jitter-tolerant identity from
+    ``figure_instant``, same-window ties by ``max(used_percent)``); a window the
+    store never had is added, and one the candidate omits is kept untouched.
 
     Returns ``None`` when nothing changed — an unchanged re-read, or a wholly
     stale/older candidate — so the caller writes nothing and the stored figures and
