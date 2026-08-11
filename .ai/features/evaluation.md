@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-11
+verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
 ---
 
 # Features: Task Evaluation
@@ -109,7 +109,9 @@ Implemented behavior:
 - `build_report(pack)` parses the task file for frontmatter legality,
   required sections, session-log entry counts, review coverage, verdict and
   remediation counts, blocker/fix-set/prefetch facts, status-transition
-  continuity, final-status match, and completed-task final `Open: none`.
+  continuity, final-status match, and completed-task final `Open: none`. A dev
+  work entry may collapse its mechanical first claim and completion into
+  `pending → final_review`; the same edge remains illegal for a review entry.
 - Static reports carry six transparent score axes: protocol,
   reliability/diagnostics, handoff structure, estimate fit, and
   knowledge-maintenance signals, plus `prefetch_set_read_completeness`. The read
@@ -118,7 +120,10 @@ Implemented behavior:
   candidates, including sessions dropped by the reader cap. Penalties append
   evidence-naming warnings; missing or partial evidence lowers confidence or
   makes an axis not assessable instead of crashing. `static_metrics.json`
-  stamps static schema v3 so score-set cohorts remain separable.
+  stamps static schema v4 so interpretation cohorts remain separable. Estimate
+  fit counts advancement work entries only; work after a `changes-requested`
+  review stays remediation until the next review, remains a diagnostic, and is
+  not charged to the advancement estimate.
 - Two knowledge signals are intentionally omitted because the evidence pack
   cannot derive them: per-commit touched file paths and archived-task blocker
   references across other tasks.

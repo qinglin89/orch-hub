@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-11
-verified-against: ce19bb172c57eabbbbf7e83604ec3d6bff96733b
+verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -69,8 +69,11 @@ taskfile/session-log protocol facts, six transparent score axes
 `prefetch_set_read_completeness`), confidence values, per-session read
 diagnosis, and evidence-backed warnings. The read axis scores complete
 session-time sets only across applicable assessable sessions and keeps missing
-or capped candidates in confidence rather than quality. Static schema v3 cohorts
-the score set. `generate_metrics(repo, task_id,
+or capped candidates in confidence rather than quality. Static schema v4 makes
+transition legality entry-kind-aware (`pending → final_review` is dev-only) and
+partitions work entries into advancement versus remediation; estimate fit counts
+only advancement while remediation remains neutral diagnostic evidence.
+`generate_metrics(repo, task_id,
 evaluation_id=None)` delegates to `EvaluationService.generate_evidence`, writes
 `static_metrics.json` atomically in the same evaluation dir, and cleans the
 reserved dir if the report write fails. `api.py` exposes this as the protected

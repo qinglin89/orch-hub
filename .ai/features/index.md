@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-11
+verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
 ---
 
 # Features
@@ -10,7 +10,7 @@ verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
 | Repo discovery and readiness | implemented | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | CLI `repos`, CLI `repos --json`, `GET /api/repos`, `GET /api/repos/{repo_id}/commits` |
 | Task inventory | implemented | task_store, api, models | `GET /api/tasks`, `GET /api/repos/{repo_id}/tasks`, `GET /api/repos/{repo_id}/tasks/{task_id}` |
 | Task evaluation foundation | implemented | evaluation, ai_snapshot, session_reads, config, task_store, runs, history, sessions, logs, git_meta, models, api, web | internal `EvaluationService` evidence build/generate/list/read/prune; schema-v15 `.ai/` snapshot/patch and ordered session-read evidence; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET/POST /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; batched newest-state in `GET /api/history/runs`; dashboard `#/evaluations/{repo}/{task}` |
-| Task static metrics | implemented | static_metrics, session_reads, evaluation, config, models, api, web | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`; six axes incl. prefetch-set read completeness; static schema v3; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; persists and displays `static_metrics.json` beside `evidence.json`; no model call |
+| Task static metrics | implemented | static_metrics, session_reads, evaluation, config, models, api, web | internal `StaticEvaluator.run_metrics`, `build_report`, `generate_metrics`; entry-kind-aware transitions; six axes incl. advancement-only estimate fit and prefetch-set read completeness; remediation diagnostics; static schema v4; `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics`; persists and displays `static_metrics.json` beside `evidence.json`; no model call |
 | Task semantic evaluator | implemented | semantic_jobs, semantic, session_reads, static_metrics, evaluation, config, models, api, cli, web | internal `SemanticEvaluator.evaluate/doctor`, `SemanticJobManager`, `build_semantic_evidence`, `build_prompt`, `parse_report`, `ClaudeSemanticBackend`; semantic-schema-v2 retrieval effectiveness/rediscovery grounding; `POST`/`GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `orch-hub eval doctor`; dashboard Layer 2 running/failed/completed job states plus report/history rendering; persists `semantic_report.json` and `report.md` beside evidence/static artifacts |
 | Global evaluation report feed | implemented | report_catalog, evaluation, semantic, task_store, models, api, web | internal `ReportCatalog`; `GET /api/evaluation/reports[?after=<seq>&limit=<n>]`; `GET /api/evaluation/reports/{report_key}`; dashboard `#/reports`; append-only global order/identity, startup reconciliation, retention debt guard, contained integrity-reporting bundle export |
 | Agent subscription usage | implemented | usage, statusline, runs, models, config, api, intake_agent, semantic, web, docs | primary Claude utilization-cache parser + bounded model-free `ClaudeUsageCollector`; stale-read and run-end refresh triggers; per-window cache/statusLine merge; Codex rollout reader; legacy `orch-hub-statusline`; protected `GET /api/usage`; display-only, fail-soft, no gates |

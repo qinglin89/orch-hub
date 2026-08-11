@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-11
+verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -93,11 +93,16 @@ count, dev/review/plan-gate session counts, context/turn/duration aggregates,
 warning count, and target active/archive source. `build_report(pack)` parses
 the task file content from the pack for frontmatter legality, required
 sections, session-log structure, review coverage, verdict/remediation counts,
-status-transition path, and completion hygiene, then returns six transparent
-score components with evidence-backed warnings and confidence. The sixth,
+status-transition path, and completion hygiene. Transition legality is
+entry-kind-aware: a dev entry may collapse a first claim and completion into
+`pending → final_review`, while a review entry may not. Work entries are
+partitioned into advancement and remediation; estimate fit counts only
+advancement, while remediation remains neutral diagnostic evidence. The report
+returns six transparent score components with evidence-backed warnings and
+confidence. The sixth,
 `prefetch_set_read_completeness`, scores complete applicable/assessable
 session-time sets while keeping unmeasured and reader-capped candidates in the
-confidence denominator only. Reports stamp static schema v3. `generate_metrics`
+confidence denominator only. Reports stamp static schema v4. `generate_metrics`
 delegates to `EvaluationService.generate_evidence`, writes `static_metrics.json`
 atomically into the same evaluation artifact directory, and removes the
 reserved dir on report-write failure. It mints evidence with retention deferred
