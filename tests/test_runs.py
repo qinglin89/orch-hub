@@ -35,6 +35,7 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import read_effective_config_snapshot
 from orch_hub.sessions import read_snapshot
+from orch_hub.task_snapshots import read_snapshots as read_task_snapshots
 from orch_hub.runs import (
     CAFFEINATE,
     BlockedTaskError,
@@ -1841,6 +1842,130 @@ def test_snapshot_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
     assert status.state == "ended"
     assert read_record(manager, record.run_id)["ended_ts"] is not None
     assert not sessions_json(manager, record.run_id).exists()
+
+
+# -- session-entry task snapshots (task_snapshots.json) ------------------------
+
+
+def task_snapshots_json(manager: RunManager, run_id: str) -> Path:
+    return manager.runs_dir / run_id / "task_snapshots.json"
+
+
+def task_file(repo: ManagedRepo) -> Path:
+    return repo.path / ".ai-tasks" / f"{TASK_ID}.md"
+
+
+def test_list_runs_captures_the_live_sessions_entry_task_file(tmp_path):
+    # The scan the resident monitor drives is the capture trigger: a live run with
+    # an open session bracket gets that session's task file recorded.
+    repo = make_repo(tmp_path)
+    manager, _, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:1])  # dev session start, no end yet
+    clock.tick(30)  # 03:00:30, i.e. 20s after the 03:00:10 start line
+
+    manager.list_runs()
+
+    kept = read_task_snapshots(manager.runs_dir / record.run_id)
+    assert [(e.index, e.sid, e.role, e.present) for e in kept.snapshots] == [
+        (0, "dev1", "dev", True)
+    ]
+    assert kept.snapshots[0].content == task_file(repo).read_text(encoding="utf-8")
+    assert kept.snapshots[0].entry_lag_seconds == 20
+    assert kept.snapshots[0].capture_point == "post_claim"
+
+
+def test_a_multi_session_run_captures_one_snapshot_per_session(tmp_path):
+    # The acceptance case: each session's own entry state, not one shared copy of
+    # whatever the file looked like when the run ended.
+    repo = make_repo(tmp_path)
+    manager, _, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:1])
+    clock.tick(30)
+    manager.list_runs()
+
+    # The dev session works the task and hands off; review opens at 03:11:00.
+    write_task_file(repo.path, TASK_ID, status="final_review")
+    write_orch_log(repo, ORCH_LOG_LINES[:4])
+    clock.tick(11 * 60)  # 03:11:30
+    manager.list_runs()
+
+    kept = read_task_snapshots(manager.runs_dir / record.run_id)
+    assert [(e.index, e.role, e.present) for e in kept.snapshots] == [
+        (0, "dev", True),
+        (1, "review", True),
+    ]
+    assert "status: in_progress" in kept.snapshots[0].content
+    assert "status: final_review" in kept.snapshots[1].content
+    assert kept.snapshots[1].status_before == "final_review"
+
+
+def test_run_end_settles_a_session_id_the_log_revealed_late(tmp_path):
+    # Codex logs sid=(pending) at start; the review session's real id appears only
+    # on its end line, which the end transition reconciles.
+    repo = make_repo(tmp_path)
+    manager, spawner, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:4])  # review session open, sid=(pending)
+    clock.tick(11 * 60 + 30)
+    manager.list_runs()
+    assert read_task_snapshots(manager.runs_dir / record.run_id).for_sid("rev1") is None
+
+    write_orch_log(repo, ORCH_LOG_LINES)  # end line reveals sid=rev1
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    kept = read_task_snapshots(manager.runs_dir / record.run_id)
+    assert kept.for_sid("rev1") is not None
+    assert kept.for_sid("rev1").index == 1
+
+
+def test_a_missing_task_file_does_not_fail_the_scan(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, _, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    task_file(repo).unlink()
+    write_orch_log(repo, ORCH_LOG_LINES[:1])
+    clock.tick(30)
+
+    statuses = manager.list_runs()  # must not raise
+
+    assert [status.state for status in statuses] == ["active"]
+    assert not task_snapshots_json(manager, record.run_id).exists()
+
+
+def test_an_ended_run_captures_nothing(tmp_path):
+    # A terminal run's file is that run's output, never a session's entry state.
+    repo = make_repo(tmp_path)
+    manager, spawner, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:1])
+    end_run(spawner, 0)
+    clock.tick(30)
+
+    manager.list_runs()
+
+    assert not task_snapshots_json(manager, record.run_id).exists()
+
+
+def test_task_snapshot_failure_does_not_fail_a_scan(tmp_path, monkeypatch):
+    # Isolation, like the sessions snapshot: capture is best-effort bookkeeping and
+    # must never propagate into a status read.
+    repo = make_repo(tmp_path)
+    manager, _, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:1])
+    clock.tick(30)
+
+    def boom(*_args, **_kwargs):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("orch_hub.runs.capture_entry", boom)
+    statuses = manager.list_runs()  # must not raise
+
+    assert [status.state for status in statuses] == ["active"]
+    assert not task_snapshots_json(manager, record.run_id).exists()
 
 
 # -- effective-config launch snapshot (effective_config.json) ------------------

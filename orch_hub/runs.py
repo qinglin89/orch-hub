@@ -98,6 +98,7 @@ from .orch_config import (
 )
 from .readiness import check_readiness
 from .sessions import read_live, read_snapshot, write_snapshot
+from .task_snapshots import capture_entry, reconcile_sids
 from .task_store import (
     STATUS_MISSING,
     STATUS_UNKNOWN,
@@ -658,12 +659,19 @@ class RunManager:
         or a dead pid) is persisted into the run's ``run.json``, so state
         survives hub restarts. This is also the reattach path — a fresh
         manager sees runs started by a previous hub process.
+
+        It is also the run manager's periodic observation point — the resident
+        :class:`~orch_hub.monitor.RunMonitor` drives exactly this call — so it is
+        where a live run's session-entry task file is captured
+        (:meth:`_capture_task_entries`), after the lock is released.
         """
         with self._lock:
-            return [
+            statuses = [
                 self._status(run_dir, self._refresh(run_dir, _load_record(run_dir)))
                 for run_dir in self._run_dirs()
             ]
+        self._capture_task_entries(statuses)
+        return statuses
 
     def recent_runs(self, limit: int) -> list[RunHistoryEntry]:
         """Return a bounded newest-first history *summary* — no paging.
@@ -976,6 +984,9 @@ class RunManager:
         # the repo-side log. Like the notification below, it runs a single time per
         # run (settled records return early above) and is fully isolated.
         self._snapshot_sessions(run_dir, updated)
+        # Same moment, same isolation: settle any session-entry task snapshot still
+        # keyed by a bracket whose sid the log revealed only at its end line.
+        self._settle_task_snapshots(run_dir, updated)
         # Snapshot the run's authoritative effective-config line the same way, so
         # run history retains what actually launched even after the repo-side log
         # is cleaned; also isolated (a parse/IO failure never touches run state).
@@ -1053,6 +1064,52 @@ class RunManager:
             # Never let snapshotting touch run state; a missing snapshot is a
             # graceful degradation, not an error. Log only the (non-secret) run id.
             _log.warning("session snapshot failed for run %s", record.run_id)
+
+    def _capture_task_entries(self, statuses: Sequence[RunStatus]) -> None:
+        """Capture each live run's session-entry task file (caller holds no lock).
+
+        Driven from :meth:`list_runs` — the scan the resident monitor runs every
+        30s, plus whatever dashboard traffic triggers it — because a session's
+        entry state exists only while the run is live: by the time the run ends,
+        the file has been rewritten by the very session whose entry state we
+        wanted (:mod:`orch_hub.task_snapshots`).
+
+        Deliberately outside the manager lock, like :meth:`read_sessions`'s parse:
+        this reads one log per live run and cannot be allowed to serialize status
+        reads behind it. That admits two concurrent scans capturing the same
+        session, which is harmless — they compute the same entry and the write is
+        atomic. Isolated exactly like :meth:`_snapshot_sessions`: a parse or IO
+        failure leaves the run untouched and unsnapshotted, never failing a scan.
+        """
+        for status in statuses:
+            if status.state not in (STATE_ACTIVE, STATE_WAITING):
+                continue
+            record = status.record
+            try:
+                capture_entry(
+                    self.runs_dir / record.run_id,
+                    record,
+                    read_live(record),
+                    now=self._clock(),
+                )
+            except Exception:
+                _log.warning("task-file snapshot failed for run %s", record.run_id)
+
+    def _settle_task_snapshots(self, run_dir: Path, record: RunRecord) -> None:
+        """Backfill pending session ids in the run's task snapshots, at its end.
+
+        Codex reveals a session id only on the first turn, so a bracket can log
+        ``sid=(pending)`` at start and carry the real id only on its end line — and
+        no scan need fall between that line and process exit. The end transition is
+        the last point the whole log is available, so reconcile once here
+        (:func:`orch_hub.task_snapshots.reconcile_sids`), isolated exactly like
+        :meth:`_snapshot_sessions`: an unreconciled entry keeps its bracket
+        position and is still readable, so a failure costs a join key, not state.
+        """
+        try:
+            reconcile_sids(run_dir, read_live(record))
+        except Exception:
+            _log.warning("task-snapshot reconcile failed for run %s", record.run_id)
 
     def _snapshot_effective_config(self, run_dir: Path, record: RunRecord) -> None:
         """Persist the run's ``effective-config:`` snapshot at the live->ended
