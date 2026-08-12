@@ -21,8 +21,9 @@ surface is covered in ``tests/test_api.py``; session-3 adds the dashboard view.
 The raw-artifact read is covered last: byte-exact bytes for every published
 artifact (the parsed bundle cannot prove a digest, since it re-serializes), the
 per-artifact availability that deliberately differs from the bundle's
-all-or-nothing rule, and the four no-bytes reasons an HTTP status has to stay
-able to tell apart.
+all-or-nothing rule, the four no-bytes reasons an HTTP status has to stay able to
+tell apart, and the containment that has to hold on the *file* and not only the
+directory — the four names are fixed, but what stands under them is not.
 """
 
 from __future__ import annotations
@@ -1614,6 +1615,55 @@ def test_raw_artifact_that_will_not_read_is_a_fault_not_an_absence(
     assert read.data is None
     assert read.reason == ARTIFACT_UNREADABLE
     assert EVIDENCE_NAME in read.detail
+
+
+def test_raw_artifact_symlinked_out_of_its_dir_is_refused_not_followed(tmp_path):
+    # The *directory* is contained, but `is_file()`/`read_bytes()` follow symlinks,
+    # so containment has to be re-proved on what the fixed name actually opens.
+    # Otherwise an artifact swapped after publication for a link out of the tree
+    # serves those outside bytes — a target-repo file included — under this entry's
+    # published key, which is exactly what this read path promises it cannot do.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    outside = repo(tmp_path).path / "docs" / "private.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("# target repo content\n", encoding="utf-8")
+    link = eval_dir / SEMANTIC_REPORT_MD_NAME
+    link.unlink()
+    link.symlink_to(outside)
+    # The link is live, so the refusal below is the containment check answering and
+    # not a fixture that never resolved to anything in the first place.
+    assert link.read_bytes() == b"# target repo content\n"
+
+    read = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)
+
+    assert read.data is None
+    # A damaged artifact tree, deliberately not `not_retained`: answering "pruned"
+    # would report tampering as retention's designed end state and hide it.
+    assert read.reason == ARTIFACT_UNREADABLE
+    assert "resolves outside" in read.detail
+    # Per artifact, like every other outcome here — the untouched siblings verify.
+    assert cat.read_artifact_bytes(entry, EVIDENCE_NAME).integrity == "verified"
+
+
+def test_raw_artifact_reads_through_a_symlinked_data_dir(tmp_path):
+    # Containment compares two *resolved* paths, so a hub whose data dir is itself
+    # reached through a symlink (a relocated volume, or macOS's own /var ->
+    # /private/var) still reads normally. Comparing a resolved artifact against an
+    # unresolved dir would refuse every artifact on such a deployment.
+    (tmp_path / "real-data").mkdir()
+    (tmp_path / "hub-data").symlink_to(tmp_path / "real-data", target_is_directory=True)
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert read.data == (eval_dir / EVIDENCE_NAME).read_bytes()
+    assert read.integrity == "verified"
 
 
 # -- disabled mode ------------------------------------------------------------

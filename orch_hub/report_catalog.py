@@ -231,7 +231,10 @@ message away from mapping the wrong one. The four are genuinely different
 answers: a name outside the published set (never a file), a stored identity that
 cannot be trusted to address the artifacts, a report whose artifact retention
 removed (the designed end state of an entry outliving what it indexes), and a
-file that is there but would not read."""
+file that is there but does not read — either because IO failed or because it
+resolves outside its evaluation dir, which is refused rather than followed. Both
+are hub-side defects, deliberately not folded into ``not_retained``: reporting a
+damaged artifact tree as the designed end state of retention would hide it."""
 
 INTEGRITY_VERIFIED = "verified"
 INTEGRITY_MISMATCHED = "mismatched"
@@ -636,15 +639,18 @@ class ReportCatalog:
         mode, so a surviving artifact beside a partially pruned set still reads and
         the missing sibling is that sibling's own answer.
 
-        Reads are confined twice before any IO. ``name`` must be one of the four
-        published artifact names (:data:`REQUIRED_ARTIFACTS`) — the parameter is a
-        selector over a closed set, never a path fragment, so nothing a caller
-        writes can name a file the set does not contain. The directory then comes
+        Reads are confined three times. Before any IO: ``name`` must be one of the
+        four published artifact names (:data:`REQUIRED_ARTIFACTS`) — the parameter
+        is a selector over a closed set, never a path fragment, so nothing a caller
+        writes can name a file the set does not contain — and the directory comes
         from the same contained resolution and stored-identity audit
         (:func:`_identity_fault`) that guard :meth:`read_bundle`. A traversal
-        attempt or a hand-edited line therefore opens no file at all, and nothing
-        outside the hub's own evaluations tree is reachable from here — least of
-        all the target repo, which this path never touches.
+        attempt or a hand-edited line therefore opens no file at all. Those two
+        constrain only what the *caller* and the *catalog* can address, though; the
+        third constrains the filesystem itself, re-proving containment on the
+        artifact's resolved target so a link planted where the artifact was cannot
+        make this path read outside the evaluations tree — least of all the target
+        repo, which it never touches.
 
         Bytes that no longer match the recorded digest are still returned, marked
         ``mismatched``: the same rule the bundle applies, and more load-bearing
@@ -687,13 +693,33 @@ class ReportCatalog:
             reason=ARTIFACT_NOT_RETAINED,
             detail=f"report artifact {name} is no longer retained",
         )
-        if not path.is_file():
+        # A contained *directory* says nothing about what the fixed name inside it
+        # opens: `is_file()` and `read_bytes()` both follow symlinks, so an artifact
+        # replaced after publication by a link out of the tree would otherwise
+        # serve those outside bytes (a target-repo file included) under this
+        # entry's key. Containment is therefore re-proved on the resolved target,
+        # and the read then uses that resolved path rather than reopening the
+        # unchecked one, so nothing planted in between can redirect it. Absence
+        # resolves harmlessly (a pruned file/dir resolves as far as it exists and
+        # stays under `eval_dir`), leaving `is_file()` the sole reporter of "gone".
+        resolved = path.resolve()
+        if not resolved.is_relative_to(eval_dir.resolve()):
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_UNREADABLE,
+                detail=(
+                    f"report artifact {name} resolves outside its evaluation"
+                    " directory"
+                ),
+            )
+        if not resolved.is_file():
             # A pruned dir, a partially pruned set, or something that is not a
             # regular file standing where the artifact was: all the same answer to
             # the only question asked here — these bytes are not retained.
             return gone
         try:
-            data = path.read_bytes()
+            data = resolved.read_bytes()
         except FileNotFoundError:
             # Lost to a prune between the check above and the read: still absence,
             # not an IO fault, so it must not be reported as one.

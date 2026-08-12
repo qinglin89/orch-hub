@@ -4246,6 +4246,31 @@ def test_raw_artifact_that_will_not_read_is_500_not_a_missing_report(
     assert EVIDENCE_NAME in resp.json()["detail"]
 
 
+def test_raw_artifact_symlinked_out_of_the_tree_serves_no_outside_bytes(
+    tmp_path, monkeypatch
+):
+    # The route's containment promise is about the bytes it returns, not only the
+    # path it builds: the artifact name is fixed, but the file standing under it is
+    # not, so an artifact replaced after publication by a link to anything readable
+    # outside the evaluations tree must not reach a consumer through the key.
+    client, config, item, eval_dir = published_report(tmp_path, monkeypatch)
+    outside = config.data_dir.parent / "outside-the-tree.md"
+    outside.write_text("# private content\n", encoding="utf-8")
+    link = eval_dir / SEMANTIC_REPORT_MD_NAME
+    link.unlink()
+    link.symlink_to(outside)
+
+    resp = client.get(artifact_url(item["report_key"], SEMANTIC_REPORT_MD_NAME))
+
+    assert resp.status_code == 500
+    assert b"private content" not in resp.content
+    assert SEMANTIC_REPORT_MD_NAME in resp.json()["detail"]
+    # Refused per artifact: the report's untouched artifacts still serve, so a
+    # tampered file cannot take the whole published report offline.
+    intact = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+    assert intact.status_code == 200
+
+
 def test_raw_artifact_reads_change_nothing_on_disk(tmp_path, monkeypatch):
     # Read-only in the strong sense: no publication, no evaluation, no retention
     # side effect — the hub's data dir is byte-identical after a full sweep of the
