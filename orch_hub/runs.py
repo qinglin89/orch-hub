@@ -98,7 +98,7 @@ from .orch_config import (
 )
 from .readiness import check_readiness
 from .sessions import read_live, read_snapshot, write_snapshot
-from .task_snapshots import capture_entry, reconcile_sids
+from .task_snapshots import capture_entries, settle_snapshots
 from .task_store import (
     STATUS_MISSING,
     STATUS_UNKNOWN,
@@ -1072,21 +1072,23 @@ class RunManager:
         30s, plus whatever dashboard traffic triggers it — because a session's
         entry state exists only while the run is live: by the time the run ends,
         the file has been rewritten by the very session whose entry state we
-        wanted (:mod:`orch_hub.task_snapshots`).
+        wanted (:mod:`orch_hub.task_snapshots`). A poll cannot see every session
+        at entry, which is why the module also *records* the sessions this scan
+        arrived too late for; the gap is then explicit rather than an absent entry.
 
         Deliberately outside the manager lock, like :meth:`read_sessions`'s parse:
         this reads one log per live run and cannot be allowed to serialize status
-        reads behind it. That admits two concurrent scans capturing the same
-        session, which is harmless — they compute the same entry and the write is
-        atomic. Isolated exactly like :meth:`_snapshot_sessions`: a parse or IO
-        failure leaves the run untouched and unsnapshotted, never failing a scan.
+        reads behind it. Two concurrent scans are therefore possible, and the
+        module — not this loop — serializes their writes into one artifact.
+        Isolated exactly like :meth:`_snapshot_sessions`: a parse or IO failure
+        leaves the run untouched and unsnapshotted, never failing a scan.
         """
         for status in statuses:
             if status.state not in (STATE_ACTIVE, STATE_WAITING):
                 continue
             record = status.record
             try:
-                capture_entry(
+                capture_entries(
                     self.runs_dir / record.run_id,
                     record,
                     read_live(record),
@@ -1096,20 +1098,21 @@ class RunManager:
                 _log.warning("task-file snapshot failed for run %s", record.run_id)
 
     def _settle_task_snapshots(self, run_dir: Path, record: RunRecord) -> None:
-        """Backfill pending session ids in the run's task snapshots, at its end.
+        """Close out the run's task snapshots at its end: sids, and what was missed.
 
-        Codex reveals a session id only on the first turn, so a bracket can log
-        ``sid=(pending)`` at start and carry the real id only on its end line — and
-        no scan need fall between that line and process exit. The end transition is
-        the last point the whole log is available, so reconcile once here
-        (:func:`orch_hub.task_snapshots.reconcile_sids`), isolated exactly like
-        :meth:`_snapshot_sessions`: an unreconciled entry keeps its bracket
-        position and is still readable, so a failure costs a join key, not state.
+        The end transition is the last point the whole log is available *and* the
+        last point anything runs for this run at all, so it is where both loose
+        ends are tied (:func:`orch_hub.task_snapshots.settle_snapshots`): a session
+        id the log revealed only on an end line no scan saw, and any session that
+        began and finished between two scans, which is recorded as an explicit
+        miss because no later scan can. Isolated exactly like
+        :meth:`_snapshot_sessions`: an unsettled entry keeps its bracket position
+        and is still readable, so a failure costs a join key, not state.
         """
         try:
-            reconcile_sids(run_dir, read_live(record))
+            settle_snapshots(run_dir, read_live(record), now=self._clock())
         except Exception:
-            _log.warning("task-snapshot reconcile failed for run %s", record.run_id)
+            _log.warning("task-snapshot settle failed for run %s", record.run_id)
 
     def _snapshot_effective_config(self, run_dir: Path, record: RunRecord) -> None:
         """Persist the run's ``effective-config:`` snapshot at the live->ended

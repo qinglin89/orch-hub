@@ -1901,6 +1901,28 @@ def test_a_multi_session_run_captures_one_snapshot_per_session(tmp_path):
     assert kept.snapshots[1].status_before == "final_review"
 
 
+def test_a_session_that_began_and_ended_between_scans_is_still_recorded(tmp_path):
+    # The monitor polls every 30s, so a whole short session can fall inside one
+    # gap — and a later open bracket must not make that skip permanent. Its bytes
+    # are gone, but the session is accounted for: an absent entry is
+    # indistinguishable downstream from a session that never ran.
+    repo = make_repo(tmp_path)
+    manager, _, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:4])  # dev opened *and closed*, review open
+    clock.tick(11 * 60 + 30)  # 03:11:30, i.e. 30s into the review session
+
+    manager.list_runs()
+
+    kept = read_task_snapshots(manager.runs_dir / record.run_id)
+    assert [(e.index, e.role, e.present) for e in kept.snapshots] == [
+        (0, "dev", False),
+        (1, "review", True),
+    ]
+    assert "moved on" in kept.snapshots[0].detail
+    assert kept.snapshots[0].sid == "dev1"  # still joinable to its session summary
+
+
 def test_run_end_settles_a_session_id_the_log_revealed_late(tmp_path):
     # Codex logs sid=(pending) at start; the review session's real id appears only
     # on its end line, which the end transition reconciles.
@@ -1935,8 +1957,10 @@ def test_a_missing_task_file_does_not_fail_the_scan(tmp_path):
     assert not task_snapshots_json(manager, record.run_id).exists()
 
 
-def test_an_ended_run_captures_nothing(tmp_path):
-    # A terminal run's file is that run's output, never a session's entry state.
+def test_an_ended_run_records_its_sessions_without_capturing_them(tmp_path):
+    # A terminal run's file is that run's output, never a session's entry state —
+    # so no bytes. The end transition is the last thing that runs for this run,
+    # so it is where a never-observed session is recorded, or nowhere.
     repo = make_repo(tmp_path)
     manager, spawner, clock = make_manager(tmp_path)
     record = manager.start_run(repo, TASK_ID)
@@ -1946,7 +1970,11 @@ def test_an_ended_run_captures_nothing(tmp_path):
 
     manager.list_runs()
 
-    assert not task_snapshots_json(manager, record.run_id).exists()
+    kept = read_task_snapshots(manager.runs_dir / record.run_id)
+    assert [(e.index, e.sid, e.present, e.content) for e in kept.snapshots] == [
+        (0, "dev1", False, None)
+    ]
+    assert "never observed" in kept.snapshots[0].detail
 
 
 def test_task_snapshot_failure_does_not_fail_a_scan(tmp_path, monkeypatch):
@@ -1961,7 +1989,7 @@ def test_task_snapshot_failure_does_not_fail_a_scan(tmp_path, monkeypatch):
     def boom(*_args, **_kwargs):
         raise OSError("disk gone")
 
-    monkeypatch.setattr("orch_hub.runs.capture_entry", boom)
+    monkeypatch.setattr("orch_hub.runs.capture_entries", boom)
     statuses = manager.list_runs()  # must not raise
 
     assert [status.state for status in statuses] == ["active"]

@@ -43,33 +43,54 @@ boundary has four consequences, each of them recorded rather than papered over:
   Entries are therefore keyed by the bracket's position in the run's parsed
   session list (stable: the log is append-only, and ``sessions.json`` is the same
   parse), with the sid filled in once the log carries it — see
-  :func:`reconcile_sids`.
+  :func:`settle_snapshots`.
+
+Because the trigger is a poll and not a boundary callback, an observation can
+arrive after a session is already over — a session that starts and ends between
+two scans is never seen at entry at all. Such a session is *recorded as a miss*
+rather than skipped: :func:`capture_entries` accounts for **every** ``session``
+bracket the parse holds, not only the one that can still be captured, and
+:func:`settle_snapshots` does the same final pass at the run's end, where no
+further scan can follow. One entry per session either way — the difference is
+whether it carries bytes, and a consumer reads ``present``/``detail`` to know
+which. The alternative, letting an unobserved session leave no trace, is
+indistinguishable downstream from a run that never had that session.
 
 The artifact sits beside ``sessions.json`` in the run dir and is rewritten whole
-on each change, which is what lets a later scan fill in a sid. Concurrent scans
-are harmless: both compute the same entry for the same bracket, writes are atomic
-and per-writer, and a backfill lost to a racing capture is redone by the next
-scan.
+on each change, which is what lets a later scan fill in a sid. Every rewrite is
+therefore a read-modify-write, and the writers genuinely overlap (any scan
+thread, plus the end transition), so each one runs inside a per-run
+:func:`_locked` transaction: atomic rename alone stops a *torn* file, not a
+stale writer overwriting a fresh one — a capture that read before an end
+transition backfilled a sid would otherwise erase it, with no later scan to redo
+it. Reads stay lock-free: the rename makes every reader see one whole version.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import fcntl
 import json
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .models import ManagedRepo, RunRecord, SessionsSnapshot
+from .models import ManagedRepo, RunRecord, SessionsSnapshot, SessionSummary
 from .task_store import read_task_content
 
 _log = logging.getLogger(__name__)
 
 ARTIFACT_NAME = "task_snapshots.json"
 """Persisted per-session task-file snapshots, written beside ``sessions.json``."""
+
+LOCK_NAME = "task_snapshots.lock"
+"""Stable lock file for the artifact's read-modify-write transaction. Separate
+from the artifact because the artifact is replaced by rename: a lock held on the
+file it replaces guards an inode nobody writes to any more."""
 
 SESSION_KIND = "session"
 """The :class:`~orch_hub.models.SessionSummary` kind that claims the task. The
@@ -102,6 +123,14 @@ MAX_CONTENT_SNAPSHOTS = 24
 sessions, so this is pathology insurance on the artifact's size; a session beyond
 it is still recorded, as an entry with no content, so the cap is never silent."""
 
+_MISS_ENDED = "session had already ended when first observed"
+_MISS_SUPERSEDED = "the run had already moved on when this session was observed"
+_MISS_UNOBSERVED = "session was never observed while the run was live"
+_MISS_CAP = f"run already holds {MAX_CONTENT_SNAPSHOTS} captured task files"
+"""Why an accounted-for session carries no bytes. Each names *what the observer
+missed*, never a fault of the session: the entry exists so a consumer can tell a
+session with no exact task file from one that was never there at all."""
+
 
 @dataclass(frozen=True)
 class SessionTaskSnapshot:
@@ -115,9 +144,10 @@ class SessionTaskSnapshot:
 
     ``present`` follows :class:`orch_hub.ai_snapshot.AiDoc`: True only when the
     file was found *and* read into ``content``. A False entry is a recorded miss
-    — the entry window closed, or the content cap was reached — with ``detail``
-    saying which; the run and every downstream read still complete. ``size`` is
-    the file's true byte size and ``truncated`` marks a kept head shorter than it.
+    — the session was already over when a scan first saw it, its entry window had
+    closed, or the content cap was reached — with ``detail`` saying which; the run
+    and every downstream read still complete. ``size`` is the file's true byte
+    size and ``truncated`` marks a kept head shorter than it.
 
     ``captured_at`` is the UTC instant the bytes were read and
     ``entry_lag_seconds`` how long after the session-start log line that was
@@ -161,12 +191,13 @@ class SessionTaskSnapshot:
 
 @dataclass(frozen=True)
 class TaskSnapshots:
-    """One run's session-entry task-file snapshots, in session order.
+    """One run's session-entry task-file snapshots, in bracket order.
 
-    An empty set is a valid artifact (a run whose sessions were all observed too
-    late, or that never reached one). Absence of an entry for a session is not an
-    error either: it means no capture was recorded for it, and a consumer treats
-    that session's task file as reconstructed rather than exact.
+    An empty set is a valid artifact (a run that never reached a session). Once a
+    run has ended, every ``session`` bracket its log holds has an entry here, so a
+    missing one means the run's accounting never closed — it predates this
+    artifact, or the hub died before its end transition. Downstream that reads the
+    same as a miss: no exact task file, treat that session as reconstructed.
     """
 
     snapshots: tuple[SessionTaskSnapshot, ...] = ()
@@ -179,11 +210,13 @@ class TaskSnapshots:
         return None
 
     def for_sid(self, sid: str) -> SessionTaskSnapshot | None:
-        """The entry for a backend session id, if one was captured and reconciled.
+        """The entry recorded for a backend session id, if its sid is known.
 
         The join a consumer holding a :class:`~orch_hub.models.SessionSummary`
-        uses. ``None`` covers both "no capture for that session" and "the sid was
-        never revealed", which are the same thing downstream: no exact task file.
+        uses. A returned entry may still be a recorded miss (``present`` False) —
+        the session was accounted for but its bytes were not captured. ``None``
+        means the sid was never revealed in the log, which is downstream the same
+        thing as a miss: no exact task file for that session.
         """
         for entry in self.snapshots:
             if entry.sid is not None and entry.sid == sid:
@@ -198,12 +231,48 @@ def artifact_path(run_dir: Path) -> Path:
     return run_dir / ARTIFACT_NAME
 
 
+def lock_path(run_dir: Path) -> Path:
+    return run_dir / LOCK_NAME
+
+
+@contextmanager
+def _locked(run_dir: Path) -> Iterator[None]:
+    """Hold one run's read-modify-write transaction against threads *and* processes.
+
+    Every write here recomputes the whole artifact from what it just read, so any
+    interleaving of two writers drops one of them: a capture that read before an
+    end transition backfilled a sid writes that sid back to ``None``, and two
+    scans that observed different brackets each write a set missing the other's
+    entry. Neither loss is self-healing — the end transition runs once per run,
+    and a session already accounted for is never revisited.
+
+    A POSIX advisory lock on :attr:`lock_path`, the same mechanism
+    :mod:`orch_hub.report_catalog` uses for its append transaction: ``flock`` is
+    held per open file description, so a fresh handle per entry makes it
+    exclusive between this process's own threads as well as against a second hub
+    process over the same data dir. The OS releases it if the holder dies, so a
+    crashed scan cannot wedge a run's artifact.
+
+    Lock order is one-way: a caller may hold the run manager's lock and take
+    this one (the end transition does), but nothing holding this one reaches back
+    for a manager lock — the only work inside is the artifact plus one bounded
+    task-file read.
+    """
+    with lock_path(run_dir).open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
 def write_snapshots(run_dir: Path, snapshots: TaskSnapshots) -> None:
     """Persist the whole set atomically (per-writer tmp + rename).
 
-    The tmp name carries pid and thread id — unlike ``sessions.json``, which is
-    written once per run at the end transition, this file is rewritten by any
-    scan, so two writers must not share a tmp path.
+    Serialization between writers is :func:`_locked`'s job, not this function's;
+    the rename is what keeps a *reader* from ever seeing a partial file. The tmp
+    name still carries pid and thread id so that a caller writing outside the
+    transaction (tests, a future tool) cannot collide on the tmp path.
     """
     path = artifact_path(run_dir)
     tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
@@ -214,8 +283,8 @@ def write_snapshots(run_dir: Path, snapshots: TaskSnapshots) -> None:
 def read_snapshots(run_dir: Path) -> TaskSnapshots | None:
     """Load a run's persisted snapshots, or ``None`` when absent/unreadable.
 
-    ``None`` distinguishes "nothing was ever captured for this run" (a run that
-    predates this artifact, or one no scan reached) from an empty set. Corrupt
+    ``None`` distinguishes "no artifact was ever written for this run" (one that
+    predates it, or whose accounting never closed) from an empty set. Corrupt
     JSON is treated as absent rather than raising, like
     :func:`orch_hub.sessions.read_snapshot`.
     """
@@ -228,41 +297,146 @@ def read_snapshots(run_dir: Path) -> TaskSnapshots | None:
     return _from_dict(data)
 
 
-def capture_entry(
+def capture_entries(
     run_dir: Path,
     record: RunRecord,
     sessions: SessionsSnapshot,
     *,
     now: dt.datetime,
     read_task: Callable[[ManagedRepo, str], str | None] = read_task_content,
-) -> SessionTaskSnapshot | None:
-    """Capture the task file for the run's currently-open protocol session.
+) -> tuple[SessionTaskSnapshot, ...]:
+    """Account for every ``session`` bracket of a live run; capture the live one.
 
     ``sessions`` is the caller's fresh parse of the run's log
     (:func:`orch_hub.sessions.read_live`) and ``now`` a UTC instant; the module
     reads logs through neither, so the caller owns log access and clock exactly as
     it does for ``sessions.json``.
 
-    Only the *last* bracket is a candidate: an earlier one is either already
-    recorded or long past its entry window, and a bracket that has closed took its
-    window with it. Returns the entry just persisted, or ``None`` when nothing was
-    written — no open ``session`` bracket, one already recorded, or a read failure
-    inside the window, which is left unrecorded on purpose so the next scan retries
-    (a mid-write file is over in milliseconds; a genuinely absent one is recorded
-    when the window closes). Failures are warned about here; the file is never a
-    reason for a run to fail.
+    Exactly one bracket can still be at entry — the last one, while it is open —
+    and that is the only one whose bytes are read. Every *other* unrecorded
+    ``session`` bracket is past: this scan is the first to see it and its entry
+    state is already gone, so it is recorded as a miss naming why (it closed
+    before it was observed, or a later session had already started). Recording it
+    is the point: the poll that drives this can straddle a whole short session,
+    and a session that leaves no entry at all is indistinguishable downstream from
+    one that never ran.
+
+    Returns the entries added by this call, newest bracket last; ``()`` when there
+    was nothing to add. A read failure *inside* the entry window adds nothing on
+    purpose, so the next scan retries (a mid-write file is over in milliseconds; a
+    genuinely absent one is recorded when the window closes). Failures are warned
+    about here; the task file is never a reason for a run to fail.
     """
-    index = len(sessions.sessions) - 1
-    if index < 0:
-        return None
-    summary = sessions.sessions[index]
-    if not summary.open or summary.kind != SESSION_KIND:
-        return None
-    existing = read_snapshots(run_dir) or TaskSnapshots()
-    if existing.for_index(index) is not None:
-        return None
-    lag = _entry_lag_seconds(summary.start_hms, now)
-    entry = SessionTaskSnapshot(
+    with _locked(run_dir):
+        kept, changed = _settled_sids(read_snapshots(run_dir), sessions)
+        last = len(sessions.sessions) - 1
+        added: list[SessionTaskSnapshot] = []
+        for index, summary in _unaccounted(sessions, kept):
+            if index == last and summary.open:
+                entry = _capture(
+                    record,
+                    index,
+                    summary,
+                    (*kept, *added),
+                    now=now,
+                    read_task=read_task,
+                )
+            else:
+                entry = _missed(
+                    index,
+                    summary,
+                    now,
+                    _MISS_ENDED if index == last else _MISS_SUPERSEDED,
+                )
+            if entry is not None:
+                added.append(entry)
+        if changed or added:
+            write_snapshots(run_dir, TaskSnapshots(snapshots=_ordered(kept, added)))
+        return tuple(added)
+
+
+def settle_snapshots(
+    run_dir: Path, sessions: SessionsSnapshot, *, now: dt.datetime
+) -> TaskSnapshots | None:
+    """Close a run's accounting: backfill revealed sids, record what was missed.
+
+    Run once against the run's final parse, at the live->ended transition, for the
+    two things only that moment can settle:
+
+    - **Session ids the log revealed late.** Codex names its session id on the
+      first turn, so a bracket can log ``sid=(pending)`` at start and carry the
+      real id only on its end line — which a live scan may never see, since the
+      run can exit right after it. An entry adopts a sid only when the bracket at
+      its position still matches the role, kind, and start stamp it was captured
+      with, so a shifted index (a rotated or truncated log) leaves the entry
+      unsettled rather than stamped with another session's id.
+    - **Sessions no scan ever observed.** A run whose sessions all fell between
+      polls — or that ended before any scan reached it — would otherwise leave an
+      artifact that simply omits them. Each is recorded here as a miss, because
+      after this no scan follows.
+
+    Returns the rewritten set, or ``None`` when there was nothing to settle.
+    """
+    with _locked(run_dir):
+        kept, changed = _settled_sids(read_snapshots(run_dir), sessions)
+        added = [
+            _missed(index, summary, now, _MISS_UNOBSERVED)
+            for index, summary in _unaccounted(sessions, kept)
+        ]
+        if not changed and not added:
+            return None
+        snapshots = TaskSnapshots(snapshots=_ordered(kept, added))
+        write_snapshots(run_dir, snapshots)
+        return snapshots
+
+
+def _unaccounted(
+    sessions: SessionsSnapshot, kept: tuple[SessionTaskSnapshot, ...]
+) -> Iterator[tuple[int, SessionSummary]]:
+    """Session brackets with no entry yet, in log order.
+
+    ``plan-gate`` brackets are not among them at all: a plan-gate does not claim
+    the task, and its sibling dev session — the unit that writes — gets its own
+    entry moments later (see the module doc), so it is neither captured nor
+    counted as a miss.
+    """
+    recorded = {entry.index for entry in kept}
+    for index, summary in enumerate(sessions.sessions):
+        if summary.kind == SESSION_KIND and index not in recorded:
+            yield index, summary
+
+
+def _settled_sids(
+    existing: TaskSnapshots | None, sessions: SessionsSnapshot
+) -> tuple[tuple[SessionTaskSnapshot, ...], bool]:
+    """Existing entries with any newly-revealed sid filled in, plus whether any was."""
+    if existing is None:
+        return (), False
+    changed = False
+    settled: list[SessionTaskSnapshot] = []
+    for entry in existing.snapshots:
+        sid = _revealed_sid(sessions, entry)
+        if sid is not None:
+            entry = replace(entry, sid=sid)
+            changed = True
+        settled.append(entry)
+    return tuple(settled), changed
+
+
+def _ordered(
+    kept: tuple[SessionTaskSnapshot, ...], added: list[SessionTaskSnapshot]
+) -> tuple[SessionTaskSnapshot, ...]:
+    """The whole set in bracket order. Indexes are unique (``_unaccounted`` skips
+    recorded ones), so this is a total order and a late-observed earlier session
+    lands where it belongs rather than at the end."""
+    return tuple(sorted((*kept, *added), key=lambda entry: entry.index))
+
+
+def _base(
+    index: int, summary: SessionSummary, now: dt.datetime
+) -> SessionTaskSnapshot:
+    """The self-describing entry for one bracket, before bytes or a miss reason."""
+    return SessionTaskSnapshot(
         index=index,
         sid=summary.sid,
         role=summary.role,
@@ -270,29 +444,43 @@ def capture_entry(
         status_before=summary.status_before,
         session_start_hms=summary.start_hms,
         captured_at=now.isoformat(),
-        entry_lag_seconds=lag,
+        entry_lag_seconds=_entry_lag_seconds(summary.start_hms, now),
     )
+
+
+def _missed(
+    index: int, summary: SessionSummary, now: dt.datetime, detail: str
+) -> SessionTaskSnapshot:
+    """A session accounted for without bytes; ``detail`` says what the observer missed."""
+    return replace(_base(index, summary, now), detail=detail)
+
+
+def _capture(
+    record: RunRecord,
+    index: int,
+    summary: SessionSummary,
+    kept: tuple[SessionTaskSnapshot, ...],
+    *,
+    now: dt.datetime,
+    read_task: Callable[[ManagedRepo, str], str | None],
+) -> SessionTaskSnapshot | None:
+    """The entry for the one bracket still at entry: its bytes, or why not.
+
+    ``None`` is the retry case and the only outcome that records nothing — see
+    :func:`capture_entries`.
+    """
+    entry = _base(index, summary, now)
+    lag = entry.entry_lag_seconds
     if lag is not None and lag > ENTRY_LAG_MAX_SECONDS:
-        return _persist(
-            run_dir,
-            existing,
-            replace(
-                entry,
-                detail=(
-                    f"session start observed {lag}s late, past the "
-                    f"{ENTRY_LAG_MAX_SECONDS}s entry window"
-                ),
+        return replace(
+            entry,
+            detail=(
+                f"session start observed {lag}s late, past the "
+                f"{ENTRY_LAG_MAX_SECONDS}s entry window"
             ),
         )
-    if sum(1 for kept in existing.snapshots if kept.present) >= MAX_CONTENT_SNAPSHOTS:
-        return _persist(
-            run_dir,
-            existing,
-            replace(
-                entry,
-                detail=f"run already holds {MAX_CONTENT_SNAPSHOTS} captured task files",
-            ),
-        )
+    if sum(1 for entry_kept in kept if entry_kept.present) >= MAX_CONTENT_SNAPSHOTS:
+        return replace(entry, detail=_MISS_CAP)
     content, failure = _read_task_file(record, read_task)
     if content is None:
         _log.warning(
@@ -303,61 +491,16 @@ def capture_entry(
         )
         return None
     data = content.encode("utf-8")
-    kept = data[:TASK_FILE_MAX_BYTES]
-    return _persist(
-        run_dir,
-        existing,
-        replace(
-            entry,
-            present=True,
-            # Lossy-tolerant decode, matching the log/doc readers: it absorbs the
-            # partial multi-byte character a cut at a byte offset can leave.
-            content=kept.decode("utf-8", errors="replace"),
-            size=len(data),
-            truncated=len(kept) < len(data),
-        ),
+    head = data[:TASK_FILE_MAX_BYTES]
+    return replace(
+        entry,
+        present=True,
+        # Lossy-tolerant decode, matching the log/doc readers: it absorbs the
+        # partial multi-byte character a cut at a byte offset can leave.
+        content=head.decode("utf-8", errors="replace"),
+        size=len(data),
+        truncated=len(head) < len(data),
     )
-
-
-def reconcile_sids(run_dir: Path, sessions: SessionsSnapshot) -> TaskSnapshots | None:
-    """Fill in session ids that were still ``(pending)`` when captured.
-
-    Codex names its session id on the first turn, so a bracket can log
-    ``sid=(pending)`` at start and reveal the real id only at its end line — which
-    a live scan may never see (the run can exit right after it). Re-run this
-    against the run's final parse to settle those entries; a scan that happens to
-    catch the end line settles them earlier, and both are idempotent.
-
-    An entry adopts a sid only when the bracket at its position still matches the
-    role, kind, and start stamp it was captured with, so a shifted index (a
-    rotated or truncated log) leaves the entry unreconciled instead of stamping it
-    with another session's id. Returns the rewritten set, or ``None`` when there
-    was nothing to change.
-    """
-    existing = read_snapshots(run_dir)
-    if existing is None:
-        return None
-    changed = False
-    settled: list[SessionTaskSnapshot] = []
-    for entry in existing.snapshots:
-        sid = _revealed_sid(sessions, entry)
-        if sid is not None:
-            entry = replace(entry, sid=sid)
-            changed = True
-        settled.append(entry)
-    if not changed:
-        return None
-    snapshots = TaskSnapshots(snapshots=tuple(settled))
-    write_snapshots(run_dir, snapshots)
-    return snapshots
-
-
-def _persist(
-    run_dir: Path, existing: TaskSnapshots, entry: SessionTaskSnapshot
-) -> SessionTaskSnapshot:
-    """Append one entry and rewrite the artifact (brackets arrive in order)."""
-    write_snapshots(run_dir, TaskSnapshots(snapshots=(*existing.snapshots, entry)))
-    return entry
 
 
 def _read_task_file(
@@ -410,7 +553,7 @@ def _entry_lag_seconds(start_hms: str | None, now: dt.datetime) -> int | None:
     modulo a day. A session observed within a few minutes of an exact 24h multiple
     would alias to a small lag — a session that long is not a real shape, and the
     cost would be one mislabeled entry, not a wrong run state. An unparseable
-    stamp yields ``None``: unknown lag, which :func:`capture_entry` treats as no
+    stamp yields ``None``: unknown lag, which :func:`_capture` treats as no
     reason to refuse the capture.
 
     An aware ``now`` is converted rather than trusted: comparing a local-time
