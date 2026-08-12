@@ -1983,6 +1983,45 @@ class ReportBundle:
 
 
 @dataclass(frozen=True)
+class ReportArtifactRead:
+    """One published report artifact's persisted bytes, or why they are not served.
+
+    The unit behind the raw-artifact route, and deliberately *not* a
+    :class:`ReportBundle` with one field filled in. A bundle is the import unit:
+    all-or-nothing, parsed, re-serialized by the JSON response — which is exactly
+    what a consumer cannot verify a digest against, since it never sees the bytes
+    the hash was taken over. This carries those bytes, so ``sha256(data)`` and
+    ``len(data)`` are comparable to the ``sha256``/``size`` the feed entry recorded
+    at publication, and it is addressed per artifact rather than per set: an
+    artifact still on disk beside a pruned sibling is served, because a byte-level
+    check of *this* file does not need the other three.
+
+    Exactly one of ``data`` and ``reason`` is set. ``reason`` is a stable machine
+    code (:mod:`orch_hub.report_catalog`) rather than prose, because the HTTP
+    adapter maps it to a status — a raw-byte response has no envelope to put
+    ``available: false`` in — and ``detail`` is the human sentence beside it.
+
+    ``integrity`` mirrors the bundle's vocabulary for this one artifact:
+    ``verified`` (compared against a recorded digest and matched), ``mismatched``
+    (compared and differs — still served, because only the consumer can decide what
+    an edited report means for its import), or ``unverified`` (the entry records no
+    usable digest for it, so nothing was compared).
+    """
+
+    entry: ReportCatalogEntry
+    name: str
+    data: bytes | None = None
+    reason: str | None = None
+    detail: str | None = None
+    integrity: str = "unverified"
+    recorded_sha256: str | None = None
+
+    @property
+    def served(self) -> bool:
+        return self.data is not None
+
+
+@dataclass(frozen=True)
 class SemanticJob:
     """One async Layer-2 semantic-evaluation attempt for a ``(repo, task_id)``.
 

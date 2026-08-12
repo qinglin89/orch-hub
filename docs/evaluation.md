@@ -257,6 +257,64 @@ detail route uses, so a consumer never needs to know the
   decide what an edited or uncheckable report means for its import — and
   `verified` is the strict summary: every artifact checked *and* matched.
 
+The artifacts here are **parsed**, so this route is for importing a report, not
+for checking one: to recompute a digest yourself, fetch the bytes instead (next
+section).
+
+### Verifying one artifact byte-for-byte
+
+```
+GET /api/evaluation/reports/{report_key}/artifacts/{name}
+```
+
+`name` is one of the four published artifact filenames — `evidence.json`,
+`static_metrics.json`, `semantic_report.json`, `report.md`. The body is that file
+**exactly as persisted**: no parsing, no re-encoding, no normalization.
+
+That is the difference from the bundle route above, and the reason this route
+exists. The bundle parses each artifact and the JSON response re-serializes it,
+so the bytes a consumer receives there are *this service's* formatting — key
+order, escaping, separators, trailing newline — and re-hashing them proves
+nothing about what was published. Hashing **this** body reproduces the `sha256`
+the feed entry recorded, and its length is the recorded `size`.
+
+- Availability is **per artifact**, not per set: a surviving artifact beside a
+  pruned sibling is served, because checking one file's digest needs nothing from
+  the other three. (The bundle is all-or-nothing because a half-populated
+  *import* would be taken for a whole report; one file has no such failure mode.)
+- Bytes that no longer hash to the recorded digest are **still served**. The body
+  must stay byte-exact, so the verdict travels in headers:
+  `X-Report-Artifact-Integrity` is `verified` / `mismatched` / `unverified`, and
+  `X-Report-Artifact-Sha256` echoes the recorded digest when the entry holds a
+  usable one. Withholding an edited artifact would withhold the evidence of the
+  edit from the one caller equipped to prove it.
+- Status codes carry what the bundle says in its envelope, since a raw body has
+  none:
+
+| Case | Status |
+|---|---|
+| served — including `mismatched` and `unverified` | `200` |
+| unknown `report_key` | `404` |
+| `name` is not one of the four published artifacts | `404` |
+| stored identity is not the one the report was published under | `409` |
+| published, artifact removed by retention | `410` |
+| the file is present and will not read | `500` |
+| the catalog holds a duplicate `seq`/`report_key` | `500` |
+| evaluation disabled / missing or wrong bearer token | `404` / `401` |
+
+`410` rather than `404` for a pruned artifact is deliberate: the entry proves the
+report was published, so "gone" and "wrong key" must be distinguishable without
+parsing prose.
+
+A traversal attempt reads nothing — `name` selects from a closed set and is never
+a path, and an escaped separator matches no single path segment in the first
+place. Nothing on this path opens a target repo, publishes, evaluates, or prunes.
+
+```
+curl -fsS -H "Authorization: Bearer $ORCH_HUB_TOKEN" \
+  "$HUB/api/evaluation/reports/$KEY/artifacts/evidence.json" | shasum -a 256
+```
+
 ### Retention, and the one thing that can halt publication
 
 Retention (above) and the feed are coordinated: a prune is **skipped** while it
@@ -354,6 +412,7 @@ All routes are protected by the bearer token like every non-health route.
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
 | `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
 | `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
+| `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | One published artifact's [byte-exact persisted content](#verifying-one-artifact-byte-for-byte) for independent digest verification; pruned answers `410`. |
 | `GET /api/history/runs` | One page of run history plus batched newest-evaluation state (`none`/`l1`/`l1_l2`) per distinct task group on that page. |
 | `GET /api/repos/{repo}/evaluations/{task}` | List a task's evaluations (newest-first) + resolved target state. |
 | `GET /api/repos/{repo}/evaluations/{task}/{id}` | Read one evaluation's evidence/static/semantic/`report.md`. |

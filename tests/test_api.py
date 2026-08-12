@@ -8,6 +8,7 @@ touching real repos, subprocesses, or the ai-native-development registry.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import itertools
 import json
 from dataclasses import replace
@@ -4037,6 +4038,7 @@ def test_report_feed_routes_are_404_when_evaluation_is_disabled(tmp_path, monkey
     for resp in (
         client.get("/api/evaluation/reports"),
         client.get("/api/evaluation/reports/rpt-x"),
+        client.get(f"/api/evaluation/reports/rpt-x/artifacts/{EVIDENCE_NAME}"),
     ):
         assert resp.status_code == 404
         assert "disabled" in resp.json()["detail"]
@@ -4046,6 +4048,241 @@ def test_report_feed_routes_require_auth(tmp_path):
     unauthed = TestClient(api.create_app(eval_config(tmp_path)))
     assert unauthed.get("/api/evaluation/reports").status_code == 401
     assert unauthed.get("/api/evaluation/reports/rpt-x").status_code == 401
+    assert (
+        unauthed.get(
+            f"/api/evaluation/reports/rpt-x/artifacts/{EVIDENCE_NAME}"
+        ).status_code
+        == 401
+    )
+
+
+# -- raw report artifacts ------------------------------------------------------
+
+
+def artifact_url(key: str, name: str) -> str:
+    return f"/api/evaluation/reports/{key}/artifacts/{name}"
+
+
+def published_report(tmp_path, monkeypatch, evaluation_id="20260722T090000Z"):
+    """A client plus the feed item and artifact dir of one published report."""
+    client, config, repo = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=(evaluation_id,)
+    )
+    item = client.get("/api/evaluation/reports").json()["reports"][0]
+    eval_dir = config.data_dir / "evaluations" / repo.name / RUN_TASK_ID / evaluation_id
+    return client, config, item, eval_dir
+
+
+@pytest.mark.parametrize("name", REQUIRED_ARTIFACTS)
+def test_raw_artifact_response_is_byte_exact_and_matches_the_feed_manifest(
+    tmp_path, monkeypatch, name
+):
+    # The reason this route exists: the bundle route parses each artifact and the
+    # JSON response re-serializes it, so its bytes are this service's formatting
+    # and hashing them proves nothing. Here the body is the persisted file, so the
+    # size/sha256 the feed published are verifiable by the consumer.
+    client, _config, item, eval_dir = published_report(tmp_path, monkeypatch)
+    manifest = next(a for a in item["artifacts"] if a["name"] == name)
+
+    resp = client.get(artifact_url(item["report_key"], name))
+
+    assert resp.status_code == 200
+    assert resp.content == (eval_dir / name).read_bytes()
+    assert hashlib.sha256(resp.content).hexdigest() == manifest["sha256"]
+    assert len(resp.content) == manifest["size"]
+    assert resp.headers["x-report-artifact-integrity"] == "verified"
+    assert resp.headers["x-report-artifact-sha256"] == manifest["sha256"]
+    assert name in resp.headers["content-disposition"]
+    assert resp.headers["x-content-type-options"] == "nosniff"
+
+
+def test_raw_artifact_content_types_label_json_and_markdown(tmp_path, monkeypatch):
+    client, _config, item, _dir = published_report(tmp_path, monkeypatch)
+
+    json_type = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+    md_type = client.get(artifact_url(item["report_key"], SEMANTIC_REPORT_MD_NAME))
+
+    assert json_type.headers["content-type"] == "application/json"
+    assert md_type.headers["content-type"].startswith("text/markdown")
+
+
+def test_raw_artifact_preserves_unicode_and_exact_trailing_bytes(tmp_path, monkeypatch):
+    # Whitespace, a CRLF, and a missing final newline all change the digest, so a
+    # response that normalized any of them would read as a tampered report.
+    body = "# report\r\n\r\n- café   \n\n没有换行"
+    client, _config, item, eval_dir = published_report(tmp_path, monkeypatch)
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).write_text(body, encoding="utf-8")
+
+    resp = client.get(artifact_url(item["report_key"], SEMANTIC_REPORT_MD_NAME))
+
+    assert resp.content == body.encode("utf-8")
+    assert resp.headers["content-length"] == str(len(body.encode("utf-8")))
+    # Edited after publication, so the recorded digest no longer matches — the
+    # bytes are still served, and the header is where the discrepancy is stated.
+    assert resp.headers["x-report-artifact-integrity"] == "mismatched"
+
+
+def test_raw_artifact_unknown_key_is_404(tmp_path, monkeypatch):
+    client, *_ = published_report(tmp_path, monkeypatch)
+
+    resp = client.get(
+        artifact_url("rpt-0123456789abcdef0123456789abcdef", EVIDENCE_NAME)
+    )
+
+    assert resp.status_code == 404
+    assert "unknown report key" in resp.json()["detail"]
+
+
+@pytest.mark.parametrize("name", ["notes.txt", "..%2Fevidence.json", "evidence.json~"])
+def test_raw_artifact_unknown_name_is_404_and_reads_no_file(
+    tmp_path, monkeypatch, name
+):
+    # ``name`` selects from the four published artifacts; it is never a path. A
+    # real file next to them under another name is still not a published artifact,
+    # which is the same rule that makes a traversal attempt inert — and an escaped
+    # separator does not even reach the handler, since a decoded slash matches no
+    # single path segment.
+    client, _config, item, eval_dir = published_report(tmp_path, monkeypatch)
+    (eval_dir / "notes.txt").write_text("operator scratch\n", encoding="utf-8")
+
+    resp = client.get(artifact_url(item["report_key"], name))
+
+    assert resp.status_code == 404
+    assert b"operator scratch" not in resp.content
+
+
+def test_raw_artifact_of_a_pruned_report_is_410_not_404(tmp_path, monkeypatch):
+    # The entry outlives its artifacts by design, so "published, and gone" must be
+    # distinguishable from "wrong key" without parsing the message.
+    import shutil
+
+    client, config, item, _dir = published_report(tmp_path, monkeypatch)
+    shutil.rmtree(config.data_dir / "evaluations")
+
+    resp = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+
+    assert resp.status_code == 410
+    assert "no longer retained" in resp.json()["detail"]
+    # A read is a read: nothing is re-evaluated to heal the missing artifact.
+    assert not (config.data_dir / "evaluations").exists()
+
+
+def test_raw_artifact_serves_a_survivor_of_a_partially_pruned_set(
+    tmp_path, monkeypatch
+):
+    # Availability is per artifact here, unlike the all-or-nothing bundle: the
+    # bundle protects an import from being taken for a whole report, while a
+    # byte check of one artifact needs nothing from the other three.
+    client, _config, item, eval_dir = published_report(tmp_path, monkeypatch)
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).unlink()
+
+    survivor = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+    removed = client.get(artifact_url(item["report_key"], SEMANTIC_REPORT_MD_NAME))
+    bundle = client.get(f"/api/evaluation/reports/{item['report_key']}")
+
+    assert survivor.status_code == 200
+    assert survivor.content == (eval_dir / EVIDENCE_NAME).read_bytes()
+    assert removed.status_code == 410
+    assert bundle.json()["available"] is False
+
+
+def test_raw_artifact_of_an_incoherent_catalog_identity_is_409(tmp_path, monkeypatch):
+    # The slug rule is idempotent but lossy, so a hand-edited alias would serve the
+    # real repo's artifact under a contradicting feed identity. Neither missing nor
+    # a server fault: the stored line is the defect, and no retry heals it.
+    client, config, item, _dir = published_report(tmp_path, monkeypatch)
+    path = config.data_dir / "report-catalog" / "catalog.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    rows[0]["repo_slug"] = rows[0]["repo_slug"] + "!!"
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    resp = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+
+    assert resp.status_code == 409
+    assert "incoherent stored report identity" in resp.json()["detail"]
+
+
+def test_raw_artifact_refuses_to_serve_from_an_ambiguous_catalog(tmp_path, monkeypatch):
+    # Same fail-closed audit as the other two feed routes: a cursor over a file
+    # with a repeated sequence cannot promise exactly-once traversal, so no read
+    # path serves from it until it is repaired.
+    client, config, _repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z", "20260722T100000Z"),
+    )
+    path = config.data_dir / "report-catalog" / "catalog.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    key = rows[0]["report_key"]
+    rows[1]["seq"] = rows[0]["seq"]
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    resp = client.get(artifact_url(key, EVIDENCE_NAME))
+
+    assert resp.status_code == 500
+    assert "ambiguous" in resp.json()["detail"]
+
+
+def test_raw_artifact_that_will_not_read_is_500_not_a_missing_report(
+    tmp_path, monkeypatch
+):
+    # A present-but-unreadable file is a hub-side fault. Answering 410 would tell a
+    # consumer the report was pruned — a permanent answer to a transient problem.
+    client, _config, item, _dir = published_report(tmp_path, monkeypatch)
+
+    def _boom(self: Path) -> bytes:
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    resp = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+
+    assert resp.status_code == 500
+    assert EVIDENCE_NAME in resp.json()["detail"]
+
+
+def test_raw_artifact_reads_change_nothing_on_disk(tmp_path, monkeypatch):
+    # Read-only in the strong sense: no publication, no evaluation, no retention
+    # side effect — the hub's data dir is byte-identical after a full sweep of the
+    # route across every artifact of a published report.
+    client, config, item, _dir = published_report(tmp_path, monkeypatch)
+
+    def snapshot() -> dict:
+        return {
+            path.relative_to(config.data_dir): path.read_bytes()
+            for path in sorted(config.data_dir.rglob("*"))
+            if path.is_file()
+        }
+
+    before = snapshot()
+    for name in REQUIRED_ARTIFACTS:
+        assert client.get(artifact_url(item["report_key"], name)).status_code == 200
+
+    assert snapshot() == before
+
+
+def test_raw_artifact_and_bundle_agree_on_the_same_published_content(
+    tmp_path, monkeypatch
+):
+    # The two routes are different views of one artifact, not two sources: the raw
+    # bytes must parse to exactly what the bundle (and the per-task detail route)
+    # hands back.
+    client, _config, item, _dir = published_report(tmp_path, monkeypatch)
+    key = item["report_key"]
+
+    bundle = client.get(f"/api/evaluation/reports/{key}").json()
+    raw_report = client.get(artifact_url(key, SEMANTIC_REPORT_NAME))
+    raw_md = client.get(artifact_url(key, SEMANTIC_REPORT_MD_NAME))
+
+    assert json.loads(raw_report.content) == bundle["artifacts"]["semantic_report"]
+    assert raw_md.content.decode("utf-8") == bundle["artifacts"]["report_md"]
+    # And the feed page it was discovered through is unchanged by either read.
+    assert client.get("/api/evaluation/reports").json()["reports"] == [item]
 
 
 def test_task_level_evaluation_routes_stay_compatible_with_the_feed(

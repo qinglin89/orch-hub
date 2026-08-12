@@ -129,6 +129,7 @@ from .evaluation import (
 from .models import (
     ManagedRepo,
     ReportArtifact,
+    ReportArtifactRead,
     ReportBundle,
     ReportCatalogEntry,
     ReportPage,
@@ -216,6 +217,29 @@ CONFIG_UNAVAILABLE_DETAIL = (
 exists per run (``effective_config.json`` in the run dir) but is not part of the
 bounded evidence pack, and the catalog reads only durable evaluation artifacts —
 never live run state — so an entry stays reproducible from what it names."""
+
+ARTIFACT_UNKNOWN = "unknown_artifact"
+ARTIFACT_IDENTITY = "identity_fault"
+ARTIFACT_NOT_RETAINED = "not_retained"
+ARTIFACT_UNREADABLE = "unreadable"
+"""Why :meth:`ReportCatalog.read_artifact_bytes` served no bytes.
+
+Stable machine codes rather than prose, because a raw-byte response has no
+envelope to carry ``available: false`` — the reason has to become a status code
+at the HTTP boundary, and a caller that switches on a sentence is one reworded
+message away from mapping the wrong one. The four are genuinely different
+answers: a name outside the published set (never a file), a stored identity that
+cannot be trusted to address the artifacts, a report whose artifact retention
+removed (the designed end state of an entry outliving what it indexes), and a
+file that is there but would not read."""
+
+INTEGRITY_VERIFIED = "verified"
+INTEGRITY_MISMATCHED = "mismatched"
+INTEGRITY_UNVERIFIED = "unverified"
+"""Per-artifact digest states, the same vocabulary :class:`ReportBundle` reports
+over a whole set. ``unverified`` is deliberately not folded into ``verified``:
+an artifact the entry holds no usable digest for was never compared to anything,
+which is a weaker claim than a match."""
 
 
 class ReportCatalogError(Exception):
@@ -589,6 +613,111 @@ class ReportCatalog:
             report_md=report_md,
             mismatched=tuple(mismatched),
             unverified=tuple(unverified),
+        )
+
+    def read_artifact_bytes(
+        self, entry: ReportCatalogEntry, name: str
+    ) -> ReportArtifactRead:
+        """Read one published artifact's persisted bytes, exactly as stored.
+
+        The verification path beside :meth:`read_bundle`, which structurally cannot
+        be one: a bundle *parses* each artifact, so what reaches a consumer through
+        it is a re-serialization whose bytes are this process's formatting choices —
+        key order, separators, escaping, the trailing newline — not the bytes the
+        entry's ``sha256`` was taken over. Recomputing a digest from that is
+        checking the response encoder, not the report. Nothing here parses,
+        decodes, or normalizes: the file's bytes *are* the return value, so a
+        consumer can prove for itself that what the hub stored is what the hub
+        published, which is the whole reason publication records a digest.
+
+        Addressed **per artifact**, deliberately unlike the bundle's all-or-nothing
+        availability. That rule exists because a half-populated *import* would be
+        imported as if it were the whole report; a single file has no such failure
+        mode, so a surviving artifact beside a partially pruned set still reads and
+        the missing sibling is that sibling's own answer.
+
+        Reads are confined twice before any IO. ``name`` must be one of the four
+        published artifact names (:data:`REQUIRED_ARTIFACTS`) — the parameter is a
+        selector over a closed set, never a path fragment, so nothing a caller
+        writes can name a file the set does not contain. The directory then comes
+        from the same contained resolution and stored-identity audit
+        (:func:`_identity_fault`) that guard :meth:`read_bundle`. A traversal
+        attempt or a hand-edited line therefore opens no file at all, and nothing
+        outside the hub's own evaluations tree is reachable from here — least of
+        all the target repo, which this path never touches.
+
+        Bytes that no longer match the recorded digest are still returned, marked
+        ``mismatched``: the same rule the bundle applies, and more load-bearing
+        here, because withholding an edited artifact would withhold the evidence of
+        the edit from the one caller equipped to prove it. Gated and read-only —
+        nothing is published, evaluated, or pruned on this path.
+        """
+        self._require_enabled()
+        if name not in REQUIRED_ARTIFACTS:
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_UNKNOWN,
+                detail=(
+                    f"{name!r} is not a published report artifact (expected one of"
+                    f" {', '.join(REQUIRED_ARTIFACTS)})"
+                ),
+            )
+        try:
+            eval_dir = self.artifact_dir(entry)
+        except ValueError as err:
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_IDENTITY,
+                detail=f"unsafe stored report identity ({err})",
+            )
+        fault = _identity_fault(entry)
+        if fault is not None:
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_IDENTITY,
+                detail=f"incoherent stored report identity ({fault})",
+            )
+        path = eval_dir / name
+        gone = ReportArtifactRead(
+            entry=entry,
+            name=name,
+            reason=ARTIFACT_NOT_RETAINED,
+            detail=f"report artifact {name} is no longer retained",
+        )
+        if not path.is_file():
+            # A pruned dir, a partially pruned set, or something that is not a
+            # regular file standing where the artifact was: all the same answer to
+            # the only question asked here — these bytes are not retained.
+            return gone
+        try:
+            data = path.read_bytes()
+        except FileNotFoundError:
+            # Lost to a prune between the check above and the read: still absence,
+            # not an IO fault, so it must not be reported as one.
+            return gone
+        except OSError as err:
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_UNREADABLE,
+                detail=f"unreadable report artifact {name} ({err})",
+            )
+        expected = _cataloged_digests(entry).get(name)
+        if expected is None:
+            integrity = INTEGRITY_UNVERIFIED
+        elif hashlib.sha256(data).hexdigest() == expected:
+            integrity = INTEGRITY_VERIFIED
+        else:
+            integrity = INTEGRITY_MISMATCHED
+        return ReportArtifactRead(
+            entry=entry,
+            name=name,
+            data=data,
+            integrity=integrity,
+            recorded_sha256=expected,
         )
 
     # -- writes ---------------------------------------------------------------

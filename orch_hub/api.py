@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Literal
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
@@ -76,7 +76,15 @@ from .orch_config import (
 )
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
-from .report_catalog import DEFAULT_PAGE_LIMIT, ReportCatalog, ReportCatalogError
+from .report_catalog import (
+    ARTIFACT_IDENTITY,
+    ARTIFACT_NOT_RETAINED,
+    ARTIFACT_UNKNOWN,
+    ARTIFACT_UNREADABLE,
+    DEFAULT_PAGE_LIMIT,
+    ReportCatalog,
+    ReportCatalogError,
+)
 from .runs import (
     BlockedTaskError,
     LaunchBlockedError,
@@ -146,6 +154,44 @@ A 401 from any other path already reveals liveness, and the shell carries no
 secret material. Everything else — including docs/OpenAPI, all data routes, and
 future dashboard data endpoints — requires the token.
 """
+
+REPORT_ARTIFACT_MEDIA_TYPES = {
+    EVIDENCE_NAME: "application/json",
+    STATIC_METRICS_NAME: "application/json",
+    SEMANTIC_REPORT_NAME: "application/json",
+    SEMANTIC_REPORT_MD_NAME: "text/markdown; charset=utf-8",
+}
+"""Content type per published report artifact, for the raw-artifact route.
+
+Keyed by each owning layer's own filename constant, so the mapping cannot drift
+from what the evaluator actually writes. It only *labels* the bytes — the body is
+the persisted file verbatim, never re-encoded — and an unmapped name falls back
+to ``application/octet-stream`` rather than asserting a type the hub does not
+know."""
+
+REPORT_ARTIFACT_STATUS = {
+    ARTIFACT_UNKNOWN: 404,
+    ARTIFACT_IDENTITY: 409,
+    ARTIFACT_NOT_RETAINED: 410,
+    ARTIFACT_UNREADABLE: 500,
+}
+"""Status per reason the raw-artifact route served no bytes.
+
+The bundle route says ``200 {"available": false, "detail": ...}`` because it has
+an envelope to say it in; a byte-exact body has none, so the status *is* the
+statement and the four reasons must stay distinguishable without parsing prose:
+
+- ``404`` — the name is not one of the four published artifacts, so it addresses
+  nothing (the same answer as an unknown report key).
+- ``409`` — the catalog line cannot be trusted to address its own artifacts. The
+  request is well-formed and the report was published; the stored identity is the
+  defect, and no retry heals it.
+- ``410`` — published, and its bytes are gone. Deliberately not ``404``: the
+  entry proves the report existed, which is exactly what retention outliving
+  artifacts is designed for, and a consumer must be able to tell "pruned" from
+  "wrong key" to know whether re-fetching another way could help.
+- ``500`` — the file is there and would not read: a hub-side fault, not a
+  statement about the report."""
 
 
 class BearerAuthMiddleware:
@@ -1622,6 +1668,73 @@ def create_app(
                 status_code=404, detail=f"unknown report key: {report_key}"
             )
         return catalog.read_bundle(entry).to_dict()
+
+    @app.get("/api/evaluation/reports/{report_key}/artifacts/{name}")
+    def get_report_artifact(report_key: str, name: str) -> Response:
+        """Return one published artifact's persisted bytes, byte for byte.
+
+        The verification companion to the bundle route, which cannot do this job:
+        that route parses each artifact and the JSON response re-serializes it, so
+        its bytes are this service's formatting, not the bytes publication hashed.
+        A consumer comparing a digest against the feed entry's manifest would be
+        checking the encoder. Here the body is the file as stored — no parsing, no
+        re-encoding, no normalization — so ``sha256`` and length are directly
+        comparable to the ``sha256``/``size`` the entry recorded, and a consumer
+        can prove the hub's record against the hub's own artifact.
+
+        ``name`` is a selector over the four published artifact names, never a
+        path: anything else addresses no file and is a ``404`` without touching the
+        filesystem, which is also what makes a traversal attempt inert. The entry's
+        stored identity is audited before any IO exactly as the bundle route audits
+        it, and the read stays inside the hub's evaluations tree — no target repo is
+        ever opened on this path, and nothing is published, evaluated, or pruned.
+
+        Statuses carry what the bundle's envelope carries (the mapping and its
+        rationale: :data:`REPORT_ARTIFACT_STATUS`) — unknown key or unknown artifact
+        name ``404``, an incoherent stored identity ``409``, an artifact retention
+        has pruned ``410`` (published, and gone — not "no such report"), an
+        unreadable file ``500``, and an ambiguous catalog ``500`` like every other
+        feed read. Availability is per artifact, not per set: a surviving file
+        beside a pruned sibling is served, because checking one artifact's bytes
+        does not need the other three.
+
+        Bytes that no longer hash to the recorded digest are still served, with
+        ``X-Report-Artifact-Integrity: mismatched`` — the response says so in a
+        header precisely because the body must stay byte-exact, and suppressing an
+        edited artifact would hide the edit from the caller equipped to prove it.
+        Disabled → 404.
+        """
+        require_evaluation_enabled()
+        try:
+            entry = catalog.find(report_key)
+        except ReportCatalogError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+        if entry is None:
+            raise HTTPException(
+                status_code=404, detail=f"unknown report key: {report_key}"
+            )
+        read = catalog.read_artifact_bytes(entry, name)
+        if not read.served:
+            raise HTTPException(
+                status_code=REPORT_ARTIFACT_STATUS.get(read.reason, 500),
+                detail=read.detail,
+            )
+        headers = {
+            # The four names are fixed constants, so this cannot be steered by a
+            # caller; it only gives ``curl -OJ``/a browser save the right filename.
+            "Content-Disposition": f'inline; filename="{read.name}"',
+            "X-Content-Type-Options": "nosniff",
+            "X-Report-Artifact-Integrity": read.integrity,
+        }
+        if read.recorded_sha256 is not None:
+            headers["X-Report-Artifact-Sha256"] = read.recorded_sha256
+        return Response(
+            content=read.data,
+            media_type=REPORT_ARTIFACT_MEDIA_TYPES.get(
+                name, "application/octet-stream"
+            ),
+            headers=headers,
+        )
 
     @app.get("/api/repos/{repo_id}/evaluations/{task_id}")
     def list_task_evaluations(repo_id: str, task_id: str) -> dict:

@@ -17,6 +17,12 @@ and the audits that keep a hand-edited append-only file from becoming a silently
 wrong answer — an ambiguous sequence/key, a stored identity that is not the one
 its key derives from, and an artifact served without a usable digest. Their HTTP
 surface is covered in ``tests/test_api.py``; session-3 adds the dashboard view.
+
+The raw-artifact read is covered last: byte-exact bytes for every published
+artifact (the parsed bundle cannot prove a digest, since it re-serializes), the
+per-artifact availability that deliberately differs from the bundle's
+all-or-nothing rule, and the four no-bytes reasons an HTTP status has to stay
+able to tell apart.
 """
 
 from __future__ import annotations
@@ -40,6 +46,10 @@ from orch_hub.evaluation import (
 )
 from orch_hub.models import ManagedRepo, ReportCatalogEntry
 from orch_hub.report_catalog import (
+    ARTIFACT_IDENTITY,
+    ARTIFACT_NOT_RETAINED,
+    ARTIFACT_UNKNOWN,
+    ARTIFACT_UNREADABLE,
     CATALOG_NAME,
     CATALOG_SUBDIR,
     CONFIG_UNAVAILABLE_DETAIL,
@@ -1387,6 +1397,225 @@ def test_bundle_of_an_unparseable_artifact_fails_closed(tmp_path):
     assert bundle.static_metrics is None
 
 
+# -- raw artifact bytes --------------------------------------------------------
+
+
+def recorded(entry: ReportCatalogEntry, name: str):
+    """The entry's manifest row for one artifact (what publication recorded)."""
+    return next(artifact for artifact in entry.artifacts if artifact.name == name)
+
+
+@pytest.mark.parametrize("name", REQUIRED_ARTIFACTS)
+def test_raw_artifact_serves_the_bytes_the_manifest_hashed(tmp_path, name):
+    # The whole point of the route: what comes back must be the persisted file,
+    # not a re-serialization of it, so the entry's recorded size/sha256 are
+    # verifiable by the consumer rather than only by the hub.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+
+    read = cat.read_artifact_bytes(entry, name)
+
+    assert read.data == (eval_dir / name).read_bytes()
+    assert read.reason is None and read.detail is None
+    manifest = recorded(entry, name)
+    assert hashlib.sha256(read.data).hexdigest() == manifest.sha256
+    assert len(read.data) == manifest.size
+    assert (read.integrity, read.recorded_sha256) == ("verified", manifest.sha256)
+
+
+def test_raw_artifact_round_trips_unicode_and_exact_trailing_bytes(tmp_path):
+    # Byte-for-byte means the parts a parse-and-re-serialize path silently
+    # rewrites: non-ASCII escaped or not, CRLF, trailing spaces, and the presence
+    # or absence of a final newline. Each of those changes the digest, so a
+    # consumer that re-hashed a normalized body would see a false mismatch.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    bodies = {
+        # Identity fields stay coherent (that is publication's rule, not this
+        # route's); the exotic bytes ride in the fields around them.
+        EVIDENCE_NAME: '{"target": {"source": "archived", "note": "é任务"}, "runs": []}',
+        STATIC_METRICS_NAME: '{"note": "tab\\tand — dash"}   ',
+        SEMANTIC_REPORT_NAME: '{"target_source": "archived", "summary": "café"}',
+        SEMANTIC_REPORT_MD_NAME: "# report\r\n\r\n- café   \n\n",
+    }
+    for name, body in bodies.items():
+        (eval_dir / name).write_text(body, encoding="utf-8")
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+
+    for name, body in bodies.items():
+        read = cat.read_artifact_bytes(entry, name)
+        assert read.data == body.encode("utf-8")
+        assert read.integrity == "verified"
+        assert len(read.data) == recorded(entry, name).size
+
+
+@pytest.mark.parametrize(
+    "name", ["notes.txt", "../evidence.json", "evidence.json.bak", "", "."]
+)
+def test_raw_artifact_of_a_name_outside_the_published_set_reads_nothing(
+    tmp_path, monkeypatch, name
+):
+    # ``name`` selects from a closed set; it is never a path fragment. A file that
+    # genuinely sits in the evaluation dir under another name is still not a
+    # published artifact, which is the same rule that makes traversal inert. The
+    # decision is taken before any IO, which is asserted rather than assumed.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    (eval_dir / "notes.txt").write_text("operator scratch\n", encoding="utf-8")
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    monkeypatch.setattr(
+        Path, "read_bytes", lambda self: pytest.fail(f"read {self} for {name!r}")
+    )
+
+    read = cat.read_artifact_bytes(entry, name)
+
+    assert read.data is None
+    assert read.reason == ARTIFACT_UNKNOWN
+    assert "not a published report artifact" in read.detail
+
+
+def test_raw_artifact_of_a_pruned_report_is_explicitly_not_retained(tmp_path):
+    # The designed end state: the entry outlives its artifacts, so this is a
+    # published report whose bytes are gone — distinct from an unknown key.
+    import shutil
+
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    shutil.rmtree(eval_dir)
+
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert read.data is None
+    assert read.reason == ARTIFACT_NOT_RETAINED
+    assert "no longer retained" in read.detail
+    # Still auditable: the digest recorded at publication survives the prune.
+    assert recorded(entry, EVIDENCE_NAME).sha256
+
+
+def test_raw_artifact_serves_a_survivor_of_a_partially_pruned_set(tmp_path):
+    # Deliberately unlike the bundle's all-or-nothing rule. That rule protects an
+    # *import* from being taken for a whole report; verifying one artifact's bytes
+    # against one recorded digest needs nothing from the other three.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).unlink()
+
+    survivor = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+    removed = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)
+
+    assert survivor.data == (eval_dir / EVIDENCE_NAME).read_bytes()
+    assert survivor.integrity == "verified"
+    assert (removed.data, removed.reason) == (None, ARTIFACT_NOT_RETAINED)
+    # The bundle still fails closed on the same directory: the two rules coexist
+    # because they answer different questions.
+    assert cat.read_bundle(entry).available is False
+
+
+def test_raw_artifact_serves_bytes_edited_since_publication_as_mismatched(tmp_path):
+    # Withholding an edited artifact would withhold the evidence of the edit from
+    # the one caller equipped to prove it. The header-level state says so instead.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).write_text("# tampered\n", encoding="utf-8")
+
+    read = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)
+
+    assert read.data == b"# tampered\n"
+    assert read.integrity == "mismatched"
+    # The recorded digest is still handed back, so the consumer can name the
+    # discrepancy without re-reading the feed page it came from.
+    assert read.recorded_sha256 == recorded(entry, SEMANTIC_REPORT_MD_NAME).sha256
+
+
+def test_raw_artifact_without_a_usable_digest_is_served_unverified(tmp_path):
+    # Nothing was compared, which is a weaker claim than a match — and the bytes
+    # are still the ones on disk, so they are still served.
+    config = cfg(tmp_path)
+    write_eval(config)
+    catalog(config).reconcile()
+    rows = lines(config)
+    rows[0]["artifacts"] = [
+        artifact
+        for artifact in rows[0]["artifacts"]
+        if artifact["name"] != EVIDENCE_NAME
+    ]
+    rewrite_lines(config, rows)
+    cat = catalog(config)
+    entry = cat.entries()[0]
+
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert read.data is not None and read.reason is None
+    assert (read.integrity, read.recorded_sha256) == ("unverified", None)
+    # An artifact whose manifest row survived is still checked normally.
+    assert cat.read_artifact_bytes(entry, STATIC_METRICS_NAME).integrity == "verified"
+
+
+@pytest.mark.parametrize(
+    "field, value, fragment",
+    [
+        ("task_id", "..", "unsafe stored report identity"),
+        ("repo_slug", "alpha!!", "incoherent stored report identity"),
+    ],
+)
+def test_raw_artifact_of_a_damaged_identity_line_reads_no_file(
+    tmp_path, monkeypatch, field, value, fragment
+):
+    # Same two audits the bundle applies, and for the same reason: a hand-edited
+    # line must not steer a read out of the tree, and a slug alias must not serve
+    # the real repo's artifact under a contradicting identity. Both decide before
+    # any IO, which is asserted rather than assumed.
+    config = cfg(tmp_path)
+    write_eval(config, slug="alpha")
+    catalog(config).reconcile()
+    rows = lines(config)
+    rows[0][field] = value
+    rewrite_lines(config, rows)
+    cat = catalog(config)
+    entry = cat.entries()[0]
+    monkeypatch.setattr(
+        Path, "read_bytes", lambda self: pytest.fail(f"read {self} after a fault")
+    )
+
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert read.data is None
+    assert read.reason == ARTIFACT_IDENTITY
+    assert fragment in read.detail
+
+
+def test_raw_artifact_that_will_not_read_is_a_fault_not_an_absence(
+    tmp_path, monkeypatch
+):
+    # A present-but-unreadable file is a hub-side fault. Reporting it as "no longer
+    # retained" would tell a consumer the report was pruned, which is a permanent
+    # answer to a transient problem.
+    config = cfg(tmp_path)
+    write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+
+    def _boom(self: Path) -> bytes:
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(Path, "read_bytes", _boom)
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert read.data is None
+    assert read.reason == ARTIFACT_UNREADABLE
+    assert EVIDENCE_NAME in read.detail
+
+
 # -- disabled mode ------------------------------------------------------------
 
 
@@ -1410,6 +1639,22 @@ def test_bundle_of_an_unparseable_artifact_fails_closed(tmp_path):
                 target_source=SOURCE_ARCHIVED,
                 archived=True,
             )
+        ),
+        lambda cat, rp: cat.read_artifact_bytes(
+            ReportCatalogEntry(
+                seq=1,
+                report_key="rpt-x",
+                cataloged_ts=None,
+                repo_name="alpha",
+                repo_slug="alpha",
+                repo_path=None,
+                task_id=TASK_A,
+                evaluation_id="20260730T100000Z",
+                generated_ts=None,
+                target_source=SOURCE_ARCHIVED,
+                archived=True,
+            ),
+            EVIDENCE_NAME,
         ),
         lambda cat, rp: cat.reconcile(),
         lambda cat, rp: cat.record_evaluation(rp, TASK_A, "20260730T100000Z"),
