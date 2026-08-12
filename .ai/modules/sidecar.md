@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-12
-verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -147,8 +147,12 @@ The read/check/allocate/append transaction uses a process-wide `flock`; appends
 are fsynced single lines with torn-tail fencing. `page()` provides forward-only
 strictly-greater integer-watermark traversal; `read_bundle()` resolves a global
 key to the complete contained artifact set and reports digest verification.
-Catalog/source identity ambiguity fails closed. Published entries outlive
-retention-pruned artifacts, which remain auditable but bundle-unavailable.
+`read_artifact_bytes()` returns one fixed-name artifact's persisted bytes for
+independent manifest verification, with per-file availability and integrity;
+its no-follow open validates and reads one descriptor so a symlink or
+check/reopen swap cannot redirect the response. Catalog/source identity
+ambiguity fails closed. Published entries outlive retention-pruned artifacts,
+which remain auditable but bundle-unavailable.
 
 `unpublished_ids()` is injected as `EvaluationService.retention_guard` so a
 prune cannot destroy recoverable publication debt. The guard and publisher read

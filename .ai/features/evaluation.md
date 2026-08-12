@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-12
-verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # Features: Task Evaluation
@@ -219,9 +219,11 @@ protocol evolution, or create protocol-improvement tasks.
 Modules: report_catalog, evaluation, semantic, task_store, models, api, web.
 
 APIs: internal `ReportCatalog.record_evaluation`, `reconcile`, `page`,
-`read_bundle`, and `unpublished_ids`; protected
+`read_bundle`, `read_artifact_bytes`, and `unpublished_ids`; protected
 `GET /api/evaluation/reports[?after=<seq>&limit=<n>]` and
-`GET /api/evaluation/reports/{report_key}`; dashboard `#/reports`.
+`GET /api/evaluation/reports/{report_key}` plus
+`GET /api/evaluation/reports/{report_key}/artifacts/{name}`; dashboard
+`#/reports`.
 
 Implemented behavior:
 
@@ -250,6 +252,13 @@ Implemented behavior:
   404; published-but-pruned, partial, unreadable, unparseable, or incoherently
   identified bundles are 200 with `available:false`. Served content reports
   strict digest `verified`, `mismatched`, and `unverified` state.
+- Raw-artifact lookup selects one of the four fixed names and returns its
+  persisted bytes without parsing or normalization, so consumers can verify the
+  cataloged size/SHA-256. Availability is per artifact; mismatched bytes remain
+  visible with integrity headers. Unknown key/name is 404, incoherent identity
+  409, pruned bytes 410, and unreadable/damaged storage 500. The artifact is
+  opened no-follow and read through the same descriptor, closing symlink and
+  check/reopen races at the file hop.
 - Feed items carry source/global identity, generated/cataloged times,
   evaluation-time target source plus publication-time archived state, evaluator
   backend/model/schema, artifact size/hash manifests, and run/git provenance.

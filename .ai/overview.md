@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-12
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # Project Overview
@@ -40,8 +40,9 @@ duplicate in-flight model calls and link completed jobs to `semantic_report.json
 plus `report.md`, and expose evaluation evidence/static/semantic artifacts
 through protected HTTP routes. Complete L1+L2 reports for archived tasks are
 published to one append-only, globally ordered catalog with stable keys,
-cursor-paged discovery, and contained bundle export; reconciliation heals
-missed publication without re-running the evaluator. The dashboard renders
+cursor-paged discovery, contained bundle export, and byte-exact per-artifact
+verification reads; reconciliation heals missed publication without re-running
+the evaluator. The dashboard renders
 Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
 Codex is read from local session rollout `rate_limits`; Claude reads a
@@ -115,8 +116,9 @@ and links back to existing per-task detail.
   artifact inspection without target-repo mutation.
 - Publish archived tasks' complete L1+L2 reports through one durable cross-repo
   feed with global order/identity, explicit artifact integrity/provenance, and
-  contained bundle retrieval. orch-hub publishes; external consumers decide
-  protocol evolution and any resulting improvement work.
+  contained bundle plus byte-exact artifact retrieval. orch-hub publishes;
+  external consumers decide protocol evolution and any resulting improvement
+  work.
 - Provide simple remote auth suitable for a Tailscale-only v1 deployment.
 - Provide a mobile-first dashboard for repo, task, run, question, log, intake,
   and task-evaluation views.

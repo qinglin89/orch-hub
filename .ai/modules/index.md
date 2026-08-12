@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-12
-verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # Modules
@@ -26,7 +26,7 @@ Full responsibilities live in the detail files below.
 | Static metrics | `orch_hub/static_metrics.py` | deterministic six-axis metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation incl. retrieval effectiveness; backend isolation; doctor |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
-| Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained bundle reads |
+| Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained bundle + byte-exact artifact reads |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
 | StatusLine writer | `orch_hub/statusline.py` | legacy optional statusLine fallback feeding the usage sink |
 | Intake manager | `orch_hub/intake.py` | remote intake lifecycle/audit; off-lock turns; verified confirm |

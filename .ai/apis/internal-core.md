@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-12
-verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -159,8 +159,8 @@ Input: config/data dir, managed repo + exact task/evaluation identity for live
 publication, or the existing evaluations tree for reconciliation.
 
 Output: immutable `ReportCatalogEntry` values, forward-cursor `ReportPage`
-values, all-or-nothing `ReportBundle` values, and unpublished evaluation ids for
-retention protection.
+values, all-or-nothing `ReportBundle` values, per-file `ReportArtifactRead`
+values, and unpublished evaluation ids for retention protection.
 
 Behavior: `ReportCatalog` shares the evaluation gate. It publishes only
 coherent complete L1+L2 artifacts whose task is archived, assigning a monotonic
@@ -171,10 +171,15 @@ reports without evaluating. `page(after_seq, limit)` is strictly-greater,
 ascending, and forward-only; duplicate durable sequences/keys fail closed.
 `read_bundle(entry)` performs contained by-key reads, requires the whole artifact
 set, and reports strict digest verified/mismatched/unverified state while
-preserving pruned entries as explicitly unavailable. `unpublished_ids()` and
-publication share one artifact-derived eligibility rule; uncertain debt is
-protected from pruning. The catalog publishes provenance/artifacts only and
-never decides protocol evolution.
+preserving pruned entries as explicitly unavailable.
+`read_artifact_bytes(entry, name)` returns one fixed-name artifact's persisted
+bytes without normalization, reports integrity per file, and keeps readable
+mismatches visible. Its no-follow open validates and reads the same descriptor,
+so the artifact's file hop cannot be redirected by a symlink or check/reopen
+swap; path-resolution and IO faults become structured unreadable results.
+`unpublished_ids()` and publication share one artifact-derived eligibility rule;
+uncertain debt is protected from pruning. The catalog publishes
+provenance/artifacts only and never decides protocol evolution.
 
 ## Usage Service
 

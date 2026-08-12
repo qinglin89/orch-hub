@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-12
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # APIs: HTTP — Task Evaluation
@@ -41,6 +41,26 @@ Cross-cutting auth/app behavior: `http-core.md`.
   run/git/protocol/config provenance availability.
 - Integrity failure: duplicate durable `seq` or `report_key` makes cursor
   traversal ambiguous and returns 500 naming the defect.
+- Auth/disabled behavior: protected; disabled returns 404.
+
+## `GET /api/evaluation/reports/{report_key}/artifacts/{name}`
+
+- Purpose: return one published artifact exactly as persisted so a consumer can
+  independently verify the feed manifest's `size` and `sha256`; no parsing,
+  re-serialization, evaluation, or retention runs on this path.
+- Names: `evidence.json`, `static_metrics.json`, `semantic_report.json`, or
+  `report.md` only. The selector is never treated as a caller-controlled path.
+- Response: the byte-exact body with its JSON/Markdown media type,
+  `X-Report-Artifact-Integrity: verified|mismatched|unverified`, and
+  `X-Report-Artifact-Sha256` when one usable catalog digest exists. Mismatched
+  readable bytes are still served.
+- Availability: per artifact, unlike the bundle's all-or-nothing import rule;
+  an intact file remains readable beside a pruned sibling. Unknown key/name is
+  404, incoherent stored identity 409, pruned artifact 410, unreadable or
+  symlinked artifact 500, and ambiguous catalog 500.
+- Containment: identity/path validation precedes IO; the fixed artifact name is
+  opened no-follow, validated, and read through one descriptor so a symlink or
+  check/reopen swap at that file hop cannot redirect returned bytes.
 - Auth/disabled behavior: protected; disabled returns 404.
 
 ## `GET /api/evaluation/reports/{report_key}`

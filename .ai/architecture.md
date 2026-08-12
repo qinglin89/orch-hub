@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-12
-verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
+verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 ---
 
 # Architecture
@@ -170,10 +170,11 @@ one append-only catalog entry with global `seq`, stable opaque `report_key`,
 artifact hashes, evaluator identity, and explicit provenance availability.
 Reconciliation retries missed/newly eligible reports without a model call; a
 shared retention guard protects publishable or undecidable unpublished
-artifacts until cataloged. Protected forward-cursor list and by-key contained
-bundle routes are read-only. Published entries remain auditable after retention
-prunes their artifacts; the hub exposes integrity/unavailability and leaves
-interpretation or protocol-evolution decisions to external consumers.
+artifacts until cataloged. Protected forward-cursor list, by-key contained
+bundle, and byte-exact per-artifact routes are read-only. Published entries
+remain auditable after retention prunes their artifacts; the hub exposes
+integrity/unavailability and leaves interpretation or protocol-evolution
+decisions to external consumers.
 
 Subscription usage is a sidecar display flow: `UsageService` reads Claude
 Code's whitelisted structured utilization cache first, then merges the optional
@@ -218,8 +219,9 @@ launch/intake gates.
   failed/retryable diagnostics, and completed `evaluation_id` linkage — not
   evaluation evidence or target state.
 - Report catalog owns cross-repo publication identity/order, reconciliation,
-  provenance/hash manifests, bundle containment, and publication-debt retention
-  protection—not evaluation judgment or protocol-evolution policy.
+  provenance/hash manifests, bundle containment, byte-exact artifact
+  verification reads, and publication-debt retention protection—not evaluation
+  judgment or protocol-evolution policy.
 - Evaluation API/dashboard presentation owns sidecar routing, readback, doctor
   gating, job polling, history comparison; never gates run control or inlines
   raw logs.
