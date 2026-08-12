@@ -29,8 +29,11 @@ directory — the four names are fixed, but what stands under them is not.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import json
+import os
+import signal
 import threading
 from pathlib import Path
 
@@ -1406,6 +1409,26 @@ def recorded(entry: ReportCatalogEntry, name: str):
     return next(artifact for artifact in entry.artifacts if artifact.name == name)
 
 
+def forbid_artifact_open(monkeypatch, *, error: OSError | None = None) -> None:
+    """Fail (or raise ``error``) if any published artifact file is opened at all.
+
+    Hooks the one gate every read of an artifact's bytes has to pass, so "decided
+    before any IO" is asserted rather than assumed, and stays asserted whatever
+    the read path is built out of. Unrelated opens (pytest's own, the catalog
+    file) delegate untouched.
+    """
+    real_open = os.open
+
+    def _guard(path, flags, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) in REQUIRED_ARTIFACTS:
+            if error is not None:
+                raise error
+            pytest.fail(f"opened {path}")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", _guard)
+
+
 @pytest.mark.parametrize("name", REQUIRED_ARTIFACTS)
 def test_raw_artifact_serves_the_bytes_the_manifest_hashed(tmp_path, name):
     # The whole point of the route: what comes back must be the persisted file,
@@ -1468,9 +1491,7 @@ def test_raw_artifact_of_a_name_outside_the_published_set_reads_nothing(
     (eval_dir / "notes.txt").write_text("operator scratch\n", encoding="utf-8")
     cat = catalog(config)
     entry = cat.reconcile()[0]
-    monkeypatch.setattr(
-        Path, "read_bytes", lambda self: pytest.fail(f"read {self} for {name!r}")
-    )
+    forbid_artifact_open(monkeypatch)
 
     read = cat.read_artifact_bytes(entry, name)
 
@@ -1584,9 +1605,7 @@ def test_raw_artifact_of_a_damaged_identity_line_reads_no_file(
     rewrite_lines(config, rows)
     cat = catalog(config)
     entry = cat.entries()[0]
-    monkeypatch.setattr(
-        Path, "read_bytes", lambda self: pytest.fail(f"read {self} after a fault")
-    )
+    forbid_artifact_open(monkeypatch)
 
     read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
 
@@ -1605,11 +1624,8 @@ def test_raw_artifact_that_will_not_read_is_a_fault_not_an_absence(
     write_eval(config)
     cat = catalog(config)
     entry = cat.reconcile()[0]
+    forbid_artifact_open(monkeypatch, error=OSError(errno.EIO, "input/output error"))
 
-    def _boom(self: Path) -> bytes:
-        raise OSError("input/output error")
-
-    monkeypatch.setattr(Path, "read_bytes", _boom)
     read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
 
     assert read.data is None
@@ -1618,11 +1634,11 @@ def test_raw_artifact_that_will_not_read_is_a_fault_not_an_absence(
 
 
 def test_raw_artifact_symlinked_out_of_its_dir_is_refused_not_followed(tmp_path):
-    # The *directory* is contained, but `is_file()`/`read_bytes()` follow symlinks,
-    # so containment has to be re-proved on what the fixed name actually opens.
-    # Otherwise an artifact swapped after publication for a link out of the tree
-    # serves those outside bytes — a target-repo file included — under this entry's
-    # published key, which is exactly what this read path promises it cannot do.
+    # The *directory* is contained, but a path-based read follows symlinks, so
+    # containment has to hold on what the fixed name actually opens. Otherwise an
+    # artifact swapped after publication for a link out of the tree serves those
+    # outside bytes — a target-repo file included — under this entry's published
+    # key, which is exactly what this read path promises it cannot do.
     config = cfg(tmp_path)
     eval_dir = write_eval(config)
     cat = catalog(config)
@@ -1643,16 +1659,111 @@ def test_raw_artifact_symlinked_out_of_its_dir_is_refused_not_followed(tmp_path)
     # A damaged artifact tree, deliberately not `not_retained`: answering "pruned"
     # would report tampering as retention's designed end state and hide it.
     assert read.reason == ARTIFACT_UNREADABLE
-    assert "resolves outside" in read.detail
+    assert "symbolic link" in read.detail
     # Per artifact, like every other outcome here — the untouched siblings verify.
     assert cat.read_artifact_bytes(entry, EVIDENCE_NAME).integrity == "verified"
 
 
+def test_raw_artifact_swapped_after_validation_still_serves_the_opened_file(
+    tmp_path, monkeypatch
+):
+    # The static case above is only half the guarantee: a read that validates a
+    # *pathname* and then opens that pathname walks the tree twice, so a swap
+    # landing between the two makes the check describe one file and the response
+    # carry another. Here the swap is fired from inside the read itself, at the
+    # moment the artifact has been opened and is being validated — the exact window
+    # a check-then-reopen implementation is exposed in. The bytes must come from
+    # the object that was opened, so the swap changes nothing.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    outside = repo(tmp_path).path / "docs" / "private.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("# target repo content\n", encoding="utf-8")
+    artifact = eval_dir / SEMANTIC_REPORT_MD_NAME
+    published = artifact.read_bytes()
+    real_fstat = os.fstat
+    swapped = False
+
+    def _swap_then_stat(fd):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            artifact.unlink()
+            artifact.symlink_to(outside)
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", _swap_then_stat)
+    read = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)
+
+    # The swap really happened mid-read (a read that never validates an open
+    # descriptor would leave this False and the assertions below vacuous).
+    assert swapped and artifact.is_symlink()
+    assert read.data == published
+    assert b"target repo content" not in read.data
+    assert read.integrity == "verified"
+
+
+def test_raw_artifact_symlink_loop_is_a_reported_fault_not_a_raised_one(tmp_path):
+    # A damaged artifact tree must stay inside the structured result. Resolving a
+    # loop by pathname raises instead of answering — `RuntimeError` on Python
+    # <= 3.12, which this project still supports — so a read built on `resolve()`
+    # escaped its own contract and surfaced as an unclassified crash. Opening
+    # answers with ELOOP on every supported version, which is a reason, not an
+    # exception.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    artifact = eval_dir / SEMANTIC_REPORT_MD_NAME
+    artifact.unlink()
+    artifact.symlink_to(artifact)
+
+    read = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)
+
+    assert read.data is None
+    assert read.reason == ARTIFACT_UNREADABLE
+    assert SEMANTIC_REPORT_MD_NAME in read.detail
+    assert cat.read_artifact_bytes(entry, EVIDENCE_NAME).integrity == "verified"
+
+
+def test_raw_artifact_replaced_by_a_pipe_answers_instead_of_blocking(tmp_path):
+    # Opening a FIFO for reading waits for a writer, forever if none comes. That
+    # would hang a request thread of the resident service on a tampered tree, so
+    # the open must not be a blocking one; the alarm turns a regression into a
+    # failure instead of a suite that never finishes.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    artifact = eval_dir / SEMANTIC_REPORT_MD_NAME
+    artifact.unlink()
+    os.mkfifo(artifact)
+
+    def _timeout(signum, frame):
+        raise AssertionError("the artifact read blocked on a FIFO")
+
+    previous = signal.signal(signal.SIGALRM, _timeout)
+    signal.alarm(5)
+    try:
+        read = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGALRM, previous)
+
+    # Not a regular file, so not the published artifact: the same answer absence
+    # gets, rather than an IO fault it is not.
+    assert read.data is None
+    assert read.reason == ARTIFACT_NOT_RETAINED
+
+
 def test_raw_artifact_reads_through_a_symlinked_data_dir(tmp_path):
-    # Containment compares two *resolved* paths, so a hub whose data dir is itself
-    # reached through a symlink (a relocated volume, or macOS's own /var ->
-    # /private/var) still reads normally. Comparing a resolved artifact against an
-    # unresolved dir would refuse every artifact on such a deployment.
+    # Containment is enforced at the artifact's own hop, not by refusing every link
+    # above it, so a hub whose data dir is itself reached through a symlink (a
+    # relocated volume, or macOS's own /var -> /private/var) still reads normally.
+    # A rule that rejected any symlink in the path would refuse every artifact on
+    # such a deployment.
     (tmp_path / "real-data").mkdir()
     (tmp_path / "hub-data").symlink_to(tmp_path / "real-data", target_is_directory=True)
     config = cfg(tmp_path)

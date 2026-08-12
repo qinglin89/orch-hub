@@ -8,9 +8,11 @@ touching real repos, subprocesses, or the ai-native-development registry.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import hashlib
 import itertools
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -4235,11 +4237,14 @@ def test_raw_artifact_that_will_not_read_is_500_not_a_missing_report(
     # A present-but-unreadable file is a hub-side fault. Answering 410 would tell a
     # consumer the report was pruned — a permanent answer to a transient problem.
     client, _config, item, _dir = published_report(tmp_path, monkeypatch)
+    real_open = os.open
 
-    def _boom(self: Path) -> bytes:
-        raise OSError("input/output error")
+    def _boom(path, flags, *args, **kwargs):
+        if os.path.basename(os.fspath(path)) == EVIDENCE_NAME:
+            raise OSError(errno.EIO, "input/output error")
+        return real_open(path, flags, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_bytes", _boom)
+    monkeypatch.setattr(os, "open", _boom)
     resp = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
 
     assert resp.status_code == 500
@@ -4267,6 +4272,26 @@ def test_raw_artifact_symlinked_out_of_the_tree_serves_no_outside_bytes(
     assert SEMANTIC_REPORT_MD_NAME in resp.json()["detail"]
     # Refused per artifact: the report's untouched artifacts still serve, so a
     # tampered file cannot take the whole published report offline.
+    intact = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
+    assert intact.status_code == 200
+
+
+def test_raw_artifact_symlink_loop_answers_500_instead_of_crashing_the_route(
+    tmp_path, monkeypatch
+):
+    # A damaged tree must reach the client as the route's documented hub-side
+    # fault, not as an unclassified crash: resolving a loop by pathname *raises*
+    # (`RuntimeError` on Python <= 3.12, which this project supports), so the read
+    # has to answer with a reason rather than let that escape its result.
+    client, _config, item, eval_dir = published_report(tmp_path, monkeypatch)
+    artifact = eval_dir / SEMANTIC_REPORT_MD_NAME
+    artifact.unlink()
+    artifact.symlink_to(artifact)
+
+    resp = client.get(artifact_url(item["report_key"], SEMANTIC_REPORT_MD_NAME))
+
+    assert resp.status_code == 500
+    assert SEMANTIC_REPORT_MD_NAME in resp.json()["detail"]
     intact = client.get(artifact_url(item["report_key"], EVIDENCE_NAME))
     assert intact.status_code == 200
 

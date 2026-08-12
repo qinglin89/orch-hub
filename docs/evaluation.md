@@ -298,23 +298,26 @@ the feed entry recorded, and its length is the recorded `size`.
 | `name` is not one of the four published artifacts | `404` |
 | stored identity is not the one the report was published under | `409` |
 | published, artifact removed by retention | `410` |
-| the file is present and will not read, or resolves outside its evaluation dir | `500` |
+| the file is present and will not read, or a symlink stands where it should | `500` |
 | the catalog holds a duplicate `seq`/`report_key` | `500` |
 | evaluation disabled / missing or wrong bearer token | `404` / `401` |
 
 `410` rather than `404` for a pruned artifact is deliberate: the entry proves the
 report was published, so "gone" and "wrong key" must be distinguishable without
-parsing prose. A file that resolves out of the tree is `500` rather than `410`
-for the mirror-image reason: it is a damaged artifact tree, and reporting it as
-"pruned" would present tampering as retention's designed end state.
+parsing prose. A symlinked artifact is `500` rather than `410` for the
+mirror-image reason: it is a damaged artifact tree, and reporting it as "pruned"
+would present tampering as retention's designed end state.
 
 A traversal attempt reads nothing — `name` selects from a closed set and is never
 a path, and an escaped separator matches no single path segment in the first
 place. Nor can the *filesystem* widen the boundary: because the four names are
-fixed but the files standing under them are not, the artifact's resolved target
-must still fall inside its own evaluation directory, so an artifact replaced by a
-symlink out of the tree is refused rather than followed. Nothing on this path
-opens a target repo, publishes, evaluates, or prunes.
+fixed but the files standing under them are not, the artifact is **opened without
+following a link at its own hop**, and the bytes are then read from that open
+file — so an artifact replaced by a symlink out of the tree is refused rather
+than followed, and a swap landing while the read is in flight changes nothing
+about what the response carries. (Symlinks *above* the evaluation dir — a
+relocated data volume — are unaffected.) Nothing on this path opens a target
+repo, publishes, evaluates, or prunes.
 
 ```
 curl -fsS -H "Authorization: Bearer $ORCH_HUB_TOKEN" \

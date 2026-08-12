@@ -102,12 +102,14 @@ than any verdict of its own.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import fcntl
 import hashlib
 import json
 import logging
 import os
 import re
+import stat
 import threading
 from collections import Counter
 from collections.abc import Callable, Iterator
@@ -231,10 +233,11 @@ message away from mapping the wrong one. The four are genuinely different
 answers: a name outside the published set (never a file), a stored identity that
 cannot be trusted to address the artifacts, a report whose artifact retention
 removed (the designed end state of an entry outliving what it indexes), and a
-file that is there but does not read — either because IO failed or because it
-resolves outside its evaluation dir, which is refused rather than followed. Both
-are hub-side defects, deliberately not folded into ``not_retained``: reporting a
-damaged artifact tree as the designed end state of retention would hide it."""
+file that is there but does not read — either because IO failed or because a
+symbolic link stands where the published artifact should, which is refused
+rather than followed. Both are hub-side defects, deliberately not folded into
+``not_retained``: reporting a damaged artifact tree as the designed end state of
+retention would hide it."""
 
 INTEGRITY_VERIFIED = "verified"
 INTEGRITY_MISMATCHED = "mismatched"
@@ -647,10 +650,12 @@ class ReportCatalog:
         (:func:`_identity_fault`) that guard :meth:`read_bundle`. A traversal
         attempt or a hand-edited line therefore opens no file at all. Those two
         constrain only what the *caller* and the *catalog* can address, though; the
-        third constrains the filesystem itself, re-proving containment on the
-        artifact's resolved target so a link planted where the artifact was cannot
-        make this path read outside the evaluations tree — least of all the target
-        repo, which it never touches.
+        third constrains the filesystem itself, and constrains it at the open
+        rather than at a pathname (:func:`_read_artifact_file`): the artifact's own
+        hop follows no link, and the bytes come from that descriptor. A link
+        planted where the artifact was — before, during, or after any check — can
+        therefore never make this path read outside the evaluations tree, least of
+        all the target repo, which it never touches.
 
         Bytes that no longer match the recorded digest are still returned, marked
         ``mismatched``: the same rule the bundle applies, and more load-bearing
@@ -678,6 +683,21 @@ class ReportCatalog:
                 reason=ARTIFACT_IDENTITY,
                 detail=f"unsafe stored report identity ({err})",
             )
+        except (OSError, RuntimeError) as err:
+            # Path math that still walks the filesystem: the contained-path helper
+            # resolves the dir to prove it stays under the evaluations base, and
+            # resolution of a symlink loop planted in the tree *raises* instead of
+            # returning — ``RuntimeError`` on the Python versions this project
+            # still supports (≤3.12 turns ``ELOOP`` into one, non-strict included),
+            # ``OSError`` in other failure modes. Unhandled, a damaged tree would
+            # escape this method's structured result and reach the route as an
+            # unclassified crash rather than the hub-side fault it is.
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_UNREADABLE,
+                detail=f"unresolvable path for report artifact {name} ({err})",
+            )
         fault = _identity_fault(entry)
         if fault is not None:
             return ReportArtifactRead(
@@ -694,43 +714,44 @@ class ReportCatalog:
             detail=f"report artifact {name} is no longer retained",
         )
         # A contained *directory* says nothing about what the fixed name inside it
-        # opens: `is_file()` and `read_bytes()` both follow symlinks, so an artifact
-        # replaced after publication by a link out of the tree would otherwise
-        # serve those outside bytes (a target-repo file included) under this
-        # entry's key. Containment is therefore re-proved on the resolved target,
-        # and the read then uses that resolved path rather than reopening the
-        # unchecked one, so nothing planted in between can redirect it. Absence
-        # resolves harmlessly (a pruned file/dir resolves as far as it exists and
-        # stays under `eval_dir`), leaving `is_file()` the sole reporter of "gone".
-        resolved = path.resolve()
-        if not resolved.is_relative_to(eval_dir.resolve()):
-            return ReportArtifactRead(
-                entry=entry,
-                name=name,
-                reason=ARTIFACT_UNREADABLE,
-                detail=(
-                    f"report artifact {name} resolves outside its evaluation"
-                    " directory"
-                ),
-            )
-        if not resolved.is_file():
-            # A pruned dir, a partially pruned set, or something that is not a
-            # regular file standing where the artifact was: all the same answer to
-            # the only question asked here — these bytes are not retained.
-            return gone
+        # opens, and no pathname check can settle it either: whatever such a check
+        # proved about `path`, the read walks that name a second time and may get a
+        # different object — an artifact swapped for a link to a target-repo file
+        # in between would be served as this entry's published artifact. So the
+        # open itself is the containment check (`_read_artifact_file`), and every
+        # step after it works on the descriptor.
         try:
-            data = resolved.read_bytes()
+            data = _read_artifact_file(path)
         except FileNotFoundError:
-            # Lost to a prune between the check above and the read: still absence,
-            # not an IO fault, so it must not be reported as one.
+            # Lost to a prune before or during the open: still absence, not an IO
+            # fault, so it must not be reported as one.
+            return gone
+        except NotADirectoryError:
+            # Something that is not a directory standing where the evaluation dir
+            # was: as absent as a pruned dir, and the answer the bundle gives it.
             return gone
         except OSError as err:
+            if err.errno == errno.ELOOP:
+                return ReportArtifactRead(
+                    entry=entry,
+                    name=name,
+                    reason=ARTIFACT_UNREADABLE,
+                    detail=(
+                        f"report artifact {name} is reached through a symbolic"
+                        " link and is refused rather than followed"
+                    ),
+                )
             return ReportArtifactRead(
                 entry=entry,
                 name=name,
                 reason=ARTIFACT_UNREADABLE,
                 detail=f"unreadable report artifact {name} ({err})",
             )
+        if data is None:
+            # A pruned dir, a partially pruned set, or something that is not a
+            # regular file standing where the artifact was: all the same answer to
+            # the only question asked here — these bytes are not retained.
+            return gone
         expected = _cataloged_digests(entry).get(name)
         if expected is None:
             integrity = INTEGRITY_UNVERIFIED
@@ -1335,6 +1356,41 @@ def _identity_fault(entry: ReportCatalogEntry) -> str | None:
             f" ({entry.repo_slug}/{entry.task_id}/{entry.evaluation_id})"
         )
     return None
+
+
+def _read_artifact_file(path: Path) -> bytes | None:
+    """Read the regular file at ``path``, following no link at its final hop.
+
+    The containment defense for a *fixed* artifact name, which no pathname check
+    can provide. The name is closed, but the object standing under it is not, and
+    every path-based operation — ``resolve``, ``is_file``, ``read_bytes`` — walks
+    that name again. Checking a pathname and then opening the same pathname is
+    therefore two walks of a tree that can change in between: the check describes
+    one object and the read returns another, so an artifact replaced by a link to
+    a target-repo file between them is served as the published artifact. Widening
+    the window is not required either — the swap only has to land inside it.
+
+    So the open *is* the check. ``O_NOFOLLOW`` refuses a symlink at the artifact's
+    own hop, so it never becomes a redirect that could be followed anywhere, and
+    everything after works on the descriptor: ``fstat`` and the read describe
+    exactly the object that was opened, whatever the name comes to mean
+    afterwards. ``O_NONBLOCK`` keeps the open from being turned into a hang — a
+    FIFO planted where the artifact was would otherwise wait for a writer forever,
+    on a request thread of the resident service (a regular file ignores the flag).
+
+    ``None`` when what stands there is not a regular file — a directory, a FIFO —
+    which is the "not retained" answer absence gets, since none of them is the
+    published artifact. Raises ``OSError`` otherwise, with ``ELOOP`` meaning a
+    refused link (the deliberate refusal, not an IO fault).
+    """
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with open(fd, "rb", closefd=False) as handle:
+            return handle.read()
+    finally:
+        os.close(fd)
 
 
 def _cataloged_digests(entry: ReportCatalogEntry) -> dict[str, str]:
