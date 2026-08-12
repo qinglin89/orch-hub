@@ -282,8 +282,9 @@ class SessionRef:
     ``entry_task_content`` is the task file as this session entered it, when the
     pack carries that capture (:mod:`orch_hub.task_snapshots`) — the preferred
     source for the declared prefetch set (:data:`SOURCE_SESSION_ENTRY_SNAPSHOT`).
-    ``None`` means no capture reached this session, and the reader falls back to
-    the session's own task-file read.
+    ``None`` means no capture reached this session *or* the bytes that did stop
+    short of the frontmatter's end, which would answer this reader wrongly rather
+    than not at all; either way it falls back to the session's own task-file read.
     """
 
     session_id: str

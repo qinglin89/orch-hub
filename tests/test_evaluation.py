@@ -498,7 +498,7 @@ def test_build_evidence_aggregates_active_task_and_its_runs(tmp_path):
         # One parsed session bracket, no run wrote an entry capture for it.
         "task_entry_fidelity": FIDELITY_RECONSTRUCTED,
         "task_entry_sessions": 1,
-        "task_entries_present": 0,
+        "task_entries_exact": 0,
         "git_available": False,  # fake git defaults to a failed window
         # This fixture repo has no `.ai/` at all: both `.ai/` flags are false and
         # the absent snapshot is the pack's one degradation warning.
@@ -1181,6 +1181,23 @@ def entry_task(prefetch: str, *, est: str = "1/2", body: str = "# Goal\n\nship i
     )
 
 
+def multibyte_entry_task(prefetch: str) -> str:
+    """A task file the per-entry cap cuts *inside* a three-byte character.
+
+    The boundary case the cap has to survive: a byte-offset slice leaves a partial
+    character, and replacing it on decode makes the kept text serialize back over
+    the cap. The assert is the fixture's own check — the padding is arithmetic
+    over :func:`entry_task`'s frontmatter, and a silently-aligned cut would leave
+    this test passing while proving nothing."""
+    lead = len(entry_task(prefetch, body="").encode()) - 1  # trailing body newline
+    pad = (EVIDENCE_TASK_FILE_MAX_BYTES - lead - 2) % 3
+    content = entry_task(
+        prefetch, body="a" * pad + "€" * EVIDENCE_TASK_FILE_MAX_BYTES
+    )
+    assert content.encode()[EVIDENCE_TASK_FILE_MAX_BYTES] & 0xC0 == 0x80
+    return content
+
+
 def entry(index: int, sid: str | None, content: str | None, **extra) -> dict:
     """One persisted ``task_snapshots.json`` entry, present iff it carries bytes."""
     return {
@@ -1236,7 +1253,7 @@ def test_build_evidence_carries_each_sessions_entry_task_file(tmp_path):
     assert pack.entry_fidelity == FIDELITY_EXACT
     summary = pack.to_dict()["summary"]
     assert summary["task_entry_fidelity"] == FIDELITY_EXACT
-    assert (summary["task_entry_sessions"], summary["task_entries_present"]) == (2, 2)
+    assert (summary["task_entry_sessions"], summary["task_entries_exact"]) == (2, 2)
     # Serialized whole, so a reader of the persisted pack sees the same bytes.
     persisted = pack.to_dict()["runs"][0]["task_snapshots"]["snapshots"]
     assert [e["sid"] for e in persisted] == ["sid-1", "sid-2"]
@@ -1351,8 +1368,11 @@ def test_entries_past_the_pack_budget_are_carried_without_content(tmp_path):
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)
     write_active_task(repo, TASK, "# body")
-    big = entry_task("[.ai/map.md]", body="x" * EVIDENCE_TASK_FILE_MAX_BYTES)
-    count = EVIDENCE_TASK_ENTRIES_MAX_BYTES // EVIDENCE_TASK_FILE_MAX_BYTES + 2
+    # Whole files, each comfortably under the per-entry cap, so what this measures
+    # is the pack-wide budget alone.
+    big = entry_task("[.ai/map.md]", body="x" * (EVIDENCE_TASK_FILE_MAX_BYTES - 1024))
+    fits = EVIDENCE_TASK_ENTRIES_MAX_BYTES // len(big.encode())
+    count = fits + 2
     write_run(
         config,
         "20260722T090000Z-alpha-task",
@@ -1377,19 +1397,24 @@ def test_entries_past_the_pack_budget_are_carried_without_content(tmp_path):
     dropped = [e for e in entries if not e.present]
     # Oldest-first: the newest entries are the ones closest to the task file the
     # pack already carries whole, so they are the cheapest to drop.
-    assert [e.sid for e in carried] == [f"sid-{i}" for i in range(len(carried))]
+    assert [e.sid for e in carried] == [f"sid-{i}" for i in range(fits)]
     assert dropped and all("budget was exhausted" in e.detail for e in dropped)
     assert sum(len(e.content.encode()) for e in carried) <= EVIDENCE_TASK_ENTRIES_MAX_BYTES
     # The limit is the pack's own and is stated once, not once per dropped entry.
     assert len(pack.warnings) == 1 and "budget" in pack.warnings[0]
+    # What the budget dropped is not exact evidence; what it kept is whole.
+    assert all(e.complete for e in carried)
     assert pack.entry_fidelity == FIDELITY_PARTIAL
 
 
-def test_an_entry_over_the_per_entry_cap_keeps_its_head(tmp_path):
+def test_a_head_cut_in_the_body_is_kept_but_is_not_exact_evidence(tmp_path):
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)
-    write_active_task(repo, TASK, "# body")
-    huge = entry_task("[.ai/map.md]", body="y" * (EVIDENCE_TASK_FILE_MAX_BYTES * 2))
+    write_ai_snapshot(repo, **{"modules/runtime.md": "# Runtime\n"})
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/modules/runtime.md]")
+    huge = entry_task(
+        "[.ai/modules/runtime.md]", body="y" * (EVIDENCE_TASK_FILE_MAX_BYTES * 2)
+    )
     write_run(
         config,
         "20260722T090000Z-alpha-task",
@@ -1404,12 +1429,116 @@ def test_an_entry_over_the_per_entry_cap_keeps_its_head(tmp_path):
 
     kept = pack.runs[0].task_snapshots.for_sid("sid-1")
     assert kept.present is True and kept.truncated is True
-    assert len(kept.content.encode()) == EVIDENCE_TASK_FILE_MAX_BYTES
+    assert len(kept.content.encode()) <= EVIDENCE_TASK_FILE_MAX_BYTES
     assert kept.size == len(huge.encode())  # the true size, not what was kept
     # The head is what matters: the frontmatter the archive cannot give back.
     assert kept.content.startswith(f"---\nid: {TASK}\n")
-    # A truncated file is still exact evidence of how the session entered.
-    assert pack.entry_fidelity == FIDELITY_EXACT
+    # But a head is not the file the session entered on: an unknown amount of
+    # Goal/Scope/Acceptance is missing, so it cannot be replayed exactly.
+    assert kept.complete is False
+    assert pack.entry_fidelity == FIDELITY_RECONSTRUCTED
+    # The declared fields all sit above the cut, so they still answer exactly.
+    assert kept.frontmatter_complete is True
+    assert pack.ai.prefetch_source == PREFETCH_SOURCE_SESSION_ENTRIES
+    assert pack.reads.sessions[0].expected == (".ai/modules/runtime.md",)
+    assert pack.reads.sessions[0].expected_source == SOURCE_SESSION_ENTRY_SNAPSHOT
+
+
+def test_a_head_cut_inside_the_frontmatter_declares_nothing(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo, **{"modules/runtime.md": "# Runtime\n"})
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/modules/runtime.md]")
+    # A frontmatter longer than the per-entry cap: the head stops before the
+    # `prefetch:` line, which parses as a session that declared nothing.
+    padded = (
+        f"---\nid: {TASK}\nstatus: in_progress\nsession-est: 1/2\n"
+        f"notes: {'n' * EVIDENCE_TASK_FILE_MAX_BYTES}\n"
+        "prefetch: [.ai/modules/runtime.md]\n---\n\n# Goal\n"
+    )
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+        task_snapshots={"snapshots": [entry(0, "sid-1", padded)]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    kept = pack.runs[0].task_snapshots.for_sid("sid-1")
+    assert kept.present is True and kept.frontmatter_complete is False
+    assert "frontmatter" in kept.detail
+    assert any("frontmatter" in w for w in pack.warnings)  # never a silent loss
+    assert pack.entry_fidelity == FIDELITY_RECONSTRUCTED
+    # "Not known" is not "declared nothing": the accumulated value is the only
+    # surviving source, and `prefetch_source` says the slice came from it.
+    assert pack.ai.prefetch_source == PREFETCH_SOURCE_TASK_FILE
+    assert [d.path for d in pack.ai.docs if d.role == "prefetch"] == [
+        ".ai/modules/runtime.md"
+    ]
+    # And the read rollup claims no session-time set rather than an empty one.
+    assert pack.reads.sessions[0].expected == ()
+    assert pack.reads.sessions[0].expected_source is None
+
+
+def test_the_per_entry_cap_cuts_on_a_character_boundary(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    huge = multibyte_entry_task("[.ai/map.md]")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+        task_snapshots={"snapshots": [entry(0, "sid-1", huge)]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    kept = pack.runs[0].task_snapshots.for_sid("sid-1")
+    assert len(kept.content.encode()) <= EVIDENCE_TASK_FILE_MAX_BYTES
+    assert "�" not in kept.content
+    assert huge.startswith(kept.content)  # a real prefix, not a repaired one
+
+
+def test_the_pack_budget_holds_across_multibyte_entries(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    # Enough cut entries to fill the pack budget to the byte, so a per-entry
+    # overshoot of even one byte puts the carried set over it.
+    huge = multibyte_entry_task("[.ai/map.md]")
+    count = EVIDENCE_TASK_ENTRIES_MAX_BYTES // EVIDENCE_TASK_FILE_MAX_BYTES
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={
+            "sessions": [
+                {"role": "dev", "kind": "session", "sid": f"sid-{i}"}
+                for i in range(count)
+            ]
+        },
+        task_snapshots={"snapshots": [entry(i, f"sid-{i}", huge) for i in range(count)]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    carried = [e for e in pack.runs[0].task_snapshots.snapshots if e.present]
+    # Every entry is debited at what it actually serializes to, so a budget filled
+    # to the byte by cut entries still holds once the pack is written out.
+    assert len(carried) == count
+    assert (
+        sum(len(e.content.encode()) for e in carried) <= EVIDENCE_TASK_ENTRIES_MAX_BYTES
+    )
 
 
 def test_the_ai_prefetch_slice_comes_from_the_session_entry_declarations(tmp_path):

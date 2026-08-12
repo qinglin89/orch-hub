@@ -88,6 +88,7 @@ from .task_snapshots import (
     SessionTaskSnapshot,
     TaskSnapshots,
     read_snapshots,
+    utf8_head,
 )
 from .task_store import parse_prefetch, read_archived_task_content, read_task_content
 
@@ -172,7 +173,12 @@ EVIDENCE_TASK_FILE_MAX_BYTES = 64 * 1024
 dir's own capture cap (:data:`orch_hub.task_snapshots.TASK_FILE_MAX_BYTES`): the
 run dir holds one run's captures, while a pack holds every run's. The *head* is
 kept, for the same reason the capture keeps it — the frontmatter leads the file
-and carries the fields nothing else recovers."""
+and carries the fields nothing else recovers. A head is bytes, not the file: it
+is marked ``truncated`` and therefore not exact entry evidence, and it stops
+being a declared-prefetch source too once the cut reaches the frontmatter (see
+:attr:`orch_hub.task_snapshots.SessionTaskSnapshot.complete` and
+``frontmatter_complete``). At measured task-file sizes (~16KB, largest observed
+170KB) only the frontmatter case is hypothetical."""
 
 EVIDENCE_TASK_ENTRIES_MAX_BYTES = 192 * 1024
 """Cap on the summed session-entry task files across the whole pack, the bound
@@ -488,18 +494,27 @@ class EvidencePack:
 
     @property
     def entry_counts(self) -> tuple[int, int]:
-        """``(sessions this pack knows of, those carrying their entry task file)``.
+        """``(sessions this pack knows of, those carrying their entry file whole)``.
 
         Counted over what the pack actually carries: an entry whose content the
         section budget dropped is not exact evidence *here*, whatever the run dir
         still holds, because the pack is the published artifact a downstream case
         is built from.
+
+        Exactness needs the *whole* file
+        (:attr:`orch_hub.task_snapshots.SessionTaskSnapshot.complete`), not merely
+        bytes. A kept head is missing an unknown amount of what the session
+        entered on — possibly the acceptance criteria, possibly the frontmatter
+        itself — so counting it as exact would tell a downstream case builder that
+        a replay can be reproduced from a file it cannot be reproduced from. The
+        head is still carried, and its ``truncated`` flag is what a consumer that
+        wants partial bytes reads.
         """
         total = 0
         exact = 0
         for run in self.runs:
             total += run.protocol_sessions
-            exact += sum(1 for entry in run.task_entries if entry.present)
+            exact += sum(1 for entry in run.task_entries if entry.complete)
         return total, exact
 
     @property
@@ -535,7 +550,7 @@ class EvidencePack:
             "target_source": self.target.source,
             "task_entry_fidelity": self.entry_fidelity,
             "task_entry_sessions": entry_total,
-            "task_entries_present": entry_exact,
+            "task_entries_exact": entry_exact,
             "git_available": git.available,
             "ai_snapshot_present": ai.present,
             "ai_doc_count": sum(1 for doc in ai.docs if doc.present),
@@ -630,11 +645,19 @@ def _session_refs(runs: Sequence[RunEvidence]) -> list[SessionRef]:
 
 
 def _entry_content(run: RunEvidence, sid: str) -> str | None:
-    """One session's captured entry task file from ``run``, if the pack carries it."""
+    """One session's captured entry task file from ``run``, if the pack carries it.
+
+    Gated on the frontmatter being whole rather than on bytes existing: the only
+    thing read off this content is the session's declared ``prefetch:`` set
+    (:func:`orch_hub.session_reads._expected_set`), and a head cut inside the
+    frontmatter yields a *wrong* set rather than no set — a dropped ``prefetch:``
+    line reads as a session that declared nothing, which is a claim, and one the
+    read rollup would carry into its own applicability and confidence.
+    """
     if run.task_snapshots is None:
         return None
     entry = run.task_snapshots.for_sid(sid)
-    return entry.content if entry is not None and entry.present else None
+    return entry.content if entry is not None and entry.frontmatter_complete else None
 
 
 def _bounded_task_entries(
@@ -655,12 +678,24 @@ def _bounded_task_entries(
     smaller entry that still fits is then carried: skipping it too would drop
     evidence the budget can afford, so the carried set is the ones that fit in
     order, not a prefix. Recorded misses cost nothing — they carry no bytes to
-    begin with. Returns the rebuilt runs and any pack-level warning, one line for
-    the whole budget event rather than one per dropped entry.
+    begin with.
+
+    A per-entry cut keeps the head (:data:`EVIDENCE_TASK_FILE_MAX_BYTES`) and is
+    taken on a character boundary (:func:`orch_hub.task_snapshots.utf8_head`), so
+    the carried text costs exactly the bytes debited from the budget rather than
+    growing back past the cap through a replaced partial character. Such a head is
+    marked ``truncated``, which is what keeps it out of the exact count and, when
+    the cut reached into the frontmatter, out of the declared-prefetch sources
+    too; that case is warned about, since it silently narrows what the pack's
+    derived sections could be built from.
+
+    Returns the rebuilt runs and any pack-level warnings, one line per limit event
+    rather than one per affected entry.
     """
     budget = EVIDENCE_TASK_ENTRIES_MAX_BYTES
     bounded: list[RunEvidence] = []
     dropped = 0
+    cut_frontmatter = 0
     for run in runs:
         if run.task_snapshots is None:
             bounded.append(run)
@@ -670,8 +705,8 @@ def _bounded_task_entries(
             if not entry.present or entry.content is None:
                 entries.append(entry)
                 continue
-            head = entry.content.encode("utf-8")[:EVIDENCE_TASK_FILE_MAX_BYTES]
-            if len(head) > budget:
+            head, head_bytes = utf8_head(entry.content, EVIDENCE_TASK_FILE_MAX_BYTES)
+            if head_bytes > budget:
                 dropped += 1
                 entries.append(
                     replace(
@@ -688,27 +723,40 @@ def _bounded_task_entries(
                     )
                 )
                 continue
-            budget -= len(head)
-            entries.append(
-                replace(
-                    entry,
-                    content=head.decode("utf-8", errors="replace"),
-                    truncated=entry.truncated or len(head) < entry.size,
-                )
+            budget -= head_bytes
+            kept = replace(
+                entry,
+                content=head,
+                truncated=entry.truncated or head_bytes < entry.size,
             )
+            if not kept.frontmatter_complete:
+                cut_frontmatter += 1
+                kept = replace(
+                    kept,
+                    detail=(
+                        "kept head stops inside the frontmatter, so this entry is"
+                        " not a session-time prefetch source"
+                    ),
+                )
+            entries.append(kept)
         bounded.append(
             replace(run, task_snapshots=TaskSnapshots(snapshots=tuple(entries)))
         )
-    warnings = (
-        (
+    warnings: list[str] = []
+    if dropped:
+        warnings.append(
             f"task entries: {dropped} session-entry task file(s) carried without"
             f" content past the pack's"
-            f" {EVIDENCE_TASK_ENTRIES_MAX_BYTES // 1024}KB budget",
+            f" {EVIDENCE_TASK_ENTRIES_MAX_BYTES // 1024}KB budget"
         )
-        if dropped
-        else ()
-    )
-    return tuple(bounded), warnings
+    if cut_frontmatter:
+        warnings.append(
+            f"task entries: {cut_frontmatter} session-entry task file(s) cut"
+            f" inside the frontmatter by the pack's"
+            f" {EVIDENCE_TASK_FILE_MAX_BYTES // 1024}KB per-entry cap; their"
+            " declared prefetch sets are unrecoverable from this pack"
+        )
+    return tuple(bounded), tuple(warnings)
 
 
 def _prefetch_slice(
@@ -733,12 +781,20 @@ def _prefetch_slice(
     task whose sessions declared nothing has an empty slice as a fact, and
     reaching for the accumulated value there would reintroduce exactly the skew
     this replaces.
+
+    Those bytes have to reach the end of the frontmatter to say anything, though.
+    A head cut short of it parses as a smaller declaration or none at all, which
+    is not "declared nothing" but "not known" — the one state the fact-versus-skew
+    argument above does not cover — so such an entry is no source here. A pack
+    carrying only those falls back to the accumulated value and says so through
+    ``prefetch_source``, the honest answer when the session-time sets are simply
+    not recoverable from what the pack holds.
     """
     carried = [
         entry.content
         for run in runs
         for entry in run.task_entries
-        if entry.present and entry.content is not None
+        if entry.frontmatter_complete and entry.content is not None
     ]
     if not carried:
         return parse_prefetch(target.content), PREFETCH_SOURCE_TASK_FILE

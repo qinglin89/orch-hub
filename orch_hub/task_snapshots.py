@@ -147,7 +147,9 @@ class SessionTaskSnapshot:
     — the session was already over when a scan first saw it, its entry window had
     closed, or the content cap was reached — with ``detail`` saying which; the run
     and every downstream read still complete. ``size`` is the file's true byte
-    size and ``truncated`` marks a kept head shorter than it.
+    size and ``truncated`` marks a kept head shorter than it — read through
+    :attr:`complete` and :attr:`frontmatter_complete` rather than off ``present``,
+    since a head is present bytes but not the whole file.
 
     ``captured_at`` is the UTC instant the bytes were read and
     ``entry_lag_seconds`` how long after the session-start log line that was
@@ -169,6 +171,42 @@ class SessionTaskSnapshot:
     size: int = 0
     truncated: bool = False
     detail: str | None = None
+
+    @property
+    def complete(self) -> bool:
+        """True when this entry carries the session's entry task file *whole*.
+
+        The test for exact evidence, as distinct from ``present``: a kept head is
+        real bytes but not the file the session entered on, and the fields the cut
+        dropped are unknowable rather than absent. Treating a head as exact is the
+        skew this module exists to remove, pointed the other way — a replay built
+        from a truncated file would silently run on less than the original had.
+        """
+        return self.present and self.content is not None and not self.truncated
+
+    @property
+    def frontmatter_complete(self) -> bool:
+        """True when this entry's bytes carry the file's whole frontmatter region.
+
+        The weaker test the *declared* facts need. ``prefetch:``, ``session-est``,
+        and ``status`` all live in the frontmatter, so a head cut somewhere in the
+        body still answers for them exactly — while a head cut inside the
+        frontmatter answers wrongly rather than not at all: the parser stops at
+        what it can see, so a lost ``prefetch:`` line reads as a session that
+        declared nothing and a cut mid-line reads as a shorter declaration.
+
+        A truncated head with no opening fence is refused too, though its parse
+        would happen to be right (a file with no frontmatter declares nothing at
+        any length). Nothing real is lost — a conforming task file opens with one
+        — and the rule stays the one thing it claims: this content was seen down
+        to the end of the frontmatter.
+        """
+        if not self.present or self.content is None:
+            return False
+        if not self.truncated:
+            return True
+        opens, closes = _frontmatter_span(self.content)
+        return opens and closes
 
     def to_dict(self) -> dict:
         return {
@@ -225,6 +263,40 @@ class TaskSnapshots:
 
     def to_dict(self) -> dict:
         return {"snapshots": [entry.to_dict() for entry in self.snapshots]}
+
+
+def utf8_head(text: str, limit: int) -> tuple[str, int]:
+    """``text`` cut to at most ``limit`` UTF-8 bytes, plus what it really costs.
+
+    Both producers of a snapshot's ``content`` cut one — this module at
+    :data:`TASK_FILE_MAX_BYTES`, the evidence pack again at its own, smaller cap —
+    and both then carry the result as *text*, re-encoded on the way into JSON. So
+    the cap has to bound the bytes that come back out, which slicing the encoded
+    form does not: a cut that lands inside a multi-byte character leaves a partial
+    one, and decoding it lossily turns those 1-2 bytes into U+FFFD, 3 bytes wide.
+    The head then serializes *larger* than the limit it was cut to, and a caller
+    debiting a shared budget by the pre-decode length under-counts every such
+    entry.
+
+    Cutting on a character boundary instead is exact in both directions: nothing
+    partial to replace, and the returned length is the serialized length. The
+    dropped character costs at most three bytes of a task file's tail, against a
+    cap that already dropped everything past it.
+
+    Returns ``(head, bytes)``; ``bytes`` is always ``len(head.encode("utf-8"))``,
+    which is the number to debit and to compare against ``size``.
+    """
+    data = text.encode("utf-8")
+    if len(data) <= limit:
+        return text, len(data)
+    cut = max(limit, 0)
+    # Back off over continuation bytes (0b10xxxxxx) to the start of the character
+    # the cut landed in, dropping it whole.
+    while cut > 0 and (data[cut] & 0xC0) == 0x80:
+        cut -= 1
+    head = data[:cut]
+    # Strict: ``data`` came from a str, so a boundary cut of it is always valid.
+    return head.decode("utf-8"), cut
 
 
 def artifact_path(run_dir: Path) -> Path:
@@ -490,16 +562,14 @@ def _capture(
             failure,
         )
         return None
-    data = content.encode("utf-8")
-    head = data[:TASK_FILE_MAX_BYTES]
+    size = len(content.encode("utf-8"))
+    head, head_bytes = utf8_head(content, TASK_FILE_MAX_BYTES)
     return replace(
         entry,
         present=True,
-        # Lossy-tolerant decode, matching the log/doc readers: it absorbs the
-        # partial multi-byte character a cut at a byte offset can leave.
-        content=head.decode("utf-8", errors="replace"),
-        size=len(data),
-        truncated=len(head) < len(data),
+        content=head,
+        size=size,
+        truncated=head_bytes < size,
     )
 
 
@@ -531,6 +601,22 @@ def _read_task_file(
     return content, None
 
 
+def _frontmatter_span(text: str) -> tuple[bool, bool]:
+    """``(opens, closes)`` for ``text``'s leading ``---`` frontmatter fence.
+
+    One scanner for the two questions asked of it, which differ only in what they
+    make of a file that opens no fence at all: :func:`_frontmatter_closed` reads
+    that as "no evidence of a partial write" and captures it, while
+    :attr:`SessionTaskSnapshot.frontmatter_complete` reads it as "the frontmatter
+    region was not seen whole" and refuses it as a declaration source. Folding
+    them into one boolean would silently give one of the two the other's default.
+    """
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return False, False
+    return True, any(line.strip() == "---" for line in lines[1:])
+
+
 def _frontmatter_closed(content: str) -> bool:
     """True unless the file opens a ``---`` frontmatter fence it never closes.
 
@@ -540,10 +626,8 @@ def _frontmatter_closed(content: str) -> bool:
     is accepted as-is; a file with no fence at all (not a conforming task file,
     but not evidence of a partial write either) is captured rather than dropped.
     """
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        return True
-    return any(line.strip() == "---" for line in lines[1:])
+    opens, closes = _frontmatter_span(content)
+    return not opens or closes
 
 
 def _entry_lag_seconds(start_hms: str | None, now: dt.datetime) -> int | None:

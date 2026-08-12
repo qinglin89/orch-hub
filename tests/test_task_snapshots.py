@@ -29,6 +29,7 @@ from orch_hub.task_snapshots import (
     lock_path,
     read_snapshots,
     settle_snapshots,
+    utf8_head,
     write_snapshots,
 )
 from orch_hub.task_store import read_task_content
@@ -451,6 +452,69 @@ def test_an_oversize_task_file_keeps_a_truncated_head(tmp_path):
     assert len(entry.content.encode("utf-8")) == TASK_FILE_MAX_BYTES
     # The head is what matters: frontmatter carries the unrecoverable fields.
     assert entry.content.startswith("---\nid: 2026-07-05-feature-x\n")
+
+
+def test_the_capture_cap_cuts_on_a_character_boundary(tmp_path):
+    # Pad so the cap falls two bytes into a three-byte character. Cutting the
+    # encoded form there and decoding it lossily would swap those two bytes for a
+    # three-byte U+FFFD, pushing the kept content back *over* the cap it was cut
+    # to — and leaving a head that is not a prefix of the file it came from.
+    pad = (TASK_FILE_MAX_BYTES - len(TASK_BODY.encode("utf-8")) - 2) % 3
+    body = TASK_BODY + "a" * pad + "€" * TASK_FILE_MAX_BYTES
+    # The fixture's own check: an accidentally-aligned cut would leave this test
+    # passing while proving nothing.
+    assert body.encode("utf-8")[TASK_FILE_MAX_BYTES] & 0xC0 == 0x80
+    repo = make_repo(tmp_path, body=body)
+    run_dir = make_run_dir(tmp_path)
+
+    entry = only(
+        capture_entries(run_dir, make_record(repo), snapshot(session()), now=NOW)
+    )
+
+    assert entry.truncated is True
+    assert len(entry.content.encode("utf-8")) <= TASK_FILE_MAX_BYTES
+    assert "�" not in entry.content
+    assert body.startswith(entry.content)  # a real prefix, not a repaired one
+
+
+def test_utf8_head_keeps_whole_characters_and_reports_the_cost():
+    text = "a" + "€" * 4  # 1 + 12 bytes
+
+    assert utf8_head(text, 13) == (text, 13)  # exactly at the limit: unchanged
+    assert utf8_head(text, 99) == (text, 13)
+    # A limit landing two bytes into the second euro drops that character whole.
+    head, kept = utf8_head(text, 6)
+    assert (head, kept) == ("a€", 4)
+    # The reported cost is the serialized cost, which is what a shared byte budget
+    # has to be debited by.
+    assert len(head.encode("utf-8")) == kept
+    assert utf8_head(text, 0) == ("", 0)
+
+
+def test_completeness_separates_a_whole_file_from_a_kept_head():
+    whole = SessionTaskSnapshot(index=0, present=True, content=TASK_BODY)
+    assert (whole.complete, whole.frontmatter_complete) == (True, True)
+
+    # Cut in the body: not the file the session entered on, but every declared
+    # field is above the cut and answers exactly.
+    body_cut = SessionTaskSnapshot(
+        index=0, present=True, content=TASK_BODY, size=99999, truncated=True
+    )
+    assert (body_cut.complete, body_cut.frontmatter_complete) == (False, True)
+
+    # Cut inside the frontmatter: the parse would silently answer *wrongly* —
+    # here, that the session declared no prefetch at all.
+    fm_cut = SessionTaskSnapshot(
+        index=0,
+        present=True,
+        content="---\nid: 2026-07-05-feature-x\nstatus: in_p",
+        size=99999,
+        truncated=True,
+    )
+    assert (fm_cut.complete, fm_cut.frontmatter_complete) == (False, False)
+
+    missed = SessionTaskSnapshot(index=0, detail="session had already ended")
+    assert (missed.complete, missed.frontmatter_complete) == (False, False)
 
 
 def test_the_content_cap_records_the_session_without_content(tmp_path):

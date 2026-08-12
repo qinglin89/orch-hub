@@ -114,8 +114,11 @@ version — compare cohorts, not raw numbers across a bump.
 While a run is live, the hub captures the task file **as each session entered
 it** and keeps it in the run dir; the evidence pack carries those bytes per
 session, and each report records `input_entry_fidelity` — `exact` when every
-session the pack knows of has its entry file, `partial` when some do, and
-`reconstructed` when none do.
+session the pack knows of has its entry file *whole*, `partial` when some do, and
+`reconstructed` when none do. A file the pack's byte caps had to cut is carried
+as a head and marked `truncated`, and it does not count as exact: what the cut
+dropped is unknown rather than absent, so a case built from it cannot claim to
+reproduce the session.
 
 It matters because the archived task file cannot give the entry state back: the
 estimate total is raised mid-flight, `prefetch:` is backfilled with what was
