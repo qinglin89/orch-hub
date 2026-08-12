@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-11
-verified-against: ce19bb172c57eabbbbf7e83604ec3d6bff96733b
+last-updated: 2026-08-12
+verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
 ---
 
 # Architecture
@@ -134,20 +134,23 @@ off the state-critical path when Bark is configured.
 
 Task evaluation: exact active/archive id → read-only aggregation of every
 `(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics,
-a producer-bounded best-effort git window, and a producer-bounded `.ai/`
-eager/prefetch snapshot plus same-window `.ai/` patches, plus bounded ordered
-session read behavior from persisted ids and the configured Claude transcript
-store → schema-v15 `evidence.json` under the hub data dir.
+a producer-bounded best-effort git window, bounded per-session entry task files,
+and a producer-bounded `.ai/` eager/prefetch snapshot plus same-window `.ai/`
+patches, plus bounded ordered session read behavior from persisted ids and the
+configured Claude transcript store → schema-v16 `evidence.json` under the hub
+data dir. Entry files come from existing log brackets, live in the run dir, and
+carry exact/partial/reconstructed fidelity; snapshot-derived prefetch declarations
+supersede accumulated task state only when their frontmatter is complete.
 Static metrics adds deterministic run/session, taskfile/session-log, six-axis
 score (including prefetch-set read completeness), confidence, and warning
-rollups as static-schema-v3 `static_metrics.json` beside it. The
+rollups as static-schema-v4 `static_metrics.json` beside it. The
 semantic layer builds a model prompt from the persisted evidence/static chain,
 including the bounded `.ai/` copy, independently available patch stream, and
 ordered read trace; semantic-schema-v2 retrieval effectiveness is distinct and
 grounds rediscovery risk. Missing/partial/unobserved parts and raw logs are
 recorded as omission or confidence degradation, never poor behavior. It persists
 `semantic_report.json` + `report.md` in the same dir and stamps the evidence
-schema cohort on the report. The default Claude CLI backend runs from an empty
+schema cohort plus entry fidelity on the report. The default Claude CLI backend runs from an empty
 non-repo cwd with tools disabled, safe mode, no session persistence, and
 plan-mode writes blocked — the model cannot read live target-repo state outside
 the prompt. Protected routes expose availability, generation, async

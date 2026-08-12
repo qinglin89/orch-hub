@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-12
+verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
 ---
 
 # Modules: Runtime
@@ -211,6 +211,27 @@ keeps the latest/peak context figure, and tolerates missing, truncated, orphaned
 or mid-write lines as partial data. `read_live(record)` locates and parses the
 current repo-side log; `write_snapshot`/`read_snapshot` atomically persist and
 tolerantly load `sessions.json`.
+
+## Session Entry Task Snapshots
+
+Location: `orch_hub/task_snapshots.py`
+
+Responsibility: preserve the target task file as each protocol `session`
+entered it, using the session-start brackets already parsed from the
+orchestrator log. Live scans capture only the last open bracket within a
+three-minute window; already-ended, superseded, over-cap, and terminally
+unobserved brackets remain explicit content-less misses. The terminal run
+transition settles late-revealed session ids and records any bracket no live
+scan saw. `plan-gate` brackets are excluded because they do not claim the task.
+
+`task_snapshots.json` lives beside `sessions.json`; whole-artifact mutations are
+serialized by a stable per-run `flock` and persisted by atomic rename. Capture
+keeps at most 24 content-bearing entries and a 256KB UTF-8-safe head per file,
+recording true byte size and truncation. `SessionTaskSnapshot.complete`
+distinguishes a whole replayable file from a kept head, while
+`frontmatter_complete` permits declaration consumers to use a head only when
+its closing frontmatter fence is present. Missing, unreadable, or mid-write task
+files warn and retry during the entry window; they never fail the run.
 
 ## Notifications
 

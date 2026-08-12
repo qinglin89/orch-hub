@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-11
-verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
+last-updated: 2026-08-12
+verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -20,16 +20,23 @@ reads active `.ai-tasks/<id>.md` first, then archived
 `(repo_path, task_id)` run records through `runs.load_records` without refresh,
 pid probing, or writes; `build_evidence` assembles a bounded `EvidencePack`
 from task content, related run records, metadata-only events, persisted session
-snapshots, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
-best-effort git-window commits, and a bounded `.ai/` snapshot. The memory
-section contains the routed eager set, task-declared prefetch docs, and a
-`.ai/`-scoped patch stream over the same git window. A separate schema-v15
-`reads` section uses persisted session ids plus Claude transcripts rooted at
-`Config.claude_transcripts_dir` to retain bounded session-time prefetch facts
-and one ordered declared/undeclared `.ai/` read trace with activity/write-order
-anchors, but no transcript text. Transcript absence, lost rows, trace/session
-caps, and unobserved sessions degrade explicitly; per-part failures remain
-independent, and every doc/router/diff/transcript bound is enforced at its
+summaries and entry-task snapshots, bounded orchestrator-log and `spawn.out`
+excerpts, terminal fields, best-effort git-window commits, and a bounded `.ai/`
+snapshot. Schema-v16 packs keep each entry task file beside its session: 64KB
+per entry and 192KB per pack, UTF-8 boundary safe. Only a whole file counts
+toward `exact`/`partial`/`reconstructed` fidelity; a kept head remains marked
+partial and is a declaration source only when its frontmatter is complete.
+
+The memory section contains the routed eager set, a prefetch slice from the
+first-seen union of usable session-entry declarations (falling back to the
+accumulated target task file when none survive), and a `.ai/`-scoped patch
+stream over the same git window. The `reads` section prefers each entry
+snapshot for its session-time prefetch set, then falls back to the session's
+own transcript task-file read. It retains bounded prefetch facts and one ordered
+declared/undeclared `.ai/` trace with activity/write-order anchors, but no
+transcript text. Transcript absence, lost rows, trace/session caps, unobserved
+sessions, and snapshot cuts degrade explicitly; per-part failures remain
+independent, and every entry/doc/router/diff/transcript bound is enforced at its
 producer.
 `generate_evidence` mints an evaluation id
 and atomically writes `evidence.json` under
@@ -107,9 +114,9 @@ partially lost read evidence lowers confidence rather than becoming bad session
 behavior. Raw orchestrator/spawn logs stay out of the prompt.
 
 The report parser requires sentinel-wrapped JSON, stamps task/evaluation
-provenance itself (including the evidence-pack schema cohort), rejects malformed
-schema output, and requires each finding to carry at least one non-empty evidence
-ref. The default `ClaudeSemanticBackend`
+provenance itself (including the evidence-pack schema cohort and session-entry
+fidelity), rejects malformed schema output, and requires each finding to carry
+at least one non-empty evidence ref. The default `ClaudeSemanticBackend`
 runs one `claude -p --output-format stream-json` turn with `--tools ""`,
 `--safe-mode`, `--no-session-persistence`, and `--permission-mode plan` from a
 fresh empty cwd outside the target repo. Its `doctor()` is a no-cost

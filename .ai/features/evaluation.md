@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-11
-verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
+last-updated: 2026-08-12
+verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
 ---
 
 # Features: Task Evaluation
@@ -16,8 +16,8 @@ Description: Build optional read-only evidence packs for one active or archived
 task so static metrics and semantic evaluators have bounded task/run/git/`.ai/`
 input without changing normal run-control state.
 
-Modules: evaluation, ai_snapshot, session_reads, config, task_store, runs,
-history, sessions, logs, git_meta, subprocess_utils, models.
+Modules: evaluation, ai_snapshot, session_reads, task_snapshots, config,
+task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models.
 
 APIs: internal `EvaluationService.resolve_target`, `related_runs`,
 `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`,
@@ -37,25 +37,28 @@ Implemented behavior:
   `(repo_path, task_id)` identity and excludes other repos/tasks and unreadable
   unattributed run dirs.
 - Evidence packs include task content/archive state, related run records,
-  metadata-only events, persisted session snapshots, bounded orchestrator-log
-  and `spawn.out` excerpts with size/truncation metadata, terminal record fields,
-  explicit warnings, best-effort git commit-window metadata, and a producer-
-  bounded `.ai/` view: the full eager set, task-declared prefetch docs, and a
-  `.ai/`-scoped patch stream over the same run window. They also carry a bounded
-  per-session read-behavior section derived from Claude transcripts under
-  `ORCH_HUB_CLAUDE_HOME`: the session-time lazy prefetch set, deterministic
-  completeness facts, and one ordered declared/undeclared `.ai/` trace with
-  activity, write-order, close-out, cap, and observability evidence. No raw
-  transcript content is retained. Each part carries independent availability
-  and degradation warnings.
+  metadata-only events, persisted session summaries and session-entry task
+  files, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
+  explicit warnings, best-effort git-window metadata, and a producer-bounded
+  `.ai/` view. Entry files are capped at 64KB each / 192KB per pack on valid
+  UTF-8 boundaries; only whole files count as exact, while cut heads remain
+  explicitly truncated and supply declared frontmatter facts only when the
+  closing fence survived.
+- The `.ai/` prefetch slice is the first-seen union of usable session-entry
+  declarations, with the accumulated target task file as the explicit fallback.
+  The bounded per-session read section likewise prefers the entry snapshot over
+  a Claude transcript task-file read for its session-time expected set, then
+  retains one ordered declared/undeclared `.ai/` trace with activity,
+  write-order, close-out, cap, and observability evidence. No raw transcript
+  content is retained; every part degrades independently with warnings.
 - Eager memory topics resolve through `.ai/index.md` routing before file-shape
   fallback (`topic.md` versus `topic/index.md`). Snapshot roots and child reads
   stay inside the managed repo; document/router reads and git patch output are
   bounded at their producers, and a failed patch read preserves collected docs.
-- `evidence.json` records its shape as schema v15; pre-version and older-schema
+- `evidence.json` records its shape as schema v16; pre-version and older-schema
   packs remain readable as additive earlier shapes. Schema 15 accounts for
-  capped and unobserved sessions so downstream confidence does not silently
-  narrow to the transcripts that happened to be readable.
+  capped/unobserved read sessions; schema 16 adds bounded session-entry files,
+  their exact/partial/reconstructed fidelity, and prefetch-source provenance.
 - Git evidence uses ambient commit-date history reachable from HEAD over the
   run lifecycle window, capped at 50 commits and 64KB at the subprocess
   producer. A byte cut drops its partial trailing record and marks the evidence
@@ -181,9 +184,9 @@ Implemented behavior:
   `retrieval_effectiveness` and `rediscovery_risk`. Missing or partial parts
   remain omitted or lower confidence rather than failing; unobserved sessions
   are missing evidence, never bad behavior. Raw logs stay out.
-- Reports stamp `input_evidence_schema`; confidence comparisons must remain
-  within one evidence-schema cohort because a new evaluator input moves the
-  confidence baseline.
+- Reports stamp `input_evidence_schema` and `input_entry_fidelity`; confidence
+  comparisons must remain within one evidence-schema cohort, and replay cases
+  can distinguish exact, partial, and reconstructed session-entry inputs.
 - The default Claude CLI backend is evidence-bounded structurally: it runs one
   stateless `claude -p` turn from a fresh empty cwd outside the target repo with
   `--tools ""`, `--safe-mode`, `--no-session-persistence`, and

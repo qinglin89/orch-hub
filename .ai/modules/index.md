@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-12
+verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
 ---
 
 # Modules
@@ -38,6 +38,7 @@ Full responsibilities live in the detail files below.
 | Control dir | `orch_hub/control_dir.py` | question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | log location, bounded tails, SSE frames |
 | Sessions | `orch_hub/sessions.py` | per-session context parsing; `sessions.json` persistence |
+| Session entry task snapshots | `orch_hub/task_snapshots.py` | post-claim task-file capture/miss accounting; `task_snapshots.json` persistence |
 | API | `orch_hub/api.py` | FastAPI app factory; bearer middleware; route wiring; uvicorn entry |
 | Notifications | `orch_hub/notifications.py` | notifier interface; Bark backend; formatters |
 | Web UI | `orch_hub/web/` | mobile-first dashboard SPA assets |
@@ -52,7 +53,7 @@ Full responsibilities live in the detail files below.
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
 | sidecar.md | Evaluation, AI snapshot evidence, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
 | intake.md | Intake manager, intake agent |
-| runtime.md | Repo admission, run manager, orchestrator launch config, monitor, history, control-dir, logs, notifications |
+| runtime.md | Repo admission, run manager, orchestrator launch config, monitor, history, control-dir, logs, sessions, session-entry task snapshots, notifications |
 | service.md | API app, launchd operations |
 | web.md | Web UI |
 
@@ -75,6 +76,8 @@ Full responsibilities live in the detail files below.
 - Session-read evidence derives bounded ordered facts from configured Claude
   transcripts, excludes close-out/read-back events, and reports missing or
   uncertain evidence instead of inventing behavior; it retains no raw transcript.
+- Session-entry task snapshots observe existing log brackets, persist only in
+  hub-owned run dirs, and never alter orchestrator or target task state.
 - Static metrics read evidence packs; write only contained
   `static_metrics.json` in the same evaluation dir; no target/run/protocol
   mutation.

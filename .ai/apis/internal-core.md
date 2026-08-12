@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-11
-verified-against: 1fbaa7676de90aeba2f09635bcb4bff39c050e32
+last-updated: 2026-08-12
+verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -52,19 +52,21 @@ and return `None` for absent or unsafe content.
 Input: managed repo, exact task id, and optional evaluation id.
 
 Output: `EvaluationTarget`, `RelatedRun` values, or a bounded `EvidencePack`
-persisted as schema-v15 `evidence.json` under the hub data dir.
+persisted as schema-v16 `evidence.json` under the hub data dir.
 
 Behavior: `EvaluationService` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` from every operation when disabled. Target resolution
 checks active task files before archive files. Related-run aggregation loads
 persisted run records read-only via `runs.load_records` and matches exact
-`(repo_path, task_id)`. Evidence building reads run events, session snapshots,
-bounded orchestrator logs, bounded `spawn.out`, terminal record fields, and
-producer-bounded best-effort git-window commits. It also reads persisted session
-ids against the Claude transcript root derived from `ORCH_HUB_CLAUDE_HOME` and
-adds bounded session-time prefetch facts plus one ordered declared/undeclared
-`.ai/` read trace; absent, lost, capped, or unobserved evidence is explicit and
-raw transcript content is never retained. Per-run/secondary artifact failures
+`(repo_path, task_id)`. Evidence building reads run events, session summaries,
+bounded per-session entry task files, orchestrator logs, `spawn.out`, terminal
+record fields, and producer-bounded best-effort git-window commits. Whole entry
+files drive exact/partial/reconstructed fidelity; complete entry frontmatter is
+the preferred source for session-time prefetch facts and the pack's `.ai/`
+prefetch slice. The reader then uses persisted session ids against the Claude
+transcript root derived from `ORCH_HUB_CLAUDE_HOME` and adds one ordered
+declared/undeclared `.ai/` trace. Absent, lost, cut, capped, or unobserved
+evidence is explicit and raw transcript content is never retained. Per-run/secondary artifact failures
 become warnings, while target task IO errors fail the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
