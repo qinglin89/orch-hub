@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import replace
 from pathlib import Path
 
 from orch_hub.models import ManagedRepo
@@ -31,6 +32,7 @@ from orch_hub.session_reads import (
     MAX_EXPECTED_DOCS,
     METHOD_INJECTED,
     METHOD_READ_TOOL,
+    SOURCE_SESSION_ENTRY_SNAPSHOT,
     SOURCE_TRANSCRIPT_TASK_READ,
     Activity,
     ReadBehavior,
@@ -315,6 +317,84 @@ def test_an_empty_declared_set_is_recovered_but_not_applicable(tmp_path):
     assert session.expected == () and session.assessable is True
     assert session.applicable is False
     assert session.coverage is None and session.complete is None
+
+
+def test_the_entry_snapshot_supplies_a_declared_set_the_transcript_never_carried(tmp_path):
+    repo = make_repo(tmp_path)
+    # A session that worked without ever re-reading its own task file: the older
+    # source has nothing to read the declaration off, and before the entry capture
+    # existed this session was simply unassessable.
+    write_transcript(
+        tmp_path, repo, read_rows(repo.path / FEATURES, content="# eval", uid="a")
+    )
+
+    session = only(
+        roll(
+            tmp_path,
+            repo,
+            [replace(dev(), entry_task_content=task_md(f"[{FEATURES}, {SIDECAR}]"))],
+        )
+    )
+
+    assert session.expected == (FEATURES, SIDECAR)
+    assert session.expected_source == SOURCE_SESSION_ENTRY_SNAPSHOT
+    assert session.assessable is True and session.applicable is True
+    assert session.read == (FEATURES,) and session.missing == (SIDECAR,)
+    assert session.complete is False
+
+
+def test_the_entry_snapshot_outranks_the_sessions_own_task_read(tmp_path):
+    repo = make_repo(tmp_path)
+    # Both sources are available and they disagree — the transcript's copy can be a
+    # later read of a file the session had already edited, so the captured entry
+    # bytes decide.
+    write_transcript(tmp_path, repo, entry_rows(repo, f"[{RUNTIME}]"))
+
+    session = only(
+        roll(
+            tmp_path,
+            repo,
+            [replace(dev(), entry_task_content=task_md(f"[{FEATURES}]"))],
+        )
+    )
+
+    assert session.expected == (FEATURES,)
+    assert session.expected_source == SOURCE_SESSION_ENTRY_SNAPSHOT
+
+
+def test_an_unobserved_session_carries_its_declared_set_but_no_verdict(tmp_path):
+    repo = make_repo(tmp_path)  # no transcript at all: a Codex-backed dev session
+
+    session = only(
+        roll(
+            tmp_path,
+            repo,
+            [replace(dev(), entry_task_content=task_md(f"[{FEATURES}]"))],
+        )
+    )
+
+    # The obligation is known; whether it was met is not, and must stay unclaimed.
+    assert session.expected == (FEATURES,)
+    assert session.expected_source == SOURCE_SESSION_ENTRY_SNAPSHOT
+    assert session.applicable is True
+    assert session.available is False and session.assessable is False
+    assert session.docs == () and session.coverage is None and session.complete is None
+    assert session.detail == "no session transcript found"
+
+
+def test_an_unobserved_session_that_declared_nothing_is_not_a_candidate(tmp_path):
+    repo = make_repo(tmp_path)
+
+    behavior = roll(
+        tmp_path, repo, [replace(dev(), entry_task_content=task_md("[]"))]
+    )
+    session = only(behavior)
+
+    # Without the capture this session would sit in the confidence denominator as
+    # an unknown obligation forever; the entry file settles that it owed nothing.
+    assert session.applicable is False
+    assert session.expected == () and session.expected_source == SOURCE_SESSION_ENTRY_SNAPSHOT
+    assert behavior.applicable_count == 0
 
 
 def test_a_review_session_owes_no_prefetch_but_its_missing_trace_is_recorded(tmp_path):

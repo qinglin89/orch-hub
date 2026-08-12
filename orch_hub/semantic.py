@@ -276,6 +276,13 @@ class SemanticEvidence:
 
     ``evidence_schema_version`` is the shape version of the pack this was distilled
     from, carried so :func:`parse_report` can stamp it on the report for cohorting.
+    ``entry_fidelity`` travels the same way and for the same kind of reason: it
+    says whether the pack carried each session's task file *as that session
+    entered it* or only the archived end state
+    (:attr:`orch_hub.evaluation.EvidencePack.entry_fidelity`). Both are harness
+    provenance, stamped on the report and deliberately absent from the prompt —
+    they describe the evidence's own completeness, which is nothing for the model
+    to judge the task by.
     """
 
     evaluation_id: str
@@ -293,6 +300,7 @@ class SemanticEvidence:
     ai_docs: tuple[AiDoc, ...] = ()
     ai_diff: AiDiff | None = None
     evidence_schema_version: str | None = None
+    entry_fidelity: str | None = None
     reads: ReadBehavior | None = None
 
     @property
@@ -348,6 +356,7 @@ class SemanticEvidence:
             "reads_available": self.reads_available,
             "reads": self.reads.to_dict() if self.reads is not None else None,
             "evidence_schema_version": self.evidence_schema_version,
+            "entry_fidelity": self.entry_fidelity,
             "omissions": list(self.omissions),
         }
 
@@ -468,6 +477,7 @@ def build_semantic_evidence(
         ai_diff=ai_diff,
         reads=reads,
         evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
+        entry_fidelity=pack.entry_fidelity,
     )
 
 
@@ -745,15 +755,21 @@ def _session_reads_section(session: SessionReads) -> str:
     if not session.available:
         # Nothing below was observed for this session, and its zero counts are
         # unknowns rather than measurements — rendering them as facts would invite
-        # exactly the "this session read nothing" reading the task forbids.
+        # exactly the "this session read nothing" reading the task forbids. The
+        # declared set is the exception: it comes from the session-entry task file
+        # rather than from the transcript, so it is a fact even here — and stating
+        # it makes the obligation legible without saying anything about compliance.
         why = session.detail or "no transcript located or parsed"
-        expected = (
-            " (the prefetch instruction does not reach this role, so nothing was"
-            " expected of it)"
-            if session.applicable is False
-            else ""
-        )
-        return f"{head}\nREAD BEHAVIOR NOT OBSERVED: {why}{expected}"
+        lines = [f"{head}\nREAD BEHAVIOR NOT OBSERVED: {why}"]
+        if session.expected:
+            lines.append(
+                "declared prefetch (from the session-entry task file):"
+                f" {', '.join(session.expected)} — whether any of it was read is"
+                " unobserved, NOT unread"
+            )
+        elif session.applicable is False:
+            lines.append(_nothing_expected_note(session))
+        return "\n".join(lines)
     lines = [head]
     if session.expected:
         lines.append(f"declared prefetch: {', '.join(session.expected)}")
@@ -769,7 +785,7 @@ def _session_reads_section(session: SessionReads) -> str:
                 + f" (complete={str(session.complete).lower()})"
             )
     elif session.applicable is False:
-        lines.append("declared prefetch: none (nothing was expected of this session)")
+        lines.append(f"declared prefetch: none — {_nothing_expected_note(session)}")
     else:
         lines.append(
             "declared prefetch: NOT RECOVERABLE — "
@@ -799,6 +815,20 @@ def _session_reads_section(session: SessionReads) -> str:
             + ("; truncated tail" if session.truncated else "")
         )
     return "\n".join(lines)
+
+
+def _nothing_expected_note(session: SessionReads) -> str:
+    """Why a session owed no prefetch reading, in the terms the reader settled it.
+
+    Two different facts reach the same ``applicable=False``, and the model must
+    not be told the wrong one: a role the instruction never reaches owes nothing
+    whatever the task declared, while a role it does reach can simply have
+    declared no lazy doc. The recovered set distinguishes them — it exists only
+    when the declaration itself was read.
+    """
+    if session.expected_source is None:
+        return "the prefetch instruction does not reach this role"
+    return "the session-time task file declared no lazy prefetch doc"
 
 
 def _read_line(read: MemoryRead) -> str:
@@ -1250,8 +1280,9 @@ def parse_report(
 
     The model supplies only the judgment fields; identity and provenance
     (``evaluation_id``, repo/task, ``evaluator``, ``generated_ts``, input links,
-    and the evidence pack's shape version — the cohort boundary a later reader
-    needs to know before comparing two reports' confidence) are stamped from
+    the evidence pack's shape version — the cohort boundary a later reader
+    needs to know before comparing two reports' confidence — and its session-entry
+    fidelity) are stamped from
     context so the model cannot spoof what it evaluated. A missing
     envelope, a non-object envelope, or a schema violation (bad severity, a score
     without a rationale, a finding with no usable ``evidence_refs``, a non-numeric
@@ -1291,6 +1322,7 @@ def parse_report(
         input_evidence_id=evaluation_id,
         input_static_metrics=evidence.static_metrics_available,
         input_evidence_schema=evidence.evidence_schema_version,
+        input_entry_fidelity=evidence.entry_fidelity,
         warnings=warnings,
     )
 
@@ -1510,6 +1542,7 @@ def render_report_md(report: SemanticReport) -> str:
         f"- **Overall confidence:** {_fmt_num(report.overall_confidence)}",
         f"- **Static metrics input:** {'yes' if report.input_static_metrics else 'no'}",
         f"- **Evidence schema:** v{report.input_evidence_schema or '1 (unrecorded)'}",
+        f"- **Session-entry task files:** {report.input_entry_fidelity or 'unrecorded'}",
         "",
         "## Summary",
         "",

@@ -1621,6 +1621,14 @@ class SemanticReport:
     boundary machine-visible without diffing two evidence packs. ``None`` on a
     report written before the field existed.
 
+    ``input_entry_fidelity`` is the other provenance fact a downstream consumer
+    needs before reusing this report's inputs: whether the pack carried each
+    session's task file *as that session entered it* (``exact``), some of them
+    (``partial``), or none (``reconstructed`` — see
+    :data:`orch_hub.evaluation.FIDELITY_RECONSTRUCTED` for why that is not a
+    neutral approximation). ``None`` on a report written before the field
+    existed, which is not the same claim as ``reconstructed``.
+
     The model supplies the judgment: ``summary`` (narrative overall assessment —
     the explanation that replaces a naked overall score), ``scores`` (per-axis,
     each with a rationale), ``findings`` (diagnoses with severity and fixes), and
@@ -1645,6 +1653,7 @@ class SemanticReport:
     input_evidence_id: str | None = None
     input_static_metrics: bool = False
     input_evidence_schema: str | None = None
+    input_entry_fidelity: str | None = None
     warnings: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
@@ -1664,6 +1673,7 @@ class SemanticReport:
             "input_evidence_id": self.input_evidence_id,
             "input_static_metrics": self.input_static_metrics,
             "input_evidence_schema": self.input_evidence_schema,
+            "input_entry_fidelity": self.input_entry_fidelity,
             "warnings": list(self.warnings),
         }
 

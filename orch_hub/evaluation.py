@@ -58,7 +58,13 @@ from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
-from .ai_snapshot import AiDiff, AiSnapshot, read_ai_snapshot
+from .ai_snapshot import (
+    PREFETCH_SOURCE_SESSION_ENTRIES,
+    PREFETCH_SOURCE_TASK_FILE,
+    AiDiff,
+    AiSnapshot,
+    read_ai_snapshot,
+)
 from .config import Config
 from .git_meta import read_commits_between
 from .history import KIND_HISTORY_ERROR, read_events
@@ -77,6 +83,12 @@ from .runs import load_records
 from .session_reads import ReadBehavior, SessionRef, read_session_behavior
 from .sessions import read_snapshot
 from .subprocess_utils import Runner, run_command
+from .task_snapshots import (
+    SESSION_KIND,
+    SessionTaskSnapshot,
+    TaskSnapshots,
+    read_snapshots,
+)
 from .task_store import parse_prefetch, read_archived_task_content, read_task_content
 
 _log = logging.getLogger(__name__)
@@ -88,7 +100,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "15"
+EVIDENCE_SCHEMA_VERSION = "16"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -129,8 +141,16 @@ finishes that accounting for the sessions nothing was read from at all
 the ones a prefetch obligation reached, so a task whose review sessions ran on a
 backend that leaves no transcript reported the same read evidence as one observed
 in every session — while the trace the semantic layer judges was short by all of
-them. A persisted pack with no ``schema_version`` key is version 1 and predates
-all of it.
+them. ``16`` carries the per-session **task file at session entry**
+(:mod:`orch_hub.task_snapshots`, per run under ``runs[].task_snapshots``), which
+is the first evidence in the pack that is not recoverable from the archived task
+file at all: ``session-est`` ``total``, ``prefetch``, and the body's
+Goal/Scope/Acceptance are each rewritten in flight, so every pack up to v15
+described a task by the version of it that came out the far end. The pack's own
+``.ai/`` prefetch slice moves onto that evidence in the same version, and the
+read section's expected sets with it, so a v15 pack and a v16 one can disagree
+about which docs a session was measured against. A persisted pack with no
+``schema_version`` key is version 1 and predates all of it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
@@ -146,6 +166,38 @@ transcript (which grows large); the semantic evaluator reads bounded text."""
 EVIDENCE_COMMIT_LIMIT = 50
 """Hard cap on git-window commits in the pack, so a wide lifecycle window cannot
 pull unbounded history (matches :data:`orch_hub.git_meta.MAX_COMMIT_LIMIT`)."""
+
+EVIDENCE_TASK_FILE_MAX_BYTES = 64 * 1024
+"""Per-entry cap on a session-entry task file carried in the pack, below the run
+dir's own capture cap (:data:`orch_hub.task_snapshots.TASK_FILE_MAX_BYTES`): the
+run dir holds one run's captures, while a pack holds every run's. The *head* is
+kept, for the same reason the capture keeps it — the frontmatter leads the file
+and carries the fields nothing else recovers."""
+
+EVIDENCE_TASK_ENTRIES_MAX_BYTES = 192 * 1024
+"""Cap on the summed session-entry task files across the whole pack, the bound
+that makes this section producer-bounded like every other one (``.ai/`` docs at
+:data:`orch_hub.ai_snapshot.TOTAL_MAX_BYTES`, its patch stream, the log tails).
+Sessions are filled oldest-first, so what an exhausted budget leaves without
+content is normally the newest — whose entry file is the one closest to
+``target.content``, which the pack already carries whole, so that end is the
+cheapest to lose. At measured task-file sizes (~16KB) this holds a dozen
+sessions."""
+
+FIDELITY_EXACT = "exact"
+"""Every session the pack knows of carries its entry task file verbatim."""
+
+FIDELITY_PARTIAL = "partial"
+"""Some sessions carry an exact entry task file and some do not."""
+
+FIDELITY_RECONSTRUCTED = "reconstructed"
+"""No session carries an exact entry task file, so anything said about how a
+session entered the task is inferred from the archived file — which lost the
+estimate total, the session-time ``prefetch:``, and the pre-adjustment
+Goal/Scope/Acceptance. The three losses all skew the same way (a reconstruction
+hands a replayed session more context and a better-calibrated plan than the
+original had), which is why the signal exists: a downstream case built from a
+reconstructed pack has to be weighted, not read as equivalent evidence."""
 
 _EVAL_ID_TS = "%Y%m%dT%H%M%SZ"
 """Evaluation-id timestamp format (matches the run manager's run-id stamp); the
@@ -316,6 +368,13 @@ class RunEvidence:
     partial evidence instead of failing the whole pack. ``ended`` is the plain
     presence of ``ended_ts`` (persisted state, *not* a re-classification: the
     live/end-state verdict stays the run manager's).
+
+    ``task_snapshots`` is the run's per-session task file *as each session
+    entered it* (:class:`orch_hub.task_snapshots.TaskSnapshots`), carried beside
+    ``sessions`` because that is what it joins to: one entry per session bracket,
+    keyed by the same ``index``/``sid``. ``None`` means the run wrote no such
+    artifact — it predates the capture, or its accounting never closed — which
+    downstream reads as no exact entry state, exactly like a recorded miss.
     """
 
     record: RunRecord
@@ -323,6 +382,7 @@ class RunEvidence:
     sessions: SessionsSnapshot | None = None
     log: LogSnapshot | None = None
     spawn_out: LogSnapshot | None = None
+    task_snapshots: TaskSnapshots | None = None
     warnings: tuple[str, ...] = ()
 
     @property
@@ -339,8 +399,36 @@ class RunEvidence:
             "spawn_out": (
                 self.spawn_out.to_dict() if self.spawn_out is not None else None
             ),
+            "task_snapshots": (
+                self.task_snapshots.to_dict()
+                if self.task_snapshots is not None
+                else None
+            ),
             "warnings": list(self.warnings),
         }
+
+    @property
+    def task_entries(self) -> tuple[SessionTaskSnapshot, ...]:
+        """This run's session-entry snapshots, or ``()`` when it wrote none."""
+        return () if self.task_snapshots is None else self.task_snapshots.snapshots
+
+    @property
+    def protocol_sessions(self) -> int:
+        """How many task-claiming sessions this run is known to have had.
+
+        The denominator the entry-fidelity rollup counts against, taken from the
+        persisted session snapshot when there is one and from the entry
+        accounting otherwise. A live run has the second and not the first (its
+        ``sessions.json`` is written at the live-to-ended transition, while
+        entries are recorded during the run), so neither source alone answers for
+        every run; the larger is the honest count, since each is complete for the
+        sessions it saw. Only ``session`` brackets count — a ``plan-gate`` never
+        claims the task and is deliberately outside this accounting.
+        """
+        summaries = 0 if self.sessions is None else sum(
+            1 for summary in self.sessions.sessions if summary.kind == SESSION_KIND
+        )
+        return max(summaries, len(self.task_entries))
 
 
 @dataclass(frozen=True)
@@ -363,7 +451,8 @@ class EvidencePack:
     pack-level degradation (per-run warnings live on each :class:`RunEvidence`,
     ``.ai/`` warnings on the snapshot). ``summary`` (computed in
     :meth:`to_dict`) is the validating metadata — run/ended counts, whether task
-    content was found, git/``.ai/``/read availability, and the total warning count
+    content was found, git/``.ai/``/read availability, the session-entry
+    fidelity rollup, and the total warning count
     across every section — enough to sanity-check a pack without walking it.
     ``evaluation_dir`` is the persisted location, set only by
     :meth:`EvaluationService.generate_evidence`; it is internal filesystem detail
@@ -397,14 +486,56 @@ class EvidencePack:
             "summary": self._summary(git, ai, reads),
         }
 
+    @property
+    def entry_counts(self) -> tuple[int, int]:
+        """``(sessions this pack knows of, those carrying their entry task file)``.
+
+        Counted over what the pack actually carries: an entry whose content the
+        section budget dropped is not exact evidence *here*, whatever the run dir
+        still holds, because the pack is the published artifact a downstream case
+        is built from.
+        """
+        total = 0
+        exact = 0
+        for run in self.runs:
+            total += run.protocol_sessions
+            exact += sum(1 for entry in run.task_entries if entry.present)
+        return total, exact
+
+    @property
+    def entry_fidelity(self) -> str:
+        """Whether this pack's sessions carry exact entry task files.
+
+        The signal a downstream case format weights by
+        (:data:`FIDELITY_EXACT` / :data:`FIDELITY_PARTIAL` /
+        :data:`FIDELITY_RECONSTRUCTED`). Three values rather than the two the
+        mixed case forces a choice between: a task with three exact sessions and
+        one missed is neither, and collapsing it either way misprices it —
+        strictly, by discarding three exact cases; loosely, by presenting a
+        reconstructed one as exact. ``summary`` carries the two counts beside it,
+        so the ratio is readable without walking the runs.
+
+        A pack with no sessions at all is :data:`FIDELITY_RECONSTRUCTED`, which is
+        the honest answer to the question the signal asks — nothing here can be
+        replayed exactly — and its zero counts say why.
+        """
+        total, exact = self.entry_counts
+        if total and exact == total:
+            return FIDELITY_EXACT
+        return FIDELITY_PARTIAL if exact else FIDELITY_RECONSTRUCTED
+
     def _summary(
         self, git: EvidenceGit, ai: AiSnapshot, reads: ReadBehavior
     ) -> dict:
+        entry_total, entry_exact = self.entry_counts
         return {
             "run_count": len(self.runs),
             "runs_ended": sum(1 for run in self.runs if run.ended),
             "has_task_content": self.target.present,
             "target_source": self.target.source,
+            "task_entry_fidelity": self.entry_fidelity,
+            "task_entry_sessions": entry_total,
+            "task_entries_present": entry_exact,
             "git_available": git.available,
             "ai_snapshot_present": ai.present,
             "ai_doc_count": sum(1 for doc in ai.docs if doc.present),
@@ -477,6 +608,11 @@ def _session_refs(runs: Sequence[RunEvidence]) -> list[SessionRef]:
     conversation id, and a session the orchestrator never learned the id of has
     no transcript to attribute. Ordering follows the runs, which are already
     oldest-first, so a task's sessions appear in the order they happened.
+
+    Each ref carries its session-entry task file when the pack has one, so the
+    read reader can take the session's declared prefetch set from the bytes the
+    session actually entered on rather than from its own first task-file read —
+    a source that needs no transcript and no re-read to survive.
     """
     return [
         SessionRef(
@@ -484,12 +620,134 @@ def _session_refs(runs: Sequence[RunEvidence]) -> list[SessionRef]:
             run_id=run.record.run_id,
             role=summary.role,
             kind=summary.kind,
+            entry_task_content=_entry_content(run, summary.sid),
         )
         for run in runs
         if run.sessions is not None
         for summary in run.sessions.sessions
         if summary.sid
     ]
+
+
+def _entry_content(run: RunEvidence, sid: str) -> str | None:
+    """One session's captured entry task file from ``run``, if the pack carries it."""
+    if run.task_snapshots is None:
+        return None
+    entry = run.task_snapshots.for_sid(sid)
+    return entry.content if entry is not None and entry.present else None
+
+
+def _bounded_task_entries(
+    runs: Sequence[RunEvidence],
+) -> tuple[tuple[RunEvidence, ...], tuple[str, ...]]:
+    """Fit every run's session-entry task files into the pack's own byte budget.
+
+    The capture bounds one *run* (:mod:`orch_hub.task_snapshots`); a pack holds
+    every run of a task, so it re-bounds at its own producer like every other
+    section. Entries are filled oldest run first, oldest bracket first, up to
+    :data:`EVIDENCE_TASK_ENTRIES_MAX_BYTES`, each capped at
+    :data:`EVIDENCE_TASK_FILE_MAX_BYTES`.
+
+    An entry the remaining budget cannot hold *whole* is carried without content
+    rather than as a stub head — a partial head would be indistinguishable from a
+    genuinely short task file — and says so in its ``detail``, keeping the pack's
+    own limit visibly distinct from a capture that was never made. A later,
+    smaller entry that still fits is then carried: skipping it too would drop
+    evidence the budget can afford, so the carried set is the ones that fit in
+    order, not a prefix. Recorded misses cost nothing — they carry no bytes to
+    begin with. Returns the rebuilt runs and any pack-level warning, one line for
+    the whole budget event rather than one per dropped entry.
+    """
+    budget = EVIDENCE_TASK_ENTRIES_MAX_BYTES
+    bounded: list[RunEvidence] = []
+    dropped = 0
+    for run in runs:
+        if run.task_snapshots is None:
+            bounded.append(run)
+            continue
+        entries: list[SessionTaskSnapshot] = []
+        for entry in run.task_snapshots.snapshots:
+            if not entry.present or entry.content is None:
+                entries.append(entry)
+                continue
+            head = entry.content.encode("utf-8")[:EVIDENCE_TASK_FILE_MAX_BYTES]
+            if len(head) > budget:
+                dropped += 1
+                entries.append(
+                    replace(
+                        entry,
+                        present=False,
+                        content=None,
+                        truncated=False,
+                        detail=(
+                            "carried without content: the pack's"
+                            f" {EVIDENCE_TASK_ENTRIES_MAX_BYTES // 1024}KB"
+                            " session-entry budget was exhausted by earlier"
+                            " sessions"
+                        ),
+                    )
+                )
+                continue
+            budget -= len(head)
+            entries.append(
+                replace(
+                    entry,
+                    content=head.decode("utf-8", errors="replace"),
+                    truncated=entry.truncated or len(head) < entry.size,
+                )
+            )
+        bounded.append(
+            replace(run, task_snapshots=TaskSnapshots(snapshots=tuple(entries)))
+        )
+    warnings = (
+        (
+            f"task entries: {dropped} session-entry task file(s) carried without"
+            f" content past the pack's"
+            f" {EVIDENCE_TASK_ENTRIES_MAX_BYTES // 1024}KB budget",
+        )
+        if dropped
+        else ()
+    )
+    return tuple(bounded), warnings
+
+
+def _prefetch_slice(
+    runs: Sequence[RunEvidence], target: EvaluationTarget
+) -> tuple[tuple[str, ...], str]:
+    """The lazy ``.ai/`` docs to carry, and which declaration they came from.
+
+    The target task file's ``prefetch:`` is *accumulated*: the schema calls it
+    mutable and backfilled with what was actually consulted, so the archived
+    value is the union of every session's needs as they were discovered — not
+    what any session declared when it ran. Reading the slice off it made the pack
+    describe the sessions by knowledge they finished with.
+
+    So the session-entry snapshots decide it when the pack carries any: the union
+    of what the sessions themselves declared, in first-seen order. The union
+    rather than a per-session slice because this section is per *pack* — one
+    ``.ai/`` view for the whole task — and a doc any session declared is one this
+    task's memory evidence should show. Per-session sets stay per-session, in the
+    read rollups.
+
+    Falling back needs the *carried bytes* as its test, not a non-empty union: a
+    task whose sessions declared nothing has an empty slice as a fact, and
+    reaching for the accumulated value there would reintroduce exactly the skew
+    this replaces.
+    """
+    carried = [
+        entry.content
+        for run in runs
+        for entry in run.task_entries
+        if entry.present and entry.content is not None
+    ]
+    if not carried:
+        return parse_prefetch(target.content), PREFETCH_SOURCE_TASK_FILE
+    declared: list[str] = []
+    for content in carried:
+        for entry in parse_prefetch(content):
+            if entry not in declared:
+                declared.append(entry)
+    return tuple(declared), PREFETCH_SOURCE_SESSION_ENTRIES
 
 
 def _write_evidence(path: Path, data: dict) -> None:
@@ -828,10 +1086,19 @@ class EvaluationService:
         self._require_enabled()
         target = self.resolve_target(repo, task_id)
         related = self.related_runs(repo, task_id)
-        runs = tuple(self._run_evidence(run) for run in related)
+        # Bound the session-entry files before anything reads them, so every
+        # section downstream — the ``.ai/`` slice, the read rollups — is derived
+        # from exactly the bytes the persisted pack carries and stays
+        # reproducible from it.
+        runs, warnings = _bounded_task_entries(
+            tuple(self._run_evidence(run) for run in related)
+        )
         since, until, window_detail = _git_window(related)
         git = self._git_evidence(repo, since, until, window_detail)
-        ai = self._ai_evidence(repo, target, since, until, window_detail)
+        prefetch, prefetch_source = _prefetch_slice(runs, target)
+        ai = self._ai_evidence(
+            repo, prefetch, prefetch_source, since, until, window_detail
+        )
         reads = self._reads_evidence(repo, task_id, runs)
         return EvidencePack(
             evaluation_id=evaluation_id,
@@ -841,6 +1108,7 @@ class EvaluationService:
             git=git,
             ai=ai,
             reads=reads,
+            warnings=warnings,
         )
 
     def generate_evidence(
@@ -927,6 +1195,7 @@ class EvaluationService:
         sessions: SessionsSnapshot | None = None
         log: LogSnapshot | None = None
         spawn_out: LogSnapshot | None = None
+        task_snapshots: TaskSnapshots | None = None
         try:
             events = read_events(run_dir)
             if any(event.kind == KIND_HISTORY_ERROR for event in events):
@@ -945,12 +1214,17 @@ class EvaluationService:
             spawn_out = read_spawn_out(record, max_lines=EVIDENCE_LOG_MAX_LINES)
         except Exception:
             warnings.append(f"run {record.run_id}: startup diagnostic unreadable")
+        try:
+            task_snapshots = read_snapshots(run_dir)
+        except Exception:
+            warnings.append(f"run {record.run_id}: session-entry snapshots unreadable")
         return RunEvidence(
             record=record,
             events=events,
             sessions=sessions,
             log=log,
             spawn_out=spawn_out,
+            task_snapshots=task_snapshots,
             warnings=tuple(warnings),
         )
 
@@ -994,16 +1268,19 @@ class EvaluationService:
     def _ai_evidence(
         self,
         repo: ManagedRepo,
-        target: EvaluationTarget,
+        prefetch: Sequence[str],
+        prefetch_source: str,
         since: str | None,
         until: str | None,
         window_detail: str | None,
     ) -> AiSnapshot:
         """Bounded, read-only view of the repo's ``.ai/`` memory for this task.
 
-        The task's own frontmatter ``prefetch:`` list selects the lazy slice to
-        carry alongside the eager set, so the pack records the part of the
-        snapshot the sessions declared they used rather than a guess. The window
+        The lazy slice to carry alongside the eager set is chosen by
+        :func:`_prefetch_slice` — the sessions' own entry declarations where the
+        pack has them, the task file's accumulated list otherwise — and the
+        snapshot records which, so the section says whose declaration it shows
+        rather than leaving a reader to assume. The window
         is the pack's own (shared with :meth:`_git_evidence`), so the ``.ai/``
         patches and the commit list describe the same span.
 
@@ -1017,7 +1294,8 @@ class EvaluationService:
         try:
             return read_ai_snapshot(
                 repo,
-                prefetch=parse_prefetch(target.content),
+                prefetch=prefetch,
+                prefetch_source=prefetch_source,
                 since=since,
                 until=until,
                 window_detail=window_detail,
@@ -1030,6 +1308,7 @@ class EvaluationService:
                 diff=AiDiff(available=False, since=since, until=until, detail=detail),
                 warnings=(f".ai/: {detail}",),
                 detail=detail,
+                prefetch_source=prefetch_source,
             )
 
     def _reads_evidence(

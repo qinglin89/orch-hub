@@ -3673,6 +3673,11 @@
       // only comparable on confidence within one schema. Reports written before
       // the field existed carry no value and are v1 by definition.
       ["evidence schema", "v" + (report.input_evidence_schema || "1 (unrecorded)")],
+      // Whether the evidence carried each session's task file as that session
+      // entered it, or only the end state it left behind. A reconstructed input
+      // is not a neutral approximation — it flatters the sessions it describes —
+      // so the operator sees it beside the schema cohort, not buried in the JSON.
+      ["session-entry files", report.input_entry_fidelity || "unrecorded"],
     ])}</dl>`;
     const summary = report.summary
       ? `<p class="sem-summary">${escapeHtml(report.summary)}</p>`

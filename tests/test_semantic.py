@@ -26,6 +26,9 @@ from orch_hub.config import DEFAULT_EVAL_EFFORT, Config
 from orch_hub.evaluation import (
     EVIDENCE_NAME,
     EVIDENCE_SCHEMA_VERSION,
+    FIDELITY_EXACT,
+    FIDELITY_PARTIAL,
+    FIDELITY_RECONSTRUCTED,
     SOURCE_ACTIVE,
     SOURCE_ARCHIVED,
     EvaluationDisabledError,
@@ -46,6 +49,7 @@ from orch_hub.models import (
 )
 from orch_hub.report_catalog import ReportCatalog
 from orch_hub.session_reads import (
+    SOURCE_SESSION_ENTRY_SNAPSHOT,
     Activity,
     MemoryRead,
     PrefetchDoc,
@@ -292,6 +296,7 @@ def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = Fal
                 ai_snippets: bool = False, present: bool = True,
                 docs=(), diff: AiDiff | None = None,
                 schema: str | None = None,
+                fidelity: str | None = None,
                 reads: ReadBehavior | None = None) -> SemanticEvidence:
     return SemanticEvidence(
         evaluation_id="e1",
@@ -310,6 +315,7 @@ def mk_evidence(*, static: dict | None = None, warnings=(), ai_diffs: bool = Fal
         ai_diff=diff,
         reads=reads,
         evidence_schema_version=schema,
+        entry_fidelity=fidelity,
     )
 
 
@@ -861,10 +867,57 @@ def test_prompt_shows_an_unmeasured_session_as_missing_evidence_not_as_a_miss():
     )))
 
     assert "prefetch reading NOT MEASURED: evidence incomplete (2 unreadable row(s))" in prompt
-    assert "declared prefetch: none (nothing was expected of this session)" in prompt
+    assert (
+        "declared prefetch: none — the prefetch instruction does not reach this role"
+        in prompt
+    )
     assert "NOTE — read-evidence degradation:" in prompt
     # A withheld verdict must never render as a completed one.
     assert "complete=false" not in prompt
+
+
+def test_prompt_separates_declaring_nothing_from_never_being_asked():
+    # Both reach applicable=False, and the model must not be told the wrong one:
+    # a dev session that declared no lazy doc was asked and had nothing to load,
+    # while a review session is outside the instruction entirely.
+    prompt = build_prompt(mk_evidence(reads=mk_reads(
+        replace(
+            session_reads("sid-dev", role="dev", expected=(), applicable=False),
+            expected_source=SOURCE_SESSION_ENTRY_SNAPSHOT,
+        ),
+        session_reads("sid-rev", role="review", expected=(), applicable=False),
+    )))
+
+    assert (
+        "declared prefetch: none — the session-time task file declared no lazy"
+        " prefetch doc" in prompt
+    )
+    assert (
+        "declared prefetch: none — the prefetch instruction does not reach this role"
+        in prompt
+    )
+
+
+def test_prompt_states_an_unobserved_sessions_declared_set_without_claiming_a_verdict():
+    # The entry capture recovers the declaration even when nothing else about the
+    # session was observed. Saying so is the point of the second source — but an
+    # obligation is not a measurement, and the prompt must not let it read as one.
+    unobserved = replace(
+        session_reads("sid-b", role="dev", expected=(".ai/map.md",)),
+        available=False, assessable=False, applicable=True,
+        expected_source=SOURCE_SESSION_ENTRY_SNAPSHOT,
+        docs=(), coverage=None, complete=None,
+        detail="no session transcript found",
+    )
+    prompt = build_prompt(mk_evidence(reads=mk_reads(unobserved)))
+
+    assert "READ BEHAVIOR NOT OBSERVED: no session transcript found" in prompt
+    assert (
+        "declared prefetch (from the session-entry task file): .ai/map.md — whether"
+        " any of it was read is unobserved, NOT unread" in prompt
+    )
+    assert "missing:" not in prompt
+    assert "complete=" not in prompt
 
 
 def test_prompt_never_renders_an_unobserved_session_as_zero_activity():
@@ -882,7 +935,7 @@ def test_prompt_never_renders_an_unobserved_session_as_zero_activity():
     )))
 
     assert "READ BEHAVIOR NOT OBSERVED: no session transcript found" in prompt
-    assert "nothing was expected of it" in prompt
+    assert "the prefetch instruction does not reach this role" in prompt
     # "none observed" is a measurement and belongs only to the session that was.
     assert "`.ai/` reads: none observed in this session" not in prompt
     assert prompt.count("session totals:") == 1  # only the observed session's
@@ -959,6 +1012,21 @@ def test_parse_stamps_the_evidence_pack_schema_version_for_cohorting():
                     evidence=mk_evidence(static={"scores": []}, schema="7"))
     assert spoofed.input_evidence_schema == "7"
     assert report.evaluator.backend == "fake"  # from the injected evaluator info
+
+
+def test_parse_stamps_the_session_entry_fidelity_of_its_evidence():
+    # What a downstream case builder weights by: whether the evidence carried the
+    # task file each session started from, or only the state it ended in.
+    report = parse(envelope(), evidence=mk_evidence(fidelity=FIDELITY_PARTIAL))
+
+    assert report.input_entry_fidelity == FIDELITY_PARTIAL
+    assert report.to_dict()["input_entry_fidelity"] == FIDELITY_PARTIAL
+    # Provenance, not judgment: the model does not get to claim it, and it is not
+    # in the prompt for the model to judge the task by either.
+    spoofed = parse(envelope({**VALID_PAYLOAD, "input_entry_fidelity": FIDELITY_EXACT}),
+                    evidence=mk_evidence(fidelity=FIDELITY_RECONSTRUCTED))
+    assert spoofed.input_entry_fidelity == FIDELITY_RECONSTRUCTED
+    assert "entry_fidelity" not in build_prompt(mk_evidence(fidelity=FIDELITY_EXACT))
 
 
 def test_parse_missing_envelope_raises():
@@ -1511,6 +1579,14 @@ def test_evaluate_prompt_carries_the_repos_ai_snapshot_from_the_persisted_pack(t
     assert report.input_evidence_schema == EVIDENCE_SCHEMA_VERSION
     persisted = json.loads((eval_dir / SEMANTIC_REPORT_NAME).read_text(encoding="utf-8"))
     assert persisted["input_evidence_schema"] == EVIDENCE_SCHEMA_VERSION
+    # As does the entry-fidelity stamp: this run predates the capture, so the
+    # whole chain — pack, evidence, report, disk — has to say reconstructed.
+    assert pack_json["summary"]["task_entry_fidelity"] == FIDELITY_RECONSTRUCTED
+    assert report.input_entry_fidelity == FIDELITY_RECONSTRUCTED
+    assert persisted["input_entry_fidelity"] == FIDELITY_RECONSTRUCTED
+    assert "- **Session-entry task files:** reconstructed" in (
+        eval_dir / SEMANTIC_REPORT_MD_NAME
+    ).read_text(encoding="utf-8")
 
 
 # -- Markdown rendering -------------------------------------------------------
@@ -1518,7 +1594,8 @@ def test_evaluate_prompt_carries_the_repos_ai_snapshot_from_the_persisted_pack(t
 
 def _report(*, summary: str | None = "ok", scores=(), findings=(), improvements=(),
             warnings=(), confidence: float = 0.7,
-            schema: str | None = None) -> SemanticReport:
+            schema: str | None = None,
+            fidelity: str | None = None) -> SemanticReport:
     return SemanticReport(
         evaluation_id=FIXED_ID,
         generated_ts=FIXED_TS.isoformat(),
@@ -1535,6 +1612,7 @@ def _report(*, summary: str | None = "ok", scores=(), findings=(), improvements=
         input_evidence_id=FIXED_ID,
         input_static_metrics=True,
         input_evidence_schema=schema,
+        input_entry_fidelity=fidelity,
         warnings=tuple(warnings),
     )
 
@@ -1543,6 +1621,14 @@ def test_render_report_md_shows_the_evidence_schema_cohort():
     assert "- **Evidence schema:** v2" in render_report_md(_report(schema="2"))
     # A pre-field report is v1 by definition, and says so rather than showing "vNone".
     assert "- **Evidence schema:** v1 (unrecorded)" in render_report_md(_report())
+
+
+def test_render_report_md_shows_the_session_entry_fidelity():
+    md = render_report_md(_report(fidelity=FIDELITY_RECONSTRUCTED))
+    assert "- **Session-entry task files:** reconstructed" in md
+    # A report from before the field existed says so rather than claiming either
+    # answer — "unrecorded" and "reconstructed" are different facts.
+    assert "- **Session-entry task files:** unrecorded" in render_report_md(_report())
 
 
 def test_render_report_md_has_all_sections():

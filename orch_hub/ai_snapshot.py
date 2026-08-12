@@ -99,6 +99,18 @@ spare. Docs are read in priority order (:data:`ROOT_DOCS`, then
 :data:`EAGER_TOPICS`, then prefetch), so an exhausted budget drops the least
 load-bearing docs first."""
 
+PREFETCH_SOURCE_TASK_FILE = "task_file"
+"""The lazy slice came from the target task file's ``prefetch:`` — the
+*accumulated* list, which the schema makes mutable and backfilled with what was
+actually consulted, so it is the union of needs as they were discovered rather
+than what any session declared when it ran."""
+
+PREFETCH_SOURCE_SESSION_ENTRIES = "session_entry_snapshots"
+"""The lazy slice came from the sessions' own entry task files
+(:mod:`orch_hub.task_snapshots`): what the sessions really declared, before any
+close-out backfill. The stronger source, and the reason the entry capture exists
+(:func:`orch_hub.evaluation._prefetch_slice`)."""
+
 PREFETCH_MAX_DOCS = 12
 """Cap on how many ``prefetch:`` docs one snapshot read will collect. A task file
 is human-written and could name an arbitrarily long list; the eager set is the
@@ -204,6 +216,12 @@ class AiSnapshot:
     ``warnings`` are this section's evidence-degradation notes, mirroring
     :class:`orch_hub.evaluation.RunEvidence`'s per-run warnings: local to the
     section, aggregated into the pack's summary count.
+
+    ``prefetch_source`` names whose declaration chose the lazy slice
+    (:data:`PREFETCH_SOURCE_SESSION_ENTRIES` / :data:`PREFETCH_SOURCE_TASK_FILE`),
+    because the two answer different questions and a reader cannot tell them apart
+    from the doc list. ``None`` on a snapshot read outside the evidence builder,
+    and on every pack written before the distinction existed.
     """
 
     present: bool
@@ -211,6 +229,7 @@ class AiSnapshot:
     diff: AiDiff | None = None
     warnings: tuple[str, ...] = ()
     detail: str | None = None
+    prefetch_source: str | None = None
 
     @property
     def snippets_available(self) -> bool:
@@ -232,6 +251,7 @@ class AiSnapshot:
             "diff": diff.to_dict(),
             "warnings": list(self.warnings),
             "detail": self.detail,
+            "prefetch_source": self.prefetch_source,
         }
 
 
@@ -343,6 +363,7 @@ def read_ai_snapshot(
     repo: ManagedRepo,
     *,
     prefetch: Sequence[str] = (),
+    prefetch_source: str | None = None,
     since: str | None = None,
     until: str | None = None,
     window_detail: str | None = None,
@@ -353,9 +374,12 @@ def read_ai_snapshot(
 ) -> AiSnapshot:
     """Read ``repo``'s ``.ai/`` snapshot and its windowed diff, bounded and total.
 
-    ``prefetch`` is the target task's frontmatter ``prefetch:`` list verbatim
+    ``prefetch`` is a frontmatter ``prefetch:`` list verbatim
     (:func:`orch_hub.task_store.parse_prefetch`); malformed entries are warned
-    about and skipped rather than rejecting the list. ``since``/``until`` are the
+    about and skipped rather than rejecting the list. ``prefetch_source`` records
+    *whose* declaration it was, which the caller decides
+    (:func:`orch_hub.evaluation._prefetch_slice`) and this module only carries.
+    ``since``/``until`` are the
     pack's run-lifecycle window, passed through unchanged so the diff describes
     exactly the window the commit evidence does; ``window_detail`` is the
     caller's reason when there is no window, reused verbatim so both sections
@@ -373,7 +397,10 @@ def read_ai_snapshot(
     ai_dir = repo.path / AI_DIRNAME
     if not ai_dir.is_dir():
         return _unreadable_snapshot(
-            f"{AI_DIRNAME}/ snapshot absent in target repo", since, until
+            f"{AI_DIRNAME}/ snapshot absent in target repo",
+            since,
+            until,
+            prefetch_source,
         )
     root = _snapshot_root(repo, ai_dir)
     if root is None:
@@ -383,7 +410,10 @@ def read_ai_snapshot(
         # the resolved (outside) dir. Repo containment is therefore decided on the
         # root, before the router or any doc is read.
         return _unreadable_snapshot(
-            f"{AI_DIRNAME}/ resolves outside the managed repo", since, until
+            f"{AI_DIRNAME}/ resolves outside the managed repo",
+            since,
+            until,
+            prefetch_source,
         )
 
     warnings: list[str] = []
@@ -416,11 +446,20 @@ def read_ai_snapshot(
         warnings=warnings,
     )
     return AiSnapshot(
-        present=True, docs=tuple(docs), diff=diff, warnings=tuple(warnings)
+        present=True,
+        docs=tuple(docs),
+        diff=diff,
+        warnings=tuple(warnings),
+        prefetch_source=prefetch_source,
     )
 
 
-def _unreadable_snapshot(detail: str, since: str | None, until: str | None) -> AiSnapshot:
+def _unreadable_snapshot(
+    detail: str,
+    since: str | None,
+    until: str | None,
+    prefetch_source: str | None = None,
+) -> AiSnapshot:
     """A snapshot that could not be read at all: no docs, no diff, one warning.
 
     Shared by the two whole-snapshot refusals — no ``.ai/`` dir, and a ``.ai/``
@@ -433,6 +472,7 @@ def _unreadable_snapshot(detail: str, since: str | None, until: str | None) -> A
         diff=AiDiff(available=False, since=since, until=until, detail=detail),
         warnings=(f"{AI_DIRNAME}/: {detail}",),
         detail=detail,
+        prefetch_source=prefetch_source,
     )
 
 

@@ -92,7 +92,8 @@ not by asking the model nicely:
 
 The evaluator does see the project's `.ai/` memory, but only as the **bounded
 copy the evidence pack took** when the evaluation was generated — the eager set,
-the task's declared `prefetch:` docs, and the `.ai/`-scoped patches for the run
+the lazy `prefetch:` docs the task's sessions declared, and the `.ai/`-scoped
+patches for the run
 window, each capped and carried inside `evidence.json`. That is what grounds the
 `ai_freshness_utility` and `knowledge_signal_density` judgments. A live re-read
 would be the opposite of this guarantee: it would drift from the persisted
@@ -107,6 +108,23 @@ Each report records the evidence pack's shape version as `input_evidence_schema`
 When a pack gains an input the evaluator reasons over, the confidence baseline
 moves, so reports are only directly comparable on confidence within one schema
 version — compare cohorts, not raw numbers across a bump.
+
+## Session-entry fidelity
+
+While a run is live, the hub captures the task file **as each session entered
+it** and keeps it in the run dir; the evidence pack carries those bytes per
+session, and each report records `input_entry_fidelity` — `exact` when every
+session the pack knows of has its entry file, `partial` when some do, and
+`reconstructed` when none do.
+
+It matters because the archived task file cannot give the entry state back: the
+estimate total is raised mid-flight, `prefetch:` is backfilled with what was
+consulted, and Goal/Scope/Acceptance are adjusted as understanding sharpens. All
+three losses run the same direction, so anything rebuilt from the archived file
+describes a task that was better understood and better estimated than it was at
+the time. Runs that ended before this capture existed stay `reconstructed`;
+nothing backfills them, and the marker is there so work built on those reports
+can weight them accordingly.
 
 ## Retention
 

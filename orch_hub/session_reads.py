@@ -206,6 +206,19 @@ SOURCE_TRANSCRIPT_TASK_READ = "transcript_task_read"
 """The expected prefetch set came from the session's own first full read of the
 task file, i.e. the frontmatter exactly as it stood at that session's entry."""
 
+SOURCE_SESSION_ENTRY_SNAPSHOT = "session_entry_snapshot"
+"""The expected prefetch set came from the hub's own capture of the task file at
+that session's entry (:mod:`orch_hub.task_snapshots`), carried into the pack and
+handed here on the :class:`SessionRef`.
+
+Preferred over :data:`SOURCE_TRANSCRIPT_TASK_READ` wherever it exists, because it
+depends on nothing the session did: the transcript source needs the session to
+have read its own task file in full, needs that transcript to still exist, and
+needs a backend that writes one at all. It is also what makes the declared set
+recoverable for a session with no transcript — which settles *applicability*
+(role plus a non-empty set) without claiming anything about compliance, since
+what was read remains unobserved there."""
+
 INSTRUCTION_DIRS = (AI_DIRNAME, ".ai-tasks", ".ai-protocol", ".claude")
 """Repo subtrees holding a session's *instructions* rather than its work material.
 
@@ -265,12 +278,19 @@ class SessionRef:
     ``session_id`` is the backend conversation id the orchestrator logged and the
     run manager persisted; ``role``/``kind`` come from the same snapshot and
     decide applicability (:data:`PREFETCH_ROLES`) without needing a transcript.
+
+    ``entry_task_content`` is the task file as this session entered it, when the
+    pack carries that capture (:mod:`orch_hub.task_snapshots`) — the preferred
+    source for the declared prefetch set (:data:`SOURCE_SESSION_ENTRY_SNAPSHOT`).
+    ``None`` means no capture reached this session, and the reader falls back to
+    the session's own task-file read.
     """
 
     session_id: str
     run_id: str | None = None
     role: str | None = None
     kind: str | None = None
+    entry_task_content: str | None = None
 
 
 @dataclass(frozen=True)
@@ -413,6 +433,12 @@ class SessionReads:
 
     ``coverage``/``complete`` are ``None`` unless the session is assessable and
     applicable; there is no default-to-zero, because a zero is a claim.
+
+    ``expected``/``expected_source`` are independent of all three: the declared
+    set comes from the session-entry task file when the pack captured one
+    (:data:`SOURCE_SESSION_ENTRY_SNAPSHOT`), so an unobserved session can carry a
+    known obligation and no verdict about it. Reading ``expected`` as evidence of
+    reading would invert exactly the asymmetry above.
 
     ``trace`` is every qualifying lazy-``.ai/`` read in order, declared and
     undeclared alike. ``writeback_excluded`` names the docs whose only reads
@@ -724,13 +750,31 @@ def _session_rollup(
     max_reads: int,
     warnings: list[str],
 ) -> SessionReads:
-    """Locate, scan, and summarize one session's transcript."""
+    """Locate, scan, and summarize one session's transcript.
+
+    The declared prefetch set is settled first and separately, because the
+    session-entry capture (when the pack carries one) answers it without the
+    transcript: a session nothing could be observed of still has a *known
+    obligation*, and saying so is what keeps a session that owed nothing out of a
+    downstream confidence denominator it would otherwise sit in as an unknown.
+    What it read stays unobserved either way — an expected set is not a
+    measurement of compliance.
+    """
+    entry_expected, entry_detail = (
+        _expected_set(ref.entry_task_content)
+        if ref.entry_task_content is not None
+        else (None, None)
+    )
     base = SessionReads(
         session_id=ref.session_id,
         run_id=ref.run_id,
         role=ref.role,
         kind=ref.kind,
-        applicable=None if _prefetch_role(ref.role) else False,
+        applicable=_applicable(ref.role, entry_expected),
+        expected=entry_expected or (),
+        expected_source=(
+            SOURCE_SESSION_ENTRY_SNAPSHOT if entry_expected is not None else None
+        ),
     )
     path = locate_transcript(transcript_root, repo, ref.session_id)
     if path is None:
@@ -759,7 +803,15 @@ def _session_rollup(
     if scan.rows == 0:
         return _degraded(base, "session transcript exposed no readable events", warnings)
 
-    expected, expected_detail = _expected_set(scan.task_content)
+    # The entry capture wins where it exists: it is the file the session started
+    # on regardless of whether the session ever re-read it, and a transcript that
+    # never shows a full task-file read leaves the older source with nothing.
+    if entry_expected is not None:
+        expected, expected_detail = entry_expected, entry_detail
+        source = SOURCE_SESSION_ENTRY_SNAPSHOT
+    else:
+        expected, expected_detail = _expected_set(scan.task_content)
+        source = SOURCE_TRANSCRIPT_TASK_READ
     # The trace and the prefetch verdict degrade independently, like the ``.ai/``
     # section's docs and patch stream: an unrecoverable expected set only costs
     # the trace its ``declared_prefetch`` attribution, since which docs were read
@@ -779,7 +831,7 @@ def _session_rollup(
         base,
         applicable=applicable,
         expected=expected,
-        expected_source=SOURCE_TRANSCRIPT_TASK_READ,
+        expected_source=source,
         docs=docs,
         detail=expected_detail,
     )
@@ -812,6 +864,20 @@ def _session_rollup(
 def _prefetch_role(role: str | None) -> bool:
     """Whether a session in ``role`` is delivered the prefetch pre-load instruction."""
     return role in PREFETCH_ROLES
+
+
+def _applicable(role: str | None, expected: tuple[str, ...] | None) -> bool | None:
+    """Whether the prefetch measurement applies to this session, if that is known.
+
+    Two independent conditions, and either one alone can settle it: a role the
+    instruction never reaches owes nothing whatever the task file says (``False``,
+    decidable with no evidence at all), and a role it does reach owes exactly what
+    the session-time declaration held — ``None`` while that declaration is
+    unrecovered, since an unknown obligation is not an absent one.
+    """
+    if not _prefetch_role(role):
+        return False
+    return None if expected is None else bool(expected)
 
 
 def _verdict_refusal(scan: "_Scan", docs: Sequence[PrefetchDoc]) -> str | None:

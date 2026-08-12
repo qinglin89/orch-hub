@@ -17,12 +17,21 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import Config
+from orch_hub.ai_snapshot import (
+    PREFETCH_SOURCE_SESSION_ENTRIES,
+    PREFETCH_SOURCE_TASK_FILE,
+)
 from orch_hub.evaluation import (
     EVALUATIONS_SUBDIR,
     EVIDENCE_COMMIT_LIMIT,
     EVIDENCE_LOG_MAX_LINES,
     EVIDENCE_NAME,
     EVIDENCE_SCHEMA_VERSION,
+    EVIDENCE_TASK_ENTRIES_MAX_BYTES,
+    EVIDENCE_TASK_FILE_MAX_BYTES,
+    FIDELITY_EXACT,
+    FIDELITY_PARTIAL,
+    FIDELITY_RECONSTRUCTED,
     SOURCE_ACTIVE,
     SOURCE_ARCHIVED,
     EvaluationDisabledError,
@@ -31,8 +40,9 @@ from orch_hub.evaluation import (
     task_evaluations_dir,
 )
 from orch_hub.models import ManagedRepo, RunRecord, StoredEvaluation
-from orch_hub.session_reads import project_slug
+from orch_hub.session_reads import SOURCE_SESSION_ENTRY_SNAPSHOT, project_slug
 from orch_hub.subprocess_utils import CommandResult
+from orch_hub.task_snapshots import ARTIFACT_NAME as TASK_SNAPSHOTS_ARTIFACT
 
 TASK = "2026-07-22-task-evaluation-foundation"
 
@@ -90,6 +100,7 @@ def write_run(
     events: list[dict] | None = None,
     events_raw: str | None = None,
     sessions: dict | None = None,
+    task_snapshots: dict | str | None = None,
 ) -> Path:
     """Write a run dir with a rich ``run.json`` plus optional run artifacts.
 
@@ -125,6 +136,14 @@ def write_run(
         )
     if sessions is not None:
         (run_dir / "sessions.json").write_text(json.dumps(sessions), encoding="utf-8")
+    if task_snapshots is not None:
+        # A raw string writes the artifact verbatim, so a corrupt one can be posed.
+        (run_dir / TASK_SNAPSHOTS_ARTIFACT).write_text(
+            task_snapshots
+            if isinstance(task_snapshots, str)
+            else json.dumps(task_snapshots),
+            encoding="utf-8",
+        )
     if log_lines is not None:
         log_dir.mkdir(parents=True, exist_ok=True)
         stamp = dt.datetime.fromisoformat(started_ts).strftime("%Y%m%dT%H%M%SZ")
@@ -476,6 +495,10 @@ def test_build_evidence_aggregates_active_task_and_its_runs(tmp_path):
         "runs_ended": 1,
         "has_task_content": True,
         "target_source": SOURCE_ACTIVE,
+        # One parsed session bracket, no run wrote an entry capture for it.
+        "task_entry_fidelity": FIDELITY_RECONSTRUCTED,
+        "task_entry_sessions": 1,
+        "task_entries_present": 0,
         "git_available": False,  # fake git defaults to a failed window
         # This fixture repo has no `.ai/` at all: both `.ai/` flags are false and
         # the absent snapshot is the pack's one degradation warning.
@@ -985,6 +1008,42 @@ def test_pack_persisted_before_the_ai_section_still_reads_back(tmp_path):
     assert stored[0].artifacts == (EVIDENCE_NAME,)
 
 
+def test_pack_persisted_before_the_session_entry_section_still_reads_back(tmp_path):
+    # The bump that added session-entry task files is additive like the ones
+    # before it: a v15 run entry has no `task_snapshots` key and no fidelity in
+    # its summary, and must read back verbatim rather than through a migration.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    evaluation_id = "20260722T090000Z"
+    eval_dir = config.data_dir / EVALUATIONS_SUBDIR / "alpha" / TASK / evaluation_id
+    eval_dir.mkdir(parents=True)
+    previous = {
+        "schema_version": "15",
+        "evaluation_id": evaluation_id,
+        "generated_ts": "2026-07-22T09:00:00+00:00",
+        "target": {"repo_name": "alpha", "repo_path": str(repo.path),
+                   "task_id": TASK, "source": SOURCE_ARCHIVED, "present": True,
+                   "content": "# body"},
+        "runs": [{"run": {"run_id": "r1", "task_id": TASK}, "ended": True,
+                  "events": [], "sessions": None, "log": None, "spawn_out": None,
+                  "warnings": []}],
+        "git": {"available": False, "commits": []},
+        "ai": {"present": False, "docs": [], "warnings": []},
+        "reads": {"available": False, "sessions": [], "warnings": []},
+        "warnings": [],
+        "summary": {"run_count": 1, "warning_count": 0},
+    }
+    (eval_dir / EVIDENCE_NAME).write_text(json.dumps(previous), encoding="utf-8")
+
+    read_back = make_service(config).read_artifact(
+        repo, TASK, evaluation_id, EVIDENCE_NAME
+    )
+
+    assert read_back == previous
+    assert "task_snapshots" not in read_back["runs"][0]
+    assert "task_entry_fidelity" not in read_back["summary"]
+
+
 # -- read-behavior section (per-session prefetch + mid-flight retrieval) ------
 
 
@@ -1109,6 +1168,328 @@ def test_read_behavior_failure_degrades_alone(tmp_path, monkeypatch):
     assert any("read behavior" in w for w in pack.reads.warnings)
     # The rest of the pack is untouched by the failure.
     assert pack.target.present is True and pack.ai.present is True
+
+
+# -- session-entry task files (the exact state each session started from) -----
+
+
+def entry_task(prefetch: str, *, est: str = "1/2", body: str = "# Goal\n\nship it") -> str:
+    """A task file as one session entered it — the fields the archive loses."""
+    return (
+        f"---\nid: {TASK}\nstatus: in_progress\nsession-est: {est}\n"
+        f"prefetch: {prefetch}\n---\n\n{body}\n"
+    )
+
+
+def entry(index: int, sid: str | None, content: str | None, **extra) -> dict:
+    """One persisted ``task_snapshots.json`` entry, present iff it carries bytes."""
+    return {
+        "index": index,
+        "sid": sid,
+        "role": "dev",
+        "kind": "session",
+        "status_before": "pending",
+        "session_start_hms": "09:00:00",
+        "captured_at": "2026-07-22T09:00:25+00:00",
+        "capture_point": "post_claim",
+        "entry_lag_seconds": 25,
+        "present": content is not None,
+        "content": content,
+        "size": len(content.encode()) if content is not None else 0,
+        "truncated": False,
+        **extra,
+    }
+
+
+def test_build_evidence_carries_each_sessions_entry_task_file(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")  # the end state, already in the pack
+    first, second = entry_task("[.ai/map.md]"), entry_task("[.ai/map.md]", est="2/3")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={
+            "sessions": [
+                {"role": "dev", "kind": "session", "sid": "sid-1"},
+                {"role": "dev", "kind": "session", "sid": "sid-2"},
+            ]
+        },
+        task_snapshots={
+            "snapshots": [entry(0, "sid-1", first), entry(1, "sid-2", second)]
+        },
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    run = pack.runs[0]
+    assert run.task_snapshots is not None
+    # Joined to the session summaries by the sid the run manager reconciled.
+    assert run.task_snapshots.for_sid("sid-1").content == first
+    assert run.task_snapshots.for_sid("sid-2").content == second
+    # The estimate total the archived file would have flattened to one value.
+    assert "session-est: 1/2" in run.task_snapshots.for_sid("sid-1").content
+    assert "session-est: 2/3" in run.task_snapshots.for_sid("sid-2").content
+    assert pack.entry_fidelity == FIDELITY_EXACT
+    summary = pack.to_dict()["summary"]
+    assert summary["task_entry_fidelity"] == FIDELITY_EXACT
+    assert (summary["task_entry_sessions"], summary["task_entries_present"]) == (2, 2)
+    # Serialized whole, so a reader of the persisted pack sees the same bytes.
+    persisted = pack.to_dict()["runs"][0]["task_snapshots"]["snapshots"]
+    assert [e["sid"] for e in persisted] == ["sid-1", "sid-2"]
+    assert persisted[0]["capture_point"] == "post_claim"
+
+
+def test_entry_fidelity_is_partial_when_only_some_sessions_were_captured(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        sessions={
+            "sessions": [
+                {"role": "dev", "kind": "session", "sid": "sid-1"},
+                {"role": "review", "kind": "session", "sid": "sid-2"},
+            ]
+        },
+        # The second session began and ended between two scans: accounted for,
+        # never captured.
+        task_snapshots={
+            "snapshots": [
+                entry(0, "sid-1", entry_task("[.ai/map.md]")),
+                entry(1, "sid-2", None, detail="session had already ended when first observed"),
+            ]
+        },
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.entry_counts == (2, 1)
+    assert pack.entry_fidelity == FIDELITY_PARTIAL
+    # A recorded miss stays in the pack: "no exact file" and "no such session"
+    # must not read the same downstream.
+    missed = pack.runs[0].task_snapshots.for_sid("sid-2")
+    assert missed is not None and missed.present is False
+    assert "already ended" in missed.detail
+
+
+def test_a_run_that_wrote_no_entry_accounting_is_reconstructed(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+        task_snapshots="{not json",  # a corrupt artifact reads as absent, not fatal
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.runs[0].task_snapshots is None
+    assert pack.entry_counts == (1, 0)
+    assert pack.entry_fidelity == FIDELITY_RECONSTRUCTED
+
+
+def test_a_live_runs_entries_count_before_its_session_snapshot_exists(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    # sessions.json is written at the live->ended transition; entries are written
+    # during the run, so mid-run the entries are the only account of its sessions.
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        task_snapshots={"snapshots": [entry(0, "sid-1", entry_task("[.ai/map.md]"))]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.runs[0].sessions is None
+    assert pack.entry_counts == (1, 1)
+    assert pack.entry_fidelity == FIDELITY_EXACT
+
+
+def test_plan_gate_brackets_are_outside_the_entry_accounting(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={
+            "sessions": [
+                {"role": "dev", "kind": "plan-gate", "sid": "sid-0"},
+                {"role": "dev", "kind": "session", "sid": "sid-1"},
+            ]
+        },
+        task_snapshots={"snapshots": [entry(1, "sid-1", entry_task("[.ai/map.md]"))]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    # A plan-gate never claims the task, so counting it would report a permanent
+    # 1-of-2 for a run that captured everything there was to capture.
+    assert pack.entry_counts == (1, 1)
+    assert pack.entry_fidelity == FIDELITY_EXACT
+
+
+def test_entries_past_the_pack_budget_are_carried_without_content(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    big = entry_task("[.ai/map.md]", body="x" * EVIDENCE_TASK_FILE_MAX_BYTES)
+    count = EVIDENCE_TASK_ENTRIES_MAX_BYTES // EVIDENCE_TASK_FILE_MAX_BYTES + 2
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={
+            "sessions": [
+                {"role": "dev", "kind": "session", "sid": f"sid-{i}"}
+                for i in range(count)
+            ]
+        },
+        task_snapshots={
+            "snapshots": [entry(i, f"sid-{i}", big) for i in range(count)]
+        },
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    entries = pack.runs[0].task_snapshots.snapshots
+    carried = [e for e in entries if e.present]
+    dropped = [e for e in entries if not e.present]
+    # Oldest-first: the newest entries are the ones closest to the task file the
+    # pack already carries whole, so they are the cheapest to drop.
+    assert [e.sid for e in carried] == [f"sid-{i}" for i in range(len(carried))]
+    assert dropped and all("budget was exhausted" in e.detail for e in dropped)
+    assert sum(len(e.content.encode()) for e in carried) <= EVIDENCE_TASK_ENTRIES_MAX_BYTES
+    # The limit is the pack's own and is stated once, not once per dropped entry.
+    assert len(pack.warnings) == 1 and "budget" in pack.warnings[0]
+    assert pack.entry_fidelity == FIDELITY_PARTIAL
+
+
+def test_an_entry_over_the_per_entry_cap_keeps_its_head(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    huge = entry_task("[.ai/map.md]", body="y" * (EVIDENCE_TASK_FILE_MAX_BYTES * 2))
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+        task_snapshots={"snapshots": [entry(0, "sid-1", huge)]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    kept = pack.runs[0].task_snapshots.for_sid("sid-1")
+    assert kept.present is True and kept.truncated is True
+    assert len(kept.content.encode()) == EVIDENCE_TASK_FILE_MAX_BYTES
+    assert kept.size == len(huge.encode())  # the true size, not what was kept
+    # The head is what matters: the frontmatter the archive cannot give back.
+    assert kept.content.startswith(f"---\nid: {TASK}\n")
+    # A truncated file is still exact evidence of how the session entered.
+    assert pack.entry_fidelity == FIDELITY_EXACT
+
+
+def test_the_ai_prefetch_slice_comes_from_the_session_entry_declarations(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(
+        repo,
+        **{"modules/runtime.md": "# Runtime\n", "features/evaluation.md": "# Eval\n"},
+    )
+    # The archived value is the accumulated one — it has picked up a doc the
+    # sessions only discovered they needed at close-out.
+    write_active_task(
+        repo, TASK, "# body",
+        prefetch="[.ai/modules/runtime.md, .ai/features/evaluation.md]",
+    )
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+        task_snapshots={
+            "snapshots": [entry(0, "sid-1", entry_task("[.ai/modules/runtime.md]"))]
+        },
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.ai.prefetch_source == PREFETCH_SOURCE_SESSION_ENTRIES
+    prefetch_docs = [d.path for d in pack.ai.docs if d.role == "prefetch"]
+    assert prefetch_docs == [".ai/modules/runtime.md"]
+    # And the read section measures the session against the same declaration.
+    assert pack.reads.sessions[0].expected == (".ai/modules/runtime.md",)
+    assert pack.reads.sessions[0].expected_source == SOURCE_SESSION_ENTRY_SNAPSHOT
+
+
+def test_the_ai_prefetch_slice_falls_back_to_the_task_file_without_entries(tmp_path):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo, **{"modules/runtime.md": "# Runtime\n"})
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/modules/runtime.md]")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.ai.prefetch_source == PREFETCH_SOURCE_TASK_FILE
+    assert [d.path for d in pack.ai.docs if d.role == "prefetch"] == [
+        ".ai/modules/runtime.md"
+    ]
+
+
+def test_sessions_that_declared_nothing_give_an_empty_slice_not_the_accumulated_one(
+    tmp_path,
+):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_ai_snapshot(repo, **{"modules/runtime.md": "# Runtime\n"})
+    # Backfilled at close-out with what was consulted; no session ever declared it.
+    write_active_task(repo, TASK, "# body", prefetch="[.ai/modules/runtime.md]")
+    write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        sessions={"sessions": [{"role": "dev", "kind": "session", "sid": "sid-1"}]},
+        task_snapshots={"snapshots": [entry(0, "sid-1", entry_task("[]"))]},
+    )
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.ai.prefetch_source == PREFETCH_SOURCE_SESSION_ENTRIES
+    assert [d.path for d in pack.ai.docs if d.role == "prefetch"] == []
 
 
 def test_generate_evidence_id_is_timestamped_and_collision_safe(tmp_path):
