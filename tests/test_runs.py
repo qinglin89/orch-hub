@@ -34,6 +34,13 @@ from orch_hub.models import (
     SessionEst,
 )
 from orch_hub.orch_config import read_effective_config_snapshot
+from orch_hub.protocol_provenance import (
+    DEPLOY_LOCK_NAME,
+    STABILITY_CHANGED,
+    STABILITY_STABLE,
+    STABILITY_UNVERIFIED,
+    read_protocol,
+)
 from orch_hub.sessions import read_snapshot
 from orch_hub.task_snapshots import read_snapshots as read_task_snapshots
 from orch_hub.runs import (
@@ -2149,6 +2156,191 @@ def test_effective_config_snapshot_failure_does_not_corrupt_run_end(tmp_path, mo
     assert status.state == "ended"
     assert read_record(manager, record.run_id)["ended_ts"] is not None
     assert not effective_config_json(manager, record.run_id).exists()
+
+
+# -- protocol provenance (protocol.json) --------------------------------------
+
+
+COMMIT = "6b62754694c289fc8822562cec22ab774e071b2c"
+OTHER_COMMIT = "aa11bb22cc33dd44ee55ff6677889900aabbccdd"
+PAYLOAD = "533a87d311bd99d9ae9ba25f1385a3c22396b4e704a8b75a2ad9b9b36614f450"
+
+
+def write_deploy_lock(repo: ManagedRepo, *, commit: str = COMMIT) -> None:
+    (repo.path / DEPLOY_LOCK_NAME).write_text(
+        json.dumps(
+            {
+                "canonical_payload_sha256": PAYLOAD,
+                "schema_version": 1,
+                "source_git_commit": commit,
+                "source_repo": "ai-native-deployment",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_start_run_captures_the_deployed_protocol_before_spawning(tmp_path):
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, clock = make_manager(tmp_path)
+
+    record = manager.start_run(repo, TASK_ID)
+
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.verified_revision == COMMIT
+    assert snapshot.captured_ts == clock.now.isoformat()
+    # Captured before the child exists: the run's own sessions load exactly this
+    # payload, and nothing later in the run dir can change what it names.
+    assert spawner.calls[0]["stdout_path"].parent == manager.runs_dir / record.run_id
+
+
+def test_a_missing_deployment_lock_records_a_reason_and_still_launches(tmp_path):
+    # Provenance is evidence, not a gate: readiness owns the fail-closed
+    # deployment checks, so an unrecorded revision costs the report a cohort key,
+    # never the run.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+
+    record = manager.start_run(repo, TASK_ID)
+
+    assert len(spawner.calls) == 1
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.available is False
+    assert snapshot.verified_revision is None
+    assert snapshot.detail
+
+
+def test_a_failed_capture_write_refuses_the_launch_and_cleans_up(tmp_path, monkeypatch):
+    # The write lands in a run dir this call just created; one that cannot take it
+    # cannot take run.json either, so it is handled like a failed spawn rather
+    # than leaving a launched run with no provenance.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+
+    def boom(_run_dir, _repo_path, *, now):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("orch_hub.runs.capture_protocol", boom)
+
+    with pytest.raises(OSError):
+        manager.start_run(repo, TASK_ID)
+
+    assert spawner.calls == []
+    assert manager.list_runs() == []
+    assert not manager.runs_dir.exists() or list(manager.runs_dir.iterdir()) == []
+
+
+def test_run_end_records_a_stable_deployment(tmp_path):
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    clock.tick(3600)
+    manager.list_runs()  # observe the end -> comparison runs once
+
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_STABLE
+    assert snapshot.verified_revision == COMMIT
+
+
+def test_a_redeploy_during_the_run_degrades_the_capture(tmp_path):
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_deploy_lock(repo, commit=OTHER_COMMIT)  # aii-2 deploy mid-run
+
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_CHANGED
+    assert snapshot.source_git_commit == COMMIT  # still auditable
+    assert snapshot.verified_revision is None  # but not publishable
+
+
+def test_a_redeploy_after_the_run_leaves_the_verdict_alone(tmp_path):
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+
+    end_run(spawner, 0)
+    manager.list_runs()  # the one comparison this run gets
+    write_deploy_lock(repo, commit=OTHER_COMMIT)
+    manager.list_runs()  # a settled record short-circuits; nothing re-compares
+
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_STABLE
+    assert snapshot.verified_revision == COMMIT
+
+
+def test_a_run_ended_while_the_hub_was_down_is_not_compared(tmp_path):
+    # A fresh manager over the same data dir observes the end at an unbounded lag
+    # (exit_code stays None), so a differing deployment cannot be attributed to
+    # the run — it records that it could not look, not a false 'changed'.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_deploy_lock(repo, commit=OTHER_COMMIT)  # redeployed after the hub died
+
+    manager_b, _, _ = make_manager(tmp_path)  # pid_probe returns False (dead)
+    status = manager_b.get_run(record.run_id)
+
+    assert status.record.exit_code is None
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_UNVERIFIED
+    assert snapshot.checked_ts is not None  # the one look this run gets
+    assert snapshot.verified_revision == COMMIT
+
+
+def test_protocol_settle_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):
+    # Isolated like the other end-transition snapshots: the capture is already
+    # durable, so a failed comparison costs a verdict, not run state.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+
+    def boom(_run_dir, _repo_path, *, now, end_observed):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr("orch_hub.runs.settle_protocol", boom)
+    end_run(spawner, 0)
+    status = only_status(manager)  # must not raise
+
+    assert status.state == "ended"
+    assert read_record(manager, record.run_id)["ended_ts"] is not None
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_UNVERIFIED
+
+
+def test_a_run_predating_the_capture_still_ends_cleanly(tmp_path):
+    # Legacy compatibility: a run dir with no protocol.json settles to nothing
+    # rather than adopting the repo's current lock.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    (manager.runs_dir / record.run_id / "protocol.json").unlink()
+
+    end_run(spawner, 0)
+    status = only_status(manager)
+
+    assert status.state == "ended"
+    assert read_protocol(manager.runs_dir / record.run_id) is None
 
 
 # -- load_records (read-only historical reader) -------------------------------

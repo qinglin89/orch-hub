@@ -7,9 +7,10 @@ subprocess side of the orchestrator contract
 .. code-block:: text
 
     <data_dir>/runs/<run_id>/
-        run.json     hub-owned run record (atomic rewrite on updates)
-        control/     the --control-dir file channel, fresh per run
-        spawn.out    subprocess stdout+stderr (startup-failure diagnosis)
+        run.json      hub-owned run record (atomic rewrite on updates)
+        control/      the --control-dir file channel, fresh per run
+        spawn.out     subprocess stdout+stderr (startup-failure diagnosis)
+        protocol.json the deployed protocol revision, captured before the spawn
 
 Run dirs live outside every target repo working tree (an in-repo dir would
 dirty the tree and fail the orchestrator's post-checks), and each run gets a
@@ -96,6 +97,7 @@ from .orch_config import (
     read_effective_config_snapshot,
     write_effective_config_snapshot,
 )
+from .protocol_provenance import capture_protocol, settle_protocol
 from .readiness import check_readiness
 from .sessions import read_live, read_snapshot, write_snapshot
 from .task_snapshots import capture_entries, settle_snapshots
@@ -483,15 +485,24 @@ class RunManager:
                 str(control_dir),
                 *(str(arg) for arg in extra_args),
             )
-            # Stamp the start time *before* spawning. The orchestrator picks its
-            # own second-precision log filename during its startup, which is
-            # necessarily after this point, so floor(started_ts) <= that stamp
-            # and logs.locate_log can never miss the run's own log. Stamping it
-            # after the spawn let a launch that crossed a one-second boundary
-            # record started_ts a second ahead of the child's stamp, hiding the
-            # real log behind locate_log's floored lower bound.
-            started_ts = self._clock().isoformat()
             try:
+                # Freeze the deployed protocol revision before the spawn, so the
+                # capture names what this run's sessions load rather than
+                # whatever the target repo holds by evaluation time
+                # (:mod:`orch_hub.protocol_provenance`). Inside this try because
+                # its *write* failing means the run dir is unusable — the same
+                # cleanup-and-refuse a failed spawn gets; a missing or malformed
+                # lock is not a failure here, it is an unavailable capture.
+                self._capture_protocol(run_dir, repo)
+                # Stamp the start time *before* spawning. The orchestrator picks
+                # its own second-precision log filename during its startup, which
+                # is necessarily after this point, so floor(started_ts) <= that
+                # stamp and logs.locate_log can never miss the run's own log.
+                # Stamping it after the spawn let a launch that crossed a
+                # one-second boundary record started_ts a second ahead of the
+                # child's stamp, hiding the real log behind locate_log's floored
+                # lower bound.
+                started_ts = self._clock().isoformat()
                 with (run_dir / SPAWN_OUT_NAME).open("wb") as spawn_out:
                     proc = self._spawner(
                         list(argv),
@@ -502,8 +513,8 @@ class RunManager:
                     )
             except Exception:
                 # The dir was created by this very call and holds nothing but
-                # the empty channel; removing it keeps failed launches from
-                # accumulating as broken run entries.
+                # the empty channel and this launch's own capture; removing it
+                # keeps failed launches from accumulating as broken run entries.
                 shutil.rmtree(run_dir, ignore_errors=True)
                 raise
             record = RunRecord(
@@ -987,6 +998,10 @@ class RunManager:
         # Same moment, same isolation: settle any session-entry task snapshot still
         # keyed by a bracket whose sid the log revealed only at its end line.
         self._settle_task_snapshots(run_dir, updated)
+        # And the last point the deployed protocol can still be compared against
+        # what this run captured at launch — a redeployment from here on is after
+        # the run, not during it.
+        self._settle_protocol(run_dir, updated)
         # Snapshot the run's authoritative effective-config line the same way, so
         # run history retains what actually launched even after the repo-side log
         # is cleaned; also isolated (a parse/IO failure never touches run state).
@@ -1113,6 +1128,56 @@ class RunManager:
             settle_snapshots(run_dir, read_live(record), now=self._clock())
         except Exception:
             _log.warning("task-snapshot settle failed for run %s", record.run_id)
+
+    def _capture_protocol(self, run_dir: Path, repo: ManagedRepo) -> None:
+        """Freeze the repo's deployed protocol revision into the run dir.
+
+        Deliberately *not* isolated like the end-transition snapshots: this runs
+        before the spawn, where the caller's cleanup can still refuse the launch,
+        and a run dir that cannot take this write cannot take ``run.json``
+        either. What it does not do is gate — a missing or malformed deployment
+        lock returns an unavailable capture (:func:`capture_protocol`), which is
+        recorded and logged rather than raised. Readiness owns the fail-closed
+        deployment checks; provenance is evidence, like commit metadata.
+        """
+        snapshot = capture_protocol(run_dir, repo.path, now=self._clock())
+        if not snapshot.available:
+            # Worth an operator's attention (this run's report will publish no
+            # protocol revision) but never a launch failure. The detail names the
+            # lock file and its defect; nothing on this path carries a secret.
+            _log.warning(
+                "protocol provenance unavailable for run %s: %s",
+                run_dir.name,
+                snapshot.detail,
+            )
+
+    def _settle_protocol(self, run_dir: Path, record: RunRecord) -> None:
+        """Record the end-of-run deployment-lock comparison for this run.
+
+        Isolated exactly like :meth:`_snapshot_sessions`: the capture is already
+        durable and usable on its own, so a failed comparison costs a stability
+        verdict, not run state. A record with no repo attribution (a stub) has
+        nothing to compare against.
+
+        A missing ``exit_code`` is exactly this class's "ended while the hub was
+        not the parent" (see :meth:`_refresh`), which is the one case where this
+        moment is not the run's end but merely the first scan after it — an
+        unbounded lag, in which a differing deployment says nothing about the run.
+        The module records that rather than a verdict it cannot support.
+        """
+        if record.repo_path is None:
+            return
+        try:
+            settle_protocol(
+                run_dir,
+                record.repo_path,
+                now=self._clock(),
+                end_observed=record.exit_code is not None,
+            )
+        except Exception:
+            _log.warning(
+                "protocol provenance settle failed for run %s", record.run_id
+            )
 
     def _snapshot_effective_config(self, run_dir: Path, record: RunRecord) -> None:
         """Persist the run's ``effective-config:`` snapshot at the live->ended
