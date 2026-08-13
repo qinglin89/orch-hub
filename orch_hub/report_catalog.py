@@ -116,6 +116,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from .config import Config
 from .evaluation import (
@@ -517,18 +518,29 @@ class ReportCatalog:
         global key alone and never constructs a repo/task/evaluation path. Reads
         are contained by :meth:`artifact_dir` (the same unsafe-segment rejection as
         every other artifact read) and confined to the evaluation's own four files;
-        nothing about the target repo is touched.
+        nothing about the target repo is touched. Containment of each *file* is
+        the raw read's, for the same reason and by the same helper: a fixed name
+        does not fix the object standing under it, so every artifact is opened
+        no-follow and parsed from that descriptor (:func:`_read_artifact_file`).
+        An artifact replaced after publication by a link out of the tree therefore
+        reaches no consumer — not as text in ``report_md``, not as outside JSON in
+        the three parsed slots — whether the link was planted before this call or
+        lands inside it.
 
         Availability is **all-or-nothing**, matching what publication required: a
         bundle is served only when the complete L1+L2 set is still present and
         readable. Every other case is ``available: false`` with a ``detail`` — a
         pruned artifact dir (the designed end state of an entry outliving its
-        artifacts), a partially removed one, an unreadable or unparseable file, a
-        stored identity that cannot address a contained path at all, or one that
-        can but is not provably the identity the report was published under
-        (:func:`_identity_fault`). Failing closed matters more here than degrading
-        gracefully: a half-populated or misattributed bundle would be imported as
-        if it were the published report.
+        artifacts), a partially removed one, an artifact that is *damaged* rather
+        than gone (a link standing where the published file was), an unreadable or
+        unparseable file, a stored identity that cannot address a contained path at
+        all, or one that can but is not provably the identity the report was
+        published under (:func:`_identity_fault`). Failing closed matters more here
+        than degrading gracefully: a half-populated or misattributed bundle would
+        be imported as if it were the published report. The damaged case is kept
+        distinct from the pruned ones on purpose: retention removing artifacts is
+        this feed's designed end state, and reporting a tampered tree as that end
+        state would hide it from the operator who can repair it.
 
         Integrity is reported, not enforced: served artifacts whose bytes no longer
         match the digests recorded at publication are named in ``mismatched``, and
@@ -548,6 +560,19 @@ class ReportCatalog:
                 available=False,
                 detail=f"unsafe stored report identity ({err})",
             )
+        except (OSError, RuntimeError) as err:
+            # Path math that still walks the filesystem: the contained-path helper
+            # resolves the dir to prove it stays under the evaluations base, and a
+            # symlink loop planted in the tree makes resolution *raise* instead of
+            # return — ``RuntimeError`` on the Python versions this project still
+            # supports (≤3.12), ``OSError`` in other failure modes. Unhandled, a
+            # damaged tree would escape this envelope as an unclassified crash
+            # rather than the hub-side fault the raw read already classifies.
+            return ReportBundle(
+                entry=entry,
+                available=False,
+                detail=f"unresolvable path for report artifacts ({err})",
+            )
         # Also before any IO: a line that *can* name a contained dir but is not the
         # identity that dir was published under would otherwise serve another
         # report's artifacts, hash-verified, under this entry's key.
@@ -558,16 +583,24 @@ class ReportCatalog:
                 available=False,
                 detail=f"incoherent stored report identity ({fault})",
             )
+        gone = ReportBundle(
+            entry=entry,
+            available=False,
+            detail="report artifacts are no longer retained",
+        )
         if not eval_dir.is_dir():
-            return ReportBundle(
-                entry=entry,
-                available=False,
-                detail="report artifacts are no longer retained",
-            )
+            return gone
         # Same completeness rule publication used, asked for its detail rather
         # than its verdict: a partially pruned set must read as an incomplete set,
-        # not as the IO error its first absent file would otherwise produce below.
-        missing = _missing_artifacts(eval_dir)
+        # not as the IO error its first absent file would otherwise produce below,
+        # and a damaged one must not read as either. Advisory only — it names what
+        # is wrong across the whole set before anything is read, while the read
+        # below is what containment actually rests on.
+        missing, uncontained = _artifact_faults(eval_dir)
+        if uncontained:
+            return ReportBundle(
+                entry=entry, available=False, detail=_damaged_detail(uncontained)
+            )
         if missing:
             return ReportBundle(
                 entry=entry,
@@ -582,14 +615,31 @@ class ReportCatalog:
         mismatched: list[str] = []
         unverified: list[str] = []
         for name in REQUIRED_ARTIFACTS:
+            # The check above described the names; this opens the objects. Nothing
+            # a pathname check proves survives the second walk a path-based read
+            # takes, so the open itself refuses a link at the artifact's own hop
+            # and the bytes come from that descriptor — a swap landing inside this
+            # loop changes what the name means, never what the bundle carries.
             try:
-                data = (eval_dir / name).read_bytes()
+                data = _read_artifact_file(eval_dir / name)
+            except (FileNotFoundError, NotADirectoryError):
+                # Pruned between the check and the open: still absence, and the
+                # answer absence gets — not the IO fault it is not.
+                return gone
             except OSError as err:
+                if err.errno == errno.ELOOP:
+                    return ReportBundle(
+                        entry=entry, available=False, detail=_damaged_detail((name,))
+                    )
                 return ReportBundle(
                     entry=entry,
                     available=False,
                     detail=f"unreadable report artifact {name} ({err})",
                 )
+            if data is None:
+                # Not a regular file — a directory or FIFO standing where the
+                # artifact was: not the published artifact, so not retained.
+                return gone
             raw[name] = data
             expected = cataloged.get(name)
             if expected is None:
@@ -1244,9 +1294,60 @@ def _walk_evaluations(base: Path) -> Iterator[tuple[str, str, str, Path]]:
                     yield repo_dir.name, task_dir.name, eval_dir.name, eval_dir
 
 
-def _missing_artifacts(eval_dir: Path) -> list[str]:
-    """Which of the required L1+L2 artifacts an evaluation dir does not hold."""
-    return [name for name in REQUIRED_ARTIFACTS if not (eval_dir / name).is_file()]
+def _artifact_faults(eval_dir: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """``(missing, uncontained)`` names among an evaluation dir's four artifacts.
+
+    Two different defects, deliberately never merged into one list. *Missing* is
+    the ordinary state — retention pruned the file, or the dir only ever held an
+    evidence-only generation — and it is what the feed's "no longer retained"
+    story is made of. *Uncontained* is a link standing where a published artifact
+    should be, which the hub never writes: the artifact's bytes would be some
+    other file's, so the report is damaged rather than gone, and a caller that
+    could not tell the two apart would report tampering as retention's designed
+    end state.
+
+    ``lstat`` rather than ``is_file()`` is the whole difference: the latter
+    follows links, so a symlinked artifact counted as *present* is what let
+    publication hash an outside file and the bundle serve it. Anything that is
+    not a regular file at that hop — a directory, a FIFO, an absent name, a
+    parent that will not stat — is counted missing, matching what ``is_file()``
+    answered for those.
+
+    This is a census, not a containment check: it says what is wrong across the
+    whole set before anything is opened (a bundle names every absent artifact at
+    once rather than failing at the first). Containment itself is at the open, in
+    :func:`_read_artifact_file` for a read and :func:`_artifact_digest` for a
+    publication, because a name checked here can mean something else by the time
+    it is opened.
+    """
+    missing: list[str] = []
+    uncontained: list[str] = []
+    for name in REQUIRED_ARTIFACTS:
+        try:
+            mode = os.lstat(eval_dir / name).st_mode
+        except OSError:
+            missing.append(name)
+            continue
+        if stat.S_ISLNK(mode):
+            uncontained.append(name)
+        elif not stat.S_ISREG(mode):
+            missing.append(name)
+    return tuple(missing), tuple(uncontained)
+
+
+def _damaged_detail(names: tuple[str, ...]) -> str:
+    """Why a bundle is unavailable because artifacts are linked, not present.
+
+    One phrasing for both the pre-read census and a link the read itself refuses,
+    so the two cannot drift into describing the same tree two ways. Kept
+    recognizably apart from the "no longer retained" and "incomplete" details,
+    which a consumer reads as retention doing its job.
+    """
+    return (
+        "report artifact set is damaged"
+        f" ({', '.join(names)} reached through a symbolic link"
+        " and refused rather than followed)"
+    )
 
 
 def _is_complete(eval_dir: Path) -> bool:
@@ -1259,11 +1360,20 @@ def _is_complete(eval_dir: Path) -> bool:
     filesystem rather than inferred from job state. Completeness alone does not
     publish — the candidate must also be coherent and archived.
 
-    Phrased over :func:`_missing_artifacts` so the read side can report *which*
-    artifacts are gone without restating the rule; publication and the bundle
-    export must never be able to disagree about what a complete report is.
+    A *linked* artifact is not a present one here either, which is a publication
+    rule and not only a read rule: an entry's manifest digest is the promise a
+    consumer verifies, and taking it over whatever a link points at would publish
+    that promise about a file the hub never wrote. So a damaged dir is not a
+    candidate — for a sweep, for the live hook, and for the retention guard that
+    shares this predicate (an unpublishable dir is not publication debt, exactly
+    as an incomplete one is not).
+
+    Phrased over :func:`_artifact_faults` so the read side can report *which*
+    artifacts are gone or damaged without restating the rule; publication and the
+    bundle export must never be able to disagree about what a complete report is.
     """
-    return not _missing_artifacts(eval_dir)
+    missing, uncontained = _artifact_faults(eval_dir)
+    return not missing and not uncontained
 
 
 def _require_unique_identity(entries: list[ReportCatalogEntry]) -> None:
@@ -1357,39 +1467,57 @@ def _identity_fault(entry: ReportCatalogEntry) -> str | None:
     return None
 
 
-def _read_artifact_file(path: Path) -> bytes | None:
-    """Read the regular file at ``path``, following no link at its final hop.
+@contextmanager
+def _opened_artifact(path: Path) -> Iterator[BinaryIO | None]:
+    """Open one artifact by its fixed name, following no link at its final hop.
 
     The containment defense for a *fixed* artifact name, which no pathname check
     can provide. The name is closed, but the object standing under it is not, and
-    every path-based operation — ``resolve``, ``is_file``, ``read_bytes`` — walks
-    that name again. Checking a pathname and then opening the same pathname is
-    therefore two walks of a tree that can change in between: the check describes
-    one object and the read returns another, so an artifact replaced by a link to
-    a target-repo file between them is served as the published artifact. Widening
-    the window is not required either — the swap only has to land inside it.
+    every path-based operation — ``resolve``, ``is_file``, ``lstat``,
+    ``read_bytes`` — walks that name again. Checking a pathname and then opening
+    the same pathname is therefore two walks of a tree that can change in between:
+    the check describes one object and the read returns another, so an artifact
+    replaced by a link to a target-repo file between them is served (or hashed) as
+    the published artifact. Widening the window is not required either — the swap
+    only has to land inside it.
 
-    So the open *is* the check. ``O_NOFOLLOW`` refuses a symlink at the artifact's
-    own hop, so it never becomes a redirect that could be followed anywhere, and
-    everything after works on the descriptor: ``fstat`` and the read describe
-    exactly the object that was opened, whatever the name comes to mean
+    So the open *is* the check, and it is the one every caller that turns an
+    artifact into bytes goes through — the bundle export, the raw byte read, and
+    the manifest digest publication records. ``O_NOFOLLOW`` refuses a symlink at
+    the artifact's own hop, so it never becomes a redirect that could be followed
+    anywhere, and everything after works on the descriptor: ``fstat`` and the read
+    describe exactly the object that was opened, whatever the name comes to mean
     afterwards. ``O_NONBLOCK`` keeps the open from being turned into a hang — a
     FIFO planted where the artifact was would otherwise wait for a writer forever,
     on a request thread of the resident service (a regular file ignores the flag).
 
-    ``None`` when what stands there is not a regular file — a directory, a FIFO —
-    which is the "not retained" answer absence gets, since none of them is the
-    published artifact. Raises ``OSError`` otherwise, with ``ELOOP`` meaning a
-    refused link (the deliberate refusal, not an IO fault).
+    Yields ``None`` when what stands there is not a regular file — a directory, a
+    FIFO — since none of them is the published artifact. Raises ``OSError``
+    otherwise, with ``ELOOP`` meaning a refused link (the deliberate refusal, not
+    an IO fault). Links *above* the artifact stay followable on purpose: a hub
+    whose data dir is reached through one (a relocated volume, macOS's own
+    ``/var`` → ``/private/var``) must keep reading and publishing normally.
     """
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
-            return None
+            yield None
+            return
         with open(fd, "rb", closefd=False) as handle:
-            return handle.read()
+            yield handle
     finally:
         os.close(fd)
+
+
+def _read_artifact_file(path: Path) -> bytes | None:
+    """The whole contained artifact at ``path``, or ``None`` if it is not one.
+
+    The read-side wrapper of :func:`_opened_artifact`: both feed read paths hand
+    back or parse *these* bytes, so what a consumer receives came from the object
+    the open accepted rather than from whatever the name resolves to now.
+    """
+    with _opened_artifact(path) as handle:
+        return handle.read() if handle is not None else None
 
 
 def _cataloged_digests(entry: ReportCatalogEntry) -> dict[str, str]:
@@ -1453,12 +1581,25 @@ def _artifact_digest(path: Path) -> ReportArtifact:
     (:func:`_is_complete`), so a read failure here is a genuine IO problem and is
     raised as :class:`ReportCatalogError` — publishing an entry with an
     unverifiable hash would defeat the point of recording one.
+
+    Through the same no-follow open the read paths use, because the recorded
+    digest is the strongest claim an entry makes: a link planted between the
+    completeness check and this hash would otherwise put an outside file's digest
+    in the manifest, and every later verification — the consumer's included —
+    would then be checking that file. A refused link (or anything else that is not
+    a regular file) is the undecided answer rather than a decision: no entry is
+    written, a sweep logs and retries it, and the shared predicate keeps the dir
+    out of publication meanwhile.
     """
     digest = hashlib.sha256()
     size = 0
     try:
-        with path.open("rb") as fh:
-            while chunk := fh.read(_HASH_CHUNK):
+        with _opened_artifact(path) as handle:
+            if handle is None:
+                raise ReportCatalogError(
+                    f"artifact {path.name} is not a contained regular file"
+                )
+            while chunk := handle.read(_HASH_CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
     except OSError as err:

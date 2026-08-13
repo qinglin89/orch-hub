@@ -1934,7 +1934,11 @@ class ReportBundle:
     catalog outliving its artifacts) while the fetch fails closed rather than
     handing back a partial import. The same applies to an entry whose stored
     identity cannot address a contained directory, or cannot be trusted to name
-    the artifacts it was published from.
+    the artifacts it was published from, and to a *damaged* set — a link standing
+    where a published artifact should be, refused rather than followed. That last
+    ``detail`` is deliberately distinguishable from the pruned ones: retention
+    removing artifacts is the feed's designed end state, so reporting a tampered
+    tree as that end state would hide it from the operator who can repair it.
 
     The three JSON artifacts carry whatever their file parses to — object, array,
     or scalar — exactly like the per-task detail route, because the artifact bytes

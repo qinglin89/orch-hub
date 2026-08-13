@@ -4048,6 +4048,52 @@ def test_report_bundle_of_pruned_artifacts_is_unavailable_not_404(
     assert not (config.data_dir / "evaluations" / repo.name / RUN_TASK_ID).exists()
 
 
+def test_report_bundle_of_a_symlinked_artifact_serves_no_outside_bytes(
+    tmp_path, monkeypatch
+):
+    # The route's containment promise is about the bytes it hands back, not only
+    # the path it builds: the four names are fixed, but the files standing under
+    # them are not, so an artifact replaced after publication by a link out of the
+    # evaluations tree must reach no consumer — neither as text in report_md nor
+    # as parseable outside JSON in the three parsed slots.
+    client, config, repo = make_feed_client(
+        tmp_path, monkeypatch, evaluation_ids=("20260722T090000Z",)
+    )
+    item = client.get("/api/evaluation/reports").json()["reports"][0]
+    eval_dir = (
+        config.data_dir / "evaluations" / repo.name / RUN_TASK_ID / "20260722T090000Z"
+    )
+    outside = config.data_dir.parent / "outside-the-tree.json"
+    outside.write_text('{"secret": "private content"}', encoding="utf-8")
+    link = eval_dir / EVIDENCE_NAME
+    link.unlink()
+    link.symlink_to(outside)
+
+    resp = client.get(f"/api/evaluation/reports/{item['report_key']}")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["available"] is False
+    assert b"private content" not in resp.content
+    assert body["artifacts"] == {
+        "evidence": None,
+        "static_metrics": None,
+        "semantic_report": None,
+        "report_md": None,
+    }
+    # A damaged tree, deliberately distinguishable from the pruned and partially
+    # pruned sets the same envelope reports: retention is this feed's designed end
+    # state, and dressing tampering up as it would hide the defect.
+    assert "damaged" in body["detail"] and "symbolic link" in body["detail"]
+    assert "no longer retained" not in body["detail"]
+    # Still auditable, and the per-artifact route keeps answering per artifact.
+    assert len(body["entry"]["artifacts"]) == len(REQUIRED_ARTIFACTS)
+    assert (
+        client.get(artifact_url(item["report_key"], SEMANTIC_REPORT_MD_NAME)).status_code
+        == 200
+    )
+
+
 def test_report_feed_refuses_to_serve_an_ambiguous_catalog(tmp_path, monkeypatch):
     # Only a hand-edit, a merge, or a restore can put two entries at one sequence,
     # and a cursor over that file cannot promise exactly-once traversal: a consumer

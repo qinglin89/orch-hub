@@ -374,6 +374,73 @@ def test_live_hook_defers_a_report_whose_task_is_still_active(tmp_path):
     assert catalog(config).entries() == []
 
 
+def test_an_artifact_standing_as_a_link_is_not_a_publishable_report(tmp_path):
+    # A link is not the file publication would hash. The entry's manifest digest
+    # is the claim a consumer verifies, so recording one taken over whatever the
+    # link points at would publish that claim about a file the hub never wrote.
+    # The dir is therefore not a candidate at all — same predicate, same answer,
+    # for the sweep, the live hook, and the retention guard.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    outside = tmp_path / "outside" / STATIC_METRICS_NAME
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(json.dumps({"scores": ["outside"]}), encoding="utf-8")
+    linked = eval_dir / STATIC_METRICS_NAME
+    published = linked.read_bytes()
+    linked.unlink()
+    linked.symlink_to(outside)
+    cat = catalog(config)
+
+    assert cat.reconcile() == []
+    assert cat.record_evaluation(repo(tmp_path), TASK_A, "20260730T100000Z") is None
+    assert cat.entries() == []
+    # Unpublishable is not publication debt, exactly as an incomplete set is not:
+    # retention stays free to prune a dir the feed will never publish.
+    assert cat.unpublished_ids(repo(tmp_path), TASK_A) == set()
+    # And the refusal is a fact about the dir's current state, not a mark on it:
+    # restoring the file makes the same report publishable.
+    linked.unlink()
+    linked.write_bytes(published)
+    assert [entry.evaluation_id for entry in cat.reconcile()] == ["20260730T100000Z"]
+
+
+def test_publication_refuses_a_link_planted_after_the_completeness_check(
+    tmp_path, monkeypatch
+):
+    # The static case above is only half the guarantee: completeness is checked by
+    # pathname and the manifest is hashed afterwards, so a swap landing between
+    # the two is the window a check-then-hash publication is exposed in. Fired
+    # here from inside the check itself. The digest must come from an open that
+    # refuses the link, leaving the candidate undecided — no entry, retried later
+    # — rather than recording an outside file's hash as this report's.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    outside = tmp_path / "outside" / EVIDENCE_NAME
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text(json.dumps({"target": {"repo_path": "/elsewhere"}}), encoding="utf-8")
+    real_is_complete = report_catalog_module._is_complete
+    swapped = False
+
+    def _swap_then_check(path: Path) -> bool:
+        nonlocal swapped
+        verdict = real_is_complete(path)
+        if verdict and not swapped:
+            swapped = True
+            artifact = path / EVIDENCE_NAME
+            artifact.unlink()
+            artifact.symlink_to(outside)
+        return verdict
+
+    monkeypatch.setattr(report_catalog_module, "_is_complete", _swap_then_check)
+    added = catalog(config).reconcile()
+
+    # The swap really landed inside the window (otherwise the assertions below
+    # would be vacuous), and nothing was published from it.
+    assert swapped and (eval_dir / EVIDENCE_NAME).is_symlink()
+    assert added == []
+    assert not (config.data_dir / CATALOG_SUBDIR / CATALOG_NAME).exists()
+
+
 # -- identity coherence -------------------------------------------------------
 
 
@@ -1536,6 +1603,110 @@ def test_bundle_of_an_unparseable_artifact_fails_closed(tmp_path):
     assert bundle.available is False
     assert STATIC_METRICS_NAME in bundle.detail
     assert bundle.static_metrics is None
+
+
+@pytest.mark.parametrize("name", REQUIRED_ARTIFACTS)
+def test_bundle_of_a_symlinked_artifact_serves_no_outside_bytes(tmp_path, name):
+    # The directory is contained, but a path-based read follows links, so an
+    # artifact replaced after publication by a link out of the tree would be
+    # exported under this entry's key — as verbatim text in report_md, and as any
+    # parseable outside JSON in the three parsed slots. Containment has to hold on
+    # what each fixed name actually opens.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    outside = repo(tmp_path).path / "docs" / "private.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    # Readable text *and* parseable JSON, so no slot could refuse it merely for
+    # having the wrong shape.
+    outside.write_text('{"secret": "target repo content"}', encoding="utf-8")
+    link = eval_dir / name
+    link.unlink()
+    link.symlink_to(outside)
+    # The link is live, so the refusal below is the containment check answering
+    # and not a fixture that never resolved to anything.
+    assert link.read_text(encoding="utf-8") == '{"secret": "target repo content"}'
+
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is False
+    # All-or-nothing: no slot is populated, and nothing outside the tree reaches
+    # the serialized response either.
+    assert (bundle.evidence, bundle.static_metrics) == (None, None)
+    assert (bundle.semantic_report, bundle.report_md) == (None, None)
+    assert "target repo content" not in json.dumps(bundle.to_dict())
+    # Damaged, deliberately not pruned: retention removing artifacts is this
+    # feed's designed end state, so reporting a tampered tree as that end state
+    # would hide it from the operator who can repair it.
+    assert "damaged" in bundle.detail and "symbolic link" in bundle.detail
+    assert "no longer retained" not in bundle.detail
+    assert "incomplete" not in bundle.detail
+    assert name in bundle.detail
+    # Still auditable: the entry and its publication-time hashes are untouched.
+    assert len(bundle.entry.artifacts) == len(REQUIRED_ARTIFACTS)
+
+
+def test_bundle_swapped_after_the_census_still_parses_the_opened_files(
+    tmp_path, monkeypatch
+):
+    # The static case above is only half the guarantee: naming the damaged
+    # artifacts before the read is a pathname check, and the read walks each name
+    # again, so a swap landing between them makes the check describe one object
+    # and the export carry another. Fired here from inside the read, at the moment
+    # the first artifact has been opened and is being validated — the exact window
+    # a check-then-reopen bundle is exposed in.
+    config = cfg(tmp_path)
+    eval_dir = write_eval(config)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    outside = repo(tmp_path).path / "docs" / "private.json"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text('{"secret": "target repo content"}', encoding="utf-8")
+    artifact = eval_dir / EVIDENCE_NAME
+    real_fstat = os.fstat
+    swapped = False
+
+    def _swap_then_stat(fd):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            artifact.unlink()
+            artifact.symlink_to(outside)
+        return real_fstat(fd)
+
+    monkeypatch.setattr(os, "fstat", _swap_then_stat)
+    bundle = cat.read_bundle(entry)
+
+    # The swap really happened mid-read (a bundle that never validates an open
+    # descriptor would leave this False and the assertions below vacuous).
+    assert swapped and artifact.is_symlink()
+    assert bundle.available is True
+    assert bundle.evidence["target"]["task_id"] == TASK_A
+    assert "target repo content" not in json.dumps(bundle.to_dict())
+    # The bytes came from the object that was opened, so they still hash to what
+    # publication recorded.
+    assert bundle.verified is True and bundle.mismatched == ()
+
+
+def test_bundle_reads_and_publishes_through_a_symlinked_data_dir(tmp_path):
+    # Containment is enforced at each artifact's own hop, not by refusing every
+    # link above it, so a hub whose data dir is itself reached through a symlink
+    # (a relocated volume, macOS's own /var -> /private/var) still publishes and
+    # exports normally. A rule that rejected any link in the path would take every
+    # report on such a deployment out of the feed.
+    (tmp_path / "real-data").mkdir()
+    (tmp_path / "hub-data").symlink_to(tmp_path / "real-data", target_is_directory=True)
+    config = cfg(tmp_path)
+    write_eval(config)
+    cat = catalog(config)
+
+    entry = cat.reconcile()[0]
+    bundle = cat.read_bundle(entry)
+
+    assert bundle.available is True and bundle.detail is None
+    assert bundle.report_md.startswith("# Semantic Task Evaluation")
+    assert bundle.verified is True
 
 
 # -- raw artifact bytes --------------------------------------------------------

@@ -264,6 +264,17 @@ detail route uses, so a consumer never needs to know the
   `200 {"available": false, "detail": ...}` — *not* `404`. The report was
   published and its entry stays auditable; "no such report" would misreport it.
   An unknown key is the `404`.
+- Each artifact is **opened without following a link at its own hop**, and the
+  bytes are parsed from that open file — the same rule as the byte-exact route
+  below, so an artifact replaced after publication by a link out of the tree is
+  refused rather than exported, and a swap landing while the read is in flight
+  changes nothing. That answers `available: false` with a *damaged* detail,
+  deliberately worded apart from the pruned and partially pruned ones: retention
+  removing artifacts is this feed's designed end state, and reporting a tampered
+  tree as that end state would hide it. (Symlinks *above* the evaluation dir — a
+  relocated data volume — are unaffected.) The same rule decides publication: a
+  dir holding a linked artifact is not a complete report, so its digest is never
+  recorded over an outside file, and a sweep publishes it only once repaired.
 - `integrity` reports which served artifacts no longer hash to the digest
   recorded at publication (`mismatched`) and which the entry has no usable
   digest for (`unverified`). Neither blocks the download — only the consumer can
