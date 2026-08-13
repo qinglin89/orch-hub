@@ -2189,8 +2189,11 @@ def test_start_run_captures_the_deployed_protocol_before_spawning(tmp_path):
 
     snapshot = read_protocol(manager.runs_dir / record.run_id)
     assert snapshot is not None
-    assert snapshot.verified_revision == COMMIT
+    assert snapshot.source_git_commit == COMMIT
     assert snapshot.captured_ts == clock.now.isoformat()
+    # A capture is not yet a publishable revision: this run is live, and its end
+    # check is what confirms the deployment held for all of its sessions.
+    assert snapshot.verified_revision is None
     # Captured before the child exists: the run's own sessions load exactly this
     # payload, and nothing later in the run dir can change what it names.
     assert spawner.calls[0]["stdout_path"].parent == manager.runs_dir / record.run_id
@@ -2302,7 +2305,8 @@ def test_a_run_ended_while_the_hub_was_down_is_not_compared(tmp_path):
     assert snapshot is not None
     assert snapshot.stability == STABILITY_UNVERIFIED
     assert snapshot.checked_ts is not None  # the one look this run gets
-    assert snapshot.verified_revision == COMMIT
+    assert snapshot.source_git_commit == COMMIT  # auditable
+    assert snapshot.verified_revision is None  # but never confirmed
 
 
 def test_protocol_settle_failure_does_not_corrupt_run_end(tmp_path, monkeypatch):

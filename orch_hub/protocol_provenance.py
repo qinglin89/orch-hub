@@ -30,10 +30,16 @@ Two writes, ordered by the run's own state machine:
   transition and records only a *stability* verdict: the deployment can be
   updated while a run is in flight, in which case the run's sessions did not all
   use one protocol revision and the run must not be published as if they had.
-  The check can only ever degrade a capture (:data:`STABILITY_CHANGED`), never
-  establish or replace one, and it runs exactly once — ``checked_ts`` marks that
-  it ran, so a later re-check cannot mistake a post-run redeployment for a
-  mid-run one.
+  It never establishes or replaces a captured revision, and it runs exactly once
+  — ``checked_ts`` marks that it ran, so a later re-check cannot mistake a
+  post-run redeployment for a mid-run one.
+
+Publication is therefore narrow by construction: a run carries a publishable
+revision only once the end check has run *and* found the deployment unchanged
+(:meth:`ProtocolSnapshot.verified_revision`). A capture on its own attests to the
+run's first moment, not to what its later sessions loaded, so a run that is still
+live, whose lock had vanished by its end, or whose end the hub was not up to
+observe keeps its commit readable for audit and publishes nothing.
 
 Because the two writes never overlap, this artifact needs no cross-writer lock
 (unlike :mod:`orch_hub.task_snapshots`, whose captures genuinely race); the
@@ -74,10 +80,13 @@ while keeping a pathological file from being parsed into memory."""
 STABILITY_UNVERIFIED = "unverified"
 """No usable end-of-run comparison: the run is still live, its end check has not
 run, or the lock could not be re-read at its end (``detail`` says which). The
-launch capture stands — this is an absence of contradiction, not a defect."""
+launch capture stands as audit data — this is an absence of contradiction, not a
+defect — but nothing confirms it held for the whole run, so it publishes no
+revision."""
 
 STABILITY_STABLE = "stable"
-"""The lock still named the captured revision when the run ended."""
+"""The lock still named the captured revision when the run ended. The only state
+a revision may be published from."""
 
 STABILITY_CHANGED = "changed"
 """The deployment was updated while the run was in flight, so the run's sessions
@@ -128,12 +137,16 @@ class ProtocolSnapshot:
 
         The one predicate downstream aggregation should use, so "which runs count
         as carrying a revision" is decided here rather than re-derived at each
-        consumer. A capture contradicted by the end check
-        (:data:`STABILITY_CHANGED`) yields ``None`` even though its commit is
-        still recorded: the field remains readable for audit, but it is not what
-        the run ran under end to end.
+        consumer. It needs a completed end check that found the deployment
+        unchanged: a launch capture attests only to the run's first moment, and a
+        report publishes what the run ran under end to end. So a contradicted
+        capture (:data:`STABILITY_CHANGED`) and an uncompared one
+        (:data:`STABILITY_UNVERIFIED` — still live, lock unreadable at the end, or
+        an end the hub was not up to observe) are alike here: both keep their
+        recorded commit readable for audit and publish nothing. Absent evidence
+        of one revision is not evidence of one revision.
         """
-        if not self.available or self.stability == STABILITY_CHANGED:
+        if not self.available or self.stability != STABILITY_STABLE:
             return None
         return self.source_git_commit
 
@@ -253,8 +266,10 @@ def settle_protocol(
     down is observed at an unbounded lag, where "the deployment differs" no longer
     distinguishes a mid-run redeployment from any of the ones since. Such a run
     records that its end could not be compared rather than a verdict it cannot
-    support — conservative in the honest direction, since a false ``changed``
-    silently withholds a publishable revision.
+    support. That buys no publication — an uncompared end publishes nothing
+    either way — but it keeps the recorded verdict truthful: a false ``changed``
+    tells an operator, in ``detail``, that the deployment moved under their run
+    when nothing observed says it did.
 
     Only the two revision fields are compared. A lock that renamed its source or
     bumped its own schema while naming the same commit and payload hash deployed
@@ -321,6 +336,12 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     claiming availability without a well-formed commit and payload hash, or
     carrying a stability value this version does not know (a hand-edited file, or
     one written by a newer hub), is unusable rather than partially trusted.
+
+    ``stability`` is validated the same way and for the same reason: it is the
+    field that grants publication (:meth:`ProtocolSnapshot.verified_revision`), so
+    a verdict with no ``checked_ts`` — a conclusion recording no check that could
+    have reached it, which :func:`settle_protocol` never writes — is refused
+    rather than read as a confirmed revision.
     """
     if not isinstance(data, dict):
         return _unavailable(f"{ARTIFACT_NAME} is not a JSON object")
@@ -330,8 +351,11 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     commit = _hex_field(data, "source_git_commit", _SHA)
     payload = _hex_field(data, "canonical_payload_sha256", _SHA256)
     available = data.get("available") is True
+    checked_ts = _str_field(data, "checked_ts")
     if available and (commit is None or payload is None):
         return _unavailable(f"{ARTIFACT_NAME} claims a revision it does not carry")
+    if available and stability != STABILITY_UNVERIFIED and checked_ts is None:
+        return _unavailable(f"{ARTIFACT_NAME} carries a verdict it never checked")
     return ProtocolSnapshot(
         available=available,
         source_git_commit=commit if available else None,
@@ -340,7 +364,7 @@ def _from_dict(data: object) -> ProtocolSnapshot:
         lock_schema_version=_int_field(data, "lock_schema_version"),
         captured_ts=_str_field(data, "captured_ts"),
         stability=stability,
-        checked_ts=_str_field(data, "checked_ts"),
+        checked_ts=checked_ts,
         detail=_str_field(data, "detail"),
     )
 

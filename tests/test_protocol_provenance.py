@@ -184,7 +184,7 @@ def test_capture_writes_a_validated_stamped_artifact(tmp_path: Path) -> None:
     assert snapshot.captured_ts == CAPTURED_AT.isoformat()
     assert snapshot.stability == STABILITY_UNVERIFIED
     assert snapshot.checked_ts is None
-    assert snapshot.verified_revision == COMMIT
+    assert snapshot.source_git_commit == COMMIT
     persisted = json.loads((run_dir / ARTIFACT_NAME).read_text(encoding="utf-8"))
     assert persisted["schema_version"] == PROTOCOL_SCHEMA_VERSION
     assert persisted["source_git_commit"] == COMMIT
@@ -207,6 +207,26 @@ def test_capture_records_an_absent_lock_instead_of_raising(tmp_path: Path) -> No
     assert reloaded is not None
     assert reloaded.available is False
     assert reloaded.detail
+
+
+def test_a_live_capture_is_not_publishable_until_its_end_check(tmp_path: Path) -> None:
+    # The capture attests to the run's first moment only. Until the end check
+    # confirms the deployment held, the run has a commit to audit and no commit
+    # to publish: the deployment could still be updated under its later sessions,
+    # and a report must not claim one revision for all of them.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    write_lock(repo_path)
+
+    captured = capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+
+    assert captured.source_git_commit == COMMIT
+    assert captured.verified_revision is None
+
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    assert settled is not None
+    assert settled.verified_revision == COMMIT
 
 
 # -- end-of-run stability check ----------------------------------------------
@@ -296,8 +316,11 @@ def test_settle_keeps_the_capture_when_the_lock_cannot_be_reread(
     assert settled.stability == STABILITY_UNVERIFIED
     assert settled.checked_ts == ENDED_AT.isoformat()
     assert "unreadable at run end" in (settled.detail or "")
-    # Not being able to look is not a contradiction: the launch capture stands.
-    assert settled.verified_revision == COMMIT
+    # Not being able to look is not a contradiction, so the launch capture stands
+    # for audit; it is not a confirmation either, and only a confirmed revision
+    # may be published.
+    assert settled.source_git_commit == COMMIT
+    assert settled.verified_revision is None
 
 
 def test_settle_runs_once_even_when_it_could_not_verify(tmp_path: Path) -> None:
@@ -339,7 +362,10 @@ def test_settle_declines_to_compare_an_unobserved_end(tmp_path: Path) -> None:
     assert settled.stability == STABILITY_UNVERIFIED
     assert settled.checked_ts == ENDED_AT.isoformat()
     assert "hub was down" in (settled.detail or "")
-    assert settled.verified_revision == COMMIT
+    # Declining to compare protects the verdict's honesty, not the publication:
+    # an end nobody observed closely enough confirms nothing either.
+    assert settled.source_git_commit == COMMIT
+    assert settled.verified_revision is None
 
 
 def test_settle_never_backfills_an_unavailable_capture(tmp_path: Path) -> None:
@@ -402,6 +428,17 @@ def test_read_protocol_fails_closed_on_inconsistent_artifacts(tmp_path: Path) ->
                 "source_git_commit": "nope",
                 "canonical_payload_sha256": PAYLOAD,
                 "stability": STABILITY_STABLE,
+            }
+        ),
+        # 'stable' is what grants publication, so a verdict recording no check
+        # that could have reached it is refused rather than trusted.
+        "verdict_without_a_check": json.dumps(
+            {
+                "available": True,
+                "source_git_commit": COMMIT,
+                "canonical_payload_sha256": PAYLOAD,
+                "stability": STABILITY_STABLE,
+                "captured_ts": CAPTURED_AT.isoformat(),
             }
         ),
     }

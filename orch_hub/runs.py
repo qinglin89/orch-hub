@@ -1155,9 +1155,11 @@ class RunManager:
         """Record the end-of-run deployment-lock comparison for this run.
 
         Isolated exactly like :meth:`_snapshot_sessions`: the capture is already
-        durable and usable on its own, so a failed comparison costs a stability
-        verdict, not run state. A record with no repo attribution (a stub) has
-        nothing to compare against.
+        durable, so a failed comparison costs this run's publishable revision but
+        never run state. The run keeps an unconfirmed capture, which is what an
+        uncompared end honestly is — this transition fires once, so nothing
+        retries it. A record with no repo attribution (a stub) has nothing to
+        compare against.
 
         A missing ``exit_code`` is exactly this class's "ended while the hub was
         not the parent" (see :meth:`_refresh`), which is the one case where this
