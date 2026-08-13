@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
+verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -176,12 +176,15 @@ reports without evaluating. `page(after_seq, limit)` is strictly-greater,
 ascending, and forward-only; duplicate durable sequences/keys fail closed.
 `read_bundle(entry)` performs contained by-key reads, requires the whole artifact
 set, and reports strict digest verified/mismatched/unverified state while
-preserving pruned entries as explicitly unavailable.
+preserving pruned entries as explicitly unavailable. Each fixed artifact is
+opened no-follow, validated, and read from that descriptor; a linked artifact
+returns a distinct damaged-tree unavailability rather than pruned/incomplete.
 `read_artifact_bytes(entry, name)` returns one fixed-name artifact's persisted
 bytes without normalization, reports integrity per file, and keeps readable
-mismatches visible. Its no-follow open validates and reads the same descriptor,
-so the artifact's file hop cannot be redirected by a symlink or check/reopen
-swap; path-resolution and IO faults become structured unreadable results.
+mismatches visible. It uses the same descriptor rule, so neither read path's file
+hop can be redirected by a symlink or check/reopen swap; path-resolution and IO
+faults become structured unreadable results. Publication completeness rejects a
+linked artifact, and manifest digests use the same no-follow descriptor open.
 `unpublished_ids()` and publication share one artifact-derived eligibility rule;
 uncertain debt is protected from pruning. The catalog publishes
 provenance/artifacts only and never decides protocol evolution. Report protocol

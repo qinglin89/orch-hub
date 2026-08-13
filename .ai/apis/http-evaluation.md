@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
+verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
 ---
 
 # APIs: HTTP — Task Evaluation
@@ -75,10 +75,15 @@ Cross-cutting auth/app behavior: `http-core.md`.
   JSON plus raw `report_md`; `integrity` is
   `{verified,mismatched,unverified}`.
 - Availability: unknown key is 404. A published report whose complete artifact
-  set was pruned, partially removed, unreadable, unparseable, unsafe, or
-  identity-incoherent returns 200 with `available:false` and an explicit reason.
-  Digest mismatch/unavailability is reported while content remains available
-  for the consumer's decision.
+  set was pruned, partially removed, damaged by a linked artifact, unreadable,
+  unparseable, unsafe, or identity-incoherent returns 200 with
+  `available:false` and an explicit reason. The damaged detail is distinct from
+  retention-pruned/incomplete states. Digest mismatch/unavailability is reported
+  while content remains available for the consumer's decision.
+- Containment: all four fixed artifact names are opened no-follow, validated,
+  and read through their descriptors; a symlink or check/reopen swap at the file
+  hop cannot redirect parsed JSON or Markdown bytes. Links above the evaluation
+  directory (including a symlinked data dir) remain supported.
 - Auth/disabled behavior: protected; disabled returns 404.
 
 ## `GET /api/repos/{repo_id}/evaluations/{task_id}`

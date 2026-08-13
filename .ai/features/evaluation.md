@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
+verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
 ---
 
 # Features: Task Evaluation
@@ -239,7 +239,9 @@ Implemented behavior:
   (`evidence.json`, `static_metrics.json`, `semantic_report.json`, `report.md`)
   and an archived task. A semantic-finalization hook publishes after durability;
   startup reconciliation deterministically/idempotently backfills missed and
-  already-existing reports, including reports evaluated before archive.
+  already-existing reports, including reports evaluated before archive. A linked
+  artifact is not complete or publishable, and manifest hashing opens each fixed
+  name no-follow so a check-to-hash swap cannot record an outside file's digest.
 - Append allocation is guarded across threads/processes with `flock`; each line
   is flushed/fsynced and torn tails are fenced. Duplicate durable sequences or
   keys make all reads/publication fail closed instead of silently skipping a
@@ -255,7 +257,11 @@ Implemented behavior:
 - Bundle lookup by global key is contained and all-or-nothing. Unknown keys are
   404; published-but-pruned, partial, unreadable, unparseable, or incoherently
   identified bundles are 200 with `available:false`. Served content reports
-  strict digest `verified`, `mismatched`, and `unverified` state.
+  strict digest `verified`, `mismatched`, and `unverified` state. Each fixed
+  artifact name is opened no-follow and parsed from that descriptor; a link or
+  check/reopen swap at the file hop cannot export outside bytes. Linked artifacts
+  return a damaged-tree detail distinct from pruned/incomplete states; symlinks
+  above the evaluation directory remain supported.
 - Raw-artifact lookup selects one of the four fixed names and returns its
   persisted bytes without parsing or normalization, so consumers can verify the
   cataloged size/SHA-256. Availability is per artifact; mismatched bytes remain

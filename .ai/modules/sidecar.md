@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
+verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -150,13 +150,15 @@ active remain candidates and publish after a contained archive probe succeeds.
 The read/check/allocate/append transaction uses a process-wide `flock`; appends
 are fsynced single lines with torn-tail fencing. `page()` provides forward-only
 strictly-greater integer-watermark traversal; `read_bundle()` resolves a global
-key to the complete contained artifact set and reports digest verification.
-`read_artifact_bytes()` returns one fixed-name artifact's persisted bytes for
-independent manifest verification, with per-file availability and integrity;
-its no-follow open validates and reads one descriptor so a symlink or
-check/reopen swap cannot redirect the response. Catalog/source identity
-ambiguity fails closed. Published entries outlive retention-pruned artifacts,
-which remain auditable but bundle-unavailable.
+key to the complete contained artifact set and reports digest verification. Both
+bundle and raw-artifact reads open each fixed artifact name no-follow, validate
+the descriptor, and consume that descriptor, so a symlink or check/reopen swap
+at the file hop cannot redirect returned bytes. A linked bundle artifact is
+damaged (distinct from retention-pruned/incomplete) and makes the all-or-nothing
+bundle unavailable. The same file-hop rule gates publication completeness and
+manifest hashing, so a link is never published as an artifact or hashed through.
+Catalog/source identity ambiguity fails closed. Published entries outlive
+retention-pruned artifacts, which remain auditable but bundle-unavailable.
 
 Protocol provenance is copied only from the persisted evidence pack's
 fail-closed aggregate into `provenance.protocol.effective_revision`; the catalog
