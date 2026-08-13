@@ -1738,12 +1738,22 @@ class ReportProvenance:
     The ``*_available`` flags are the load-bearing part: provenance the evidence
     pack does not carry is reported as explicitly **unavailable with a reason**,
     never as an empty value a consumer could mistake for "no runs" or "default
-    config". Today ``protocol`` and ``orchestrator_config`` are always
-    unavailable — evidence packs carry neither a ``.ai-protocol`` version nor a
-    run's ``effective-config`` snapshot — and their ``detail`` says so.
+    config". ``orchestrator_config`` is always unavailable — evidence packs carry
+    no run ``effective-config`` snapshot — and its ``detail`` says so.
     ``git_newest_sha`` is the newest commit in the evidence git window (git log
     is reverse-chronological), i.e. roughly the repo state the task ended at, not
     necessarily current HEAD.
+
+    ``protocol_revision`` is the ai-native-development commit whose deployed
+    protocol every contributing run verifiably ran under
+    (:class:`orch_hub.protocol_provenance.EffectiveProtocol`, taken from the
+    pack's durable per-run captures). It is the field a consumer cohorts reports
+    by when asking whether a protocol change helped, which is why it is
+    unanimity-gated rather than best-effort: a task whose runs span a
+    redeployment, or whose provenance the hub never verified, publishes the reason
+    and no revision. Packs written before the capture existed carry no such
+    section at all and are unavailable for that reason — never backfilled from the
+    repo's current deployment, which by publication time is usually a later one.
     """
 
     runs_available: bool = False
@@ -1756,6 +1766,7 @@ class ReportProvenance:
     git_newest_sha: str | None = None
     git_detail: str | None = None
     protocol_available: bool = False
+    protocol_revision: str | None = None
     protocol_detail: str | None = None
     config_available: bool = False
     config_detail: str | None = None
@@ -1778,6 +1789,7 @@ class ReportProvenance:
             },
             "protocol": {
                 "available": self.protocol_available,
+                "effective_revision": self.protocol_revision,
                 "detail": self.protocol_detail,
             },
             "orchestrator_config": {

@@ -41,6 +41,14 @@ run's first moment, not to what its later sessions loaded, so a run that is stil
 live, whose lock had vanished by its end, or whose end the hub was not up to
 observe keeps its commit readable for audit and publishes nothing.
 
+A *report*, though, is about a task, and a task is worked by several runs. The
+same rule therefore applies once more across them
+(:func:`effective_protocol`): the revision an evaluation report is published
+under is the one every contributing run verified, and a set that is incomplete or
+disagrees has no effective revision — only a reason. Both the per-run predicate
+and the cross-run aggregate live here so the rule has one owner; a consumer reads
+the answer, never re-derives it from the parts.
+
 Because the two writes never overlap, this artifact needs no cross-writer lock
 (unlike :mod:`orch_hub.task_snapshots`, whose captures genuinely race); the
 atomic rename is enough to keep readers from seeing a partial file.
@@ -59,6 +67,7 @@ import json
 import os
 import re
 import threading
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -163,6 +172,165 @@ class ProtocolSnapshot:
             "checked_ts": self.checked_ts,
             "detail": self.detail,
         }
+
+
+@dataclass(frozen=True)
+class EffectiveProtocol:
+    """The protocol revision a set of runs may be published under, or why none is.
+
+    The cross-run counterpart of :meth:`ProtocolSnapshot.verified_revision`,
+    carried by an evidence pack and copied onto the catalog entry a consumer
+    cohorts by. ``available`` is again the single load-bearing flag: when it is
+    false ``revision`` is ``None`` and ``detail`` says why in operator-readable
+    terms, so "the runs disagreed" and "the hub never verified them" are never
+    served as an absent field a consumer could read as "no protocol".
+
+    ``run_count`` and ``verified_count`` are kept beside the verdict so the shape
+    of the failure is machine-readable without parsing ``detail``: ``0/0`` is a
+    task with no runs, ``1/3`` an incomplete set, and ``3/3`` with no revision the
+    disagreement case.
+
+    The field is ``revision`` but serializes as ``effective_revision``: within
+    this record the qualifier is redundant, while a consumer reading
+    ``provenance.protocol`` needs it to know the value is the *set's* revision and
+    not one run's captured one.
+    """
+
+    available: bool
+    revision: str | None = None
+    run_count: int = 0
+    verified_count: int = 0
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "available": self.available,
+            "effective_revision": self.revision,
+            "run_count": self.run_count,
+            "verified_count": self.verified_count,
+            "detail": self.detail,
+        }
+
+
+MAX_LISTED_REVISIONS = 4
+"""How many distinct revisions a disagreement ``detail`` names before summarizing.
+Bounds the string a catalog line carries: revisions are full object names and a
+task's run count has no ceiling, so the reason stays a sentence rather than
+growing with the task."""
+
+
+def effective_protocol(
+    snapshots: Sequence[ProtocolSnapshot | None],
+) -> EffectiveProtocol:
+    """The one revision every contributing run verified, or an explained absence.
+
+    ``snapshots`` is one entry per contributing run, in run order, each the run's
+    persisted capture or ``None`` for a run that wrote none (one predating the
+    capture). The rule is unanimity over
+    :meth:`ProtocolSnapshot.verified_revision`, and it is deliberately the strict
+    reading of "the protocol this task ran under": a report published under a
+    revision two of its three runs used would state a cohort membership that is
+    false for the third, and a consumer grouping by it cannot tell that from a
+    true one. An incomplete or disagreeing set is worth less than an unavailable
+    one only if the consumer is guessing — which the ``detail`` exists to stop.
+
+    Both failure modes are reported together when both hold: a set can be short of
+    verified runs *and* have the verified ones disagree, and naming only the first
+    would suggest the missing evidence is all that stands between the task and a
+    revision.
+    """
+    total = len(snapshots)
+    if not total:
+        return EffectiveProtocol(
+            available=False,
+            detail="no related runs to take a protocol revision from",
+        )
+    revisions = [
+        snapshot.verified_revision
+        for snapshot in snapshots
+        if snapshot is not None and snapshot.verified_revision is not None
+    ]
+    distinct = sorted(set(revisions))
+    reasons = []
+    if len(revisions) < total:
+        reasons.append(
+            f"{total - len(revisions)} of {total} contributing runs carry no"
+            " verified protocol revision"
+        )
+    if len(distinct) > 1:
+        listed = ", ".join(distinct[:MAX_LISTED_REVISIONS])
+        extra = len(distinct) - MAX_LISTED_REVISIONS
+        reasons.append(
+            "contributing runs verified different protocol revisions: "
+            + listed
+            + (f" (+{extra} more)" if extra > 0 else "")
+        )
+    if reasons:
+        return EffectiveProtocol(
+            available=False,
+            run_count=total,
+            verified_count=len(revisions),
+            detail="; ".join(reasons),
+        )
+    return EffectiveProtocol(
+        available=True,
+        revision=distinct[0],
+        run_count=total,
+        verified_count=len(revisions),
+    )
+
+
+def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
+    """Read a persisted aggregate section (an evidence pack's) fail-closed.
+
+    The reader for a consumer that holds the serialized pack rather than the
+    :class:`EffectiveProtocol` — today the report catalog, which reads
+    ``evidence.json`` as JSON. It lives here so the availability rule keeps one
+    owner: a second implementation at the catalog would be free to drift into
+    publishing a revision this module would not.
+
+    Absence is distinguished from damage, because they mean different things to an
+    operator: ``None`` is a pack written before packs carried this section (the
+    common case for a while), while a present-but-wrong section is a pack
+    something rewrote. An unavailable section's own reason is carried through
+    verbatim — it already names which runs fell short — and a section claiming
+    availability without a well-formed object name is refused rather than
+    published as a cohort key no consumer can resolve.
+    """
+    if data is None:
+        return EffectiveProtocol(
+            available=False,
+            detail="evidence pack carries no protocol provenance section",
+        )
+    if not isinstance(data, dict):
+        return EffectiveProtocol(
+            available=False,
+            detail="evidence pack protocol provenance is not a JSON object",
+        )
+    runs = _int_field(data, "run_count") or 0
+    verified = _int_field(data, "verified_count") or 0
+    if data.get("available") is not True:
+        return EffectiveProtocol(
+            available=False,
+            run_count=runs,
+            verified_count=verified,
+            detail=_str_field(data, "detail") or "protocol provenance unavailable",
+        )
+    revision = _hex_field(data, "effective_revision", _SHA)
+    if revision is None:
+        return EffectiveProtocol(
+            available=False,
+            run_count=runs,
+            verified_count=verified,
+            detail="evidence pack claims a protocol revision it does not carry",
+        )
+    return EffectiveProtocol(
+        available=True,
+        revision=revision,
+        run_count=runs,
+        verified_count=verified,
+        detail=_str_field(data, "detail"),
+    )
 
 
 def artifact_path(run_dir: Path) -> Path:

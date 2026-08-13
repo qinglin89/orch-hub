@@ -3,6 +3,10 @@
 Everything runs against fake repos and run dirs in ``tmp_path``: the module reads
 one file from a repo and writes one artifact into a run dir, so no registry, no
 subprocess, and no orchestrator is involved.
+
+The last two sections cover the cross-run aggregate a *report* is published
+under — unanimity over the per-run predicate, both of its failure modes, and the
+fail-closed read of a persisted aggregate the report catalog holds as JSON.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ from orch_hub.protocol_provenance import (
     ARTIFACT_NAME,
     DEPLOY_LOCK_NAME,
     LOCK_MAX_BYTES,
+    MAX_LISTED_REVISIONS,
     PROTOCOL_SCHEMA_VERSION,
     STABILITY_CHANGED,
     STABILITY_STABLE,
@@ -22,6 +27,8 @@ from orch_hub.protocol_provenance import (
     ProtocolSnapshot,
     artifact_path,
     capture_protocol,
+    effective_protocol,
+    effective_protocol_from_dict,
     read_deploy_lock,
     read_protocol,
     settle_protocol,
@@ -471,3 +478,163 @@ def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
     write_protocol(run_dir, snapshot)
 
     assert read_protocol(run_dir) == snapshot
+
+
+# -- aggregating a task's runs into one effective revision --------------------
+#
+# A run's capture answers for one run; a report answers for a task, which several
+# runs worked. The same fail-closed rule applies once more across them: the
+# revision published is the one every contributing run verified.
+
+
+def snap(
+    commit: str = COMMIT,
+    *,
+    stability: str = STABILITY_STABLE,
+    available: bool = True,
+) -> ProtocolSnapshot:
+    return ProtocolSnapshot(
+        available=available,
+        source_git_commit=commit if available else None,
+        canonical_payload_sha256=PAYLOAD if available else None,
+        captured_ts=CAPTURED_AT.isoformat(),
+        stability=stability,
+        checked_ts=(
+            None if stability == STABILITY_UNVERIFIED else ENDED_AT.isoformat()
+        ),
+    )
+
+
+def test_unanimous_verified_runs_have_an_effective_revision() -> None:
+    result = effective_protocol([snap(), snap(), snap()])
+
+    assert result.available is True
+    assert result.revision == COMMIT
+    assert (result.run_count, result.verified_count) == (3, 3)
+    assert result.detail is None
+    assert result.to_dict()["effective_revision"] == COMMIT
+
+
+def test_one_unverifiable_run_costs_the_whole_task_its_revision() -> None:
+    # Every non-`stable` state and a run with no artifact at all are alike here:
+    # a report published under a revision one of its runs cannot be shown to have
+    # used states a cohort membership that is false for that run.
+    cases = {
+        "no artifact": None,
+        "no end check": snap(stability=STABILITY_UNVERIFIED),
+        "redeployed mid-run": snap(stability=STABILITY_CHANGED),
+        "no usable lock": snap(available=False),
+    }
+    for label, missing in cases.items():
+        result = effective_protocol([snap(), missing])
+
+        assert result.available is False, label
+        assert result.revision is None, label
+        assert (result.run_count, result.verified_count) == (2, 1), label
+        assert result.detail == (
+            "1 of 2 contributing runs carry no verified protocol revision"
+        ), label
+
+
+def test_runs_spanning_a_redeployment_have_no_effective_revision() -> None:
+    result = effective_protocol([snap(COMMIT), snap(OTHER_COMMIT)])
+
+    assert result.available is False
+    assert result.verified_count == 2
+    assert result.detail == (
+        "contributing runs verified different protocol revisions: "
+        + ", ".join(sorted((COMMIT, OTHER_COMMIT)))
+    )
+
+
+def test_both_defects_are_reported_together() -> None:
+    # Naming only the incompleteness would suggest the missing evidence is all
+    # that stands between this task and a revision. It is not: the runs that did
+    # verify one disagree.
+    result = effective_protocol([snap(COMMIT), snap(OTHER_COMMIT), None])
+
+    assert result.available is False
+    assert result.detail is not None
+    assert "1 of 3 contributing runs carry no verified" in result.detail
+    assert "verified different protocol revisions" in result.detail
+
+
+def test_a_disagreement_detail_stays_bounded() -> None:
+    commits = [f"{index:040x}" for index in range(1, 8)]
+
+    result = effective_protocol([snap(commit) for commit in commits])
+
+    # A task's run count has no ceiling, so the reason summarizes rather than
+    # growing with it. The listed ones are the first in the same sorted order the
+    # rule compares by, so the message is deterministic.
+    assert result.detail is not None
+    assert result.detail.endswith("(+3 more)")
+    assert all(commit in result.detail for commit in commits[:MAX_LISTED_REVISIONS])
+    assert commits[MAX_LISTED_REVISIONS] not in result.detail
+
+
+def test_a_task_with_no_runs_has_no_effective_revision() -> None:
+    result = effective_protocol([])
+
+    assert result.available is False
+    assert (result.run_count, result.verified_count) == (0, 0)
+    assert result.detail == "no related runs to take a protocol revision from"
+
+
+# -- reading a persisted aggregate (the catalog's view) -----------------------
+
+
+def test_persisted_aggregates_round_trip() -> None:
+    original = effective_protocol([snap(), snap()])
+
+    assert effective_protocol_from_dict(original.to_dict()) == original
+
+
+def test_an_absent_section_is_distinguished_from_a_damaged_one() -> None:
+    # A pack written before packs carried this section, versus one something
+    # rewrote. Both publish nothing; only the reason differs, and only the second
+    # is a defect worth an operator's attention.
+    absent = effective_protocol_from_dict(None)
+    damaged = effective_protocol_from_dict([COMMIT])
+
+    assert absent.available is False
+    assert absent.detail == "evidence pack carries no protocol provenance section"
+    assert damaged.available is False
+    assert damaged.detail == "evidence pack protocol provenance is not a JSON object"
+
+
+def test_an_unavailable_section_carries_its_own_reason_through() -> None:
+    reason = "1 of 2 contributing runs carry no verified protocol revision"
+
+    result = effective_protocol_from_dict(
+        {"available": False, "run_count": 2, "verified_count": 1, "detail": reason}
+    )
+
+    # The aggregate already named which runs fell short; restating it generically
+    # would drop the only part a consumer can act on.
+    assert result.available is False
+    assert result.detail == reason
+    assert (result.run_count, result.verified_count) == (2, 1)
+
+
+def test_a_section_claiming_a_revision_it_does_not_carry_is_refused() -> None:
+    for revision in (None, "", "HEAD", "main", COMMIT[:8], 7):
+        result = effective_protocol_from_dict(
+            {"available": True, "effective_revision": revision, "run_count": 1}
+        )
+
+        assert result.available is False, revision
+        assert result.revision is None, revision
+        assert result.detail == (
+            "evidence pack claims a protocol revision it does not carry"
+        )
+
+
+def test_a_persisted_revision_is_normalized_like_a_captured_one() -> None:
+    result = effective_protocol_from_dict(
+        {"available": True, "effective_revision": f"  {COMMIT.upper()} "}
+    )
+
+    # Same normalization the capture applies, so a hand-edited pack cannot split a
+    # cohort by case or stray whitespace.
+    assert result.available is True and result.revision == COMMIT

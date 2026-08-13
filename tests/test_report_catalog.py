@@ -57,7 +57,7 @@ from orch_hub.report_catalog import (
     CATALOG_NAME,
     CATALOG_SUBDIR,
     CONFIG_UNAVAILABLE_DETAIL,
-    PROTOCOL_UNAVAILABLE_DETAIL,
+    PACK_UNREADABLE_DETAIL,
     REPORT_KEY_PREFIX,
     REQUIRED_ARTIFACTS,
     ReportCatalog,
@@ -70,6 +70,7 @@ from orch_hub.static_metrics import STATIC_METRICS_NAME
 TASK_A = "2026-07-30-alpha-task"
 TASK_B = "2026-07-30-beta-task"
 FIXED_TS = dt.datetime(2026, 7, 31, 8, 0, 0, tzinfo=dt.timezone.utc)
+PROTOCOL_COMMIT = "6b62754694c289fc8822562cec22ab774e071b2c"
 
 
 # -- fixtures -----------------------------------------------------------------
@@ -105,6 +106,7 @@ def write_eval(
     run_ids: tuple[str, ...] = ("r1",),
     git_available: bool = True,
     semantic_body: str | None = None,
+    protocol: dict | None = None,
 ) -> Path:
     """Write one evaluation dir directly, so eligibility is exercised structurally.
 
@@ -115,27 +117,31 @@ def write_eval(
     """
     eval_dir = config.data_dir / "evaluations" / slug / task_id / evaluation_id
     eval_dir.mkdir(parents=True, exist_ok=True)
+    evidence = {
+        "evaluation_id": evaluation_id,
+        "target": {
+            "repo_name": slug,
+            "repo_path": str(config.data_dir.parent / "repos" / slug),
+            "task_id": task_id,
+            "source": SOURCE_ARCHIVED if archived else SOURCE_ACTIVE,
+            "present": True,
+        },
+        "runs": [{"run": {"run_id": rid}} for rid in run_ids],
+        "git": {
+            "available": git_available,
+            "since": "2026-07-29T09:00:00+00:00",
+            "until": "2026-07-29T10:00:00+00:00",
+            "commits": [{"hash": "cafe1234"}, {"hash": "beef5678"}],
+            "detail": None if git_available else "git history unavailable",
+        },
+    }
+    # Omitted unless a case asks for it: the default fixture stays a pack from
+    # before per-run protocol capture, which is the shape most published entries
+    # will have been written from.
+    if protocol is not None:
+        evidence["protocol"] = protocol
     bodies = {
-        EVIDENCE_NAME: json.dumps(
-            {
-                "evaluation_id": evaluation_id,
-                "target": {
-                    "repo_name": slug,
-                    "repo_path": str(config.data_dir.parent / "repos" / slug),
-                    "task_id": task_id,
-                    "source": SOURCE_ARCHIVED if archived else SOURCE_ACTIVE,
-                    "present": True,
-                },
-                "runs": [{"run": {"run_id": rid}} for rid in run_ids],
-                "git": {
-                    "available": git_available,
-                    "since": "2026-07-29T09:00:00+00:00",
-                    "until": "2026-07-29T10:00:00+00:00",
-                    "commits": [{"hash": "cafe1234"}, {"hash": "beef5678"}],
-                    "detail": None if git_available else "git history unavailable",
-                },
-            }
-        ),
+        EVIDENCE_NAME: json.dumps(evidence),
         STATIC_METRICS_NAME: json.dumps({"evaluation_id": evaluation_id, "scores": []}),
         SEMANTIC_REPORT_NAME: semantic_body
         if semantic_body is not None
@@ -160,6 +166,29 @@ def write_eval(
     for name in artifacts:
         (eval_dir / name).write_text(bodies[name], encoding="utf-8")
     return eval_dir
+
+
+def protocol_section(
+    *,
+    revision: object = PROTOCOL_COMMIT,
+    available: bool = True,
+    runs: int = 1,
+    verified: int | None = None,
+    detail: str | None = None,
+) -> dict:
+    """A pack's protocol section, in the shape `EffectiveProtocol` serializes.
+
+    Written literally rather than through the producer for the same reason the
+    artifacts are: the catalog's contract is over the bytes on disk, so the tests
+    have to be able to hand it a section the evidence layer would never emit.
+    """
+    return {
+        "available": available,
+        "effective_revision": revision,
+        "run_count": runs,
+        "verified_count": runs if verified is None else verified,
+        "detail": detail,
+    }
 
 
 def lines(config: Config) -> list[dict]:
@@ -423,16 +452,100 @@ def test_entry_carries_hashes_evaluator_identity_and_explicit_provenance(tmp_pat
     # git log is reverse-chronological, so the window's first commit is newest.
     assert prov.git_newest_sha == "cafe1234"
     # Provenance the evidence pack cannot carry is unavailable WITH A REASON, so a
-    # consumer never reads absence as "no protocol" / "default config".
-    assert prov.protocol_available is False
-    assert prov.protocol_detail == PROTOCOL_UNAVAILABLE_DETAIL
+    # consumer never reads absence as "no protocol" / "default config". This pack
+    # predates per-run protocol capture, which is its own named reason.
+    assert prov.protocol_available is False and prov.protocol_revision is None
+    assert prov.protocol_detail == (
+        "evidence pack carries no protocol provenance section"
+    )
     assert prov.config_available is False
     assert prov.config_detail == CONFIG_UNAVAILABLE_DETAIL
 
 
+def test_entry_publishes_the_protocol_revision_its_runs_verified(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(
+        config,
+        run_ids=("r1", "r2"),
+        protocol=protocol_section(runs=2),
+    )
+
+    entry = catalog(config).reconcile()[0]
+
+    # The cohort key an external consumer groups reports by: the deployed
+    # ai-native-development commit both runs verifiably ran under, read from the
+    # pack's durable per-run captures rather than from the repo (whose deployment
+    # has usually moved on by publication time).
+    assert entry.provenance.protocol_available is True
+    assert entry.provenance.protocol_revision == PROTOCOL_COMMIT
+    assert entry.provenance.protocol_detail is None
+    assert entry.to_dict()["provenance"]["protocol"] == {
+        "available": True,
+        "effective_revision": PROTOCOL_COMMIT,
+        "detail": None,
+    }
+
+
+def test_entry_carries_the_packs_reason_when_no_revision_is_effective(tmp_path):
+    config = cfg(tmp_path)
+    reason = "1 of 2 contributing runs carry no verified protocol revision"
+    write_eval(
+        config,
+        run_ids=("r1", "r2"),
+        protocol=protocol_section(
+            available=False, revision=None, runs=2, verified=1, detail=reason
+        ),
+    )
+
+    entry = catalog(config).reconcile()[0]
+
+    # Unavailable is published WITH the pack's own reason, verbatim: the aggregate
+    # already named which runs fell short, and a generic "unavailable" here would
+    # lose the only part an operator can act on. The report still publishes — a
+    # revision is cohorting data, not an eligibility rule.
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_revision is None
+    assert entry.provenance.protocol_detail == reason
+
+
+def test_a_protocol_section_claiming_a_revision_it_lacks_is_refused(tmp_path):
+    config = cfg(tmp_path)
+    # A hand-edited or truncated pack: `available` says yes, the revision is not an
+    # object name. Publishing it would hand consumers a cohort key that resolves to
+    # nothing, and one that silently splits a cohort it belongs to.
+    write_eval(config, protocol=protocol_section(revision="HEAD"))
+
+    entry = catalog(config).reconcile()[0]
+
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_revision is None
+    assert entry.provenance.protocol_detail == (
+        "evidence pack claims a protocol revision it does not carry"
+    )
+
+
+def test_a_malformed_protocol_section_degrades_instead_of_raising(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, protocol=protocol_section())
+    eval_dir = config.data_dir / "evaluations" / "alpha" / TASK_A / "20260730T100000Z"
+    evidence = json.loads((eval_dir / EVIDENCE_NAME).read_text(encoding="utf-8"))
+    evidence["protocol"] = [PROTOCOL_COMMIT]
+    (eval_dir / EVIDENCE_NAME).write_text(json.dumps(evidence), encoding="utf-8")
+
+    entry = catalog(config).reconcile()[0]
+
+    # Same rule as the nested-commit case: a structurally wrong section degrades
+    # its own field rather than escaping the entry build and costing every later
+    # candidate in the sweep its publication.
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_detail == (
+        "evidence pack protocol provenance is not a JSON object"
+    )
+
+
 def test_entry_round_trips_through_the_persisted_line(tmp_path):
     config = cfg(tmp_path)
-    write_eval(config, run_ids=("r1",))
+    write_eval(config, run_ids=("r1",), protocol=protocol_section())
     original = catalog(config).reconcile()[0]
 
     # Re-read by a fresh instance: the persisted line must reconstruct the entry
@@ -441,6 +554,28 @@ def test_entry_round_trips_through_the_persisted_line(tmp_path):
 
     assert reloaded == original
     assert reloaded.to_dict() == lines(config)[0]
+
+
+def test_a_line_from_before_protocol_provenance_still_deserializes(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, protocol=protocol_section())
+    published = catalog(config).reconcile()[0]
+
+    # Rewrite the line in the pre-revision shape a running hub wrote before this
+    # field existed. The catalog is append-only and never migrated, so entries
+    # published then have to keep reading back — with protocol provenance simply
+    # unavailable, not as a parse failure that hides the report.
+    path = config.data_dir / CATALOG_SUBDIR / CATALOG_NAME
+    line = published.to_dict()
+    line["provenance"]["protocol"] = {"available": False, "detail": "unavailable"}
+    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    entry = catalog(config).entries()[0]
+
+    assert entry.seq == published.seq and entry.report_key == published.report_key
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_revision is None
+    assert entry.provenance.git_available is True  # every other section intact
 
 
 def test_pre_schema_version_evidence_pack_publishes_with_full_provenance(tmp_path):
@@ -471,8 +606,10 @@ def test_degraded_evidence_still_publishes_with_explicit_unavailable_provenance(
     # The report itself is intact and publishable; only its cohorting degrades.
     assert entry.repo_path is None
     assert entry.provenance.runs_available is False
-    assert entry.provenance.runs_detail == "evidence pack unreadable"
+    assert entry.provenance.runs_detail == PACK_UNREADABLE_DETAIL
     assert entry.provenance.git_available is False
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_detail == PACK_UNREADABLE_DETAIL
 
 
 def test_a_malformed_nested_commit_degrades_provenance_instead_of_raising(tmp_path):

@@ -137,6 +137,7 @@ from .models import (
     ReportPage,
     ReportProvenance,
 )
+from .protocol_provenance import effective_protocol_from_dict
 from .semantic import SEMANTIC_REPORT_MD_NAME, SEMANTIC_REPORT_NAME
 from .static_metrics import STATIC_METRICS_NAME
 from .task_store import read_archived_task_content
@@ -205,12 +206,10 @@ short page unambiguous and a bulk importer and an idle poller genuinely want
 different sizes. Exceeding it is a fail-closed error rather than a silent clamp
 (config contract: malformed explicit values fail loudly)."""
 
-PROTOCOL_UNAVAILABLE_DETAIL = (
-    "evidence packs carry no .ai-protocol version for the evaluated task"
-)
-"""Why protocol provenance is explicitly unavailable. Stated as a reason rather
-than left empty so a consumer cannot read "no protocol recorded" as "the default
-protocol": the evidence layer simply does not capture it today."""
+PACK_UNREADABLE_DETAIL = "evidence pack unreadable"
+"""Why every derived provenance section is unavailable when the pack itself could
+not be read. One reason for all of them: the sections differ in what they *would*
+have said, but not in why nothing can be said."""
 
 CONFIG_UNAVAILABLE_DETAIL = (
     "evidence packs carry no orchestrator effective-config snapshot"
@@ -1695,11 +1694,19 @@ def _provenance(evidence: dict | None) -> ReportProvenance:
 
     Only durable artifact content is consulted, so the record is reproducible
     from what the entry names. What the pack cannot answer is stated as
-    explicitly unavailable *with a reason* — ``protocol`` and
-    ``orchestrator_config`` always, and ``runs``/``git`` when the pack is missing
+    explicitly unavailable *with a reason* — ``orchestrator_config`` always,
+    ``protocol`` for a pack predating the per-run capture or whose runs did not
+    verifiably share one revision, and ``runs``/``git`` when the pack is missing
     or degraded — so a consumer never mistakes an absent field for a known-empty
     one. An unreadable pack is not fatal: the report itself is still publishable,
     just less cohortable.
+
+    The protocol section is read, not re-derived: the pack already aggregated its
+    runs' captures under the rule that owns publication
+    (:func:`orch_hub.protocol_provenance.effective_protocol_from_dict`), and a
+    second rule here could publish a revision that one would not. Reading it from
+    the pack is also what keeps the entry reproducible — the repo's deployment
+    lock has almost certainly moved on by publication time.
 
     Every nested lookup is type-checked before use rather than trusted to match
     the schema. The pack is a file on disk that anything could have truncated or
@@ -1708,9 +1715,9 @@ def _provenance(evidence: dict | None) -> ReportProvenance:
     candidate its publication too.
     """
     unavailable = ReportProvenance(
-        runs_detail="evidence pack unreadable",
-        git_detail="evidence pack unreadable",
-        protocol_detail=PROTOCOL_UNAVAILABLE_DETAIL,
+        runs_detail=PACK_UNREADABLE_DETAIL,
+        git_detail=PACK_UNREADABLE_DETAIL,
+        protocol_detail=PACK_UNREADABLE_DETAIL,
         config_detail=CONFIG_UNAVAILABLE_DETAIL,
     )
     if evidence is None:
@@ -1731,6 +1738,7 @@ def _provenance(evidence: dict | None) -> ReportProvenance:
     # newest — roughly the repo state the task's runs ended at. A malformed item
     # there degrades the field; it does not fail the report.
     newest = _mapping(commits[0]) if commits else None
+    protocol = effective_protocol_from_dict(evidence.get("protocol"))
     return ReportProvenance(
         runs_available=runs_available,
         run_ids=run_ids,
@@ -1741,8 +1749,9 @@ def _provenance(evidence: dict | None) -> ReportProvenance:
         git_commit_count=len(commits),
         git_newest_sha=_str_field(newest, "hash") if newest is not None else None,
         git_detail=_str_field(git, "detail"),
-        protocol_available=False,
-        protocol_detail=PROTOCOL_UNAVAILABLE_DETAIL,
+        protocol_available=protocol.available,
+        protocol_revision=protocol.revision,
+        protocol_detail=protocol.detail,
         config_available=False,
         config_detail=CONFIG_UNAVAILABLE_DETAIL,
     )
@@ -1852,6 +1861,7 @@ def _provenance_from_dict(data: object) -> ReportProvenance:
         git_newest_sha=_str_field(git, "newest_sha"),
         git_detail=_str_field(git, "detail"),
         protocol_available=bool(protocol.get("available")),
+        protocol_revision=_str_field(protocol, "effective_revision"),
         protocol_detail=_str_field(protocol, "detail"),
         config_available=bool(config.get("available")),
         config_detail=_str_field(config, "detail"),

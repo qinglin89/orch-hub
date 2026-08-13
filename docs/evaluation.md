@@ -229,11 +229,24 @@ GET /api/evaluation/reports?after=<seq>&limit=<n>
 Each item carries the source identity (repo/task/evaluation), the global
 identity, generated and published timestamps, the archived-target facts, the
 evaluator's backend/model/schema, the artifact names with their sizes and
-sha256 digests, and provenance for cohorting (run ids, git commit window).
+sha256 digests, and provenance for cohorting (run ids, git commit window,
+effective protocol revision).
 Provenance the evidence pack does not carry is reported as **explicitly
-unavailable with a reason** — today that is always the case for
-`.ai-protocol` version and the orchestrator `effective-config` snapshot, since
-evidence packs record neither.
+unavailable with a reason** — today that is always the case for the
+orchestrator `effective-config` snapshot, since evidence packs record it
+nowhere.
+
+`provenance.protocol.effective_revision` is the ai-native-development commit
+whose deployed protocol the report's runs ran under — the cohort key for asking
+whether a protocol change helped. Each run stamps its repo's
+`.ai-deploy-lock.json` into its run dir before the orchestrator starts, and the
+hub re-checks it when the run ends; a report publishes a revision only when
+**every** contributing run verified the **same** one. Anything else — a run from
+before the hub captured this, a deployment that moved mid-run, a run whose end
+the hub was not up to observe, or runs that span a redeployment — is
+`available: false` with a `detail` naming which of those it was. Nothing is ever
+backfilled from a repo's current deployment lock, which by publication time
+usually names a later revision than the runs used.
 
 ### Fetching one report
 

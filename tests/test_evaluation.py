@@ -40,6 +40,15 @@ from orch_hub.evaluation import (
     task_evaluations_dir,
 )
 from orch_hub.models import ManagedRepo, RunRecord, StoredEvaluation
+from orch_hub.protocol_provenance import ARTIFACT_NAME as PROTOCOL_ARTIFACT
+from orch_hub.protocol_provenance import (
+    DEPLOY_LOCK_NAME,
+    PROTOCOL_SCHEMA_VERSION,
+    STABILITY_STABLE,
+    STABILITY_UNVERIFIED,
+    capture_protocol,
+    settle_protocol,
+)
 from orch_hub.session_reads import SOURCE_SESSION_ENTRY_SNAPSHOT, project_slug
 from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_snapshots import ARTIFACT_NAME as TASK_SNAPSHOTS_ARTIFACT
@@ -101,6 +110,7 @@ def write_run(
     events_raw: str | None = None,
     sessions: dict | None = None,
     task_snapshots: dict | str | None = None,
+    protocol: dict | str | None = None,
 ) -> Path:
     """Write a run dir with a rich ``run.json`` plus optional run artifacts.
 
@@ -142,6 +152,11 @@ def write_run(
             task_snapshots
             if isinstance(task_snapshots, str)
             else json.dumps(task_snapshots),
+            encoding="utf-8",
+        )
+    if protocol is not None:
+        (run_dir / PROTOCOL_ARTIFACT).write_text(
+            protocol if isinstance(protocol, str) else json.dumps(protocol),
             encoding="utf-8",
         )
     if log_lines is not None:
@@ -493,6 +508,10 @@ def test_build_evidence_aggregates_active_task_and_its_runs(tmp_path):
     assert summary == {
         "run_count": 2,
         "runs_ended": 1,
+        # Neither run captured a deployed protocol revision, so the task has no
+        # effective one — the runs' own sections say why.
+        "protocol_available": False,
+        "protocol_verified_runs": 0,
         "has_task_content": True,
         "target_source": SOURCE_ACTIVE,
         # One parsed session bracket, no run wrote an entry capture for it.
@@ -1667,6 +1686,183 @@ def test_generate_evidence_rejects_unsafe_task_id(tmp_path):
     with pytest.raises(ValueError):
         make_service(config).generate_evidence(repo, "../evil")
     assert not (config.data_dir / EVALUATIONS_SUBDIR).exists()
+
+
+# -- protocol provenance (which deployed protocol the task's runs ran under) --
+#
+# The pack carries each run's persisted capture verbatim and aggregates them into
+# the one revision the task may be published under. Everything comes from the run
+# dirs: the repo's own deployment lock is never read here, because by evaluation
+# time it usually names a later deployment than any of these runs used.
+
+COMMIT_A = "6b62754694c289fc8822562cec22ab774e071b2c"
+COMMIT_B = "aa11bb22cc33dd44ee55ff6677889900aabbccdd"
+PAYLOAD = "5" * 64
+
+
+def protocol_artifact(
+    *,
+    commit: str = COMMIT_A,
+    stability: str = STABILITY_STABLE,
+    available: bool = True,
+    detail: str | None = None,
+) -> dict:
+    """One run's persisted capture, in the shape ``protocol.json`` holds."""
+    return {
+        "schema_version": PROTOCOL_SCHEMA_VERSION,
+        "available": available,
+        "source_git_commit": commit if available else None,
+        "canonical_payload_sha256": PAYLOAD if available else None,
+        "source_repo": "ai-native-deployment",
+        "lock_schema_version": 1,
+        "captured_ts": "2026-07-22T09:00:00+00:00",
+        "stability": stability,
+        "checked_ts": (
+            None if stability == STABILITY_UNVERIFIED else "2026-07-22T09:30:00+00:00"
+        ),
+        "detail": detail,
+    }
+
+
+def build_with_protocols(tmp_path, *protocols: dict | str | None):
+    """Build a pack over one run per given capture (``None`` = a run with none)."""
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# Active goal")
+    for index, protocol in enumerate(protocols):
+        write_run(
+            config,
+            f"20260722T0{index}0000Z-alpha-task",
+            repo=repo,
+            started_ts=f"2026-07-22T0{index}:00:00+00:00",
+            ended_ts=f"2026-07-22T0{index}:30:00+00:00",
+            exit_code=0,
+            protocol=protocol,
+        )
+    return make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+
+def test_pack_publishes_the_revision_every_run_verified(tmp_path):
+    pack = build_with_protocols(
+        tmp_path, protocol_artifact(), protocol_artifact()
+    )
+
+    assert pack.protocol.available is True
+    assert pack.protocol.revision == COMMIT_A
+    assert (pack.protocol.run_count, pack.protocol.verified_count) == (2, 2)
+    assert pack.protocol.detail is None
+
+    data = pack.to_dict()
+    # The aggregate is a top-level section beside the runs it summarizes, and each
+    # run's own capture is carried whole — a consumer that disagrees with the
+    # aggregation rule can still see what every run recorded.
+    assert data["protocol"] == {
+        "available": True,
+        "effective_revision": COMMIT_A,
+        "run_count": 2,
+        "verified_count": 2,
+        "detail": None,
+    }
+    assert data["runs"][0]["protocol"]["source_git_commit"] == COMMIT_A
+    assert data["runs"][0]["protocol"]["stability"] == STABILITY_STABLE
+    assert data["summary"]["protocol_available"] is True
+    assert data["summary"]["protocol_verified_runs"] == 2
+
+
+def test_pack_reports_a_run_without_a_capture_as_missing_not_absent(tmp_path):
+    # A run launched before the capture existed. Legacy packs stay readable and
+    # publishable; what they cannot do is claim a revision for a run nothing
+    # observed — the tree's current lock would be a later deployment.
+    pack = build_with_protocols(tmp_path, protocol_artifact(), None)
+
+    assert pack.runs[1].protocol is None
+    assert pack.to_dict()["runs"][1]["protocol"] is None
+    assert pack.protocol.available is False
+    assert pack.protocol.revision is None
+    assert pack.protocol.detail == (
+        "1 of 2 contributing runs carry no verified protocol revision"
+    )
+
+
+def test_pack_refuses_a_revision_when_runs_span_a_redeployment(tmp_path):
+    pack = build_with_protocols(
+        tmp_path,
+        protocol_artifact(commit=COMMIT_A),
+        protocol_artifact(commit=COMMIT_B),
+    )
+
+    # Both runs verified a revision; they are not the same one, so the task ran
+    # under two protocols and belongs to neither cohort.
+    assert (pack.protocol.run_count, pack.protocol.verified_count) == (2, 2)
+    assert pack.protocol.available is False
+    assert COMMIT_A in pack.protocol.detail and COMMIT_B in pack.protocol.detail
+
+
+def test_pack_does_not_publish_an_unverified_capture(tmp_path):
+    # A run whose end check never completed: the commit stays readable for audit,
+    # but nothing confirmed the deployment held for the whole run.
+    pack = build_with_protocols(
+        tmp_path, protocol_artifact(stability=STABILITY_UNVERIFIED)
+    )
+
+    assert pack.runs[0].protocol.source_git_commit == COMMIT_A
+    assert pack.protocol.available is False
+    assert pack.protocol.verified_count == 0
+
+
+def test_a_corrupt_capture_degrades_the_pack_instead_of_failing_it(tmp_path):
+    pack = build_with_protocols(tmp_path, "{not json", protocol_artifact())
+
+    # Unreadable is *unavailable*, not absent: the hub did capture something for
+    # this run, so a consumer must not treat it as backfillable.
+    assert pack.runs[0].protocol is not None
+    assert pack.runs[0].protocol.available is False
+    assert "unreadable" in pack.runs[0].protocol.detail
+    assert pack.protocol.available is False
+
+
+def test_a_pack_with_no_runs_has_no_effective_revision(tmp_path):
+    pack = build_with_protocols(tmp_path)
+
+    assert pack.protocol.available is False
+    assert pack.protocol.run_count == 0
+    assert pack.protocol.detail == "no related runs to take a protocol revision from"
+
+
+def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
+    # The other cases hand-write the artifact, which cannot catch the two modules
+    # disagreeing about its shape. This one drives the real producer — a
+    # deployment lock, a launch capture, an end check — and reads the result back
+    # through the pack, so the run-dir contract is asserted end to end.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# Active goal")
+    (repo.path / DEPLOY_LOCK_NAME).write_text(
+        json.dumps(
+            {
+                "canonical_payload_sha256": PAYLOAD,
+                "schema_version": 1,
+                "source_git_commit": COMMIT_A,
+                "source_repo": "ai-native-deployment",
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_dir = write_run(
+        config,
+        "20260722T090000Z-alpha-task",
+        repo=repo,
+        started_ts="2026-07-22T09:00:00+00:00",
+        ended_ts="2026-07-22T09:30:00+00:00",
+        exit_code=0,
+    )
+    capture_protocol(run_dir, repo.path, now=FIXED_CLOCK)
+    settle_protocol(run_dir, repo.path, now=FIXED_CLOCK)
+
+    pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
+
+    assert pack.runs[0].protocol.canonical_payload_sha256 == PAYLOAD
+    assert pack.protocol.available is True and pack.protocol.revision == COMMIT_A
 
 
 # -- disabled mode (fail-closed for build + persist) --------------------------

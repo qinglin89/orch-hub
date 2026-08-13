@@ -79,6 +79,12 @@ from .models import (
     SessionsSnapshot,
     StoredEvaluation,
 )
+from .protocol_provenance import (
+    EffectiveProtocol,
+    ProtocolSnapshot,
+    effective_protocol,
+    read_protocol,
+)
 from .runs import load_records
 from .session_reads import ReadBehavior, SessionRef, read_session_behavior
 from .sessions import read_snapshot
@@ -101,7 +107,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "16"
+EVIDENCE_SCHEMA_VERSION = "17"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -150,8 +156,17 @@ Goal/Scope/Acceptance are each rewritten in flight, so every pack up to v15
 described a task by the version of it that came out the far end. The pack's own
 ``.ai/`` prefetch slice moves onto that evidence in the same version, and the
 read section's expected sets with it, so a v15 pack and a v16 one can disagree
-about which docs a session was measured against. A persisted pack with no
-``schema_version`` key is version 1 and predates all of it.
+about which docs a session was measured against. ``17`` carries the **deployed
+protocol revision** each run ran under (``runs[].protocol``) and the one the
+task's runs agree on (``protocol``, from
+:func:`orch_hub.protocol_provenance.effective_protocol`) — the ai-native-development
+commit whose protocol text the sessions were actually working under, which no
+earlier pack could state at all. It is the first evidence here that a report is
+*cohortable* by: up to v16 two reports written months and several protocol
+revisions apart were indistinguishable to a consumer grouping them, so the
+question "did this change to the protocol help?" had no answer in the artifacts.
+A persisted pack with no ``schema_version`` key is version 1 and predates all of
+it.
 
 Only *additive* so far, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
@@ -381,6 +396,16 @@ class RunEvidence:
     keyed by the same ``index``/``sid``. ``None`` means the run wrote no such
     artifact — it predates the capture, or its accounting never closed — which
     downstream reads as no exact entry state, exactly like a recorded miss.
+
+    ``protocol`` is the deployed protocol revision this run ran under, as its
+    launch capture and end check recorded it
+    (:class:`orch_hub.protocol_provenance.ProtocolSnapshot`). ``None`` is again a
+    run that wrote no artifact — one launched before the capture existed — and is
+    deliberately not the same as a capture that found no usable lock: the pack
+    carries the distinction so a consumer cannot read a hub that never looked as a
+    repo that had nothing to look at. It is read from the run dir rather than
+    re-derived from the repo, which is the whole point of capturing it: by
+    evaluation time the tree usually holds a later deployment.
     """
 
     record: RunRecord
@@ -389,6 +414,7 @@ class RunEvidence:
     log: LogSnapshot | None = None
     spawn_out: LogSnapshot | None = None
     task_snapshots: TaskSnapshots | None = None
+    protocol: ProtocolSnapshot | None = None
     warnings: tuple[str, ...] = ()
 
     @property
@@ -409,6 +435,9 @@ class RunEvidence:
                 self.task_snapshots.to_dict()
                 if self.task_snapshots is not None
                 else None
+            ),
+            "protocol": (
+                self.protocol.to_dict() if self.protocol is not None else None
             ),
             "warnings": list(self.warnings),
         }
@@ -479,18 +508,34 @@ class EvidencePack:
         git = self.git if self.git is not None else EvidenceGit(available=False)
         ai = self.ai if self.ai is not None else AiSnapshot(present=False)
         reads = self.reads if self.reads is not None else ReadBehavior(available=False)
+        protocol = self.protocol
         return {
             "schema_version": EVIDENCE_SCHEMA_VERSION,
             "evaluation_id": self.evaluation_id,
             "generated_ts": self.generated_ts,
             "target": self.target.to_dict(),
             "runs": [run.to_dict() for run in self.runs],
+            "protocol": protocol.to_dict(),
             "git": git.to_dict(),
             "ai": ai.to_dict(),
             "reads": reads.to_dict(),
             "warnings": list(self.warnings),
-            "summary": self._summary(git, ai, reads),
+            "summary": self._summary(git, ai, reads, protocol),
         }
+
+    @property
+    def protocol(self) -> EffectiveProtocol:
+        """The deployed protocol revision this task's runs are publishable under.
+
+        Computed from the runs rather than stored beside them
+        (:func:`orch_hub.protocol_provenance.effective_protocol`), for the same
+        reason ``entry_fidelity`` is: an aggregate that can be set independently of
+        the parts it summarizes can contradict them, and this one decides what a
+        published report claims about protocol cohort membership. A pack with no
+        runs, with a run that recorded no verified revision, or whose runs verified
+        different revisions carries the reason instead of a revision.
+        """
+        return effective_protocol([run.protocol for run in self.runs])
 
     @property
     def entry_counts(self) -> tuple[int, int]:
@@ -540,12 +585,18 @@ class EvidencePack:
         return FIDELITY_PARTIAL if exact else FIDELITY_RECONSTRUCTED
 
     def _summary(
-        self, git: EvidenceGit, ai: AiSnapshot, reads: ReadBehavior
+        self,
+        git: EvidenceGit,
+        ai: AiSnapshot,
+        reads: ReadBehavior,
+        protocol: EffectiveProtocol,
     ) -> dict:
         entry_total, entry_exact = self.entry_counts
         return {
             "run_count": len(self.runs),
             "runs_ended": sum(1 for run in self.runs if run.ended),
+            "protocol_available": protocol.available,
+            "protocol_verified_runs": protocol.verified_count,
             "has_task_content": self.target.present,
             "target_source": self.target.source,
             "task_entry_fidelity": self.entry_fidelity,
@@ -1252,6 +1303,7 @@ class EvaluationService:
         log: LogSnapshot | None = None
         spawn_out: LogSnapshot | None = None
         task_snapshots: TaskSnapshots | None = None
+        protocol: ProtocolSnapshot | None = None
         try:
             events = read_events(run_dir)
             if any(event.kind == KIND_HISTORY_ERROR for event in events):
@@ -1274,6 +1326,10 @@ class EvaluationService:
             task_snapshots = read_snapshots(run_dir)
         except Exception:
             warnings.append(f"run {record.run_id}: session-entry snapshots unreadable")
+        try:
+            protocol = read_protocol(run_dir)
+        except Exception:
+            warnings.append(f"run {record.run_id}: protocol provenance unreadable")
         return RunEvidence(
             record=record,
             events=events,
@@ -1281,6 +1337,7 @@ class EvaluationService:
             log=log,
             spawn_out=spawn_out,
             task_snapshots=task_snapshots,
+            protocol=protocol,
             warnings=tuple(warnings),
         )
 

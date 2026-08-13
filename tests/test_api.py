@@ -3743,18 +3743,21 @@ def test_app_lifespan_reconciles_orphaned_semantic_jobs(tmp_path, monkeypatch):
 
 
 def write_complete_evaluation(
-    config: Config, repo: ManagedRepo, evaluation_id: str
+    config: Config, repo: ManagedRepo, evaluation_id: str, *, protocol: dict | None = None
 ) -> Path:
     """Write one complete L1+L2 evaluation dir straight to the data dir."""
     eval_dir = (
         config.data_dir / "evaluations" / repo.name / RUN_TASK_ID / evaluation_id
     )
     eval_dir.mkdir(parents=True)
-    (eval_dir / EVIDENCE_NAME).write_text(
-        json.dumps({"target": {"repo_path": str(repo.path), "source": SOURCE_ARCHIVED},
-                    "runs": [], "git": {"available": False, "commits": []}}),
-        encoding="utf-8",
-    )
+    evidence = {
+        "target": {"repo_path": str(repo.path), "source": SOURCE_ARCHIVED},
+        "runs": [],
+        "git": {"available": False, "commits": []},
+    }
+    if protocol is not None:
+        evidence["protocol"] = protocol
+    (eval_dir / EVIDENCE_NAME).write_text(json.dumps(evidence), encoding="utf-8")
     (eval_dir / STATIC_METRICS_NAME).write_text("{}", encoding="utf-8")
     (eval_dir / SEMANTIC_REPORT_NAME).write_text(
         json.dumps({
@@ -3811,7 +3814,13 @@ def test_app_lifespan_starts_with_evaluation_disabled_and_publishes_nothing(
 
 
 def make_feed_client(
-    tmp_path, monkeypatch, *, enabled: bool = True, evaluation_ids=(), publish=True
+    tmp_path,
+    monkeypatch,
+    *,
+    enabled: bool = True,
+    evaluation_ids=(),
+    publish=True,
+    protocol: dict | None = None,
 ):
     """An eval client whose catalog already holds ``evaluation_ids`` as reports.
 
@@ -3822,7 +3831,7 @@ def make_feed_client(
     config = eval_config(tmp_path, enabled=enabled)
     repo = make_run_repo(tmp_path)
     for evaluation_id in evaluation_ids:
-        write_complete_evaluation(config, repo, evaluation_id)
+        write_complete_evaluation(config, repo, evaluation_id, protocol=protocol)
     if publish and enabled:
         ReportCatalog(config).reconcile()
     client, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo, enabled=enabled)
@@ -3860,10 +3869,44 @@ def test_report_feed_serializes_global_identity_hashes_and_provenance(
     assert {a["name"] for a in item["artifacts"]} == set(REQUIRED_ARTIFACTS)
     assert all(len(a["sha256"]) == 64 for a in item["artifacts"])
     # Provenance the evidence pack cannot carry is explicitly unavailable *with a
-    # reason*, never an empty value a consumer could read as "no protocol".
+    # reason*, never an empty value a consumer could read as "no protocol". This
+    # pack predates per-run protocol capture, so it carries no revision at all.
     assert item["provenance"]["protocol"]["available"] is False
+    assert item["provenance"]["protocol"]["effective_revision"] is None
     assert item["provenance"]["protocol"]["detail"]
     assert item["provenance"]["orchestrator_config"]["detail"]
+
+
+def test_report_feed_serializes_the_effective_protocol_revision(tmp_path, monkeypatch):
+    # The cohort key the feed exists to hand an external consumer: the deployed
+    # ai-native-development commit this report's runs verifiably ran under, taken
+    # from the durable evidence pack and never from the repo's current deployment.
+    revision = "6b62754694c289fc8822562cec22ab774e071b2c"
+    client, _config, _repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z",),
+        protocol={
+            "available": True,
+            "effective_revision": revision,
+            "run_count": 2,
+            "verified_count": 2,
+            "detail": None,
+        },
+    )
+
+    item = client.get("/api/evaluation/reports").json()["reports"][0]
+
+    assert item["provenance"]["protocol"] == {
+        "available": True,
+        "effective_revision": revision,
+        "detail": None,
+    }
+
+    # The by-key bundle resolves to the same entry, so a consumer that stored the
+    # key re-reads the same cohort membership it imported.
+    bundle = client.get(f"/api/evaluation/reports/{item['report_key']}").json()
+    assert bundle["entry"]["provenance"]["protocol"]["effective_revision"] == revision
 
 
 def test_report_feed_paging_reaches_every_report_exactly_once(tmp_path, monkeypatch):
