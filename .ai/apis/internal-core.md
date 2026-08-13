@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
+last-updated: 2026-08-14
+verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -52,22 +52,27 @@ and return `None` for absent or unsafe content.
 Input: managed repo, exact task id, and optional evaluation id.
 
 Output: `EvaluationTarget`, `RelatedRun` values, or a bounded `EvidencePack`
-persisted as schema-v16 `evidence.json` under the hub data dir.
+persisted as schema-v17 `evidence.json` under the hub data dir.
 
 Behavior: `EvaluationService` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` from every operation when disabled. Target resolution
 checks active task files before archive files. Related-run aggregation loads
 persisted run records read-only via `runs.load_records` and matches exact
 `(repo_path, task_id)`. Evidence building reads run events, session summaries,
-bounded per-session entry task files, orchestrator logs, `spawn.out`, terminal
-record fields, and producer-bounded best-effort git-window commits. Whole entry
-files drive exact/partial/reconstructed fidelity; complete entry frontmatter is
-the preferred source for session-time prefetch facts and the pack's `.ai/`
-prefetch slice. The reader then uses persisted session ids against the Claude
-transcript root derived from `ORCH_HUB_CLAUDE_HOME` and adds one ordered
+bounded per-session entry task files, persisted run protocol snapshots,
+orchestrator logs, `spawn.out`, terminal record fields, and producer-bounded
+best-effort git-window commits. The protocol aggregate publishes one effective
+revision only when every contributing run durably verified the same deployed
+commit; legacy, malformed, unverified, and mixed captures remain unavailable
+with a reason and are never backfilled from the live target. Whole entry files
+drive exact/partial/reconstructed fidelity; complete entry frontmatter is the
+preferred source for session-time prefetch facts and the pack's `.ai/` prefetch
+slice. The reader then uses persisted session ids against the Claude transcript
+root derived from `ORCH_HUB_CLAUDE_HOME` and adds one ordered
 declared/undeclared `.ai/` trace. Absent, lost, cut, capped, or unobserved
-evidence is explicit and raw transcript content is never retained. Per-run/secondary artifact failures
-become warnings, while target task IO errors fail the build. Persistence writes only
+evidence is explicit and raw transcript content is never retained. Per-run/
+secondary artifact failures become warnings, while target task IO errors fail
+the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
 Persisted evaluation listing and artifact reads are structural and contained:
@@ -179,7 +184,10 @@ so the artifact's file hop cannot be redirected by a symlink or check/reopen
 swap; path-resolution and IO faults become structured unreadable results.
 `unpublished_ids()` and publication share one artifact-derived eligibility rule;
 uncertain debt is protected from pruning. The catalog publishes
-provenance/artifacts only and never decides protocol evolution.
+provenance/artifacts only and never decides protocol evolution. Report protocol
+provenance comes from the persisted pack aggregate and serializes as
+`provenance.protocol.effective_revision`; current target deployment state is
+never consulted at catalog or API time.
 
 ## Usage Service
 

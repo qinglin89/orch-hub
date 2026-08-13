@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
+last-updated: 2026-08-14
+verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
 ---
 
 # Features: Task Evaluation
@@ -16,8 +16,9 @@ Description: Build optional read-only evidence packs for one active or archived
 task so static metrics and semantic evaluators have bounded task/run/git/`.ai/`
 input without changing normal run-control state.
 
-Modules: evaluation, ai_snapshot, session_reads, task_snapshots, config,
-task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models.
+Modules: evaluation, protocol_provenance, ai_snapshot, session_reads,
+task_snapshots, config, task_store, runs, history, sessions, logs, git_meta,
+subprocess_utils, models.
 
 APIs: internal `EvaluationService.resolve_target`, `related_runs`,
 `build_evidence`, `generate_evidence`, `list_evaluations`, `read_artifact`,
@@ -39,11 +40,11 @@ Implemented behavior:
 - Evidence packs include task content/archive state, related run records,
   metadata-only events, persisted session summaries and session-entry task
   files, bounded orchestrator-log and `spawn.out` excerpts, terminal fields,
-  explicit warnings, best-effort git-window metadata, and a producer-bounded
-  `.ai/` view. Entry files are capped at 64KB each / 192KB per pack on valid
-  UTF-8 boundaries; only whole files count as exact, while cut heads remain
-  explicitly truncated and supply declared frontmatter facts only when the
-  closing fence survived.
+  each run's durable deployed-protocol snapshot, explicit warnings, best-effort
+  git-window metadata, and a producer-bounded `.ai/` view. Entry files are
+  capped at 64KB each / 192KB per pack on valid UTF-8 boundaries; only whole
+  files count as exact, while cut heads remain explicitly truncated and supply
+  declared frontmatter facts only when the closing fence survived.
 - The `.ai/` prefetch slice is the first-seen union of usable session-entry
   declarations, with the accumulated target task file as the explicit fallback.
   The bounded per-session read section likewise prefers the entry snapshot over
@@ -55,10 +56,13 @@ Implemented behavior:
   fallback (`topic.md` versus `topic/index.md`). Snapshot roots and child reads
   stay inside the managed repo; document/router reads and git patch output are
   bounded at their producers, and a failed patch read preserves collected docs.
-- `evidence.json` records its shape as schema v16; pre-version and older-schema
-  packs remain readable as additive earlier shapes. Schema 15 accounts for
-  capped/unobserved read sessions; schema 16 adds bounded session-entry files,
-  their exact/partial/reconstructed fidelity, and prefetch-source provenance.
+- `evidence.json` records its shape as schema v17; pre-version and older-schema
+  packs remain readable as additive earlier shapes. Schema 16 adds bounded
+  session-entry files, fidelity, and prefetch-source provenance; schema 17 adds
+  each run's persisted `protocol.json` and the fail-closed cross-run effective
+  revision. A revision is available only when every contributing run completed
+  a stable end check for the same deployed commit; missing, corrupt, unverified,
+  or mixed provenance carries a reason and no revision.
 - Git evidence uses ambient commit-date history reachable from HEAD over the
   run lifecycle window, capped at 50 commits and 64KB at the subprocess
   producer. A byte cut drops its partial trailing record and marks the evidence
@@ -261,9 +265,11 @@ Implemented behavior:
   check/reopen races at the file hop.
 - Feed items carry source/global identity, generated/cataloged times,
   evaluation-time target source plus publication-time archived state, evaluator
-  backend/model/schema, artifact size/hash manifests, and run/git provenance.
-  Protocol/config provenance absent from evidence is explicitly unavailable
-  with a reason, never inferred.
+  backend/model/schema, artifact size/hash manifests, run/git provenance, and
+  `provenance.protocol.effective_revision` when the persisted pack's runs share
+  one verified deployed commit. Missing/mixed protocol evidence and absent
+  config evidence are explicitly unavailable with a reason, never inferred
+  from current target state.
 - `#/reports` preserves global order, uses a visited-cursor trail for exact
   Previous navigation, and links each coherent row to existing per-task report
   detail. Every Run-history state exposes the gated `All evaluation reports →`

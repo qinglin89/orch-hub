@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
+last-updated: 2026-08-14
+verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
 ---
 
 # APIs: HTTP — Task Evaluation
@@ -38,7 +38,10 @@ Cross-cutting auth/app behavior: `http-core.md`.
 - Shape: `{"enabled":true,"reports":[ReportCatalogEntry],"cursor",
   "next_cursor","has_more"}`. Entries include global/source identity,
   timestamps, archive/evaluator state, artifact sizes/hashes, and explicit
-  run/git/protocol/config provenance availability.
+  run/git/protocol/config provenance availability. Protocol provenance includes
+  `effective_revision` only when every contributing run's persisted launch/end
+  snapshot verified the same deployed commit; otherwise `available:false` and
+  `detail` explain the missing, unverified, or mixed evidence.
 - Integrity failure: duplicate durable `seq` or `report_key` makes cursor
   traversal ambiguous and returns 500 naming the defect.
 - Auth/disabled behavior: protected; disabled returns 404.

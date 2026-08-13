@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
+last-updated: 2026-08-14
+verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -22,10 +22,14 @@ pid probing, or writes; `build_evidence` assembles a bounded `EvidencePack`
 from task content, related run records, metadata-only events, persisted session
 summaries and entry-task snapshots, bounded orchestrator-log and `spawn.out`
 excerpts, terminal fields, best-effort git-window commits, and a bounded `.ai/`
-snapshot. Schema-v16 packs keep each entry task file beside its session: 64KB
-per entry and 192KB per pack, UTF-8 boundary safe. Only a whole file counts
-toward `exact`/`partial`/`reconstructed` fidelity; a kept head remains marked
-partial and is a declaration source only when its frontmatter is complete.
+snapshot. Schema-v17 packs keep each entry task file beside its session and each
+run's durable `protocol.json`; the computed top-level protocol section publishes
+one revision only when all runs completed stable end checks for the same commit.
+Missing, malformed, unverified, and mixed captures remain explicitly
+unavailable. Entry files are capped at 64KB per entry and 192KB per pack, UTF-8
+boundary safe. Only a whole file counts toward
+`exact`/`partial`/`reconstructed` fidelity; a kept head remains marked partial
+and is a declaration source only when its frontmatter is complete.
 
 The memory section contains the routed eager set, a prefetch slice from the
 first-seen union of usable session-entry declarations (falling back to the
@@ -153,6 +157,11 @@ its no-follow open validates and reads one descriptor so a symlink or
 check/reopen swap cannot redirect the response. Catalog/source identity
 ambiguity fails closed. Published entries outlive retention-pruned artifacts,
 which remain auditable but bundle-unavailable.
+
+Protocol provenance is copied only from the persisted evidence pack's
+fail-closed aggregate into `provenance.protocol.effective_revision`; the catalog
+never reads a target's current deployment lock or invents a revision for legacy,
+unverified, or mixed runs.
 
 `unpublished_ids()` is injected as `EvaluationService.retention_guard` so a
 prune cannot destroy recoverable publication debt. The guard and publisher read
