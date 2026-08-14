@@ -27,14 +27,17 @@ The subsystem is built from four composable primitives:
   :func:`orch_hub.runs.load_records`, which never refreshes/mutates run state).
 - **artifact path layout** — compute the contained, per-``(repo, task,
   evaluation)`` directory an evidence pack is written to, rejecting unsafe path
-  segments so a crafted id cannot escape the evaluations tree. Reading what is
+  segments so a crafted id cannot escape the evaluations tree. Touching what is
   stored there is a second, stronger primitive: a pathname is re-walked by every
   operation that uses it, so :func:`opened_evaluations_dir` walks the tree's own
-  hops following no link and :func:`opened_artifact` opens each artifact relative
-  to that descriptor. The tree may be *reached* through a link (a relocated data
-  dir); nothing inside it may be. Every consumer that turns a stored artifact into
-  bytes — this module's own readers, the global report feed's exports, and the
-  digests publication records — goes through them.
+  hops following no link and :func:`opened_artifact` /
+  :func:`write_contained_artifact` open each artifact relative to that descriptor.
+  The tree may be *reached* through a link (a relocated data dir); nothing inside
+  it may be. Every consumer that turns a stored artifact into bytes — this
+  module's own readers, the global report feed's exports, and the digests
+  publication records — goes through them, and so does every path that creates a
+  directory or writes an artifact *into* the tree: the hub must not be the thing
+  that populates a tree its own reads would then refuse as damaged.
 - **evidence pack build + persist** — assemble a bounded :class:`EvidencePack`
   from the target task, its related runs (each run's metadata-only history
   events, per-session context snapshot, and *bounded* log/``spawn.out`` tails),
@@ -264,6 +267,21 @@ _ARTIFACT_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
 """Flags for opening one stored artifact: no link at its own hop, and no blocking
 open (see :func:`opened_artifact`)."""
 
+_ARTIFACT_WRITE_FLAGS = (
+    os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK
+)
+"""Flags for opening one artifact's temp file for writing: the write-side mirror of
+:data:`_ARTIFACT_FLAGS`. ``O_NOFOLLOW`` refuses a link planted at the temp name —
+otherwise ``O_CREAT|O_TRUNC`` through one truncates and overwrites whatever it
+points at — and ``O_NONBLOCK`` keeps a planted FIFO from parking a request thread
+until a reader shows up. ``O_TRUNC`` rather than ``O_EXCL`` so a temp file left by
+an interrupted write is reused, exactly as the previous ``write_text`` did."""
+
+_ARTIFACT_WRITE_MODE = 0o666
+"""Creation mode for a written artifact, matching what ``open(..., "w")`` requests
+so the umask keeps deciding the result: containment is about *which object* is
+written, not about tightening permissions the operator already chose."""
+
 
 class EvaluationError(Exception):
     """Base class for task-evaluation errors."""
@@ -382,12 +400,16 @@ def opened_evaluations_dir(
     repo_name: str | None = None,
     task_id: str | None = None,
     evaluation_id: str | None = None,
+    create: bool = False,
 ) -> Iterator[int | None]:
     """Yield a descriptor for one level of the evaluations tree, following no link.
 
     The subsystem's containment primitive, and the thing every read of a stored
     artifact starts from — the per-task detail route, the global feed's bundle and
-    raw-artifact reads, and publication's own completeness/hashing pass. It exists
+    raw-artifact reads, and publication's own completeness/hashing pass — as well
+    as every write into the tree (``create=True``; see
+    :meth:`EvaluationService._reserve_evaluation_dir` and
+    :func:`write_contained_artifact`). It exists
     because a *pathname* cannot carry containment: whatever a check proves about
     ``<repo>/<task>/<eval>/evidence.json``, the read walks those names a second
     time and may get different objects, and a no-follow open of the file alone
@@ -412,6 +434,16 @@ def opened_evaluations_dir(
     never followed far enough to be one) and ``ValueError`` for an unsafe segment;
     every other ``OSError`` propagates as the IO fault it is.
 
+    ``create=True`` makes each named level on the way down, so a generation reaches
+    its dir through the same walk instead of a ``mkdir(parents=True)`` on a
+    pathname the kernel would resolve through any link standing in it. Creation
+    changes nothing about the rule — the hop is still opened ``O_NOFOLLOW`` after
+    the ``mkdir``, so an existing link is refused as damage rather than followed
+    and written through. It also removes the *absence* case (the level exists
+    by the time the descriptor is yielded, or the attempt raised), so this never
+    yields ``None`` under ``create=True``: an absent or non-directory hop is a
+    failed write to report, not a state to interpret.
+
     The descriptors are closed on the way out, so a caller must do its reading
     inside the ``with``; nothing it obtains from them outlives it.
     """
@@ -423,18 +455,33 @@ def opened_evaluations_dir(
         segments = tree_segments(
             repo_name=repo_name, task_id=task_id, evaluation_id=evaluation_id
         )
-    # The base is the tree, not something inside it: opened by path, links and
-    # all, which is what keeps a relocated data dir readable.
+    # The base is the tree, not something inside it: opened (and, for a write,
+    # created) by path, links and all, which is what keeps a relocated data dir
+    # readable and writable.
+    base = data_dir / EVALUATIONS_SUBDIR
+    if create:
+        base.mkdir(parents=True, exist_ok=True)
     try:
-        fds = [os.open(data_dir / EVALUATIONS_SUBDIR, _TREE_BASE_FLAGS)]
+        fds = [os.open(base, _TREE_BASE_FLAGS)]
     except (FileNotFoundError, NotADirectoryError):
         yield None
         return
     try:
         for segment in segments:
+            if create:
+                try:
+                    os.mkdir(segment, dir_fd=fds[-1])
+                except FileExistsError:
+                    # Already there — which says nothing about *what* is there.
+                    # The no-follow open below is what decides that, so a link
+                    # standing at this hop is still refused rather than made the
+                    # parent of a fresh evaluation.
+                    pass
             try:
                 fds.append(os.open(segment, _TREE_HOP_FLAGS, dir_fd=fds[-1]))
             except FileNotFoundError:
+                if create:
+                    raise
                 yield None
                 return
             except OSError as err:
@@ -445,6 +492,12 @@ def opened_evaluations_dir(
                     ) from err
                 raise
             if not stat.S_ISDIR(os.fstat(fds[-1]).st_mode):
+                if create:
+                    # Nothing to interpret on a write path: the tree cannot be
+                    # built through a file or a FIFO, so this is an IO fault.
+                    raise NotADirectoryError(
+                        errno.ENOTDIR, os.strerror(errno.ENOTDIR), segment
+                    )
                 # A file, a FIFO, anything else: not a level of the tree, and as
                 # absent as a name that is not there at all.
                 yield None
@@ -524,6 +577,89 @@ def read_contained_artifact(
                 return handle.read() if handle is not None else None
         except FileNotFoundError:
             return None
+
+
+def write_contained_artifact(
+    data_dir: Path,
+    *,
+    repo_name: str,
+    task_id: str,
+    evaluation_id: str,
+    name: str,
+    text: str,
+) -> None:
+    """Write one artifact into an already-reserved evaluation dir, atomically.
+
+    The write mirror of :func:`read_contained_artifact`, and the only way the
+    subsystem's layers put bytes in the tree: the evidence pack here, the static
+    report, and the semantic report plus its Markdown render. Same containment, by
+    the same walk — ``name`` is validated as a single safe segment, the
+    repo/task/evaluation hops are opened ``O_NOFOLLOW``, and both the temp file and
+    the rename are relative to that descriptor, so no hop can be redirected by a
+    link planted after a check.
+
+    Atomicity is unchanged from the ``write_text`` + :func:`os.replace` it
+    replaces (same-dir temp file, then a rename over the final name); ``renameat``
+    replaces a link standing at the destination rather than writing through it, so
+    the final hop needs no separate check. The temp file's own open is where the
+    write side was previously weakest: ``O_CREAT|O_TRUNC`` follows a link, so a
+    link planted at ``<name>.tmp`` was a truncate-and-overwrite of whatever it
+    named (see :data:`_ARTIFACT_WRITE_FLAGS`).
+
+    ``text`` is already-serialized content: each layer owns the shape of its own
+    artifact (JSON here and in the two report layers, Markdown for ``report.md``),
+    so this owns only how bytes reach the tree. Raises ``FileNotFoundError`` when
+    the evaluation dir is not there — a generation reserves it first, so its
+    absence means it was removed mid-generation, which fails the generation rather
+    than silently writing nothing — and :class:`EvaluationDamagedTreeError` for a
+    link at any hop, including the artifact's own.
+    """
+    artifact = _safe_segment(name, label="artifact name")
+    payload = text.encode("utf-8")
+    with opened_evaluations_dir(
+        data_dir,
+        repo_name=repo_name,
+        task_id=task_id,
+        evaluation_id=evaluation_id,
+    ) as dir_fd:
+        if dir_fd is None:
+            raise FileNotFoundError(
+                errno.ENOENT,
+                "evaluation directory is absent",
+                str(
+                    evaluation_artifact_dir(
+                        data_dir,
+                        repo_name=repo_name,
+                        task_id=task_id,
+                        evaluation_id=evaluation_id,
+                    )
+                ),
+            )
+        tmp = f"{artifact}.tmp"
+        try:
+            fd = os.open(
+                tmp, _ARTIFACT_WRITE_FLAGS, _ARTIFACT_WRITE_MODE, dir_fd=dir_fd
+            )
+        except OSError as err:
+            if err.errno == errno.ELOOP:
+                raise EvaluationDamagedTreeError(
+                    f"artifact temp file {tmp!r} is reached through a symbolic link"
+                    " and is refused rather than written through"
+                ) from err
+            raise
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                # A FIFO with a reader already attached, a device node: the open
+                # succeeded, but renaming it over the artifact name would leave the
+                # tree holding something no read path will ever serve.
+                raise OSError(
+                    errno.EINVAL, "artifact temp file is not a regular file", tmp
+                )
+            with open(fd, "wb", closefd=False) as handle:
+                handle.write(payload)
+        finally:
+            os.close(fd)
+        os.replace(tmp, artifact, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
 
 
 def contained_dir_names(dir_fd: int) -> list[str]:
@@ -1113,11 +1249,16 @@ def _prefetch_slice(
     return tuple(declared), PREFETCH_SOURCE_SESSION_ENTRIES
 
 
-def _write_evidence(path: Path, data: dict) -> None:
-    """Persist ``evidence.json`` atomically (same-dir tmp + rename), like run.json."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
+def artifact_json_text(data: dict) -> str:
+    """Serialize one artifact's JSON exactly as every layer persists it.
+
+    One rule for the three layers that write JSON into an evaluation dir
+    (``evidence.json``, ``static_metrics.json``, ``semantic_report.json``), so the
+    stored shape cannot drift between them — the ``indent=1`` is load-bearing only
+    in that the report catalog hashes these bytes and a re-render must reproduce
+    them.
+    """
+    return json.dumps(data, indent=1)
 
 
 def evaluation_order_key(evaluation_id: str) -> tuple[str, int]:
@@ -1334,6 +1475,25 @@ class EvaluationService:
         newest-first among the removed. Gated and hub-owned: it only ever deletes
         the subsystem's own artifacts, never target repo/task/run state.
 
+        Deletion is the one write path that stays *path*-based, because
+        ``shutil.rmtree`` takes a ``dir_fd`` only on Python 3.13+, above this
+        package's floor. Three existing properties contain it, relied on
+        deliberately and pinned by tests rather than inherited by accident:
+
+        - What it deletes comes from :meth:`list_evaluations`, the contained walk,
+          so a linked evaluation dir is never a candidate and a link at the
+          ``<repo-slug>``/``<task-id>`` hop refuses the whole prune as damage
+          instead of enumerating another tree's ids into a deletion list.
+        - Should one reach the deletion list anyway (a dir swapped for a link after
+          the listing), :meth:`artifact_dir`'s ``resolve()`` assertion refuses a
+          link pointing *out* of the tree before ``rmtree`` runs.
+        - A link pointing *inside* the tree passes that assertion and is then
+          refused by ``rmtree`` itself, which ``lstat``s its own argument and will
+          not delete through a symbolic link. ``ignore_errors`` turns that into
+          "left alone", so the cost is a retained evaluation, never another
+          evaluation's artifacts. Its interior walk is descriptor-based on every
+          platform this runs on.
+
         An injected ``retention_guard`` extends ``protect`` with every evaluation
         the global report feed still owes a publication (see the class docstring):
         deleting one of those is unrecoverable, because reconciliation re-derives
@@ -1454,6 +1614,50 @@ class EvaluationService:
             return None
         return data.decode("utf-8")
 
+    def write_artifact(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str, data: dict
+    ) -> None:
+        """Persist one JSON artifact into an already-reserved evaluation dir.
+
+        The write counterpart of :meth:`read_artifact`, and the single seam the
+        upper layers use to put an artifact in the tree — the static and semantic
+        evaluators call this rather than opening ``pack.evaluation_dir / <name>``
+        themselves, so containment is decided once here instead of once per layer.
+        Serialization is :func:`artifact_json_text` and the write is
+        :func:`write_contained_artifact`: atomic, and no hop of the tree followed
+        through a link. Gated; the dir must already have been reserved by
+        :meth:`generate_evidence`.
+        """
+        self._require_enabled()
+        write_contained_artifact(
+            self._config.data_dir,
+            repo_name=repo.name,
+            task_id=task_id,
+            evaluation_id=evaluation_id,
+            name=name,
+            text=artifact_json_text(data),
+        )
+
+    def write_text_artifact(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str, text: str
+    ) -> None:
+        """Persist one *text* artifact verbatim (the semantic layer's ``report.md``).
+
+        The write counterpart of :meth:`read_text_artifact`, same containment by
+        the same helper; kept distinct from :meth:`write_artifact` for the same
+        reason the readers are — a Markdown render must not be routed through
+        ``json.dumps``.
+        """
+        self._require_enabled()
+        write_contained_artifact(
+            self._config.data_dir,
+            repo_name=repo.name,
+            task_id=task_id,
+            evaluation_id=evaluation_id,
+            name=name,
+            text=text,
+        )
+
     def build_evidence(
         self, repo: ManagedRepo, task_id: str, *, evaluation_id: str
     ) -> EvidencePack:
@@ -1531,7 +1735,9 @@ class EvaluationService:
         evaluation_id, evaluation_dir = self._reserve_evaluation_dir(repo, task_id)
         try:
             pack = self.build_evidence(repo, task_id, evaluation_id=evaluation_id)
-            _write_evidence(evaluation_dir / EVIDENCE_NAME, pack.to_dict())
+            self.write_artifact(
+                repo, task_id, evaluation_id, EVIDENCE_NAME, pack.to_dict()
+            )
         except Exception:
             # This call created the dir; remove it so a failed generate leaves no
             # empty evaluation dir (the run manager cleans a failed spawn the same
@@ -1557,18 +1763,40 @@ class EvaluationService:
         """Mint a collision-free evaluation id and create its contained dir.
 
         The id is a UTC stamp; a same-second collision bumps a ``-N`` suffix
-        (mirrors the run manager's run-dir creation). The dir is the contained
-        :meth:`artifact_dir` path (which rejects unsafe repo/task/eval segments),
-        created with parents, so persistence has a validated target."""
+        (mirrors the run manager's run-dir creation). Segment legality still comes
+        from :meth:`artifact_dir`, which is also what hands back the path the
+        generation's failure cleanup and :class:`EvidencePack` carry.
+
+        The directories are made through the tree's own walk
+        (:func:`opened_evaluations_dir` with ``create=True``) rather than by
+        ``mkdir(parents=True)`` on that path. The path helper's ``resolve()``
+        assertion already refuses a hop link pointing *outside* the tree, but it
+        proves that about the names at check time and the kernel then resolves them
+        again at ``mkdir`` time — so a link swapped in between, or one pointing at
+        another dir *inside* the tree, was followed. Creating hop by hop and
+        re-opening each ``O_NOFOLLOW`` closes both: this is the same rule the reads
+        hold, applied at the one place that can put a directory in the tree at all.
+
+        The collision bump is a plain ``mkdir`` relative to the ``<repo>/<task>``
+        descriptor, so ``FileExistsError`` keeps meaning exactly what it did — this
+        second is taken — without a second round trip through the pathname.
+        """
         base_id = self._clock().strftime(_EVAL_ID_TS)
-        for attempt in itertools.count():
-            evaluation_id = base_id if attempt == 0 else f"{base_id}-{attempt + 1}"
-            evaluation_dir = self.artifact_dir(repo, task_id, evaluation_id)
-            try:
-                evaluation_dir.mkdir(parents=True)
-            except FileExistsError:
-                continue
-            return evaluation_id, evaluation_dir
+        with opened_evaluations_dir(
+            self._config.data_dir,
+            repo_name=repo.name,
+            task_id=task_id,
+            create=True,
+        ) as parent_fd:
+            assert parent_fd is not None  # create=True never yields absence
+            for attempt in itertools.count():
+                evaluation_id = base_id if attempt == 0 else f"{base_id}-{attempt + 1}"
+                evaluation_dir = self.artifact_dir(repo, task_id, evaluation_id)
+                try:
+                    os.mkdir(evaluation_id, dir_fd=parent_fd)
+                except FileExistsError:
+                    continue
+                return evaluation_id, evaluation_dir
         raise AssertionError("unreachable")
 
     def _run_evidence(self, related: RelatedRun) -> RunEvidence:

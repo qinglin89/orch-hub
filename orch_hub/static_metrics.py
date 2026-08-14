@@ -64,13 +64,10 @@ under ``protocol``.
 from __future__ import annotations
 
 import datetime as dt
-import json
-import os
 import re
 import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
 
 from .config import Config
 from .evaluation import (
@@ -346,8 +343,12 @@ class StaticEvaluator:
         :meth:`EvaluationService.generate_evidence` (which mints the evaluation
         id, reserves the contained dir, and writes ``evidence.json``), scores the
         returned pack, and writes ``static_metrics.json`` beside it — one dir per
-        evaluation, both artifacts tied to the same id. The report write is
-        atomic (same-dir tmp + rename); if it fails, the whole evaluation dir is
+        evaluation, both artifacts tied to the same id. The report write goes back
+        through :meth:`EvaluationService.write_artifact` rather than opening
+        ``pack.evaluation_dir / <name>`` directly: it is atomic the same way
+        (same-dir tmp + rename) and, more to the point, reaches the dir through the
+        evaluations tree's own no-follow walk, so this layer holds no containment
+        rule of its own. If it fails, the whole evaluation dir is
         removed so no half-pair (evidence without metrics) is left behind,
         mirroring ``generate_evidence``'s own failure cleanup. Read-only over
         target repo/run state — the only writes are the two hub-owned artifacts.
@@ -363,7 +364,9 @@ class StaticEvaluator:
         report = _build_report(pack, self._clock().isoformat())
         assert pack.evaluation_dir is not None  # generate_evidence always sets it
         try:
-            _write_json(pack.evaluation_dir / STATIC_METRICS_NAME, report.to_dict())
+            self._service.write_artifact(
+                repo, task_id, pack.evaluation_id, STATIC_METRICS_NAME, report.to_dict()
+            )
         except Exception:
             shutil.rmtree(pack.evaluation_dir, ignore_errors=True)
             raise
@@ -614,14 +617,6 @@ def _build_report(pack: EvidencePack, generated_ts: str | None) -> StaticMetrics
         reads=reads,
         schema_version=STATIC_SCHEMA_VERSION,
     )
-
-
-def _write_json(path: Path, data: dict) -> None:
-    """Persist ``static_metrics.json`` atomically (same-dir tmp + rename), matching
-    ``evaluation._write_evidence``."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 # -- protocol parsing ---------------------------------------------------------

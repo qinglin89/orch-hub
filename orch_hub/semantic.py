@@ -57,7 +57,6 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
-import os
 import shutil
 import subprocess
 import tempfile
@@ -1499,22 +1498,6 @@ def _clamp01(value: float) -> float:
     return round(max(0.0, min(1.0, value)), 3)
 
 
-def _write_json(path: Path, data: dict) -> None:
-    """Persist a report artifact atomically (same-dir tmp + rename), matching
-    ``evaluation._write_evidence`` / ``static_metrics._write_json``."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-    os.replace(tmp, path)
-
-
-def _write_text(path: Path, text: str) -> None:
-    """Persist a text artifact atomically (same-dir tmp + rename), the ``report.md``
-    counterpart of :func:`_write_json` for non-JSON siblings."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
-
-
 # -- Markdown rendering -------------------------------------------------------
 
 
@@ -1750,7 +1733,11 @@ class SemanticEvaluator:
         re-request) mints its own dir, preserving prior reports for comparison.
 
         Atomic and fail-closed: :meth:`EvaluationService.generate_evidence` mints
-        and reserves the dir (removing it on its own failure); every step after is
+        and reserves the dir (removing it on its own failure), and all three writes
+        below go back through :meth:`EvaluationService.write_artifact` /
+        :meth:`~EvaluationService.write_text_artifact`, so they land in the tree by
+        the same no-follow walk the reads use instead of by a pathname this layer
+        holds. Every step after the reservation is
         wrapped so a static-write, backend/model, parse/schema, or report-write
         failure removes the whole reserved dir and re-raises — a failed evaluation
         leaves no half-written artifacts and, being confined to the hub data dir,
@@ -1775,7 +1762,13 @@ class SemanticEvaluator:
         eval_dir = pack.evaluation_dir
         try:
             static_report = self._static.build_report(pack)
-            _write_json(eval_dir / STATIC_METRICS_NAME, static_report.to_dict())
+            self._service.write_artifact(
+                repo,
+                task_id,
+                pack.evaluation_id,
+                STATIC_METRICS_NAME,
+                static_report.to_dict(),
+            )
             evidence = build_semantic_evidence(pack, static_report)
             prompt = build_prompt(evidence)
             text = self._backend.evaluate(prompt, repo)
@@ -1787,8 +1780,16 @@ class SemanticEvaluator:
                 generated_ts=self._clock().isoformat(),
                 evidence=evidence,
             )
-            _write_json(eval_dir / SEMANTIC_REPORT_NAME, report.to_dict())
-            _write_text(eval_dir / SEMANTIC_REPORT_MD_NAME, render_report_md(report))
+            self._service.write_artifact(
+                repo, task_id, pack.evaluation_id, SEMANTIC_REPORT_NAME, report.to_dict()
+            )
+            self._service.write_text_artifact(
+                repo,
+                task_id,
+                pack.evaluation_id,
+                SEMANTIC_REPORT_MD_NAME,
+                render_report_md(report),
+            )
         except Exception:
             # generate_evidence created this dir; remove the whole reserved
             # evaluation (evidence + static + any partial semantic write) so a

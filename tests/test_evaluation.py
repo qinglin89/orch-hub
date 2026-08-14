@@ -2113,6 +2113,133 @@ def test_reads_and_listing_work_through_a_relocated_data_dir(tmp_path):
     )
 
 
+# -- artifact-tree containment: the write half --------------------------------
+#
+# Same rule, at the only places that can put something *in* the tree. The path
+# helpers' resolve() assertion already refuses a hop link pointing outside the
+# tree, but it proves that about names at check time and the kernel resolves them
+# again at mkdir/open time — so the write paths walk the tree hop by hop like the
+# reads do. The point is less the escape (planting the link needs write access to
+# the hub's own data dir) than coherence: the hub must not be the thing that
+# populates a tree its own reads then refuse as damaged.
+
+
+@pytest.mark.parametrize("depth", [1, 2])
+def test_generation_refuses_a_linked_directory_hop(tmp_path, depth):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    outside = tmp_path / "outside"
+    (outside / TASK).mkdir(parents=True)
+    parts = ("alpha", TASK)[:depth]
+    link = config.data_dir / EVALUATIONS_SUBDIR / Path(*parts)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(
+        outside if depth == 1 else outside / TASK, target_is_directory=True
+    )
+
+    with pytest.raises(EvaluationDamagedTreeError):
+        service.generate_evidence(repo, TASK)
+    # Refused, not followed: the generation created nothing on the other side.
+    assert list((outside / TASK).iterdir()) == []
+
+
+def test_generation_refuses_a_hop_linked_to_another_dir_inside_the_tree(tmp_path):
+    # The case the resolve() assertion cannot see at all: this link stays *under*
+    # the evaluations base, so the pathname check passes and the mkdir would file
+    # one task's evaluations under another task's id.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    other = config.data_dir / EVALUATIONS_SUBDIR / "alpha" / "other-task"
+    other.mkdir(parents=True)
+    (config.data_dir / EVALUATIONS_SUBDIR / "alpha" / TASK).symlink_to(
+        other, target_is_directory=True
+    )
+
+    with pytest.raises(EvaluationDamagedTreeError):
+        service.generate_evidence(repo, TASK)
+    assert list(other.iterdir()) == []
+
+
+def test_artifact_write_refuses_a_linked_temp_file(tmp_path):
+    # Where the write side was weakest: the temp file's open is O_CREAT|O_TRUNC,
+    # which through a link truncates and overwrites whatever it names.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    pack = service.generate_evidence(repo, TASK)
+    outside = repo.path / "docs" / "private.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("target repo content", encoding="utf-8")
+    (pack.evaluation_dir / "report.md.tmp").symlink_to(outside)
+
+    with pytest.raises(EvaluationDamagedTreeError):
+        service.write_text_artifact(repo, TASK, pack.evaluation_id, "report.md", "x")
+    assert outside.read_text(encoding="utf-8") == "target repo content"
+
+
+def test_artifact_write_replaces_a_linked_artifact_without_following_it(tmp_path):
+    # The final hop needs no separate check: renameat replaces a link standing at
+    # the destination rather than writing through it. Pinned because the whole
+    # atomic-write shape rests on it.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    pack = service.generate_evidence(repo, TASK)
+    outside = repo.path / "docs" / "private.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("target repo content", encoding="utf-8")
+    linked = pack.evaluation_dir / "report.md"
+    linked.symlink_to(outside)
+
+    service.write_text_artifact(repo, TASK, pack.evaluation_id, "report.md", "# fresh\n")
+
+    assert not linked.is_symlink()
+    assert outside.read_text(encoding="utf-8") == "target repo content"
+    assert (
+        service.read_text_artifact(repo, TASK, pack.evaluation_id, "report.md")
+        == "# fresh\n"
+    )
+
+
+def test_artifact_write_on_an_absent_evaluation_dir_fails_loudly(tmp_path):
+    # A generation reserves its dir first, so absence here means it was removed
+    # mid-generation: a failed write to report, not a silent no-op.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    with pytest.raises(FileNotFoundError):
+        service.write_artifact(repo, TASK, "20990101T000000Z", EVIDENCE_NAME, {"a": 1})
+    with pytest.raises(ValueError):
+        service.write_artifact(repo, TASK, "20990101T000000Z", "../x.json", {"a": 1})
+
+
+def test_generation_works_through_a_relocated_data_dir(tmp_path):
+    # The compatibility half, for the write paths: creating the tree hop by hop
+    # must not stop a hub whose data dir is reached through a link from writing.
+    real = tmp_path / "volume" / "hub-data"
+    real.mkdir(parents=True)
+    (tmp_path / "hub-data").symlink_to(real, target_is_directory=True)
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    pack = service.generate_evidence(repo, TASK)
+    service.write_text_artifact(repo, TASK, pack.evaluation_id, "report.md", "# r\n")
+
+    landed = real / EVALUATIONS_SUBDIR / "alpha" / TASK / pack.evaluation_id
+    assert (landed / EVIDENCE_NAME).is_file()
+    assert (landed / "report.md").read_text(encoding="utf-8") == "# r\n"
+
+
 # -- retention / cleanup ------------------------------------------------------
 #
 # Evaluation artifacts accumulate one dir per generation; retention keeps only the
@@ -2173,6 +2300,60 @@ def test_prune_evaluations_is_scoped_to_one_task(tmp_path):
     # Pruning TASK never touches the other task's evaluations.
     assert len(service.list_evaluations(repo, TASK)) == 1
     assert len(service.list_evaluations(repo, other)) == 1
+
+
+def test_prune_never_deletes_through_a_linked_evaluation_dir(tmp_path):
+    # Deletion is the one write path that stays pathname-based (shutil.rmtree takes
+    # a dir_fd only above this package's Python floor), so the two properties it
+    # leans on are pinned here rather than inherited by accident.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    outside = tmp_path / "outside" / "20990101T000000Z"
+    outside.mkdir(parents=True)
+    (outside / EVIDENCE_NAME).write_text('{"outside": true}', encoding="utf-8")
+    keeper = service.generate_evidence(repo, TASK)
+    linked_id = "20990101T000000Z"
+    task_dir = config.data_dir / EVALUATIONS_SUBDIR / "alpha" / TASK
+    (task_dir / linked_id).symlink_to(outside, target_is_directory=True)
+
+    # 1. The listing the prune deletes from is the contained walk, so a linked dir
+    #    is not a candidate at all — nothing to delete, nothing to follow.
+    assert [s.evaluation_id for s in service.list_evaluations(repo, TASK)] == [
+        keeper.evaluation_id
+    ]
+    assert service.prune_evaluations(repo, TASK, keep=1) == []
+
+    # 2. And if one reaches the deletion list anyway (a dir swapped for a link
+    #    after the listing), two things stop it. A link out of the tree is refused
+    #    by artifact_dir's resolve() assertion before rmtree runs at all — loudly,
+    #    which auto_prune swallows into "no retention this pass".
+    def forced(*_a, **_k):
+        return [
+            StoredEvaluation(evaluation_id=keeper.evaluation_id, artifacts=()),
+            StoredEvaluation(evaluation_id=linked_id, artifacts=()),
+        ]
+
+    service.list_evaluations = forced  # type: ignore[method-assign]
+    with pytest.raises(ValueError):
+        service.prune_evaluations(repo, TASK, keep=1)
+    assert (outside / EVIDENCE_NAME).is_file()
+    assert (task_dir / linked_id).is_symlink()
+
+    # A link *inside* the tree passes that assertion — and is then refused by
+    # rmtree itself, which lstats its own argument and will not delete through a
+    # symbolic link. ignore_errors turns that into "left alone", so the cost is a
+    # retained evaluation, never another evaluation's artifacts.
+    sibling = task_dir / "20990101T000001Z"
+    sibling.mkdir()
+    (sibling / EVIDENCE_NAME).write_text('{"sibling": true}', encoding="utf-8")
+    (task_dir / linked_id).unlink()
+    (task_dir / linked_id).symlink_to(sibling, target_is_directory=True)
+
+    assert service.prune_evaluations(repo, TASK, keep=1) == [linked_id]
+    assert (sibling / EVIDENCE_NAME).is_file()
+    assert (task_dir / linked_id).is_symlink()
 
 
 def test_generate_evidence_auto_prunes_to_config_cap(tmp_path):

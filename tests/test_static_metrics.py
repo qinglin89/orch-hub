@@ -1624,6 +1624,24 @@ def _write_archived_completed_task(config: Config, tmp_path: Path) -> ManagedRep
     return repo
 
 
+def _failing_metrics_write(service):
+    """A ``write_artifact`` that fails the metrics write only.
+
+    Both artifacts now reach the tree through the same contained service seam, so
+    a blanket failure would exercise ``generate_evidence``'s own cleanup instead of
+    the metrics-write cleanup these tests are about. The evidence write passes
+    through to the real method.
+    """
+    real = service.write_artifact
+
+    def write(repo, task_id, evaluation_id, name, data):
+        if name == STATIC_METRICS_NAME:
+            raise OSError("disk full")
+        real(repo, task_id, evaluation_id, name, data)
+
+    return write
+
+
 def test_generate_metrics_persists_report_beside_evidence(tmp_path):
     config = Config(
         ai_native_path=tmp_path / "ai-native",
@@ -1667,18 +1685,10 @@ def test_generate_metrics_cleans_up_dir_on_write_failure(tmp_path, monkeypatch):
         evaluation_enabled=True,
     )
     repo = _write_archived_completed_task(config, tmp_path)
-    ev = StaticEvaluator(
-        config,
-        evaluation_service=EvaluationService(config, git_runner=_fake_git, clock=lambda: FIXED_TS),
-        clock=lambda: FIXED_TS,
-    )
+    service = EvaluationService(config, git_runner=_fake_git, clock=lambda: FIXED_TS)
+    ev = StaticEvaluator(config, evaluation_service=service, clock=lambda: FIXED_TS)
 
-    import orch_hub.static_metrics as sm
-
-    def boom(path, data):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(sm, "_write_json", boom)
+    monkeypatch.setattr(service, "write_artifact", _failing_metrics_write(service))
 
     with pytest.raises(OSError):
         ev.generate_metrics(repo, TASK)
@@ -1708,12 +1718,7 @@ def test_generate_metrics_failure_preserves_existing_retained_history(tmp_path, 
     first = ev.generate_metrics(repo, TASK)  # the existing retained evaluation
     assert len(service.list_evaluations(repo, TASK)) == 1
 
-    import orch_hub.static_metrics as sm
-
-    def boom(path, data):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(sm, "_write_json", boom)
+    monkeypatch.setattr(service, "write_artifact", _failing_metrics_write(service))
 
     with pytest.raises(OSError):
         ev.generate_metrics(repo, TASK)
