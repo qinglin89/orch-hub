@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
+verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
 ---
 
 # Features: Task Evaluation
@@ -68,19 +68,22 @@ Implemented behavior:
   producer. A byte cut drops its partial trailing record and marks the evidence
   prefix truncated; any related run with no parseable end keeps `until`
   open-ended.
-- `generate_evidence` persists `evidence.json` atomically under
-  `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`, cleaning an empty
-  reserved dir on failure. It never mutates target repos, task files, run
-  records, `.ai/`, or `.ai-tasks/`. Standalone evidence generation auto-prunes
-  after the evidence artifact is durable; metrics/semantic generation defer
-  retention until their full artifact set is durable, protecting the new id.
+- `generate_evidence` reserves its directory and persists `evidence.json`
+  atomically through the evaluations tree's descriptor walk, cleaning the
+  reserved dir through the same walk on failure. It never mutates target repos,
+  task files, run records, `.ai/`, or `.ai-tasks/`. Standalone evidence
+  generation auto-prunes after the evidence artifact is durable;
+  metrics/semantic generation defer retention until their full artifact set is
+  durable, protecting the new id.
 - `list_evaluations` enumerates persisted evaluation dirs newest-first by
   `(timestamp, numeric collision suffix)` and reports only regular artifact
   files. The evaluations base may itself be reached through links (relocated
-  data dir), but every repo/task/evaluation hop and artifact below it is opened
-  no-follow relative to an already-open descriptor; `read_artifact` and
-  `read_text_artifact` therefore never serve bytes through an in-tree link.
-  Linked interior hops are storage damage, distinct from an absent/pruned file.
+  data dir), but creation, reads, artifact writes, failure cleanup, and retention
+  all walk every repo/task/evaluation hop no-follow relative to an already-open
+  descriptor; recursive removal likewise unlinks relative to contained parent
+  descriptors and reports only evaluations actually removed. Linked interior
+  hops are storage damage, distinct from an absent/pruned file, and are retained
+  rather than followed by a best-effort delete.
 - HTTP routes expose availability, persisted evaluation listing, evaluation
   detail readback, evidence generation, and the semantic doctor while preserving
   the same disabled fail-closed gate: only `GET /api/evaluation` returns 200

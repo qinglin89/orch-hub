@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
+verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -75,17 +75,17 @@ secondary artifact failures become warnings, while target task IO errors fail
 the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
-Persisted evaluation listing and artifact reads are structural and contained.
-The evaluations base may resolve through links, but all repo/task/evaluation
-hops beneath it are opened no-follow, and artifacts are opened relative to the
-resulting descriptor. `list_evaluations` reports only real dirs/regular files;
-`read_artifact` parses JSON and `read_text_artifact` reads text such as semantic
-`report.md`. Linked interior hops raise storage damage rather than reading
-outside bytes or collapsing into absence; corrupt JSON fails loudly.
-`prune_evaluations`/`auto_prune` enforce the per-task retention
-cap under the hub-owned evaluation tree; top-level generation paths call
-retention only after their complete artifact set is durable and protect the
-just-written id.
+Persisted evaluation creation, listing, artifact reads/writes, and removal are
+structural and contained. The evaluations base may resolve through links, but
+all repo/task/evaluation hops beneath it are opened no-follow; artifacts and
+recursive removal operate relative to the resulting descriptors.
+`list_evaluations` reports only real dirs/regular files; `read_artifact` parses
+JSON, `read_text_artifact` reads text such as semantic `report.md`, and
+`remove_evaluation` is the single best-effort cleanup/retention seam. Linked
+interior hops raise storage damage on reads and are retained rather than followed
+on removal; corrupt JSON fails loudly. `prune_evaluations`/`auto_prune` enforce
+the per-task retention cap, report only successful removals, run only after the
+complete artifact set is durable, and protect the just-written id.
 
 ## Static Metrics Evaluator
 

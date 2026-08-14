@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
+verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
 ---
 
 # Architecture
@@ -163,9 +163,10 @@ plan-mode writes blocked — the model cannot read live target-repo state outsid
 the prompt. Protected routes expose availability, generation, async
 semantic job start/status, doctor readiness, history, and artifact readback.
 The evaluations base may be reached through links for relocated storage, but
-every repo/task/evaluation segment and artifact beneath it is opened no-follow
-relative to an already-open descriptor; linked interior state is damage, never
-a source of bytes or an alias for ordinary pruning.
+creation, listing, artifact reads/writes, cleanup, and retention all open every
+repo/task/evaluation segment beneath it no-follow and act relative to contained
+descriptors; linked interior state is damage, never a source/target of bytes or
+an alias for ordinary pruning.
 `SemanticJobManager` stores one current job per `(repo, task)` under
 `<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job
 instead of starting a duplicate model call, and reconciles restart-orphaned

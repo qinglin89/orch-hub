@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
+verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -42,18 +42,19 @@ transcript text. Transcript absence, lost rows, trace/session caps, unobserved
 sessions, and snapshot cuts degrade explicitly; per-part failures remain
 independent, and every entry/doc/router/diff/transcript bound is enforced at its
 producer.
-`generate_evidence` mints an evaluation id
-and atomically writes `evidence.json` under
+`generate_evidence` mints an evaluation id and atomically writes
+`evidence.json` under
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. The evaluations base
-may be reached through links for relocated data dirs, but `list_evaluations`,
-`read_artifact`, and `read_text_artifact` open every repo/task/evaluation hop
-below it no-follow and open artifacts relative to that descriptor. Listings
-include only real directories/regular files; linked interior hops are refused
-as storage damage rather than followed or reported as pruned. Retention is per
-task via
-`ORCH_HUB_EVAL_RETENTION`; `prune_evaluations` removes older evaluation dirs
-inside that `(repo, task)` subtree, and generation paths prune only after their
-complete artifact set is durable, protecting the just-written id so failed
+may be reached through links for relocated data dirs, but directory creation,
+listing, artifact reads/writes, failure cleanup, and retention all open every
+repo/task/evaluation hop below it no-follow and operate relative to the resulting
+descriptor. Recursive removal opens each child no-follow and unlinks it relative
+to its contained parent. Listings include only real directories/regular files;
+linked interior hops are refused as storage damage rather than followed or
+reported as pruned. Retention is per task via `ORCH_HUB_EVAL_RETENTION`;
+`prune_evaluations` removes older evaluation dirs inside that `(repo, task)`
+subtree, reports only successful removals, and generation paths prune only after
+their complete artifact set is durable, protecting the just-written id so failed
 static/semantic attempts never shrink retained history.
 
 Per-run artifact reads are isolated into warnings so corrupt/missing run
