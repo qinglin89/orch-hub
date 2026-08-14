@@ -2178,13 +2178,20 @@ def write_deploy_lock(
     """Deploy a protocol into the fake repo: both receipts and the file they name.
 
     One helper because a real deploy writes them together — the lock names the
-    identity, the manifest vouches for the bytes, and the end check needs both.
-    Re-calling it with another commit is a redeployment.
+    identity and the payload's file set, the manifest vouches for the bytes, and
+    the end check needs both to agree. Re-calling it with another commit is a
+    redeployment.
     """
     (repo.path / DEPLOY_LOCK_NAME).write_text(
         json.dumps(
             {
                 "canonical_payload_sha256": PAYLOAD,
+                "deployed_files": [
+                    {
+                        "canonical_sha256": "0" * 64,
+                        "target_relative_path": DEPLOYED_FILE,
+                    }
+                ],
                 "schema_version": 1,
                 "source_git_commit": commit,
                 "source_repo": "ai-native-deployment",

@@ -57,11 +57,21 @@ vouches for the deployed bytes: the lock hashes each file's canonical source, an
 ``aii-2`` renders a few of them into their target (this repo's ``CLAUDE.md``
 among them), so a target-versus-lock comparison would report drift on every
 deploy. The two receipts are joined by their shared ``source_git_commit``; a
-manifest naming a different one describes a different deploy and is refused
+receipt naming a different one describes a different deploy and is refused
 rather than used. The lock's aggregate digest is deliberately *not* recomputed
 from its own file list: that formula is ``aii-2``'s internal contract, and
 re-deriving it here would make the next lock-schema change read as a damaged
 deployment.
+
+*Which* files the payload consists of is the lock's statement, though
+(``deployed_files[].target_relative_path``), because the lock is where the
+identity comes from; the manifest only vouches for each file's bytes. The two
+file sets are therefore compared before anything is hashed. A manifest missing
+one of the lock's files — or naming one target twice, which hashes that file
+twice and leaves another unchecked — would otherwise let every remaining row
+hash cleanly and report a match over a strict subset of the payload the identity
+names, which is the same defect as a silently truncated bound: an identity backed
+by less than it claims.
 
 The artifact (``protocol.json``, beside ``sessions.json``) is deliberately not a
 field of ``run.json``: the record's shape stays stable for readers that predate
@@ -149,10 +159,11 @@ MANIFEST_MAX_BYTES = 4 * 1024 * 1024
 record per deployed file, ~43KB for the ~120-file payload."""
 
 PAYLOAD_MAX_FILES = 512
-"""How many deployed files the end check will compare (~120 today). A receipt
-listing more is refused rather than sampled: a partial comparison is not a
-verification, and a bound that quietly truncated would publish an identity backed
-by less than it claims."""
+"""How many deployed files the end check will compare (~120 today). *Either*
+receipt listing more is refused rather than sampled: a partial comparison is not
+a verification, and a bound that quietly truncated would publish an identity
+backed by less than it claims. Raising it also widens what :func:`_from_dict`
+accepts as a persisted count, which is the only place the two meet."""
 
 PAYLOAD_MAX_FILE_BYTES = 4 * 1024 * 1024
 """Per-file read cap (largest deployed file today ~145KB). A record declaring more
@@ -594,18 +605,27 @@ def read_deploy_lock(repo_path: Path) -> ProtocolSnapshot:
 
 
 def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
-    """Compare the repo's deployed files against the receipt for ``expected_commit``.
+    """Compare the repo's deployed files against the receipts for ``expected_commit``.
 
     The receipt-to-target half of the identity: the lock says *which* payload was
     deployed, and this says whether the tree still holds it. Never raises — every
     failure is a state with a reason, because the caller is settling a run that has
     already ended and must record what it could see, not fail.
 
-    ``expected_commit`` is the captured run's commit, and the manifest must name
-    the same one. That join is what makes the comparison say something about the
-    *captured* identity: a manifest from a different deploy would have the hub
-    hashing files against a receipt the run never ran under, and answering
-    "matched" to a question nobody asked.
+    ``expected_commit`` is the captured run's commit, and *both* receipts must name
+    it. That join is what makes the comparison say something about the *captured*
+    identity: a receipt from a different deploy would have the hub hashing files
+    against a list the run never ran under, and answering "matched" to a question
+    nobody asked. The lock is re-read here rather than taken from the caller, so
+    the join is established from the receipts themselves and this predicate carries
+    no precondition a caller could forget.
+
+    The payload's file set comes from the lock and the manifest must match it
+    exactly (see the module header): a comparison over the manifest's rows alone
+    verifies whatever subset the manifest happens to list. Paths are compared as
+    the receipts spell them — ``aii-2`` writes the same string in both — so a
+    receipt that respelled one fails closed rather than being normalized into an
+    agreement it does not state.
 
     Bounded at every producer (:data:`PAYLOAD_MAX_FILES`,
     :data:`PAYLOAD_MAX_FILE_BYTES`, :data:`PAYLOAD_MAX_TOTAL_BYTES`,
@@ -623,6 +643,21 @@ def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
     are deliberately not compared either: this answers what the run's sessions
     *read*, and an executable bit is not protocol text.
     """
+    lock, error = _read_receipt(deploy_lock_path(repo_path), LOCK_MAX_BYTES)
+    if error is not None or lock is None:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE, detail=error or f"unreadable {DEPLOY_LOCK_NAME}"
+        )
+    if _hex_field(lock, "source_git_commit", _SHA) != expected_commit:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE,
+            detail=f"{DEPLOY_LOCK_NAME} no longer names the deploy this run captured",
+        )
+    expected, error = _deployed_targets(lock)
+    if expected is None or error is not None:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE, detail=error or f"unusable {DEPLOY_LOCK_NAME}"
+        )
     data, error = _read_receipt(manifest_path(repo_path), MANIFEST_MAX_BYTES)
     if error is not None or data is None:
         return PayloadCheck(
@@ -652,6 +687,7 @@ def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
             ),
         )
     records = []
+    listed: set[str] = set()
     total = 0
     for key, record in sorted(files.items(), key=lambda item: str(item[0])):
         parsed = _payload_record(key, record)
@@ -663,6 +699,16 @@ def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
                     f" {str(key)!r}"
                 ),
             )
+        if parsed[0] in listed:
+            # Two rows pointing at one target hash that file twice and leave the
+            # other unchecked, which is drift-hiding rather than a duplicate fact.
+            return PayloadCheck(
+                PAYLOAD_UNVERIFIABLE,
+                detail=(
+                    f"{DEPLOY_MANIFEST_NAME} records {parsed[0]!r} more than once"
+                ),
+            )
+        listed.add(parsed[0])
         total += parsed[2]
         if total > PAYLOAD_MAX_TOTAL_BYTES:
             return PayloadCheck(
@@ -673,6 +719,21 @@ def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
                 ),
             )
         records.append(parsed)
+    if listed != expected:
+        parts = []
+        absent = sorted(expected - listed)
+        added = sorted(listed - expected)
+        if absent:
+            parts.append(f"{DEPLOY_MANIFEST_NAME} does not vouch for {_listed(absent)}")
+        if added:
+            parts.append(f"{DEPLOY_MANIFEST_NAME} adds {_listed(added)}")
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE,
+            detail=(
+                "the deploy receipts disagree about which files the payload is: "
+                + "; ".join(parts)
+            ),
+        )
     mismatched: list[str] = []
     unreadable: list[str] = []
     for relative, digest, size in records:
@@ -700,6 +761,43 @@ def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
             detail=f"deployed files could not be read: {_listed(unreadable)}",
         )
     return PayloadCheck(PAYLOAD_MATCHED, files=len(records))
+
+
+def _deployed_targets(lock: dict) -> tuple[frozenset[str] | None, str | None]:
+    """The complete set of target paths the lock says its payload consists of.
+
+    ``(None, reason)`` whenever the lock cannot establish that set, which makes the
+    whole comparison unverifiable: without it the hub knows only what the manifest
+    chose to list, and "every row matched" would be a claim about the manifest
+    rather than about the payload. A lock naming one target twice is refused for
+    the same reason the manifest is — a set the receipt states ambiguously is not
+    one the hub can hold the tree to.
+
+    Only ``target_relative_path`` is read. The canonical digests beside it hash the
+    payload's *sources*, which ``aii-2`` renders per target for a few files, so
+    they say nothing about the deployed bytes (that is the manifest's job).
+    """
+    deployed = lock.get("deployed_files")
+    if not isinstance(deployed, list) or not deployed:
+        return None, f"{DEPLOY_LOCK_NAME} lists no deployed files"
+    if len(deployed) > PAYLOAD_MAX_FILES:
+        return None, (
+            f"{DEPLOY_LOCK_NAME} lists {len(deployed)} files, past the"
+            f" {PAYLOAD_MAX_FILES}-file check cap"
+        )
+    targets: set[str] = set()
+    for record in deployed:
+        relative = (
+            _str_field(record, "target_relative_path")
+            if isinstance(record, dict)
+            else None
+        )
+        if relative is None or not _is_contained_relative(relative):
+            return None, f"{DEPLOY_LOCK_NAME} has an unusable deployed-file record"
+        if relative in targets:
+            return None, f"{DEPLOY_LOCK_NAME} names {relative!r} more than once"
+        targets.add(relative)
+    return frozenset(targets), None
 
 
 def _payload_record(key: object, record: object) -> tuple[str, str, int] | None:
@@ -949,8 +1047,12 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     a verdict with no ``checked_ts`` — a conclusion recording no check that could
     have reached it, which :func:`settle_protocol` never writes — is refused
     rather than read as a confirmed identity. Under this schema a ``stable``
-    verdict also names how many files it compared; one that does not is the same
-    class of defect.
+    verdict also names how many files it compared, and the count has to be one
+    :func:`verify_payload` could have produced — it refuses an empty receipt and
+    caps it at :data:`PAYLOAD_MAX_FILES`, so ``0``, a negative, or a larger count
+    is a rewritten artifact, not a smaller verification. Both are the same class
+    of defect as a verdict with no ``checked_ts``: evidence that contradicts the
+    only process that writes it.
 
     The schema stamp is read as *meaning*, not just shape, which is what keeps the
     older artifacts honest without touching them. A schema-1 ``stable`` was reached
@@ -989,6 +1091,11 @@ def _from_dict(data: object) -> ProtocolSnapshot:
         elif payload_files is None:
             return _unavailable(
                 f"{ARTIFACT_NAME} claims a verified payload it never counted"
+            )
+        elif not 1 <= payload_files <= PAYLOAD_MAX_FILES:
+            return _unavailable(
+                f"{ARTIFACT_NAME} claims a verified payload of {payload_files}"
+                " files, which no check could have produced"
             )
     return ProtocolSnapshot(
         available=available,

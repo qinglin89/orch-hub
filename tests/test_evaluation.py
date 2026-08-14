@@ -1848,6 +1848,12 @@ def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
         json.dumps(
             {
                 "canonical_payload_sha256": PAYLOAD,
+                "deployed_files": [
+                    {
+                        "canonical_sha256": "0" * 64,
+                        "target_relative_path": ".ai-protocol/protocols/conduct.md",
+                    }
+                ],
                 "schema_version": 1,
                 "source_git_commit": COMMIT_A,
                 "source_repo": "ai-native-deployment",

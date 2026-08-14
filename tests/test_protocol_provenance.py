@@ -70,17 +70,26 @@ def write_lock(
     payload: object = PAYLOAD,
     source_repo: object = "ai-native-deployment",
     schema_version: object = 1,
+    targets: object | None = None,
 ) -> None:
-    """Write a deployment lock shaped like the real ``aii-2`` output."""
+    """Write a deployment lock shaped like the real ``aii-2`` output.
+
+    ``deployed_files`` names the whole payload, as the real lock does (117 entries
+    against the manifest's 117): it is the lock that says which files the identity
+    covers, so a fixture listing fewer would quietly exercise a subset comparison.
+    ``targets`` overrides that list for the cases that need the two receipts to
+    disagree.
+    """
     body = {
         "canonical_payload_sha256": payload,
         "deployed_files": [
             {
-                "canonical_relative_path": "canonical/protocols/conduct.md",
+                "canonical_relative_path": f"canonical/{relative}",
                 "canonical_sha256": "0" * 64,
                 "canonical_size_bytes": 2176,
-                "target_relative_path": CONDUCT,
+                "target_relative_path": relative,
             }
+            for relative in (sorted(DEPLOYED) if targets is None else targets)
         ],
         "schema_version": schema_version,
         "source_git_commit": commit,
@@ -249,7 +258,7 @@ def test_read_deploy_lock_survives_an_unreadable_path(tmp_path: Path) -> None:
 
 def test_verify_payload_matches_a_clean_deployment(tmp_path: Path) -> None:
     repo_path = make_repo(tmp_path)
-    deploy_payload(repo_path)
+    deploy(repo_path)
 
     check = verify_payload(repo_path, COMMIT)
 
@@ -262,7 +271,7 @@ def test_verify_payload_catches_an_edited_deployed_file(tmp_path: Path) -> None:
     # The case a lock comparison cannot see: both receipts are untouched, and the
     # protocol text the sessions read is not the one the identity names.
     repo_path = make_repo(tmp_path)
-    deploy_payload(repo_path)
+    deploy(repo_path)
     (repo_path / CONDUCT).write_text("# Conduct\n\nDo whatever.\n", encoding="utf-8")
 
     check = verify_payload(repo_path, COMMIT)
@@ -276,7 +285,7 @@ def test_verify_payload_catches_a_same_size_edit(tmp_path: Path) -> None:
     # Size is only the cheap half of the comparison; equal length must still be
     # hashed, or an in-place character swap would pass.
     repo_path = make_repo(tmp_path)
-    deploy_payload(repo_path)
+    deploy(repo_path)
     original = (repo_path / CONDUCT).read_text(encoding="utf-8")
     (repo_path / CONDUCT).write_text(original.replace("actual", "ACTUAL"), "utf-8")
 
@@ -288,7 +297,7 @@ def test_verify_payload_catches_a_same_size_edit(tmp_path: Path) -> None:
 
 def test_verify_payload_catches_a_missing_deployed_file(tmp_path: Path) -> None:
     repo_path = make_repo(tmp_path)
-    deploy_payload(repo_path)
+    deploy(repo_path)
     (repo_path / RUNBOOK).unlink()
 
     check = verify_payload(repo_path, COMMIT)
@@ -303,7 +312,7 @@ def test_verify_payload_refuses_to_follow_a_linked_deployed_file(
     # A deploy writes regular files. A link where one belongs is drift in its own
     # right, and following it would hash bytes from outside the payload.
     repo_path = make_repo(tmp_path)
-    deploy_payload(repo_path)
+    deploy(repo_path)
     elsewhere = tmp_path / "elsewhere.md"
     elsewhere.write_text(DEPLOYED[CONDUCT], encoding="utf-8")
     (repo_path / CONDUCT).unlink()
@@ -321,6 +330,7 @@ def test_verify_payload_refuses_a_manifest_from_another_deploy(
     # Without the shared commit the two receipts describe different deployments,
     # and hashing against the wrong one would answer a question nobody asked.
     repo_path = make_repo(tmp_path)
+    write_lock(repo_path)
     deploy_payload(repo_path, commit=OTHER_COMMIT)
 
     check = verify_payload(repo_path, COMMIT)
@@ -332,7 +342,7 @@ def test_verify_payload_refuses_a_manifest_from_another_deploy(
 
 def test_verify_payload_without_a_manifest_is_unverifiable(tmp_path: Path) -> None:
     repo_path = make_repo(tmp_path)
-    deploy_payload(repo_path)
+    deploy(repo_path)
     (repo_path / DEPLOY_MANIFEST_NAME).unlink()
 
     check = verify_payload(repo_path, COMMIT)
@@ -365,6 +375,9 @@ def test_verify_payload_refuses_a_damaged_receipt(tmp_path: Path) -> None:
     }
     for name, files in cases.items():
         repo_path = make_repo(tmp_path, name)
+        # The lock names exactly the one file these manifests are about, so each
+        # case fails on its own damage rather than on a set disagreement.
+        write_lock(repo_path, targets=[CONDUCT])
         deploy_payload(repo_path, manifest_files=files)
 
         check = verify_payload(repo_path, COMMIT)
@@ -386,12 +399,139 @@ def test_verify_payload_refuses_a_receipt_past_the_file_cap(tmp_path: Path) -> N
         }
         for index in range(PAYLOAD_MAX_FILES + 1)
     }
+    write_lock(repo_path)
     deploy_payload(repo_path, manifest_files=oversized)
 
     check = verify_payload(repo_path, COMMIT)
 
     assert check.state == PAYLOAD_UNVERIFIABLE
     assert str(PAYLOAD_MAX_FILES) in (check.detail or "")
+
+
+def test_verify_payload_refuses_a_lock_past_the_file_cap(tmp_path: Path) -> None:
+    # The same bound on the other receipt: the lock is where the payload's file
+    # set comes from, so an unbounded list there would be walked before the
+    # manifest's cap ever applied.
+    repo_path = make_repo(tmp_path)
+    deploy(repo_path)
+    write_lock(repo_path, targets=[f"file-{index}.md" for index in range(600)])
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert DEPLOY_LOCK_NAME in (check.detail or "")
+    assert str(PAYLOAD_MAX_FILES) in (check.detail or "")
+
+
+# -- the receipts have to agree on what the payload is -------------------------
+#
+# The lock states the payload's file set and the manifest vouches for each file's
+# bytes. Comparing the tree against the manifest's rows alone verifies whatever
+# subset the manifest happens to list, so a row it drops is a file nobody checks
+# — and the identity would still be published as if it had been.
+
+
+def test_verify_payload_refuses_a_manifest_missing_a_deployed_file(
+    tmp_path: Path,
+) -> None:
+    repo_path = make_repo(tmp_path)
+    deploy(repo_path)
+    # The receipt for the edited file is gone, so every row that remains hashes
+    # cleanly. Only the lock still says that file is part of the payload.
+    deploy_payload(repo_path, files={CONDUCT: DEPLOYED[CONDUCT]})
+    (repo_path / RUNBOOK).write_text("# Runbook\n\nSkip the review.\n", "utf-8")
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert check.files is None  # nothing was compared: the set was never settled
+    assert RUNBOOK in (check.detail or "")
+
+
+def test_verify_payload_refuses_a_manifest_that_records_one_target_twice(
+    tmp_path: Path,
+) -> None:
+    # Two rows redirected to one target hash that file twice and leave the other
+    # unchecked, while the row count still matches the lock's.
+    repo_path = make_repo(tmp_path)
+    deploy(repo_path)
+    duplicated = {
+        key: {
+            "sha256": hashlib.sha256(DEPLOYED[CONDUCT].encode()).hexdigest(),
+            "size_bytes": len(DEPLOYED[CONDUCT].encode()),
+            "target_relative_path": CONDUCT,
+        }
+        for key in DEPLOYED
+    }
+    deploy_payload(repo_path, manifest_files=duplicated)
+    (repo_path / RUNBOOK).write_text("# Runbook\n\nSkip the review.\n", "utf-8")
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert check.files is None
+    assert "more than once" in (check.detail or "")
+
+
+def test_verify_payload_refuses_a_manifest_row_the_lock_does_not_name(
+    tmp_path: Path,
+) -> None:
+    # The disagreement runs both ways: a manifest vouching for files the payload
+    # does not contain describes some other deploy's tree, however cleanly its
+    # rows hash.
+    repo_path = make_repo(tmp_path)
+    deploy(repo_path)
+    write_lock(repo_path, targets=[CONDUCT])
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert RUNBOOK in (check.detail or "")
+
+
+def test_verify_payload_refuses_a_lock_that_states_no_file_set(
+    tmp_path: Path,
+) -> None:
+    # Without the lock's list the hub knows only what the manifest chose to list,
+    # and "every row matched" would be a claim about the manifest.
+    cases = {
+        "no_deployed_files": None,
+        "empty_deployed_files": [],
+        "unusable_record": [{"canonical_sha256": "0" * 64}],
+        "escaping_target": [{"target_relative_path": f"../{CONDUCT}"}],
+        "duplicate_target": [
+            {"target_relative_path": CONDUCT},
+            {"target_relative_path": CONDUCT},
+        ],
+    }
+    for name, deployed_files in cases.items():
+        repo_path = make_repo(tmp_path, name)
+        deploy(repo_path)
+        lock = json.loads((repo_path / DEPLOY_LOCK_NAME).read_text(encoding="utf-8"))
+        if deployed_files is None:
+            lock.pop("deployed_files")
+        else:
+            lock["deployed_files"] = deployed_files
+        (repo_path / DEPLOY_LOCK_NAME).write_text(json.dumps(lock), encoding="utf-8")
+
+        check = verify_payload(repo_path, COMMIT)
+
+        assert check.state == PAYLOAD_UNVERIFIABLE, name
+        assert check.files is None, name
+        assert DEPLOY_LOCK_NAME in (check.detail or ""), name
+
+
+def test_verify_payload_refuses_a_lock_from_another_deploy(tmp_path: Path) -> None:
+    # The join is against the *captured* identity, and the lock is half of it: a
+    # payload set taken from a deploy the run never used says nothing about it.
+    repo_path = make_repo(tmp_path)
+    deploy(repo_path)
+    write_lock(repo_path, commit=OTHER_COMMIT)
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert DEPLOY_LOCK_NAME in (check.detail or "")
 
 
 # -- launch capture -----------------------------------------------------------
@@ -511,6 +651,29 @@ def test_settle_cannot_verify_a_payload_it_cannot_read(tmp_path: Path) -> None:
     assert settled.stability == STABILITY_UNVERIFIED
     assert "could not be verified" in (settled.detail or "")
     assert settled.source_git_commit == COMMIT
+    assert settled.verified_identity is None
+
+
+def test_settle_publishes_nothing_when_a_receipt_omits_an_edited_file(
+    tmp_path: Path,
+) -> None:
+    # The end-to-end consequence of the two receipts having to agree: an edited
+    # deployed file whose manifest row is gone would otherwise leave every
+    # remaining row hashing cleanly, and the run would publish its whole identity
+    # on a comparison that never looked at the edited file.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+    deploy_payload(repo_path, files={CONDUCT: DEPLOYED[CONDUCT]})
+    (repo_path / RUNBOOK).write_text("# Runbook\n\nSkip the review.\n", "utf-8")
+
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    assert settled is not None
+    assert settled.stability == STABILITY_UNVERIFIED
+    assert settled.payload_files is None
+    assert "could not be verified" in (settled.detail or "")
     assert settled.verified_identity is None
 
 
@@ -733,6 +896,14 @@ def test_read_protocol_fails_closed_on_inconsistent_artifacts(tmp_path: Path) ->
         # this schema a stable verdict always names how many files it compared.
         "verdict_without_a_payload_count": json.dumps(
             {k: v for k, v in stable.items() if k != "payload_files"}
+        ),
+        # A count the producer could never have written is a rewritten artifact,
+        # not a smaller verification: the check refuses an empty receipt and one
+        # past its cap, so neither end of this range is reachable.
+        "verdict_over_no_files": json.dumps({**stable, "payload_files": 0}),
+        "verdict_over_negative_files": json.dumps({**stable, "payload_files": -3}),
+        "verdict_past_the_file_cap": json.dumps(
+            {**stable, "payload_files": PAYLOAD_MAX_FILES + 1}
         ),
     }
     for name, body in cases.items():
