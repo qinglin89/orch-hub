@@ -9,6 +9,7 @@ parser over fake ``.ai-tasks`` files so both sides stay in lockstep.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import itertools
 import json
 import os
@@ -36,7 +37,9 @@ from orch_hub.models import (
 from orch_hub.orch_config import read_effective_config_snapshot
 from orch_hub.protocol_provenance import (
     DEPLOY_LOCK_NAME,
+    DEPLOY_MANIFEST_NAME,
     STABILITY_CHANGED,
+    STABILITY_DRIFTED,
     STABILITY_STABLE,
     STABILITY_UNVERIFIED,
     read_protocol,
@@ -2166,7 +2169,18 @@ OTHER_COMMIT = "aa11bb22cc33dd44ee55ff6677889900aabbccdd"
 PAYLOAD = "533a87d311bd99d9ae9ba25f1385a3c22396b4e704a8b75a2ad9b9b36614f450"
 
 
-def write_deploy_lock(repo: ManagedRepo, *, commit: str = COMMIT) -> None:
+DEPLOYED_FILE = ".ai-protocol/protocols/conduct.md"
+
+
+def write_deploy_lock(
+    repo: ManagedRepo, *, commit: str = COMMIT, body: bytes = b"# Conduct\n"
+) -> None:
+    """Deploy a protocol into the fake repo: both receipts and the file they name.
+
+    One helper because a real deploy writes them together — the lock names the
+    identity, the manifest vouches for the bytes, and the end check needs both.
+    Re-calling it with another commit is a redeployment.
+    """
     (repo.path / DEPLOY_LOCK_NAME).write_text(
         json.dumps(
             {
@@ -2174,6 +2188,25 @@ def write_deploy_lock(repo: ManagedRepo, *, commit: str = COMMIT) -> None:
                 "schema_version": 1,
                 "source_git_commit": commit,
                 "source_repo": "ai-native-deployment",
+            }
+        ),
+        encoding="utf-8",
+    )
+    deployed = repo.path / DEPLOYED_FILE
+    deployed.parent.mkdir(parents=True, exist_ok=True)
+    deployed.write_bytes(body)
+    (repo.path / DEPLOY_MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "files": {
+                    DEPLOYED_FILE: {
+                        "sha256": hashlib.sha256(body).hexdigest(),
+                        "size_bytes": len(body),
+                        "target_relative_path": DEPLOYED_FILE,
+                    }
+                },
+                "schema_version": 1,
+                "source_git_commit": commit,
             }
         ),
         encoding="utf-8",
@@ -2266,6 +2299,26 @@ def test_a_redeploy_during_the_run_degrades_the_capture(tmp_path):
     snapshot = read_protocol(manager.runs_dir / record.run_id)
     assert snapshot is not None
     assert snapshot.stability == STABILITY_CHANGED
+    assert snapshot.source_git_commit == COMMIT  # still auditable
+    assert snapshot.verified_revision is None  # but not publishable
+
+
+def test_an_edited_protocol_file_degrades_the_capture(tmp_path):
+    # The receipts never move — no deploy ran — but the run's later sessions read
+    # protocol text the captured identity does not name, so it publishes nothing.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    (repo.path / DEPLOYED_FILE).write_bytes(b"# Conduct\n\nedited mid-run\n")
+
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    snapshot = read_protocol(manager.runs_dir / record.run_id)
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_DRIFTED
+    assert DEPLOYED_FILE in (snapshot.detail or "")
     assert snapshot.source_git_commit == COMMIT  # still auditable
     assert snapshot.verified_revision is None  # but not publishable
 

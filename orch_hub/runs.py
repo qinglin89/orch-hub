@@ -10,7 +10,7 @@ subprocess side of the orchestrator contract
         run.json      hub-owned run record (atomic rewrite on updates)
         control/      the --control-dir file channel, fresh per run
         spawn.out     subprocess stdout+stderr (startup-failure diagnosis)
-        protocol.json the deployed protocol revision, captured before the spawn
+        protocol.json the deployed protocol identity, captured before the spawn
 
 Run dirs live outside every target repo working tree (an in-repo dir would
 dirty the tree and fail the orchestrator's post-checks), and each run gets a
@@ -97,7 +97,11 @@ from .orch_config import (
     read_effective_config_snapshot,
     write_effective_config_snapshot,
 )
-from .protocol_provenance import capture_protocol, settle_protocol
+from .protocol_provenance import (
+    STABILITY_DRIFTED,
+    capture_protocol,
+    settle_protocol,
+)
 from .readiness import check_readiness
 from .sessions import read_live, read_snapshot, write_snapshot
 from .task_snapshots import capture_entries, settle_snapshots
@@ -999,8 +1003,8 @@ class RunManager:
         # keyed by a bracket whose sid the log revealed only at its end line.
         self._settle_task_snapshots(run_dir, updated)
         # And the last point the deployed protocol can still be compared against
-        # what this run captured at launch — a redeployment from here on is after
-        # the run, not during it.
+        # what this run captured at launch — a redeployment or an edit from here
+        # on is after the run, not during it.
         self._settle_protocol(run_dir, updated)
         # Snapshot the run's authoritative effective-config line the same way, so
         # run history retains what actually launched even after the repo-side log
@@ -1152,10 +1156,19 @@ class RunManager:
             )
 
     def _settle_protocol(self, run_dir: Path, record: RunRecord) -> None:
-        """Record the end-of-run deployment-lock comparison for this run.
+        """Record the end-of-run deployment check for this run.
+
+        Two comparisons behind one call (:func:`settle_protocol`): the deployment
+        lock against this run's capture, and — when it still names the captured
+        identity — the deployed files against the manifest that vouches for them.
+        The second is what an identity is published on; the launch side of that
+        boundary is the readiness gate, which already refused any repo whose files
+        had drifted from their receipt. Its cost is bounded at the producer
+        (~120 files, ~500KB for the current payload), which is why it runs inline
+        here rather than off the transition.
 
         Isolated exactly like :meth:`_snapshot_sessions`: the capture is already
-        durable, so a failed comparison costs this run's publishable revision but
+        durable, so a failed comparison costs this run's publishable identity but
         never run state. The run keeps an unconfirmed capture, which is what an
         uncompared end honestly is — this transition fires once, so nothing
         retries it. A record with no repo attribution (a stub) has nothing to
@@ -1170,12 +1183,23 @@ class RunManager:
         if record.repo_path is None:
             return
         try:
-            settle_protocol(
+            settled = settle_protocol(
                 run_dir,
                 record.repo_path,
                 now=self._clock(),
                 end_observed=record.exit_code is not None,
             )
+            if settled is not None and settled.stability == STABILITY_DRIFTED:
+                # The one verdict worth an operator's attention as it happens: a
+                # deployed protocol copy was edited under the run, which the
+                # protocol forbids and no receipt records. 'unverified' is not
+                # logged beside it — an unobserved end is ordinary, and a line
+                # per such run would bury this one.
+                _log.warning(
+                    "deployed protocol drifted during run %s: %s",
+                    record.run_id,
+                    settled.detail,
+                )
         except Exception:
             _log.warning(
                 "protocol provenance settle failed for run %s", record.run_id

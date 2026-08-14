@@ -1,8 +1,12 @@
 """Tests for per-run protocol provenance capture and its end-of-run check.
 
 Everything runs against fake repos and run dirs in ``tmp_path``: the module reads
-one file from a repo and writes one artifact into a run dir, so no registry, no
-subprocess, and no orchestrator is involved.
+two receipts plus the files they describe from a repo and writes one artifact into
+a run dir, so no registry, no subprocess, and no orchestrator is involved.
+
+The deployed payload is written for real — files on disk, hashed into the manifest
+that vouches for them — so a test drifts a deployment the way an operator does, by
+editing a file, and never by editing a digest into disagreement.
 
 The last two sections cover the cross-run aggregate a *report* is published
 under — unanimity over the per-run predicate, both of its failure modes, and the
@@ -12,18 +16,28 @@ fail-closed read of a persisted aggregate the report catalog holds as JSON.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 
 from orch_hub.protocol_provenance import (
     ARTIFACT_NAME,
     DEPLOY_LOCK_NAME,
+    DEPLOY_MANIFEST_NAME,
+    LEGACY_VERDICT_DETAIL,
     LOCK_MAX_BYTES,
     MAX_LISTED_REVISIONS,
+    PAYLOAD_MATCHED,
+    PAYLOAD_MAX_FILE_BYTES,
+    PAYLOAD_MAX_FILES,
+    PAYLOAD_MISMATCHED,
+    PAYLOAD_UNVERIFIABLE,
     PROTOCOL_SCHEMA_VERSION,
     STABILITY_CHANGED,
+    STABILITY_DRIFTED,
     STABILITY_STABLE,
     STABILITY_UNVERIFIED,
+    ProtocolIdentity,
     ProtocolSnapshot,
     artifact_path,
     capture_protocol,
@@ -32,6 +46,7 @@ from orch_hub.protocol_provenance import (
     read_deploy_lock,
     read_protocol,
     settle_protocol,
+    verify_payload,
     write_protocol,
 )
 
@@ -42,6 +57,10 @@ COMMIT = "6b62754694c289fc8822562cec22ab774e071b2c"
 OTHER_COMMIT = "aa11bb22cc33dd44ee55ff6677889900aabbccdd"
 PAYLOAD = "533a87d311bd99d9ae9ba25f1385a3c22396b4e704a8b75a2ad9b9b36614f450"
 OTHER_PAYLOAD = "1" * 64
+
+CONDUCT = ".ai-protocol/protocols/conduct.md"
+RUNBOOK = ".ai-protocol/workflow/runbook.md"
+DEPLOYED = {CONDUCT: "# Conduct\n\nReason from actual code.\n", RUNBOOK: "# Runbook\n"}
 
 
 def write_lock(
@@ -60,7 +79,7 @@ def write_lock(
                 "canonical_relative_path": "canonical/protocols/conduct.md",
                 "canonical_sha256": "0" * 64,
                 "canonical_size_bytes": 2176,
-                "target_relative_path": ".ai-protocol/protocols/conduct.md",
+                "target_relative_path": CONDUCT,
             }
         ],
         "schema_version": schema_version,
@@ -70,6 +89,51 @@ def write_lock(
     (repo_path / DEPLOY_LOCK_NAME).write_text(
         json.dumps(body, indent=1), encoding="utf-8"
     )
+
+
+def deploy_payload(
+    repo_path: Path,
+    *,
+    files: dict[str, str] | None = None,
+    commit: object = COMMIT,
+    manifest_files: object | None = None,
+) -> None:
+    """Write the deployed files plus the manifest that vouches for their bytes.
+
+    The other half of a real deploy: the lock names the payload, the manifest
+    records what landed. Digests are taken from the bytes actually written, so a
+    test that wants drift edits a file afterwards.
+    """
+    records = {}
+    for relative, text in (DEPLOYED if files is None else files).items():
+        target = repo_path / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        data = text.encode("utf-8")
+        target.write_bytes(data)
+        records[relative] = {
+            "canonical_relative_path": f"canonical/{relative}",
+            "mode": 420,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "size_bytes": len(data),
+            "target_relative_path": relative,
+        }
+    body = {
+        "deployed_at": "2026-08-13T08:00:00+00:00",
+        "files": records if manifest_files is None else manifest_files,
+        "schema_version": 1,
+        "source_git_commit": commit,
+        "source_repo_path": "/src/ai-native-development",
+        "target_repo_path": str(repo_path),
+    }
+    (repo_path / DEPLOY_MANIFEST_NAME).write_text(
+        json.dumps(body, indent=1), encoding="utf-8"
+    )
+
+
+def deploy(repo_path: Path, *, commit: str = COMMIT, payload: str = PAYLOAD) -> None:
+    """One coherent deployment: lock, manifest, and the files both describe."""
+    write_lock(repo_path, commit=commit, payload=payload)
+    deploy_payload(repo_path, commit=commit)
 
 
 def make_repo(tmp_path: Path, name: str = "repo") -> Path:
@@ -177,6 +241,159 @@ def test_read_deploy_lock_survives_an_unreadable_path(tmp_path: Path) -> None:
     assert snapshot.detail
 
 
+# -- comparing the deployed files against their receipt ------------------------
+#
+# The check that makes an identity worth publishing: a lock names a payload, and
+# only this says the tree still holds it.
+
+
+def test_verify_payload_matches_a_clean_deployment(tmp_path: Path) -> None:
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path)
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_MATCHED
+    assert check.files == len(DEPLOYED)  # the whole payload, not a sample
+    assert check.detail is None
+
+
+def test_verify_payload_catches_an_edited_deployed_file(tmp_path: Path) -> None:
+    # The case a lock comparison cannot see: both receipts are untouched, and the
+    # protocol text the sessions read is not the one the identity names.
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path)
+    (repo_path / CONDUCT).write_text("# Conduct\n\nDo whatever.\n", encoding="utf-8")
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_MISMATCHED
+    assert check.files == len(DEPLOYED)
+    assert CONDUCT in (check.detail or "")
+
+
+def test_verify_payload_catches_a_same_size_edit(tmp_path: Path) -> None:
+    # Size is only the cheap half of the comparison; equal length must still be
+    # hashed, or an in-place character swap would pass.
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path)
+    original = (repo_path / CONDUCT).read_text(encoding="utf-8")
+    (repo_path / CONDUCT).write_text(original.replace("actual", "ACTUAL"), "utf-8")
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_MISMATCHED
+    assert "content differs" in (check.detail or "")
+
+
+def test_verify_payload_catches_a_missing_deployed_file(tmp_path: Path) -> None:
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path)
+    (repo_path / RUNBOOK).unlink()
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_MISMATCHED
+    assert RUNBOOK in (check.detail or "")
+
+
+def test_verify_payload_refuses_to_follow_a_linked_deployed_file(
+    tmp_path: Path,
+) -> None:
+    # A deploy writes regular files. A link where one belongs is drift in its own
+    # right, and following it would hash bytes from outside the payload.
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path)
+    elsewhere = tmp_path / "elsewhere.md"
+    elsewhere.write_text(DEPLOYED[CONDUCT], encoding="utf-8")
+    (repo_path / CONDUCT).unlink()
+    (repo_path / CONDUCT).symlink_to(elsewhere)
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_MISMATCHED
+    assert "not a regular file" in (check.detail or "")
+
+
+def test_verify_payload_refuses_a_manifest_from_another_deploy(
+    tmp_path: Path,
+) -> None:
+    # Without the shared commit the two receipts describe different deployments,
+    # and hashing against the wrong one would answer a question nobody asked.
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path, commit=OTHER_COMMIT)
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert check.files is None
+    assert DEPLOY_MANIFEST_NAME in (check.detail or "")
+
+
+def test_verify_payload_without_a_manifest_is_unverifiable(tmp_path: Path) -> None:
+    repo_path = make_repo(tmp_path)
+    deploy_payload(repo_path)
+    (repo_path / DEPLOY_MANIFEST_NAME).unlink()
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert DEPLOY_MANIFEST_NAME in (check.detail or "")
+
+
+def test_verify_payload_refuses_a_damaged_receipt(tmp_path: Path) -> None:
+    # Not knowing is not the same as knowing the payload is wrong: a receipt this
+    # check cannot read makes the whole comparison unverifiable rather than
+    # partial, since the records it *could* read say nothing about the rest.
+    good = {
+        "canonical_relative_path": f"canonical/{CONDUCT}",
+        "sha256": hashlib.sha256(DEPLOYED[CONDUCT].encode()).hexdigest(),
+        "size_bytes": len(DEPLOYED[CONDUCT].encode()),
+        "target_relative_path": CONDUCT,
+    }
+    cases = {
+        "not_an_object": {CONDUCT: "just a hash"},
+        "escaping_path": {CONDUCT: {**good, "target_relative_path": "../outside.md"}},
+        "absolute_path": {CONDUCT: {**good, "target_relative_path": "/etc/passwd"}},
+        "no_digest": {CONDUCT: {**good, "sha256": "nope"}},
+        "no_size": {CONDUCT: {k: v for k, v in good.items() if k != "size_bytes"}},
+        "oversize_record": {
+            CONDUCT: {**good, "size_bytes": PAYLOAD_MAX_FILE_BYTES + 1}
+        },
+        "empty": {},
+        "not_a_mapping": [good],
+    }
+    for name, files in cases.items():
+        repo_path = make_repo(tmp_path, name)
+        deploy_payload(repo_path, manifest_files=files)
+
+        check = verify_payload(repo_path, COMMIT)
+
+        assert check.state == PAYLOAD_UNVERIFIABLE, name
+        assert check.files is None, name
+        assert check.detail, name
+
+
+def test_verify_payload_refuses_a_receipt_past_the_file_cap(tmp_path: Path) -> None:
+    # Refused, never sampled: a bound that quietly truncated would publish an
+    # identity backed by less than it claims.
+    repo_path = make_repo(tmp_path)
+    oversized = {
+        f"file-{index}.md": {
+            "sha256": "0" * 64,
+            "size_bytes": 1,
+            "target_relative_path": f"file-{index}.md",
+        }
+        for index in range(PAYLOAD_MAX_FILES + 1)
+    }
+    deploy_payload(repo_path, manifest_files=oversized)
+
+    check = verify_payload(repo_path, COMMIT)
+
+    assert check.state == PAYLOAD_UNVERIFIABLE
+    assert str(PAYLOAD_MAX_FILES) in (check.detail or "")
+
+
 # -- launch capture -----------------------------------------------------------
 
 
@@ -218,31 +435,31 @@ def test_capture_records_an_absent_lock_instead_of_raising(tmp_path: Path) -> No
 
 def test_a_live_capture_is_not_publishable_until_its_end_check(tmp_path: Path) -> None:
     # The capture attests to the run's first moment only. Until the end check
-    # confirms the deployment held, the run has a commit to audit and no commit
-    # to publish: the deployment could still be updated under its later sessions,
-    # and a report must not claim one revision for all of them.
+    # confirms the deployment held, the run has an identity to audit and none to
+    # publish: the deployment could still be updated under its later sessions,
+    # and a report must not claim one payload for all of them.
     repo_path = make_repo(tmp_path)
     run_dir = make_run_dir(tmp_path)
-    write_lock(repo_path)
+    deploy(repo_path)
 
     captured = capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
 
     assert captured.source_git_commit == COMMIT
-    assert captured.verified_revision is None
+    assert captured.verified_identity is None
 
     settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
 
     assert settled is not None
-    assert settled.verified_revision == COMMIT
+    assert settled.verified_identity == ProtocolIdentity(COMMIT, PAYLOAD)
 
 
 # -- end-of-run stability check ----------------------------------------------
 
 
-def test_settle_marks_an_unchanged_deployment_stable(tmp_path: Path) -> None:
+def test_settle_marks_an_intact_deployment_stable(tmp_path: Path) -> None:
     repo_path = make_repo(tmp_path)
     run_dir = make_run_dir(tmp_path)
-    write_lock(repo_path)
+    deploy(repo_path)
     capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
 
     settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
@@ -251,8 +468,70 @@ def test_settle_marks_an_unchanged_deployment_stable(tmp_path: Path) -> None:
     assert settled.stability == STABILITY_STABLE
     assert settled.checked_ts == ENDED_AT.isoformat()
     assert settled.detail is None
-    assert settled.verified_revision == COMMIT
+    # What the verdict rests on is recorded with it: the whole payload, compared.
+    assert settled.payload_files == len(DEPLOYED)
+    assert settled.verified_identity == ProtocolIdentity(COMMIT, PAYLOAD)
     assert read_protocol(run_dir) == settled
+
+
+def test_settle_marks_an_edited_payload_drifted(tmp_path: Path) -> None:
+    # The whole point of the check: the lock reads identically at both ends, and
+    # the run's later sessions still read protocol text no revision holds. An
+    # unchanged receipt is not a stable payload.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+    (repo_path / CONDUCT).write_text("# Conduct\n\nSkip the tests.\n", encoding="utf-8")
+
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    assert settled is not None
+    assert settled.stability == STABILITY_DRIFTED
+    assert CONDUCT in (settled.detail or "")
+    # Auditable, and unpublishable — the same split every unconfirmed end gets.
+    assert settled.source_git_commit == COMMIT
+    assert settled.canonical_payload_sha256 == PAYLOAD
+    assert settled.verified_identity is None
+    assert read_protocol(run_dir) == settled
+
+
+def test_settle_cannot_verify_a_payload_it_cannot_read(tmp_path: Path) -> None:
+    # Distinct from drift, and distinct in the artifact: the hub could not look,
+    # which is an absence of evidence rather than evidence of an edited payload.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+    (repo_path / DEPLOY_MANIFEST_NAME).unlink()
+
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    assert settled is not None
+    assert settled.stability == STABILITY_UNVERIFIED
+    assert "could not be verified" in (settled.detail or "")
+    assert settled.source_git_commit == COMMIT
+    assert settled.verified_identity is None
+
+
+def test_settle_does_not_check_the_payload_of_a_replaced_deployment(
+    tmp_path: Path,
+) -> None:
+    # A redeploy answers the question already: whatever the tree holds now belongs
+    # to another identity, so hashing it against this run's receipt would only
+    # restate the change under a name ('drifted') that means something else.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+    deploy(repo_path, commit=OTHER_COMMIT, payload=OTHER_PAYLOAD)
+
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    assert settled is not None
+    assert settled.stability == STABILITY_CHANGED
+    assert settled.payload_files is None
+    assert settled.verified_identity is None
 
 
 def test_settle_marks_a_mid_run_redeploy_changed(tmp_path: Path) -> None:
@@ -291,10 +570,10 @@ def test_settle_treats_a_payload_only_change_as_changed(tmp_path: Path) -> None:
     assert "source_git_commit" not in (settled.detail or "")
 
 
-def test_settle_ignores_non_revision_lock_fields(tmp_path: Path) -> None:
+def test_settle_ignores_non_identity_lock_fields(tmp_path: Path) -> None:
     repo_path = make_repo(tmp_path)
     run_dir = make_run_dir(tmp_path)
-    write_lock(repo_path)
+    deploy(repo_path)
     capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
     write_lock(repo_path, source_repo="renamed-source", schema_version=2)
 
@@ -416,37 +695,44 @@ def test_read_protocol_distinguishes_absent_from_unusable(tmp_path: Path) -> Non
 
 
 def test_read_protocol_fails_closed_on_inconsistent_artifacts(tmp_path: Path) -> None:
+    stable = {
+        "schema_version": PROTOCOL_SCHEMA_VERSION,
+        "available": True,
+        "source_git_commit": COMMIT,
+        "canonical_payload_sha256": PAYLOAD,
+        "stability": STABILITY_STABLE,
+        "checked_ts": ENDED_AT.isoformat(),
+        "payload_files": 2,
+    }
     cases = {
         "not_object": json.dumps([1, 2, 3]),
-        "unknown_stability": json.dumps(
-            {
-                "available": True,
-                "source_git_commit": COMMIT,
-                "canonical_payload_sha256": PAYLOAD,
-                "stability": "probably-fine",
-            }
+        "no_schema_version": json.dumps(
+            {k: v for k, v in stable.items() if k != "schema_version"}
         ),
-        "available_without_revision": json.dumps(
-            {"available": True, "stability": STABILITY_STABLE}
+        # A field this version reads may not mean here what it meant there.
+        "newer_schema": json.dumps(
+            {**stable, "schema_version": PROTOCOL_SCHEMA_VERSION + 1}
         ),
-        "available_with_malformed_revision": json.dumps(
-            {
-                "available": True,
-                "source_git_commit": "nope",
-                "canonical_payload_sha256": PAYLOAD,
-                "stability": STABILITY_STABLE,
-            }
+        "unknown_stability": json.dumps({**stable, "stability": "probably-fine"}),
+        "available_without_identity": json.dumps(
+            {k: v for k, v in stable.items() if k != "source_git_commit"}
+        ),
+        "available_with_malformed_identity": json.dumps(
+            {**stable, "source_git_commit": "nope"}
+        ),
+        # Half an identity is not one: the pair is verified and published whole.
+        "available_without_payload_hash": json.dumps(
+            {k: v for k, v in stable.items() if k != "canonical_payload_sha256"}
         ),
         # 'stable' is what grants publication, so a verdict recording no check
         # that could have reached it is refused rather than trusted.
         "verdict_without_a_check": json.dumps(
-            {
-                "available": True,
-                "source_git_commit": COMMIT,
-                "canonical_payload_sha256": PAYLOAD,
-                "stability": STABILITY_STABLE,
-                "captured_ts": CAPTURED_AT.isoformat(),
-            }
+            {k: v for k, v in stable.items() if k != "checked_ts"}
+        ),
+        # ... and one recording no payload comparison is the same defect: under
+        # this schema a stable verdict always names how many files it compared.
+        "verdict_without_a_payload_count": json.dumps(
+            {k: v for k, v in stable.items() if k != "payload_files"}
         ),
     }
     for name, body in cases.items():
@@ -457,8 +743,86 @@ def test_read_protocol_fails_closed_on_inconsistent_artifacts(tmp_path: Path) ->
 
         assert snapshot is not None, name
         assert snapshot.available is False, name
-        assert snapshot.verified_revision is None, name
+        assert snapshot.verified_identity is None, name
         assert snapshot.detail, name
+
+
+def test_a_pre_payload_check_verdict_reads_back_unverified(tmp_path: Path) -> None:
+    # Schema 1 reached 'stable' by comparing two lock reads, which this version
+    # does not accept as a verified payload. The artifact is never repaired or
+    # rewritten: it stays readable, and it publishes nothing.
+    run_dir = make_run_dir(tmp_path)
+    artifact_path(run_dir).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "available": True,
+                "source_git_commit": COMMIT,
+                "canonical_payload_sha256": PAYLOAD,
+                "captured_ts": CAPTURED_AT.isoformat(),
+                "stability": STABILITY_STABLE,
+                "checked_ts": ENDED_AT.isoformat(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = read_protocol(run_dir)
+
+    assert snapshot is not None
+    assert snapshot.available is True  # the capture itself is still good evidence
+    assert snapshot.source_git_commit == COMMIT
+    assert snapshot.stability == STABILITY_UNVERIFIED
+    assert snapshot.detail == LEGACY_VERDICT_DETAIL
+    assert snapshot.verified_identity is None
+    assert json.loads(artifact_path(run_dir).read_text())["stability"] == (
+        STABILITY_STABLE
+    )
+
+
+def test_a_legacy_contradicted_verdict_needs_no_demotion(tmp_path: Path) -> None:
+    # 'changed' published nothing under either schema, and saying it was never
+    # payload-checked would replace a fact with a caveat.
+    run_dir = make_run_dir(tmp_path)
+    artifact_path(run_dir).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "available": True,
+                "source_git_commit": COMMIT,
+                "canonical_payload_sha256": PAYLOAD,
+                "stability": STABILITY_CHANGED,
+                "checked_ts": ENDED_AT.isoformat(),
+                "detail": "deployed protocol changed during the run: ...",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = read_protocol(run_dir)
+
+    assert snapshot is not None
+    assert snapshot.stability == STABILITY_CHANGED
+    assert snapshot.detail == "deployed protocol changed during the run: ..."
+    assert snapshot.verified_identity is None
+
+
+# -- what a verified run publishes --------------------------------------------
+
+
+def test_verified_identity_is_the_whole_pair_or_nothing(tmp_path: Path) -> None:
+    verified = snap()
+
+    assert verified.verified_identity == ProtocolIdentity(COMMIT, PAYLOAD)
+    # The revision is derived from the pair, never verified on its own.
+    assert verified.verified_revision == COMMIT
+    for stability in (STABILITY_CHANGED, STABILITY_DRIFTED, STABILITY_UNVERIFIED):
+        withheld = snap(stability=stability)
+        assert withheld.verified_identity is None, stability
+        assert withheld.verified_revision is None, stability
+        # ... while both halves stay readable for audit.
+        assert withheld.source_git_commit == COMMIT, stability
+        assert withheld.canonical_payload_sha256 == PAYLOAD, stability
 
 
 def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
@@ -470,9 +834,10 @@ def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
         source_repo="ai-native-deployment",
         lock_schema_version=1,
         captured_ts=CAPTURED_AT.isoformat(),
-        stability=STABILITY_CHANGED,
+        stability=STABILITY_DRIFTED,
         checked_ts=ENDED_AT.isoformat(),
-        detail="deployed protocol changed during the run: ...",
+        payload_files=117,
+        detail="deployed files no longer match ...",
     )
 
     write_protocol(run_dir, snapshot)

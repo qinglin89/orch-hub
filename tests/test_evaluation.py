@@ -11,6 +11,7 @@ manager or subprocess is ever involved.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import json
 from pathlib import Path
 
@@ -44,6 +45,7 @@ from orch_hub.models import ManagedRepo, RunRecord, StoredEvaluation
 from orch_hub.protocol_provenance import ARTIFACT_NAME as PROTOCOL_ARTIFACT
 from orch_hub.protocol_provenance import (
     DEPLOY_LOCK_NAME,
+    DEPLOY_MANIFEST_NAME,
     PROTOCOL_SCHEMA_VERSION,
     STABILITY_STABLE,
     STABILITY_UNVERIFIED,
@@ -1721,6 +1723,9 @@ def protocol_artifact(
         "checked_ts": (
             None if stability == STABILITY_UNVERIFIED else "2026-07-22T09:30:00+00:00"
         ),
+        # A stable verdict names the payload comparison behind it; a run that
+        # published nothing has none to name.
+        "payload_files": 117 if stability == STABILITY_STABLE else None,
         "detail": detail,
     }
 
@@ -1832,9 +1837,10 @@ def test_a_pack_with_no_runs_has_no_effective_revision(tmp_path):
 
 def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
     # The other cases hand-write the artifact, which cannot catch the two modules
-    # disagreeing about its shape. This one drives the real producer — a
-    # deployment lock, a launch capture, an end check — and reads the result back
-    # through the pack, so the run-dir contract is asserted end to end.
+    # disagreeing about its shape. This one drives the real producer — a deployed
+    # payload with both its receipts, a launch capture, an end check that hashes
+    # the files — and reads the result back through the pack, so the run-dir
+    # contract is asserted end to end.
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)
     write_active_task(repo, TASK, "# Active goal")
@@ -1845,6 +1851,25 @@ def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
                 "schema_version": 1,
                 "source_git_commit": COMMIT_A,
                 "source_repo": "ai-native-deployment",
+            }
+        ),
+        encoding="utf-8",
+    )
+    deployed = repo.path / ".ai-protocol" / "protocols" / "conduct.md"
+    deployed.parent.mkdir(parents=True, exist_ok=True)
+    deployed.write_bytes(b"# Conduct\n")
+    (repo.path / DEPLOY_MANIFEST_NAME).write_text(
+        json.dumps(
+            {
+                "files": {
+                    ".ai-protocol/protocols/conduct.md": {
+                        "sha256": hashlib.sha256(b"# Conduct\n").hexdigest(),
+                        "size_bytes": len(b"# Conduct\n"),
+                        "target_relative_path": ".ai-protocol/protocols/conduct.md",
+                    }
+                },
+                "schema_version": 1,
+                "source_git_commit": COMMIT_A,
             }
         ),
         encoding="utf-8",

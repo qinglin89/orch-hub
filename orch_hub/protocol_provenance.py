@@ -1,22 +1,67 @@
-"""Per-run protocol provenance: the deployed protocol revision a run ran under.
+"""Per-run protocol provenance: the deployed protocol identity a run ran under.
 
 ``aii-2`` deploys the canonical protocol payload from ai-native-development into
-each managed repo and writes ``<repo>/.ai-deploy-lock.json`` describing what it
-put there. Two of that file's fields identify the payload exactly:
-``source_git_commit`` (the ai-native-development commit it came from) and
-``canonical_payload_sha256`` (the aggregate hash of the deployed bytes). Both are
-branch-independent — a branch name moves, and two repos on the same branch can
-hold different payloads — which is what makes the commit usable as the cohort key
-a downstream consumer groups evaluation reports by.
+each managed repo and writes two receipts at its root. ``.ai-deploy-lock.json``
+names the payload: ``source_git_commit`` (the ai-native-development commit whose
+canonical tree those bytes correspond to) and ``canonical_payload_sha256`` (a
+digest over the payload's file list). Both are branch-independent — a branch name
+moves, and two repos on the same branch can hold different payloads — which is
+what makes the commit usable as the cohort key a downstream consumer groups
+evaluation reports by. ``.ai-deploy-manifest.json`` lists what actually landed:
+one record per deployed file, with the digest of the bytes written to the target.
 
-The file is **live target state**, and that is the whole problem this module
+The two lock fields travel together as one :class:`ProtocolIdentity` and are
+published only together. Neither is derivable from the other — the commit names a
+source tree, the digest names the file set taken from it — so publishing one
+alone would let a consumer cohort by a revision whose payload the hub never
+confirmed, which is the same false membership a mixed run set produces.
+
+The lock is **live target state**, and that is the first problem this module
 exists to solve: by the time a task is evaluated, the repo has usually been
 redeployed, so reading the lock at evaluation time would attribute today's
-revision to a run that used another one. The hub therefore stamps the lock into
+identity to a run that used another one. The hub therefore stamps the lock into
 the hub-owned run dir at launch, before the orchestrator is spawned, and every
-downstream reader takes the revision from that durable artifact. Provenance is
+downstream reader takes the identity from that durable artifact. Provenance is
 never backfilled from the tree's current lock — a run whose launch capture failed
-has *no* revision, not the one deployed later.
+has *no* identity, not the one deployed later.
+
+A receipt is not the tree, and that is the second problem. The lock says what a
+deploy put there; nothing in it says the files are still what it put. Hand-editing
+a deployed protocol file — which the protocol itself forbids, and which is
+therefore exactly the case worth catching — leaves both receipts untouched, so a
+pre/post lock comparison sees a deployment that never moved while the run's later
+sessions read text no revision holds. An identity is only worth as much as a
+comparison against the *actual* deployed files at a boundary the hub can trust.
+
+There are two such boundaries, checked by different mechanisms:
+
+- **Launch** — the readiness gate. ``aii-2 status`` compares every deployed file
+  against the manifest (and the manifest against the current canonical tree) and
+  exits nonzero on any drift, so a run exists at all only because its repo's
+  files matched their receipt immediately before the capture
+  (:meth:`orch_hub.runs.RunManager.start_run` gates on the whole report). Nothing
+  is re-validated at capture: a second, weaker copy of a check that already
+  blocked the launch would add only a way for the two to disagree.
+- **End** — :func:`verify_payload`, the hub's own bounded receipt-to-target
+  comparison, run at the live->ended transition of a run whose end the hub
+  observed itself.
+
+Between them nothing is watched. A file edited after the launch gate and restored
+before the end check passes both, and this module claims nothing about that: a
+``stable`` verdict states exactly what was observed — the deployed files matched
+their receipt at the two boundaries, and the receipt named one identity
+throughout — which is the strongest claim two point observations support.
+
+The end check reads the *manifest*, not the lock, because only the manifest
+vouches for the deployed bytes: the lock hashes each file's canonical source, and
+``aii-2`` renders a few of them into their target (this repo's ``CLAUDE.md``
+among them), so a target-versus-lock comparison would report drift on every
+deploy. The two receipts are joined by their shared ``source_git_commit``; a
+manifest naming a different one describes a different deploy and is refused
+rather than used. The lock's aggregate digest is deliberately *not* recomputed
+from its own file list: that formula is ``aii-2``'s internal contract, and
+re-deriving it here would make the next lock-schema change read as a damaged
+deployment.
 
 The artifact (``protocol.json``, beside ``sessions.json``) is deliberately not a
 field of ``run.json``: the record's shape stays stable for readers that predate
@@ -24,22 +69,24 @@ this, and the end-of-run verdict below is written without rewriting the record.
 
 Two writes, ordered by the run's own state machine:
 
-- **Launch capture** (:func:`capture_protocol`) — validates and freezes the two
-  revision fields. Whatever it captured is immutable from then on.
+- **Launch capture** (:func:`capture_protocol`) — validates and freezes the
+  identity pair. Whatever it captured is immutable from then on.
 - **End check** (:func:`settle_protocol`) — re-reads the lock at the live->ended
-  transition and records only a *stability* verdict: the deployment can be
-  updated while a run is in flight, in which case the run's sessions did not all
-  use one protocol revision and the run must not be published as if they had.
-  It never establishes or replaces a captured revision, and it runs exactly once
-  — ``checked_ts`` marks that it ran, so a later re-check cannot mistake a
-  post-run redeployment for a mid-run one.
+  transition, then compares the deployed files against the manifest, and records
+  only a verdict: the deployment can be updated while a run is in flight, or its
+  files edited under it, in which case the run's sessions did not all use one
+  protocol payload and the run must not be published as if they had. It never
+  establishes or replaces a captured identity, and it runs exactly once —
+  ``checked_ts`` marks that it ran, so a later re-check cannot mistake a post-run
+  redeployment for a mid-run one.
 
 Publication is therefore narrow by construction: a run carries a publishable
-revision only once the end check has run *and* found the deployment unchanged
-(:meth:`ProtocolSnapshot.verified_revision`). A capture on its own attests to the
-run's first moment, not to what its later sessions loaded, so a run that is still
-live, whose lock had vanished by its end, or whose end the hub was not up to
-observe keeps its commit readable for audit and publishes nothing.
+identity only once the end check has run *and* found both the lock unchanged and
+the payload intact (:meth:`ProtocolSnapshot.verified_identity`). A capture on its
+own attests to the run's first moment, not to what its later sessions loaded, so
+a run that is still live, whose receipts had vanished by its end, or whose end the
+hub was not up to observe keeps its identity readable for audit and publishes
+nothing.
 
 A *report*, though, is about a task, and a task is worked by several runs. The
 same rule therefore applies once more across them
@@ -63,9 +110,12 @@ admission policy belongs to the consumer of the report feed, not to the hub.
 from __future__ import annotations
 
 import datetime as dt
+import errno
+import hashlib
 import json
 import os
 import re
+import stat
 import threading
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -74,39 +124,143 @@ from pathlib import Path
 DEPLOY_LOCK_NAME = ".ai-deploy-lock.json"
 """The deployed protocol's lock file, at the root of a managed repo."""
 
+DEPLOY_MANIFEST_NAME = ".ai-deploy-manifest.json"
+"""The deploy's per-file receipt, beside the lock. Its ``files`` records carry the
+digest of the bytes that reached the *target*, which is what the end check
+compares the tree against (the lock hashes canonical sources instead)."""
+
 ARTIFACT_NAME = "protocol.json"
 """The per-run capture, written beside ``run.json`` in the hub-owned run dir."""
 
-PROTOCOL_SCHEMA_VERSION = 1
-"""Shape of :meth:`ProtocolSnapshot.to_dict`. Stamped on the artifact so a later
-shape change stays separable from this one, exactly like the evidence pack's."""
+PROTOCOL_SCHEMA_VERSION = 2
+"""Shape *and meaning* of :meth:`ProtocolSnapshot.to_dict`. Stamped on the
+artifact so a later change stays separable, exactly like the evidence pack's.
+Schema 1 wrote a ``stable`` verdict from a lock-only comparison; schema 2 requires
+the deployed files to have been compared against their receipt as well, which is
+why :func:`_from_dict` refuses to read an older verdict as this one."""
 
 LOCK_MAX_BYTES = 4 * 1024 * 1024
 """Read cap for the lock file. It carries one record per deployed file (~36KB for
 the ~120-file payload), so the cap leaves two orders of magnitude of headroom
 while keeping a pathological file from being parsed into memory."""
 
+MANIFEST_MAX_BYTES = 4 * 1024 * 1024
+"""Read cap for the manifest, for the same reason and with the same headroom: one
+record per deployed file, ~43KB for the ~120-file payload."""
+
+PAYLOAD_MAX_FILES = 512
+"""How many deployed files the end check will compare (~120 today). A receipt
+listing more is refused rather than sampled: a partial comparison is not a
+verification, and a bound that quietly truncated would publish an identity backed
+by less than it claims."""
+
+PAYLOAD_MAX_FILE_BYTES = 4 * 1024 * 1024
+"""Per-file read cap (largest deployed file today ~145KB). A record declaring more
+is refused for the same reason."""
+
+PAYLOAD_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+"""Aggregate read cap across the payload (~490KB today). Keeps the end check —
+which runs inline on the run manager's live->ended transition — bounded no matter
+what a receipt declares."""
+
+MAX_LISTED_PATHS = 4
+"""How many deployed files a drift ``detail`` names before summarizing. The whole
+payload can differ at once (a re-render, a restored backup), and the reason has to
+stay a sentence: it is persisted in the run artifact and carried into evidence."""
+
 STABILITY_UNVERIFIED = "unverified"
 """No usable end-of-run comparison: the run is still live, its end check has not
-run, or the lock could not be re-read at its end (``detail`` says which). The
-launch capture stands as audit data — this is an absence of contradiction, not a
-defect — but nothing confirms it held for the whole run, so it publishes no
-revision."""
+run, or a receipt could not be read or trusted at its end (``detail`` says which).
+The launch capture stands as audit data — this is an absence of contradiction,
+not a defect — but nothing confirms it held for the whole run, so it publishes no
+identity."""
 
 STABILITY_STABLE = "stable"
-"""The lock still named the captured revision when the run ended. The only state
-a revision may be published from."""
+"""The lock still named the captured identity when the run ended, and every
+deployed file still matched its manifest record. The only state an identity may
+be published from."""
 
 STABILITY_CHANGED = "changed"
 """The deployment was updated while the run was in flight, so the run's sessions
-did not all use the captured revision. Conservatively unusable for publication."""
+did not all use the captured identity. Conservatively unusable for
+publication."""
+
+STABILITY_DRIFTED = "drifted"
+"""The receipts still named the captured identity at the run's end, but the
+deployed files no longer matched them: the payload was edited in place, so the
+identity names bytes the run's later sessions did not read. Kept distinct from
+:data:`STABILITY_CHANGED` because the two are different operator facts — a
+redeployment is ordinary, an edited deployed copy is damage the protocol forbids
+— and because only this one says the receipts are lying."""
 
 _SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 """A git commit id, SHA-1 today and SHA-256 for a repo that has migrated."""
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 
-_STABILITIES = (STABILITY_UNVERIFIED, STABILITY_STABLE, STABILITY_CHANGED)
+_STABILITIES = (
+    STABILITY_UNVERIFIED,
+    STABILITY_STABLE,
+    STABILITY_CHANGED,
+    STABILITY_DRIFTED,
+)
+
+_HASH_CHUNK = 64 * 1024
+
+
+@dataclass(frozen=True)
+class ProtocolIdentity:
+    """One deployed protocol, named atomically: its source revision *and* payload.
+
+    The unit of publication. A consumer cohorting reports asks two questions of
+    the same deployment — which canonical revision produced it, and which bytes
+    that revision produced — and the answers are only jointly meaningful: the
+    commit alone does not pin the payload (``aii-2`` refuses to state a commit for
+    a payload that does not match that tree, but the hub reads a receipt, not the
+    tree), and the digest alone names bytes with no place in any history. Carrying
+    them as one value is what keeps a caller from publishing half a fact.
+
+    Frozen and compared by value, so "the runs agree" is ``==`` over the pair
+    rather than a field-by-field check each consumer writes for itself.
+    """
+
+    source_git_commit: str
+    canonical_payload_sha256: str
+
+
+PAYLOAD_MATCHED = "matched"
+"""Every deployed file the receipt lists was present and byte-identical to it."""
+
+PAYLOAD_MISMATCHED = "mismatched"
+"""At least one deployed file is missing, resized, replaced, or no longer a
+regular file. A positive finding: the tree is not what the receipt says."""
+
+PAYLOAD_UNVERIFIABLE = "unverifiable"
+"""The comparison could not be made — no manifest, one that describes another
+deploy, a damaged record, a receipt past a bound, or a file that could not be
+read. Deliberately distinct from :data:`PAYLOAD_MISMATCHED`: not knowing is not
+the same as knowing the payload is wrong, and only one of them is a defect an
+operator should go looking for."""
+
+
+@dataclass(frozen=True)
+class PayloadCheck:
+    """One point-in-time comparison of a repo's deployed files against its receipt.
+
+    Kept in its own vocabulary rather than reusing the ``stability`` values,
+    because the two answer different questions: this is a *point* observation
+    ("does the tree match its receipt now"), while ``stability`` is a *span*
+    verdict about the whole run. Conflating them is precisely the error this
+    module was extended to fix — two matching lock reads are not a stable payload.
+
+    ``files`` is how many records were actually compared, and ``None`` when the
+    check never reached the per-file loop. It makes the bound observable: a caller
+    can tell a verdict backed by the whole payload from one backed by nothing.
+    """
+
+    state: str
+    files: int | None = None
+    detail: str | None = None
 
 
 @dataclass(frozen=True)
@@ -114,20 +268,24 @@ class ProtocolSnapshot:
     """One run's protocol provenance, as persisted in its ``protocol.json``.
 
     ``available`` is the single load-bearing flag: it is true only when both
-    revision fields were read from a well-formed lock and validated, so a reader
-    never has to re-decide whether a value is trustworthy. When it is false,
-    ``detail`` says why in operator-readable terms and the revision fields are
-    ``None`` — the unavailability is explicit, never an empty string a consumer
-    could read as "no protocol" or "default".
+    halves of the :class:`ProtocolIdentity` were read from a well-formed lock and
+    validated, so a reader never has to re-decide whether a value is trustworthy.
+    When it is false, ``detail`` says why in operator-readable terms and both
+    fields are ``None`` — the unavailability is explicit, never an empty string a
+    consumer could read as "no protocol" or "default". They are never carried one
+    without the other: half an identity is not a weaker fact, it is a different
+    one.
 
-    ``source_repo`` and ``lock_schema_version`` are the lock's own identity
-    fields, carried for cohorting but deliberately *not* part of the revision:
-    the same commit and payload hash mean the same protocol text whatever the
-    lock calls its source.
+    ``source_repo`` and ``lock_schema_version`` are the lock's own bookkeeping,
+    carried for audit but deliberately *not* part of the identity: the same commit
+    and payload hash mean the same protocol text whatever the lock calls its
+    source.
 
     ``captured_ts`` is when the launch capture ran, ``checked_ts`` when the end
-    comparison ran (``None`` while it has not). Everything above them is frozen
-    at capture; the end check writes only ``stability``/``checked_ts``/``detail``.
+    comparison ran (``None`` while it has not), and ``payload_files`` how many
+    deployed files that comparison actually checked against the manifest (``None``
+    when it never got that far). Everything above them is frozen at capture; the
+    end check writes only ``stability``/``checked_ts``/``payload_files``/``detail``.
     """
 
     available: bool
@@ -138,26 +296,52 @@ class ProtocolSnapshot:
     captured_ts: str | None = None
     stability: str = STABILITY_UNVERIFIED
     checked_ts: str | None = None
+    payload_files: int | None = None
     detail: str | None = None
 
     @property
-    def verified_revision(self) -> str | None:
-        """The commit this run may be published under, or ``None``.
+    def verified_identity(self) -> ProtocolIdentity | None:
+        """The identity this run may be published under, or ``None``.
 
         The one predicate downstream aggregation should use, so "which runs count
-        as carrying a revision" is decided here rather than re-derived at each
+        as carrying an identity" is decided here rather than re-derived at each
         consumer. It needs a completed end check that found the deployment
-        unchanged: a launch capture attests only to the run's first moment, and a
-        report publishes what the run ran under end to end. So a contradicted
-        capture (:data:`STABILITY_CHANGED`) and an uncompared one
-        (:data:`STABILITY_UNVERIFIED` — still live, lock unreadable at the end, or
-        an end the hub was not up to observe) are alike here: both keep their
-        recorded commit readable for audit and publish nothing. Absent evidence
-        of one revision is not evidence of one revision.
+        unchanged *and* its files intact: a launch capture attests only to the
+        run's first moment, and a report publishes what the run ran under end to
+        end. So a contradicted capture (:data:`STABILITY_CHANGED`), an edited
+        payload (:data:`STABILITY_DRIFTED`), and an uncompared end
+        (:data:`STABILITY_UNVERIFIED` — still live, a receipt unreadable at the
+        end, or an end the hub was not up to observe) are alike here: each keeps
+        its recorded identity readable for audit and publishes nothing. Absent
+        evidence of one payload is not evidence of one payload.
+
+        The pair is returned whole because it is published whole; a consumer that
+        wants only the revision takes it from the pair rather than from a snapshot
+        field that might not have been verified together with the digest.
         """
         if not self.available or self.stability != STABILITY_STABLE:
             return None
-        return self.source_git_commit
+        if self.source_git_commit is None or self.canonical_payload_sha256 is None:
+            # Unreachable through the constructors here (``available`` is only set
+            # with both fields validated), and still checked: this is the property
+            # that grants publication, and it must not depend on a caller having
+            # built the record correctly.
+            return None
+        return ProtocolIdentity(
+            source_git_commit=self.source_git_commit,
+            canonical_payload_sha256=self.canonical_payload_sha256,
+        )
+
+    @property
+    def verified_revision(self) -> str | None:
+        """The revision half of :attr:`verified_identity`, or ``None``.
+
+        A convenience for the revision-keyed aggregate, never an independent
+        predicate: it is derived from the pair so that no path can publish a
+        commit the hub did not verify together with its payload digest.
+        """
+        identity = self.verified_identity
+        return identity.source_git_commit if identity is not None else None
 
     def to_dict(self) -> dict:
         return {
@@ -170,6 +354,7 @@ class ProtocolSnapshot:
             "captured_ts": self.captured_ts,
             "stability": self.stability,
             "checked_ts": self.checked_ts,
+            "payload_files": self.payload_files,
             "detail": self.detail,
         }
 
@@ -341,37 +526,54 @@ def deploy_lock_path(repo_path: Path) -> Path:
     return repo_path / DEPLOY_LOCK_NAME
 
 
+def manifest_path(repo_path: Path) -> Path:
+    return repo_path / DEPLOY_MANIFEST_NAME
+
+
+def _read_receipt(path: Path, cap: int) -> tuple[dict | None, str | None]:
+    """Bounded read of one deploy receipt: ``(object, None)`` or ``(None, reason)``.
+
+    Shared by the lock and the manifest so both fail the same way and neither can
+    quietly grow a second policy for an oversize or unparseable receipt. Never
+    raises — every reason is a sentence naming the file, because both callers turn
+    it into operator-readable unavailability rather than an error.
+    """
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(cap + 1)
+    except FileNotFoundError:
+        return None, f"no {path.name} in {path.parent}"
+    except OSError as err:
+        return None, f"unreadable {path.name} ({err})"
+    if len(raw) > cap:
+        return None, f"{path.name} exceeds the {cap}-byte read cap"
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as err:
+        return None, f"unparseable {path.name} ({err})"
+    if not isinstance(data, dict):
+        return None, f"{path.name} is not a JSON object"
+    return data, None
+
+
 def read_deploy_lock(repo_path: Path) -> ProtocolSnapshot:
     """Read and validate a repo's deployment lock into an unstamped snapshot.
 
     Never raises: every failure mode — absent file, unreadable path, oversize
-    blob, non-JSON, non-object, missing or malformed revision fields — becomes an
+    blob, non-JSON, non-object, missing or malformed identity fields — becomes an
     unavailable snapshot naming the reason. A launch must not fail because a
     display/evidence artifact could not be built, and the end check must be able
     to report "could not look" as distinct from "changed".
 
     Validation is what makes ``available`` mean something: a commit id that is not
     a hex object name, or a payload hash that is not SHA-256 shaped, is refused
-    rather than published as a cohort key that no consumer can resolve.
+    rather than published as a cohort key that no consumer can resolve. Both
+    fields are required together — an ``available`` snapshot always carries a
+    whole :class:`ProtocolIdentity`, never half of one.
     """
-    path = deploy_lock_path(repo_path)
-    try:
-        with path.open("rb") as handle:
-            raw = handle.read(LOCK_MAX_BYTES + 1)
-    except FileNotFoundError:
-        return _unavailable(f"no {DEPLOY_LOCK_NAME} in {repo_path}")
-    except OSError as err:
-        return _unavailable(f"unreadable {DEPLOY_LOCK_NAME} ({err})")
-    if len(raw) > LOCK_MAX_BYTES:
-        return _unavailable(
-            f"{DEPLOY_LOCK_NAME} exceeds the {LOCK_MAX_BYTES}-byte read cap"
-        )
-    try:
-        data = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as err:
-        return _unavailable(f"unparseable {DEPLOY_LOCK_NAME} ({err})")
-    if not isinstance(data, dict):
-        return _unavailable(f"{DEPLOY_LOCK_NAME} is not a JSON object")
+    data, error = _read_receipt(deploy_lock_path(repo_path), LOCK_MAX_BYTES)
+    if error is not None or data is None:
+        return _unavailable(error or f"unreadable {DEPLOY_LOCK_NAME}")
     commit = _hex_field(data, "source_git_commit", _SHA)
     if commit is None:
         return _unavailable(
@@ -391,17 +593,228 @@ def read_deploy_lock(repo_path: Path) -> ProtocolSnapshot:
     )
 
 
+def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
+    """Compare the repo's deployed files against the receipt for ``expected_commit``.
+
+    The receipt-to-target half of the identity: the lock says *which* payload was
+    deployed, and this says whether the tree still holds it. Never raises — every
+    failure is a state with a reason, because the caller is settling a run that has
+    already ended and must record what it could see, not fail.
+
+    ``expected_commit`` is the captured run's commit, and the manifest must name
+    the same one. That join is what makes the comparison say something about the
+    *captured* identity: a manifest from a different deploy would have the hub
+    hashing files against a receipt the run never ran under, and answering
+    "matched" to a question nobody asked.
+
+    Bounded at every producer (:data:`PAYLOAD_MAX_FILES`,
+    :data:`PAYLOAD_MAX_FILE_BYTES`, :data:`PAYLOAD_MAX_TOTAL_BYTES`,
+    :data:`MANIFEST_MAX_BYTES`) and refused — not truncated — past any of them:
+    this runs inline on the run manager's live->ended transition, and a partial
+    comparison reported as a match would publish an identity backed by less than
+    it claims.
+
+    Files are opened ``O_NOFOLLOW`` and required to be regular: a deploy writes
+    regular files, so a link where one belongs is a mismatch, not a path to
+    follow. Interior directory hops are *not* walked no-follow the way the
+    evaluation tree's are — nothing here leaves the process (a digest is compared,
+    never served), so containment buys no more than the leaf check already gives,
+    and 120 files' worth of descriptor walking would buy it at real cost. Modes
+    are deliberately not compared either: this answers what the run's sessions
+    *read*, and an executable bit is not protocol text.
+    """
+    data, error = _read_receipt(manifest_path(repo_path), MANIFEST_MAX_BYTES)
+    if error is not None or data is None:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE, detail=error or f"unreadable {DEPLOY_MANIFEST_NAME}"
+        )
+    commit = _hex_field(data, "source_git_commit", _SHA)
+    if commit != expected_commit:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE,
+            detail=(
+                f"{DEPLOY_MANIFEST_NAME} describes a different deploy than"
+                f" {DEPLOY_LOCK_NAME} (manifest {commit or 'has no valid commit'})"
+            ),
+        )
+    files = data.get("files")
+    if not isinstance(files, dict) or not files:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE,
+            detail=f"{DEPLOY_MANIFEST_NAME} lists no deployed files",
+        )
+    if len(files) > PAYLOAD_MAX_FILES:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE,
+            detail=(
+                f"{DEPLOY_MANIFEST_NAME} lists {len(files)} files, past the"
+                f" {PAYLOAD_MAX_FILES}-file check cap"
+            ),
+        )
+    records = []
+    total = 0
+    for key, record in sorted(files.items(), key=lambda item: str(item[0])):
+        parsed = _payload_record(key, record)
+        if parsed is None:
+            return PayloadCheck(
+                PAYLOAD_UNVERIFIABLE,
+                detail=(
+                    f"{DEPLOY_MANIFEST_NAME} has an unusable record for"
+                    f" {str(key)!r}"
+                ),
+            )
+        total += parsed[2]
+        if total > PAYLOAD_MAX_TOTAL_BYTES:
+            return PayloadCheck(
+                PAYLOAD_UNVERIFIABLE,
+                detail=(
+                    f"{DEPLOY_MANIFEST_NAME} declares more than the"
+                    f" {PAYLOAD_MAX_TOTAL_BYTES}-byte check cap"
+                ),
+            )
+        records.append(parsed)
+    mismatched: list[str] = []
+    unreadable: list[str] = []
+    for relative, digest, size in records:
+        state, reason = _compare_deployed_file(repo_path, relative, digest, size)
+        if state == PAYLOAD_MISMATCHED:
+            mismatched.append(reason)
+        elif state == PAYLOAD_UNVERIFIABLE:
+            unreadable.append(reason)
+    if mismatched:
+        # A definite finding outranks an incomplete one: files that could not be
+        # read are still named, but the tree is already known not to match.
+        return PayloadCheck(
+            PAYLOAD_MISMATCHED,
+            files=len(records),
+            detail=(
+                f"deployed files no longer match {DEPLOY_MANIFEST_NAME}: "
+                + _listed(mismatched)
+                + (f"; unreadable: {_listed(unreadable)}" if unreadable else "")
+            ),
+        )
+    if unreadable:
+        return PayloadCheck(
+            PAYLOAD_UNVERIFIABLE,
+            files=len(records),
+            detail=f"deployed files could not be read: {_listed(unreadable)}",
+        )
+    return PayloadCheck(PAYLOAD_MATCHED, files=len(records))
+
+
+def _payload_record(key: object, record: object) -> tuple[str, str, int] | None:
+    """One manifest record as ``(relative path, sha256, size)``, or ``None``.
+
+    ``None`` is a record this check cannot use, which makes the whole comparison
+    unverifiable rather than partial. The path must be repo-relative and free of
+    ``..``: a receipt naming anything else is damaged, and the honest answer is
+    that the payload could not be verified — not a hash of a file outside the tree.
+
+    ``target_relative_path`` wins over the dict key when both are present, matching
+    what ``aii-2``'s own status check does with the same records.
+    """
+    if not isinstance(record, dict):
+        return None
+    relative = _str_field(record, "target_relative_path") or (
+        key if isinstance(key, str) and key else None
+    )
+    if relative is None or not _is_contained_relative(relative):
+        return None
+    digest = _hex_field(record, "sha256", _SHA256)
+    if digest is None:
+        return None
+    size = _int_field(record, "size_bytes")
+    if size is None or size < 0 or size > PAYLOAD_MAX_FILE_BYTES:
+        return None
+    return relative, digest, size
+
+
+def _is_contained_relative(relative: str) -> bool:
+    path = Path(relative)
+    if path.is_absolute() or path.drive or path.anchor:
+        return False
+    return all(part not in ("", os.curdir, os.pardir) for part in path.parts)
+
+
+def _compare_deployed_file(
+    repo_path: Path, relative: str, digest: str, size: int
+) -> tuple[str | None, str]:
+    """``(state, reason)`` for one deployed file; ``state`` is ``None`` when it matches.
+
+    Size is checked from the open descriptor before any bytes are hashed: it is the
+    same fact as the digest for a file whose recorded length differs, and skipping
+    the read keeps a receipt that under-declares a huge file from costing more than
+    a stat.
+    """
+    try:
+        handle = os.open(repo_path / relative, os.O_RDONLY | os.O_NOFOLLOW)
+    except FileNotFoundError:
+        return PAYLOAD_MISMATCHED, f"{relative} (missing)"
+    except OSError as err:
+        if err.errno in (errno.ELOOP, errno.EMLINK):
+            return PAYLOAD_MISMATCHED, f"{relative} (not a regular file)"
+        return PAYLOAD_UNVERIFIABLE, f"{relative} ({err.strerror or err})"
+    try:
+        info = os.fstat(handle)
+        if not stat.S_ISREG(info.st_mode):
+            return PAYLOAD_MISMATCHED, f"{relative} (not a regular file)"
+        if info.st_size != size:
+            return (
+                PAYLOAD_MISMATCHED,
+                f"{relative} ({info.st_size} bytes, receipt says {size})",
+            )
+        actual = _digest_fd(handle, size)
+    except OSError as err:
+        return PAYLOAD_UNVERIFIABLE, f"{relative} ({err.strerror or err})"
+    finally:
+        os.close(handle)
+    if actual is None:
+        return PAYLOAD_MISMATCHED, f"{relative} (shorter than the receipt says)"
+    if actual != digest:
+        return PAYLOAD_MISMATCHED, f"{relative} (content differs)"
+    return None, relative
+
+
+def _digest_fd(handle: int, size: int) -> str | None:
+    """SHA-256 of exactly ``size`` bytes from ``handle``, or ``None`` if it ends early.
+
+    Reads to the stat'ed length rather than to EOF, so a file being appended to
+    while it is hashed still costs a bounded read.
+    """
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining > 0:
+        chunk = os.read(handle, min(_HASH_CHUNK, remaining))
+        if not chunk:
+            return None
+        digest.update(chunk)
+        remaining -= len(chunk)
+    return digest.hexdigest()
+
+
+def _listed(reasons: Sequence[str]) -> str:
+    """Bounded join: the detail lands in an artifact and a catalog line."""
+    shown = ", ".join(reasons[:MAX_LISTED_PATHS])
+    extra = len(reasons) - MAX_LISTED_PATHS
+    return shown + (f" (+{extra} more)" if extra > 0 else "")
+
+
 def capture_protocol(
     run_dir: Path, repo_path: Path, *, now: dt.datetime
 ) -> ProtocolSnapshot:
-    """Freeze ``repo_path``'s protocol revision into ``run_dir`` at launch.
+    """Freeze ``repo_path``'s protocol identity into ``run_dir`` at launch.
 
     Called after the readiness gates and before the orchestrator is spawned, so
-    the captured revision is the one the run's first session actually loads. The
-    read cannot fail the launch (see :func:`read_deploy_lock`); the *write* can,
-    and is meant to — a just-created run dir that cannot hold a few hundred bytes
-    cannot hold ``run.json`` either, and the caller's existing cleanup removes the
-    dir and refuses the launch, which is the same handling a failed spawn gets.
+    the captured identity is the one the run's first session actually loads —
+    and, because those gates include ``aii-2 status``, one whose deployed files
+    were compared against their receipt moments earlier. That gate is the launch
+    boundary; nothing is re-hashed here.
+
+    The read cannot fail the launch (see :func:`read_deploy_lock`); the *write*
+    can, and is meant to — a just-created run dir that cannot hold a few hundred
+    bytes cannot hold ``run.json`` either, and the caller's existing cleanup
+    removes the dir and refuses the launch, which is the same handling a failed
+    spawn gets.
     """
     snapshot = replace(read_deploy_lock(repo_path), captured_ts=now.isoformat())
     write_protocol(run_dir, snapshot)
@@ -415,11 +828,19 @@ def settle_protocol(
     now: dt.datetime,
     end_observed: bool = True,
 ) -> ProtocolSnapshot | None:
-    """Compare the lock against the run's capture at its live->ended transition.
+    """Check the deployment against the run's capture at its live->ended transition.
+
+    Two comparisons, in order. The lock is re-read first: if it now names another
+    identity, the deployment was replaced mid-run and there is nothing left to
+    verify the payload *of*. Only an unchanged lock reaches
+    :func:`verify_payload`, which is where an identity earns publication — a
+    matching receipt at both ends says only that nobody redeployed, and the
+    deployed files can have been edited under the run without either lock read
+    noticing.
 
     Returns the settled snapshot, or ``None`` when there is nothing to settle: a
     run with no artifact (one predating this capture), a capture that carries no
-    revision to contradict, or an end check that already ran.
+    identity to contradict, or an end check that already ran.
 
     "Already ran" is keyed on ``checked_ts``, not on the verdict, and that is
     deliberate. An end check that could not read the lock leaves the stability
@@ -439,14 +860,15 @@ def settle_protocol(
     tells an operator, in ``detail``, that the deployment moved under their run
     when nothing observed says it did.
 
-    Only the two revision fields are compared. A lock that renamed its source or
-    bumped its own schema while naming the same commit and payload hash deployed
-    the same protocol text, and reporting that as a change would cost a
-    publishable report for no gain in truth.
+    Only the two identity fields are compared between the locks. A lock that
+    renamed its source or bumped its own schema while naming the same commit and
+    payload hash deployed the same protocol text, and reporting that as a change
+    would cost a publishable report for no gain in truth.
     """
     snapshot = read_protocol(run_dir)
     if snapshot is None or not snapshot.available or snapshot.checked_ts is not None:
         return None
+    payload_files: int | None = None
     if not end_observed:
         stability, detail = (
             STABILITY_UNVERIFIED,
@@ -456,8 +878,16 @@ def settle_protocol(
     else:
         current = read_deploy_lock(repo_path)
         stability, detail = _verdict(snapshot, current)
+        if stability == STABILITY_STABLE:
+            check = verify_payload(repo_path, snapshot.source_git_commit or "")
+            payload_files = check.files
+            stability, detail = _payload_verdict(check)
     settled = replace(
-        snapshot, stability=stability, checked_ts=now.isoformat(), detail=detail
+        snapshot,
+        stability=stability,
+        checked_ts=now.isoformat(),
+        payload_files=payload_files,
+        detail=detail,
     )
     write_protocol(run_dir, settled)
     return settled
@@ -496,23 +926,50 @@ def read_protocol(run_dir: Path) -> ProtocolSnapshot | None:
     return _from_dict(data)
 
 
+LEGACY_VERDICT_DETAIL = (
+    "recorded by an earlier hub that compared only the deployment lock: the"
+    " deployed files were never checked against their receipt"
+)
+"""Why a pre-payload-check ``stable`` verdict does not publish. Named because it is
+the reason an operator will meet most often for a while — every run that ended
+before this check existed carries it."""
+
+
 def _from_dict(data: object) -> ProtocolSnapshot:
     """Rebuild a snapshot from persisted JSON, failing closed on any defect.
 
-    Every path that cannot produce a *validated* revision yields an unavailable
+    Every path that cannot produce a *validated* identity yields an unavailable
     snapshot, so ``available`` keeps its meaning for every reader: an artifact
     claiming availability without a well-formed commit and payload hash, or
     carrying a stability value this version does not know (a hand-edited file, or
     one written by a newer hub), is unusable rather than partially trusted.
 
     ``stability`` is validated the same way and for the same reason: it is the
-    field that grants publication (:meth:`ProtocolSnapshot.verified_revision`), so
+    field that grants publication (:meth:`ProtocolSnapshot.verified_identity`), so
     a verdict with no ``checked_ts`` — a conclusion recording no check that could
     have reached it, which :func:`settle_protocol` never writes — is refused
-    rather than read as a confirmed revision.
+    rather than read as a confirmed identity. Under this schema a ``stable``
+    verdict also names how many files it compared; one that does not is the same
+    class of defect.
+
+    The schema stamp is read as *meaning*, not just shape, which is what keeps the
+    older artifacts honest without touching them. A schema-1 ``stable`` was reached
+    by comparing two lock reads, which this version does not accept as a verified
+    payload, so it reads back ``unverified`` with :data:`LEGACY_VERDICT_DETAIL` —
+    the identity stays readable for audit and publishes nothing. Its ``changed``
+    and ``unverified`` verdicts need no such demotion: they published nothing
+    already. A *newer* schema is refused outright, since a field this version
+    reads may not mean here what it meant there.
     """
     if not isinstance(data, dict):
         return _unavailable(f"{ARTIFACT_NAME} is not a JSON object")
+    version = _int_field(data, "schema_version")
+    if version is None or version < 1:
+        return _unavailable(f"{ARTIFACT_NAME} carries no usable schema version")
+    if version > PROTOCOL_SCHEMA_VERSION:
+        return _unavailable(
+            f"{ARTIFACT_NAME} was written by a newer hub (schema {version})"
+        )
     stability = data.get("stability")
     if stability not in _STABILITIES:
         return _unavailable(f"{ARTIFACT_NAME} has an unrecognized stability")
@@ -520,10 +977,19 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     payload = _hex_field(data, "canonical_payload_sha256", _SHA256)
     available = data.get("available") is True
     checked_ts = _str_field(data, "checked_ts")
+    payload_files = _int_field(data, "payload_files")
+    detail = _str_field(data, "detail")
     if available and (commit is None or payload is None):
-        return _unavailable(f"{ARTIFACT_NAME} claims a revision it does not carry")
+        return _unavailable(f"{ARTIFACT_NAME} claims an identity it does not carry")
     if available and stability != STABILITY_UNVERIFIED and checked_ts is None:
         return _unavailable(f"{ARTIFACT_NAME} carries a verdict it never checked")
+    if available and stability == STABILITY_STABLE:
+        if version < PROTOCOL_SCHEMA_VERSION:
+            stability, detail = STABILITY_UNVERIFIED, LEGACY_VERDICT_DETAIL
+        elif payload_files is None:
+            return _unavailable(
+                f"{ARTIFACT_NAME} claims a verified payload it never counted"
+            )
     return ProtocolSnapshot(
         available=available,
         source_git_commit=commit if available else None,
@@ -533,14 +999,32 @@ def _from_dict(data: object) -> ProtocolSnapshot:
         captured_ts=_str_field(data, "captured_ts"),
         stability=stability,
         checked_ts=checked_ts,
-        detail=_str_field(data, "detail"),
+        payload_files=payload_files,
+        detail=detail,
+    )
+
+
+def _payload_verdict(check: PayloadCheck) -> tuple[str, str | None]:
+    """One :class:`PayloadCheck` as an end-of-run verdict and its reason.
+
+    The point observation becomes a span verdict only here, and only because the
+    caller has already established that the lock named one identity across the
+    run: "matched, and nothing was redeployed" is what ``stable`` means.
+    """
+    if check.state == PAYLOAD_MATCHED:
+        return STABILITY_STABLE, None
+    if check.state == PAYLOAD_MISMATCHED:
+        return STABILITY_DRIFTED, check.detail
+    return (
+        STABILITY_UNVERIFIED,
+        f"deployed payload could not be verified at run end: {check.detail}",
     )
 
 
 def _verdict(
     captured: ProtocolSnapshot, current: ProtocolSnapshot
 ) -> tuple[str, str | None]:
-    """The stability verdict and its reason for one end-of-run comparison."""
+    """The lock-comparison verdict and its reason for one end-of-run check."""
     if not current.available:
         return (
             STABILITY_UNVERIFIED,
