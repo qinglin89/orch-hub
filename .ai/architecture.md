@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 4e09c50fd0890e76feca291c3dbbcfc6898b022b
+verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
 ---
 
 # Architecture
@@ -162,6 +162,10 @@ non-repo cwd with tools disabled, safe mode, no session persistence, and
 plan-mode writes blocked — the model cannot read live target-repo state outside
 the prompt. Protected routes expose availability, generation, async
 semantic job start/status, doctor readiness, history, and artifact readback.
+The evaluations base may be reached through links for relocated storage, but
+every repo/task/evaluation segment and artifact beneath it is opened no-follow
+relative to an already-open descriptor; linked interior state is damage, never
+a source of bytes or an alias for ordinary pruning.
 `SemanticJobManager` stores one current job per `(repo, task)` under
 `<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job
 instead of starting a duplicate model call, and reconciles restart-orphaned
@@ -179,8 +183,10 @@ including `provenance.protocol.effective_revision` copied from the persisted
 evidence aggregate when available.
 Reconciliation retries missed/newly eligible reports without a model call; a
 shared retention guard protects publishable or undecidable unpublished
-artifacts until cataloged. Protected forward-cursor list, by-key contained
-bundle, and byte-exact per-artifact routes are read-only. Published entries
+artifacts until cataloged. Candidate publication, by-key bundles, and byte-exact
+per-artifact reads share the evaluation tree's descriptor walk and refuse every
+interior linked directory/file hop. Protected forward-cursor list and artifact
+routes are read-only. Published entries
 remain auditable after retention prunes their artifacts; the hub exposes
 integrity/unavailability and leaves interpretation or protocol-evolution
 decisions to external consumers.

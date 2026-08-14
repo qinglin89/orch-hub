@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
+verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -44,11 +44,13 @@ independent, and every entry/doc/router/diff/transcript bound is enforced at its
 producer.
 `generate_evidence` mints an evaluation id
 and atomically writes `evidence.json` under
-`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. `list_evaluations`
-enumerates persisted dirs newest-first by `(timestamp, numeric suffix)` and
-reports present artifact filenames; `read_artifact` parses contained artifact
-JSON and `read_text_artifact` reads contained text artifacts such as semantic
-`report.md` for the API/dashboard read layer. Retention is per task via
+`<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/`. The evaluations base
+may be reached through links for relocated data dirs, but `list_evaluations`,
+`read_artifact`, and `read_text_artifact` open every repo/task/evaluation hop
+below it no-follow and open artifacts relative to that descriptor. Listings
+include only real directories/regular files; linked interior hops are refused
+as storage damage rather than followed or reported as pruned. Retention is per
+task via
 `ORCH_HUB_EVAL_RETENTION`; `prune_evaluations` removes older evaluation dirs
 inside that `(repo, task)` subtree, and generation paths prune only after their
 complete artifact set is durable, protecting the just-written id so failed
@@ -150,13 +152,13 @@ active remain candidates and publish after a contained archive probe succeeds.
 The read/check/allocate/append transaction uses a process-wide `flock`; appends
 are fsynced single lines with torn-tail fencing. `page()` provides forward-only
 strictly-greater integer-watermark traversal; `read_bundle()` resolves a global
-key to the complete contained artifact set and reports digest verification. Both
-bundle and raw-artifact reads open each fixed artifact name no-follow, validate
-the descriptor, and consume that descriptor, so a symlink or check/reopen swap
-at the file hop cannot redirect returned bytes. A linked bundle artifact is
-damaged (distinct from retention-pruned/incomplete) and makes the all-or-nothing
-bundle unavailable. The same file-hop rule gates publication completeness and
-manifest hashing, so a link is never published as an artifact or hashed through.
+key to the complete contained artifact set and reports digest verification. The
+catalog re-opens every scanned candidate and every bundle/raw read through the
+evaluation module's descriptor walk: the repo/task/evaluation hops and each
+fixed artifact are no-follow, and artifacts are validated and consumed through
+the opened descriptors. A linked interior hop is damaged (distinct from
+retention-pruned/incomplete), is never published or hashed through, and is not
+publication debt; non-canonical repo directory names are not swept.
 Catalog/source identity ambiguity fails closed. Published entries outlive
 retention-pruned artifacts, which remain auditable but bundle-unavailable.
 

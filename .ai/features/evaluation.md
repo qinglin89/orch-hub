@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
+verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
 ---
 
 # Features: Task Evaluation
@@ -75,9 +75,12 @@ Implemented behavior:
   after the evidence artifact is durable; metrics/semantic generation defer
   retention until their full artifact set is durable, protecting the new id.
 - `list_evaluations` enumerates persisted evaluation dirs newest-first by
-  `(timestamp, numeric collision suffix)` and reports only which artifact files
-  exist; `read_artifact` returns parsed JSON artifacts and `read_text_artifact`
-  returns text artifacts such as `report.md` for a contained evaluation dir.
+  `(timestamp, numeric collision suffix)` and reports only regular artifact
+  files. The evaluations base may itself be reached through links (relocated
+  data dir), but every repo/task/evaluation hop and artifact below it is opened
+  no-follow relative to an already-open descriptor; `read_artifact` and
+  `read_text_artifact` therefore never serve bytes through an in-tree link.
+  Linked interior hops are storage damage, distinct from an absent/pruned file.
 - HTTP routes expose availability, persisted evaluation listing, evaluation
   detail readback, evidence generation, and the semantic doctor while preserving
   the same disabled fail-closed gate: only `GET /api/evaluation` returns 200
@@ -239,9 +242,11 @@ Implemented behavior:
   (`evidence.json`, `static_metrics.json`, `semantic_report.json`, `report.md`)
   and an archived task. A semantic-finalization hook publishes after durability;
   startup reconciliation deterministically/idempotently backfills missed and
-  already-existing reports, including reports evaluated before archive. A linked
-  artifact is not complete or publishable, and manifest hashing opens each fixed
-  name no-follow so a check-to-hash swap cannot record an outside file's digest.
+  already-existing reports, including reports evaluated before archive. Every
+  candidate is re-opened through the shared descriptor walk; an interior linked
+  directory or artifact is neither publishable nor retention debt, and manifest
+  hashing opens each fixed name relative to that descriptor so a check-to-hash
+  swap cannot record outside bytes.
 - Append allocation is guarded across threads/processes with `flock`; each line
   is flushed/fsynced and torn tails are fenced. Duplicate durable sequences or
   keys make all reads/publication fail closed instead of silently skipping a
@@ -258,17 +263,18 @@ Implemented behavior:
   404; published-but-pruned, partial, unreadable, unparseable, or incoherently
   identified bundles are 200 with `available:false`. Served content reports
   strict digest `verified`, `mismatched`, and `unverified` state. Each fixed
-  artifact name is opened no-follow and parsed from that descriptor; a link or
-  check/reopen swap at the file hop cannot export outside bytes. Linked artifacts
-  return a damaged-tree detail distinct from pruned/incomplete states; symlinks
-  above the evaluation directory remain supported.
+  artifact name is opened no-follow and parsed from that descriptor; the
+  repo/task/evaluation hops are likewise walked no-follow, so a link or
+  check/reopen swap at any in-tree hop cannot export outside bytes. Linked hops
+  return damaged-tree detail distinct from pruned/incomplete states; links used
+  to reach the evaluations base remain supported.
 - Raw-artifact lookup selects one of the four fixed names and returns its
   persisted bytes without parsing or normalization, so consumers can verify the
   cataloged size/SHA-256. Availability is per artifact; mismatched bytes remain
   visible with integrity headers. Unknown key/name is 404, incoherent identity
   409, pruned bytes 410, and unreadable/damaged storage 500. The artifact is
-  opened no-follow and read through the same descriptor, closing symlink and
-  check/reopen races at the file hop.
+  opened no-follow and read through the same contained directory descriptor,
+  closing symlink and check/reopen races at every in-tree hop.
 - Feed items carry source/global identity, generated/cataloged times,
   evaluation-time target source plus publication-time archived state, evaluator
   backend/model/schema, artifact size/hash manifests, run/git provenance, and

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 81883a7c862b027c1d70fbdd0a22aeaa427a3a3c
+verified-against: f6f9bbe5d5e8261c9761d6a84e919f4349ea25a1
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -75,11 +75,14 @@ secondary artifact failures become warnings, while target task IO errors fail
 the build. Persistence writes only
 `<data_dir>/evaluations/<repo>/<task>/<evaluation-id>/evidence.json` and never
 mutates target repos, run records, `.ai/`, or `.ai-tasks/`.
-Persisted evaluation listing and artifact reads are structural and contained:
-`list_evaluations` reports newest-first ids plus artifact filenames, while
-`read_artifact` parses JSON artifacts and `read_text_artifact` reads text
-artifacts such as semantic `report.md` for a known evaluation dir. Corrupt JSON
-fails loudly. `prune_evaluations`/`auto_prune` enforce the per-task retention
+Persisted evaluation listing and artifact reads are structural and contained.
+The evaluations base may resolve through links, but all repo/task/evaluation
+hops beneath it are opened no-follow, and artifacts are opened relative to the
+resulting descriptor. `list_evaluations` reports only real dirs/regular files;
+`read_artifact` parses JSON and `read_text_artifact` reads text such as semantic
+`report.md`. Linked interior hops raise storage damage rather than reading
+outside bytes or collapsing into absence; corrupt JSON fails loudly.
+`prune_evaluations`/`auto_prune` enforce the per-task retention
 cap under the hub-owned evaluation tree; top-level generation paths call
 retention only after their complete artifact set is durable and protect the
 just-written id.
@@ -176,15 +179,17 @@ reports without evaluating. `page(after_seq, limit)` is strictly-greater,
 ascending, and forward-only; duplicate durable sequences/keys fail closed.
 `read_bundle(entry)` performs contained by-key reads, requires the whole artifact
 set, and reports strict digest verified/mismatched/unverified state while
-preserving pruned entries as explicitly unavailable. Each fixed artifact is
-opened no-follow, validated, and read from that descriptor; a linked artifact
-returns a distinct damaged-tree unavailability rather than pruned/incomplete.
+preserving pruned entries as explicitly unavailable. Every repo/task/evaluation
+hop is walked no-follow and each fixed artifact is opened relative to the final
+descriptor; a linked interior hop returns distinct damaged-tree unavailability
+rather than pruned/incomplete.
 `read_artifact_bytes(entry, name)` returns one fixed-name artifact's persisted
 bytes without normalization, reports integrity per file, and keeps readable
 mismatches visible. It uses the same descriptor rule, so neither read path's file
 hop can be redirected by a symlink or check/reopen swap; path-resolution and IO
 faults become structured unreadable results. Publication completeness rejects a
-linked artifact, and manifest digests use the same no-follow descriptor open.
+linked directory or artifact, manifest digests use the same descriptor chain,
+and the retention guard treats the same damaged candidate as non-debt.
 `unpublished_ids()` and publication share one artifact-derived eligibility rule;
 uncertain debt is protected from pruning. The catalog publishes
 provenance/artifacts only and never decides protocol evolution. Report protocol
