@@ -705,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "6b62754694c289fc8822562cec22ab774e071b2c",
+  "source_git_commit": "e63042d2a565d0f1734732894b39951a2f3ff0d1",
   "source_repo": "ai-native-deployment"
 }
