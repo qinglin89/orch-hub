@@ -50,6 +50,7 @@ from .control_dir import (
 )
 from .evaluation import (
     EVIDENCE_NAME,
+    EvaluationDamagedTreeError,
     EvaluationDisabledError,
     EvaluationService,
 )
@@ -414,9 +415,11 @@ def _history_evaluation_states(entries, evaluation: EvaluationService) -> list[d
 
     Evidence-only (or an empty history) is ``none`` because no report exists;
     static metrics are ``l1``; static metrics plus a semantic report are
-    ``l1_l2``. A malformed/inaccessible task evaluation path is omitted
-    best-effort rather than making run history load-bearing on the optional
-    sidecar; the link can still render without a state marker.
+    ``l1_l2``. A malformed, inaccessible, or damaged task evaluation path is
+    omitted best-effort rather than making run history load-bearing on the
+    optional sidecar; the link can still render without a state marker, and the
+    damage surfaces where an operator is actually asking about that evaluation
+    (the per-task routes) rather than by failing every history load.
     """
     if not evaluation.enabled:
         return []
@@ -434,7 +437,7 @@ def _history_evaluation_states(entries, evaluation: EvaluationService) -> list[d
         seen.add(key)
         try:
             stored = evaluation.list_evaluations(repo, record.task_id)
-        except (OSError, ValueError):
+        except (OSError, ValueError, EvaluationDamagedTreeError):
             continue
 
         latest = stored[0] if stored else None
@@ -838,6 +841,24 @@ def create_app(
         request: Request, exc: EvaluationDisabledError
     ) -> JSONResponse:
         return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    # A symbolic link standing at a hop of the hub's own evaluations tree, refused
+    # rather than followed (:class:`EvaluationDamagedTreeError`). Hub-side storage
+    # damage, so 500 rather than a client error, and named rather than left to the
+    # unclassified-crash handler: an operator can repair the tree, but only if the
+    # response says that is what is wrong. Registered app-wide so every evaluation
+    # route — the per-task list, the artifact detail readback, a generation —
+    # answers it the same way, and the global feed's routes keep their own
+    # per-report availability vocabulary (a damaged bundle is data there, not a
+    # failed request).
+    @app.exception_handler(EvaluationDamagedTreeError)
+    async def _evaluation_damaged_tree(
+        request: Request, exc: EvaluationDamagedTreeError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=500,
+            content={"detail": f"evaluation artifact storage is damaged: {exc}"},
+        )
 
     # Default-deny bearer auth as pure ASGI middleware (see BearerAuthMiddleware
     # for why not BaseHTTPMiddleware): it wraps the whole app, so it protects
@@ -1817,7 +1838,11 @@ def create_app(
         affordances. ``repo_id`` unknown → 404; an ``evaluation_id`` with no
         persisted dir → 404 (kept distinct from a present dir missing one artifact,
         which is a ``null`` field). An unsafe ``task_id`` → 400; a corrupt persisted
-        artifact surfaces as a 500 rather than being masked as "not generated".
+        artifact surfaces as a 500 rather than being masked as "not generated", and
+        so does a *damaged* one: a link standing where an artifact or one of its
+        parent directories should be is refused rather than followed, and named as
+        storage damage rather than collapsed into the ``null`` that a consumer
+        reads as retention or an evidence-only generation.
         """
         require_evaluation_enabled()
         repo = resolve_repo(repo_id)
@@ -1840,34 +1865,24 @@ def create_app(
                     f" {evaluation_id!r}"
                 ),
             )
-        # Read only the artifacts the dir actually holds (task_id already validated
-        # by list_evaluations above); a corrupt file's decode error rides out to a
-        # 500 here, deliberately not caught as the 400 that path-safety uses.
-        evidence = (
-            evaluation.read_artifact(repo, task_id, evaluation_id, EVIDENCE_NAME)
-            if EVIDENCE_NAME in stored.artifacts
-            else None
+        # Each artifact is asked for by name rather than gated on the listing above
+        # (task_id is already validated by it): the reader answers ``None`` for an
+        # absent file itself, so the gate would only add a second, staler opinion of
+        # what the dir holds — and one that reports a *linked* artifact, which the
+        # listing excludes, as the ``null`` that means "not generated". A corrupt
+        # file's decode error and a refused link both ride out to a 500 here,
+        # deliberately not caught as the 400 that path-safety uses.
+        evidence = evaluation.read_artifact(
+            repo, task_id, evaluation_id, EVIDENCE_NAME
         )
-        static = (
-            evaluation.read_artifact(
-                repo, task_id, evaluation_id, STATIC_METRICS_NAME
-            )
-            if STATIC_METRICS_NAME in stored.artifacts
-            else None
+        static = evaluation.read_artifact(
+            repo, task_id, evaluation_id, STATIC_METRICS_NAME
         )
-        semantic = (
-            evaluation.read_artifact(
-                repo, task_id, evaluation_id, SEMANTIC_REPORT_NAME
-            )
-            if SEMANTIC_REPORT_NAME in stored.artifacts
-            else None
+        semantic = evaluation.read_artifact(
+            repo, task_id, evaluation_id, SEMANTIC_REPORT_NAME
         )
-        report_md = (
-            evaluation.read_text_artifact(
-                repo, task_id, evaluation_id, SEMANTIC_REPORT_MD_NAME
-            )
-            if SEMANTIC_REPORT_MD_NAME in stored.artifacts
-            else None
+        report_md = evaluation.read_text_artifact(
+            repo, task_id, evaluation_id, SEMANTIC_REPORT_MD_NAME
         )
         return {
             "evaluation_id": evaluation_id,

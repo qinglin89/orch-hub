@@ -27,7 +27,14 @@ The subsystem is built from four composable primitives:
   :func:`orch_hub.runs.load_records`, which never refreshes/mutates run state).
 - **artifact path layout** — compute the contained, per-``(repo, task,
   evaluation)`` directory an evidence pack is written to, rejecting unsafe path
-  segments so a crafted id cannot escape the evaluations tree.
+  segments so a crafted id cannot escape the evaluations tree. Reading what is
+  stored there is a second, stronger primitive: a pathname is re-walked by every
+  operation that uses it, so :func:`opened_evaluations_dir` walks the tree's own
+  hops following no link and :func:`opened_artifact` opens each artifact relative
+  to that descriptor. The tree may be *reached* through a link (a relocated data
+  dir); nothing inside it may be. Every consumer that turns a stored artifact into
+  bytes — this module's own readers, the global report feed's exports, and the
+  digests publication records — goes through them.
 - **evidence pack build + persist** — assemble a bounded :class:`EvidencePack`
   from the target task, its related runs (each run's metadata-only history
   events, per-session context snapshot, and *bounded* log/``spawn.out`` tails),
@@ -48,15 +55,19 @@ admitted with its own explicit caps rather than on trust.
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import itertools
 import json
 import logging
 import os
 import re
 import shutil
-from collections.abc import Callable, Collection, Sequence
+import stat
+from collections.abc import Callable, Collection, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import BinaryIO
 
 from .ai_snapshot import (
     PREFETCH_SOURCE_SESSION_ENTRIES,
@@ -235,6 +246,24 @@ _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 any run of unsafe chars to ``-`` (a local copy, not an import of a private, so
 the evaluation module stays independent of run-manager internals)."""
 
+_TREE_BASE_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NONBLOCK
+"""Flags for opening the evaluations base. Links are followed here on purpose —
+the base *is* the tree, and a hub may keep it on a relocated volume — so
+``O_DIRECTORY`` is enough to make anything else standing there an ``ENOTDIR``."""
+
+_TREE_HOP_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+"""Flags for opening one hop *inside* the tree: no link at that hop, and no
+blocking open. Deliberately without ``O_DIRECTORY``, which on macOS makes a
+refused link indistinguishable from a plain non-directory (it reports ``ENOTDIR``
+where Linux reports ``ELOOP``) and would collapse tree damage into ordinary
+absence. The descriptor is checked with ``fstat`` instead, which answers about the
+object that was opened rather than about a name — the same reason nothing else
+here trusts a pathname."""
+
+_ARTIFACT_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+"""Flags for opening one stored artifact: no link at its own hop, and no blocking
+open (see :func:`opened_artifact`)."""
+
 
 class EvaluationError(Exception):
     """Base class for task-evaluation errors."""
@@ -250,23 +279,38 @@ class EvaluationDisabledError(EvaluationError):
     """
 
 
+class EvaluationDamagedTreeError(EvaluationError):
+    """A hop inside the evaluations tree is a symbolic link, and was refused.
+
+    The hub writes only real directories and regular files under
+    ``<data_dir>/evaluations``, so a link standing at one of its hops is something
+    the subsystem did not put there. Following it would serve or publish another
+    file's bytes as this evaluation's artifact, so every path that turns the tree
+    into bytes refuses it (:func:`opened_evaluations_dir`,
+    :func:`opened_artifact`) and raises this instead.
+
+    Deliberately distinct from an *absent* artifact, which reads as ``None``
+    everywhere: absence is retention's designed end state, while this is damage an
+    operator can repair, and a caller that could not tell them apart would report
+    tampering as the normal end of an artifact's life.
+    """
+
+
 def task_evaluations_dir(data_dir: Path, *, repo_name: str, task_id: str) -> Path:
     """Return the contained parent dir holding every evaluation for one task.
 
     Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/``, the directory
     :func:`evaluation_artifact_dir` places each ``<evaluation-id>/`` under and
-    :meth:`EvaluationService.list_evaluations` enumerates. The repo component is
-    slugged (:data:`_SLUG`); the task component must be a single safe path
-    segment (empty, a separator/null byte, or a ``.``/``..`` dot reference raises
-    ``ValueError``, failing closed). As a final defense the resolved target is
-    asserted to stay under the resolved evaluations base, so neither a crafted
-    task id nor repo name can steer a read/write outside ``<data_dir>/evaluations``.
-    Pure path math: it creates nothing.
+    :meth:`EvaluationService.list_evaluations` enumerates. Segments come from
+    :func:`tree_segments` (slugged repo, validated task id), so a crafted id
+    fails closed with ``ValueError`` rather than building a path that could escape
+    the tree. As a final defense the resolved target is asserted to stay under the
+    resolved evaluations base. Pure path math: it creates nothing, and — unlike
+    :func:`opened_evaluations_dir` — it *follows* links, so it is for the write and
+    delete paths that name a directory, never for reading artifacts out of one.
     """
     base = data_dir / EVALUATIONS_SUBDIR
-    repo_seg = _safe_segment(repo_slug(repo_name), label="repo")
-    task_seg = _safe_segment(task_id, label="task id")
-    target = base / repo_seg / task_seg
+    target = base.joinpath(*tree_segments(repo_name=repo_name, task_id=task_id))
     if not target.resolve().is_relative_to(base.resolve()):
         raise ValueError(f"evaluations path escapes {base}: {target}")
     return target
@@ -281,24 +325,236 @@ def evaluation_artifact_dir(
 ) -> Path:
     """Return the contained directory for one evaluation's artifacts.
 
-    Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/`` —
-    the per-task parent (:func:`task_evaluations_dir`, which slugs the repo and
-    validates the task segment) plus a validated ``<evaluation-id>`` segment. A
-    segment that is empty, contains a separator or null byte, or is a ``.``/``..``
-    dot reference raises ``ValueError`` — fail closed rather than build a path
-    that could escape the evaluations tree. As a final defense the resolved target
-    is asserted to stay under the resolved evaluations base (catching, e.g., an
-    all-dots repo slug), so neither a crafted task id, evaluation id, nor repo
-    name can steer a write outside ``<data_dir>/evaluations``. Pure path math: it
-    creates nothing.
+    Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/``,
+    validated and contained exactly as :func:`task_evaluations_dir` is, with the
+    same pure-path-math and link-following caveats: this is the dir a generation
+    creates and writes into and a prune removes, while every *read* of what stands
+    inside it goes through :func:`opened_evaluations_dir`.
     """
     base = data_dir / EVALUATIONS_SUBDIR
-    parent = task_evaluations_dir(data_dir, repo_name=repo_name, task_id=task_id)
-    eval_seg = _safe_segment(evaluation_id, label="evaluation id")
-    target = parent / eval_seg
+    target = base.joinpath(
+        *tree_segments(
+            repo_name=repo_name, task_id=task_id, evaluation_id=evaluation_id
+        )
+    )
     if not target.resolve().is_relative_to(base.resolve()):
         raise ValueError(f"evaluation artifact path escapes {base}: {target}")
     return target
+
+
+def tree_segments(
+    *,
+    repo_name: str,
+    task_id: str | None = None,
+    evaluation_id: str | None = None,
+) -> tuple[str, ...]:
+    """The validated path components addressing one level of the evaluations tree.
+
+    One rule for the two ways the tree is addressed — as a path
+    (:func:`task_evaluations_dir`, :func:`evaluation_artifact_dir`) and as a
+    descriptor walk (:func:`opened_evaluations_dir`) — so a segment one of them
+    rejects can never be a segment the other accepts. The repo component is
+    slugged (:data:`_SLUG`) and every component must be a single safe segment
+    (:func:`_safe_segment`).
+
+    Public because a caller holding an identity from elsewhere — the report
+    catalog, resolving a stored catalog line — needs to ask *whether it addresses
+    the tree at all* before deciding anything else about it, without opening
+    anything.
+
+    Levels cascade: naming a deeper one without its parent is a caller bug, not a
+    tree state, so it raises rather than silently addressing the shallower dir.
+    """
+    if evaluation_id is not None and task_id is None:
+        raise ValueError("evaluation id given without a task id")
+    segments = [_safe_segment(repo_slug(repo_name), label="repo")]
+    if task_id is not None:
+        segments.append(_safe_segment(task_id, label="task id"))
+    if evaluation_id is not None:
+        segments.append(_safe_segment(evaluation_id, label="evaluation id"))
+    return tuple(segments)
+
+
+@contextmanager
+def opened_evaluations_dir(
+    data_dir: Path,
+    *,
+    repo_name: str | None = None,
+    task_id: str | None = None,
+    evaluation_id: str | None = None,
+) -> Iterator[int | None]:
+    """Yield a descriptor for one level of the evaluations tree, following no link.
+
+    The subsystem's containment primitive, and the thing every read of a stored
+    artifact starts from — the per-task detail route, the global feed's bundle and
+    raw-artifact reads, and publication's own completeness/hashing pass. It exists
+    because a *pathname* cannot carry containment: whatever a check proves about
+    ``<repo>/<task>/<eval>/evidence.json``, the read walks those names a second
+    time and may get different objects, and a no-follow open of the file alone
+    proves nothing when a *directory* above it became a link in between (the
+    ``O_NOFOLLOW`` on the last component says nothing about the earlier ones). So
+    the walk is the check: each hop below the base is opened ``O_NOFOLLOW``, and
+    everything the caller does afterwards is relative to the descriptor it gets.
+
+    The rule this establishes, stated once for every caller: **the evaluations
+    tree may be reached through links; nothing inside it may be.** Its base is
+    opened normally, so a hub whose data dir is a relocated volume or sits under
+    macOS's own ``/var`` → ``/private/var`` reads and publishes exactly as one on a
+    plain path does. Below the base the hub writes only real directories, so a link
+    at ``<repo-slug>``, ``<task-id>``, or ``<evaluation-id>`` is not tree state to
+    interpret — it is damage, and following it would pull an outside artifact set
+    into the feed with the hub's own hashes on it.
+
+    Yields ``None`` when the level is simply absent — nothing evaluated yet, or a
+    prune took it — including when a non-directory stands at a hop, since that is
+    no more the tree than an absent name is. Raises
+    :class:`EvaluationDamagedTreeError` for a refused link (a loop included: it is
+    never followed far enough to be one) and ``ValueError`` for an unsafe segment;
+    every other ``OSError`` propagates as the IO fault it is.
+
+    The descriptors are closed on the way out, so a caller must do its reading
+    inside the ``with``; nothing it obtains from them outlives it.
+    """
+    if repo_name is None:
+        if task_id is not None or evaluation_id is not None:
+            raise ValueError("task id given without a repo name")
+        segments: tuple[str, ...] = ()
+    else:
+        segments = tree_segments(
+            repo_name=repo_name, task_id=task_id, evaluation_id=evaluation_id
+        )
+    # The base is the tree, not something inside it: opened by path, links and
+    # all, which is what keeps a relocated data dir readable.
+    try:
+        fds = [os.open(data_dir / EVALUATIONS_SUBDIR, _TREE_BASE_FLAGS)]
+    except (FileNotFoundError, NotADirectoryError):
+        yield None
+        return
+    try:
+        for segment in segments:
+            try:
+                fds.append(os.open(segment, _TREE_HOP_FLAGS, dir_fd=fds[-1]))
+            except FileNotFoundError:
+                yield None
+                return
+            except OSError as err:
+                if err.errno == errno.ELOOP:
+                    raise EvaluationDamagedTreeError(
+                        f"{segment!r} is reached through a symbolic link and is"
+                        " refused rather than followed"
+                    ) from err
+                raise
+            if not stat.S_ISDIR(os.fstat(fds[-1]).st_mode):
+                # A file, a FIFO, anything else: not a level of the tree, and as
+                # absent as a name that is not there at all.
+                yield None
+                return
+        yield fds[-1]
+    finally:
+        for fd in reversed(fds):
+            os.close(fd)
+
+
+@contextmanager
+def opened_artifact(name: str, *, dir_fd: int) -> Iterator[BinaryIO | None]:
+    """Open one artifact by name inside an already-contained dir descriptor.
+
+    The file-hop half of the rule :func:`opened_evaluations_dir` states for the
+    directory hops, and the last step of every path that turns a stored artifact
+    into bytes — a detail-route read, a bundle export, a raw verification read, and
+    the manifest digest publication records. ``O_NOFOLLOW`` refuses a link at the
+    artifact's own hop, and ``fstat`` and the read then describe exactly the object
+    that was opened, whatever the name comes to mean afterwards; opening relative
+    to ``dir_fd`` is what keeps that guarantee from being undone one level up.
+    ``O_NONBLOCK`` keeps the open from being turned into a hang — a FIFO planted
+    where the artifact was would otherwise wait for a writer forever, on a request
+    thread of the resident service (a regular file ignores the flag).
+
+    Yields ``None`` when what stands there is not a regular file — a directory, a
+    FIFO — since none of them is the published artifact. Raises
+    :class:`EvaluationDamagedTreeError` for a refused link and ``OSError``
+    (``FileNotFoundError`` for an absent artifact) otherwise.
+    """
+    try:
+        fd = os.open(name, _ARTIFACT_FLAGS, dir_fd=dir_fd)
+    except OSError as err:
+        if err.errno == errno.ELOOP:
+            raise EvaluationDamagedTreeError(
+                f"artifact {name!r} is reached through a symbolic link and is"
+                " refused rather than followed"
+            ) from err
+        raise
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            yield None
+            return
+        with open(fd, "rb", closefd=False) as handle:
+            yield handle
+    finally:
+        os.close(fd)
+
+
+def read_contained_artifact(
+    data_dir: Path,
+    *,
+    repo_name: str,
+    task_id: str,
+    evaluation_id: str,
+    name: str,
+) -> bytes | None:
+    """One stored artifact's bytes, or ``None`` when it is not there to read.
+
+    The whole contained read in one call, for callers that want the bytes and the
+    ordinary absent/damaged split rather than the descriptors: absent dir, absent
+    file, and a non-regular file all read as ``None``, while a link at any hop
+    raises :class:`EvaluationDamagedTreeError`. ``name`` is validated as a single
+    safe segment first, so a traversal attempt opens nothing at all.
+    """
+    artifact = _safe_segment(name, label="artifact name")
+    with opened_evaluations_dir(
+        data_dir,
+        repo_name=repo_name,
+        task_id=task_id,
+        evaluation_id=evaluation_id,
+    ) as dir_fd:
+        if dir_fd is None:
+            return None
+        try:
+            with opened_artifact(artifact, dir_fd=dir_fd) as handle:
+                return handle.read() if handle is not None else None
+        except FileNotFoundError:
+            return None
+
+
+def contained_dir_names(dir_fd: int) -> list[str]:
+    """Sorted names of the real subdirectories of an opened tree dir.
+
+    The census counterpart of :func:`opened_evaluations_dir`: it says what the
+    level holds, without opening any of it. ``follow_symlinks=False`` keeps it
+    answering the same question the walk enforces, so a listing can never offer a
+    name the read would then refuse. Sorted so every enumeration of the tree — the
+    per-task listing, the feed's sweep — is deterministic.
+    """
+    return sorted(
+        entry.name
+        for entry in os.scandir(dir_fd)
+        if entry.is_dir(follow_symlinks=False)
+    )
+
+
+def contained_file_names(dir_fd: int) -> list[str]:
+    """Sorted names of the regular files in an opened tree dir (links excluded).
+
+    What :meth:`EvaluationService.list_evaluations` reports as an evaluation's
+    artifacts, under the census rule :func:`contained_dir_names` states: a linked
+    name is not one of the hub's artifacts, so a listing must not advertise bytes
+    that every read path refuses to serve.
+    """
+    return sorted(
+        entry.name
+        for entry in os.scandir(dir_fd)
+        if entry.is_file(follow_symlinks=False)
+    )
 
 
 def repo_slug(value: str) -> str:
@@ -1004,7 +1260,7 @@ class EvaluationService:
         """List every persisted evaluation for ``(repo, task_id)``, newest-first.
 
         A structural directory read, gated and contained: it lists the
-        ``<evaluation-id>/`` dirs under the per-task :func:`task_evaluations_dir`
+        ``<evaluation-id>/`` dirs under the per-task level of the evaluations tree
         and, for each, the artifact filenames it holds (``evidence.json`` /
         ``static_metrics.json``), so the caller learns which evaluations exist and
         what each carries without reading any artifact body. Newest-first by id
@@ -1014,23 +1270,38 @@ class EvaluationService:
         same-second ``-10`` before ``-9`` and report a stale latest). An absent
         tree (no evaluation ever generated) is an empty list, not an error; only
         the gate fails closed. Read-only — it creates nothing.
+
+        Enumerated through the contained walk and its census helpers
+        (:func:`opened_evaluations_dir`, :func:`contained_dir_names`,
+        :func:`contained_file_names`), so this manifest promises exactly what the
+        read paths will serve: a linked evaluation dir or artifact is not listed,
+        and a link at the repo/task hop raises
+        :class:`EvaluationDamagedTreeError` rather than quietly listing another
+        tree's evaluations as this task's.
         """
         self._require_enabled()
-        parent = task_evaluations_dir(
+        stored: list[StoredEvaluation] = []
+        with opened_evaluations_dir(
             self._config.data_dir, repo_name=repo.name, task_id=task_id
-        )
-        if not parent.is_dir():
-            return []
-        stored = [
-            StoredEvaluation(
-                evaluation_id=child.name,
-                artifacts=tuple(
-                    sorted(p.name for p in child.iterdir() if p.is_file())
-                ),
-            )
-            for child in parent.iterdir()
-            if child.is_dir()
-        ]
+        ) as parent_fd:
+            if parent_fd is None:
+                return []
+            names = contained_dir_names(parent_fd)
+        for name in names:
+            with opened_evaluations_dir(
+                self._config.data_dir,
+                repo_name=repo.name,
+                task_id=task_id,
+                evaluation_id=name,
+            ) as child_fd:
+                if child_fd is None:
+                    continue
+                stored.append(
+                    StoredEvaluation(
+                        evaluation_id=name,
+                        artifacts=tuple(contained_file_names(child_fd)),
+                    )
+                )
         stored.sort(key=lambda e: evaluation_order_key(e.evaluation_id), reverse=True)
         return stored
 
@@ -1133,19 +1404,29 @@ class EvaluationService:
         layer's ``STATIC_METRICS_NAME`` — a fixed constant supplied by the caller,
         so the subsystem's own filenames stay in their home modules rather than
         being duplicated here) and is re-validated as a single safe segment.
-        Resolution goes through :meth:`artifact_dir`, so a crafted
-        repo/task/evaluation id is rejected before any read. A missing evaluation
-        dir or a missing artifact file both read as ``None`` (a not-yet-generated
-        or evidence-only evaluation), kept distinct from a present-but-empty
-        artifact. Gated and read-only; a corrupt artifact surfaces its ``json``
+        Resolution goes through :func:`read_contained_artifact`, so a crafted
+        repo/task/evaluation id is rejected before any read and every hop of the
+        tree is walked without following a link — the bytes this hands back came
+        from the object that open accepted, never from whatever the name resolves
+        to now. A missing evaluation dir or a missing artifact file both read as
+        ``None`` (a not-yet-generated or evidence-only evaluation), kept distinct
+        from a present-but-empty artifact; a link standing where an artifact or one
+        of its parent dirs should be raises
+        :class:`EvaluationDamagedTreeError` rather than serving the outside file it
+        points at. Gated and read-only; a corrupt artifact surfaces its ``json``
         decode error rather than being silently masked.
         """
         self._require_enabled()
-        eval_dir = self.artifact_dir(repo, task_id, evaluation_id)
-        path = eval_dir / _safe_segment(name, label="artifact name")
-        if not path.is_file():
+        data = read_contained_artifact(
+            self._config.data_dir,
+            repo_name=repo.name,
+            task_id=task_id,
+            evaluation_id=evaluation_id,
+            name=name,
+        )
+        if data is None:
             return None
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(data.decode("utf-8"))
 
     def read_text_artifact(
         self, repo: ManagedRepo, task_id: str, evaluation_id: str, name: str
@@ -1154,19 +1435,24 @@ class EvaluationService:
 
         The text parallel of :meth:`read_artifact` for a non-JSON sibling
         artifact (the semantic layer's ``report.md`` — a human-readable export
-        rendered beside ``semantic_report.json``). Same containment: ``name`` is
-        re-validated as a single safe segment and resolution goes through
-        :meth:`artifact_dir`, so a crafted repo/task/evaluation id is rejected
-        before any read; a missing dir or file both read as ``None``. Gated and
-        read-only. Kept distinct from :meth:`read_artifact` because a Markdown
-        artifact must not be run through ``json.loads``.
+        rendered beside ``semantic_report.json``). Same containment, by the same
+        helper: ``name`` is re-validated as a single safe segment, a crafted
+        repo/task/evaluation id is rejected before any read, no hop of the tree is
+        followed through a link, and a missing dir or file both read as ``None``.
+        Gated and read-only. Kept distinct from :meth:`read_artifact` because a
+        Markdown artifact must not be run through ``json.loads``.
         """
         self._require_enabled()
-        eval_dir = self.artifact_dir(repo, task_id, evaluation_id)
-        path = eval_dir / _safe_segment(name, label="artifact name")
-        if not path.is_file():
+        data = read_contained_artifact(
+            self._config.data_dir,
+            repo_name=repo.name,
+            task_id=task_id,
+            evaluation_id=evaluation_id,
+            name=name,
+        )
+        if data is None:
             return None
-        return path.read_text(encoding="utf-8")
+        return data.decode("utf-8")
 
     def build_evidence(
         self, repo: ManagedRepo, task_id: str, *, evaluation_id: str

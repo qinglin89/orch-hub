@@ -102,7 +102,6 @@ than any verdict of its own.
 from __future__ import annotations
 
 import datetime as dt
-import errno
 import fcntl
 import hashlib
 import json
@@ -116,18 +115,20 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO
 
 from .config import Config
 from .evaluation import (
-    EVALUATIONS_SUBDIR,
     EVIDENCE_NAME,
     SOURCE_ARCHIVED,
+    EvaluationDamagedTreeError,
     EvaluationDisabledError,
+    contained_dir_names,
     evaluation_artifact_dir,
     evaluation_order_key,
+    opened_artifact,
+    opened_evaluations_dir,
     repo_slug,
-    task_evaluations_dir,
+    tree_segments,
 )
 from .models import (
     ManagedRepo,
@@ -234,10 +235,10 @@ answers: a name outside the published set (never a file), a stored identity that
 cannot be trusted to address the artifacts, a report whose artifact retention
 removed (the designed end state of an entry outliving what it indexes), and a
 file that is there but does not read — either because IO failed or because a
-symbolic link stands where the published artifact should, which is refused
-rather than followed. Both are hub-side defects, deliberately not folded into
-``not_retained``: reporting a damaged artifact tree as the designed end state of
-retention would hide it."""
+symbolic link stands where the published artifact or one of its parent
+directories should, which is refused rather than followed. Both are hub-side
+defects, deliberately not folded into ``not_retained``: reporting a damaged
+artifact tree as the designed end state of retention would hide it."""
 
 INTEGRITY_VERIFIED = "verified"
 INTEGRITY_MISMATCHED = "mismatched"
@@ -453,6 +454,25 @@ class ReportCatalog:
             evaluation_id=entry.evaluation_id,
         )
 
+    def _opened_dir(self, entry: ReportCatalogEntry):
+        """The contained descriptor both read paths work from (a context manager).
+
+        The read counterpart of :meth:`artifact_dir`, and the reason that method is
+        path math only: a directory *name* is re-walked by every operation that
+        uses it, so a link swapped in above the artifacts would redirect a read
+        that a pathname check had just approved. This walks the tree's hops
+        no-follow once and hands back the descriptor everything else — the
+        completeness census, each artifact open, each hash — is taken relative to
+        (:func:`~orch_hub.evaluation.opened_evaluations_dir`, which also states why
+        links *above* the tree stay followable).
+        """
+        return opened_evaluations_dir(
+            self._config.data_dir,
+            repo_name=entry.repo_slug,
+            task_id=entry.task_id,
+            evaluation_id=entry.evaluation_id,
+        )
+
     def page(
         self, *, after_seq: int | None = None, limit: int = DEFAULT_PAGE_LIMIT
     ) -> ReportPage:
@@ -551,31 +571,18 @@ class ReportCatalog:
         read-only.
         """
         self._require_enabled()
-        try:
-            eval_dir = self.artifact_dir(entry)
-        except ValueError as err:
-            # A hand-edited or foreign catalog line: nothing is read at all.
+        # Both audits decide before any IO. A hand-edited or foreign catalog line
+        # that cannot address the tree is read no further at all; a line that *can*
+        # name a contained dir but is not the identity that dir was published under
+        # would otherwise serve another report's artifacts, hash-verified, under
+        # this entry's key.
+        unsafe = _unaddressable(entry)
+        if unsafe is not None:
             return ReportBundle(
                 entry=entry,
                 available=False,
-                detail=f"unsafe stored report identity ({err})",
+                detail=f"unsafe stored report identity ({unsafe})",
             )
-        except (OSError, RuntimeError) as err:
-            # Path math that still walks the filesystem: the contained-path helper
-            # resolves the dir to prove it stays under the evaluations base, and a
-            # symlink loop planted in the tree makes resolution *raise* instead of
-            # return — ``RuntimeError`` on the Python versions this project still
-            # supports (≤3.12), ``OSError`` in other failure modes. Unhandled, a
-            # damaged tree would escape this envelope as an unclassified crash
-            # rather than the hub-side fault the raw read already classifies.
-            return ReportBundle(
-                entry=entry,
-                available=False,
-                detail=f"unresolvable path for report artifacts ({err})",
-            )
-        # Also before any IO: a line that *can* name a contained dir but is not the
-        # identity that dir was published under would otherwise serve another
-        # report's artifacts, hash-verified, under this entry's key.
         fault = _identity_fault(entry)
         if fault is not None:
             return ReportBundle(
@@ -588,15 +595,40 @@ class ReportCatalog:
             available=False,
             detail="report artifacts are no longer retained",
         )
-        if not eval_dir.is_dir():
-            return gone
+        try:
+            with self._opened_dir(entry) as dir_fd:
+                if dir_fd is None:
+                    return gone
+                return self._read_opened_bundle(entry, dir_fd, gone)
+        except EvaluationDamagedTreeError as err:
+            # A link (or a loop, which is never followed far enough to become one)
+            # standing at a directory hop of the tree: damage, not the pruning that
+            # an entry outliving its artifacts is made of.
+            return ReportBundle(
+                entry=entry, available=False, detail=_damaged_hop_detail(err)
+            )
+        except OSError as err:
+            return ReportBundle(
+                entry=entry,
+                available=False,
+                detail=f"unreadable report artifacts ({err})",
+            )
+
+    def _read_opened_bundle(
+        self, entry: ReportCatalogEntry, dir_fd: int, gone: ReportBundle
+    ) -> ReportBundle:
+        """The artifact half of :meth:`read_bundle`, over an opened evaluation dir.
+
+        Split out only so the containment walk's failure modes are classified once,
+        around one ``with``; every rule this applies is documented on the caller.
+        """
         # Same completeness rule publication used, asked for its detail rather
         # than its verdict: a partially pruned set must read as an incomplete set,
         # not as the IO error its first absent file would otherwise produce below,
         # and a damaged one must not read as either. Advisory only — it names what
         # is wrong across the whole set before anything is read, while the read
         # below is what containment actually rests on.
-        missing, uncontained = _artifact_faults(eval_dir)
+        missing, uncontained = _artifact_faults(dir_fd)
         if uncontained:
             return ReportBundle(
                 entry=entry, available=False, detail=_damaged_detail(uncontained)
@@ -621,16 +653,16 @@ class ReportCatalog:
             # and the bytes come from that descriptor — a swap landing inside this
             # loop changes what the name means, never what the bundle carries.
             try:
-                data = _read_artifact_file(eval_dir / name)
-            except (FileNotFoundError, NotADirectoryError):
+                data = _read_artifact_file(name, dir_fd=dir_fd)
+            except EvaluationDamagedTreeError:
+                return ReportBundle(
+                    entry=entry, available=False, detail=_damaged_detail((name,))
+                )
+            except FileNotFoundError:
                 # Pruned between the check and the open: still absence, and the
                 # answer absence gets — not the IO fault it is not.
                 return gone
             except OSError as err:
-                if err.errno == errno.ELOOP:
-                    return ReportBundle(
-                        entry=entry, available=False, detail=_damaged_detail((name,))
-                    )
                 return ReportBundle(
                     entry=entry,
                     available=False,
@@ -723,29 +755,13 @@ class ReportCatalog:
                     f" {', '.join(REQUIRED_ARTIFACTS)})"
                 ),
             )
-        try:
-            eval_dir = self.artifact_dir(entry)
-        except ValueError as err:
+        unsafe = _unaddressable(entry)
+        if unsafe is not None:
             return ReportArtifactRead(
                 entry=entry,
                 name=name,
                 reason=ARTIFACT_IDENTITY,
-                detail=f"unsafe stored report identity ({err})",
-            )
-        except (OSError, RuntimeError) as err:
-            # Path math that still walks the filesystem: the contained-path helper
-            # resolves the dir to prove it stays under the evaluations base, and
-            # resolution of a symlink loop planted in the tree *raises* instead of
-            # returning — ``RuntimeError`` on the Python versions this project
-            # still supports (≤3.12 turns ``ELOOP`` into one, non-strict included),
-            # ``OSError`` in other failure modes. Unhandled, a damaged tree would
-            # escape this method's structured result and reach the route as an
-            # unclassified crash rather than the hub-side fault it is.
-            return ReportArtifactRead(
-                entry=entry,
-                name=name,
-                reason=ARTIFACT_UNREADABLE,
-                detail=f"unresolvable path for report artifact {name} ({err})",
+                detail=f"unsafe stored report identity ({unsafe})",
             )
         fault = _identity_fault(entry)
         if fault is not None:
@@ -755,7 +771,6 @@ class ReportCatalog:
                 reason=ARTIFACT_IDENTITY,
                 detail=f"incoherent stored report identity ({fault})",
             )
-        path = eval_dir / name
         gone = ReportArtifactRead(
             entry=entry,
             name=name,
@@ -763,33 +778,34 @@ class ReportCatalog:
             detail=f"report artifact {name} is no longer retained",
         )
         # A contained *directory* says nothing about what the fixed name inside it
-        # opens, and no pathname check can settle it either: whatever such a check
-        # proved about `path`, the read walks that name a second time and may get a
-        # different object — an artifact swapped for a link to a target-repo file
-        # in between would be served as this entry's published artifact. So the
-        # open itself is the containment check (`_read_artifact_file`), and every
-        # step after it works on the descriptor.
+        # opens, and a pathname settles neither: whatever a check proved about the
+        # name, the read walks it a second time and may get a different object —
+        # an artifact, or a directory above it, swapped for a link to a
+        # target-repo file in between would be served as this entry's published
+        # artifact. So the walk and the open are the containment check
+        # (:meth:`_opened_dir`, :func:`_read_artifact_file`), and every step after
+        # them works on descriptors.
         try:
-            data = _read_artifact_file(path)
+            with self._opened_dir(entry) as dir_fd:
+                if dir_fd is None:
+                    # A pruned dir, or something that is not a directory standing
+                    # where it was: as absent as a pruned artifact.
+                    return gone
+                data = _read_artifact_file(name, dir_fd=dir_fd)
+        except EvaluationDamagedTreeError as err:
+            # A link refused at the artifact's own hop or at a directory above it;
+            # a loop is the same answer, never followed far enough to become one.
+            return ReportArtifactRead(
+                entry=entry,
+                name=name,
+                reason=ARTIFACT_UNREADABLE,
+                detail=f"report artifact {name} is damaged ({err})",
+            )
         except FileNotFoundError:
             # Lost to a prune before or during the open: still absence, not an IO
             # fault, so it must not be reported as one.
             return gone
-        except NotADirectoryError:
-            # Something that is not a directory standing where the evaluation dir
-            # was: as absent as a pruned dir, and the answer the bundle gives it.
-            return gone
         except OSError as err:
-            if err.errno == errno.ELOOP:
-                return ReportArtifactRead(
-                    entry=entry,
-                    name=name,
-                    reason=ARTIFACT_UNREADABLE,
-                    detail=(
-                        f"report artifact {name} is reached through a symbolic"
-                        " link and is refused rather than followed"
-                    ),
-                )
             return ReportArtifactRead(
                 entry=entry,
                 name=name,
@@ -826,7 +842,8 @@ class ReportCatalog:
         The live hook (:class:`orch_hub.semantic.ReportCataloger`), called by the
         semantic evaluator once its whole artifact set is durable. Returns the new
         entry, or ``None`` for the three ordinary non-publication cases: the
-        artifact set is incomplete, the evaluated task is not archived yet (an
+        artifact set is not one the feed can publish (incomplete, or damaged by a
+        link at one of its own hops), the evaluated task is not archived yet (an
         evaluation of live work — it publishes from a later sweep, once close-out
         archives the task), or it is already published. None of the three is an
         error; the last is what makes a re-run hook, a racing reconciliation, and
@@ -840,33 +857,45 @@ class ReportCatalog:
         artifacts that retry needs (:meth:`unpublished_ids`).
         """
         self._require_enabled()
-        eval_dir = evaluation_artifact_dir(
-            self._config.data_dir,
-            repo_name=repo.name,
-            task_id=task_id,
-            evaluation_id=evaluation_id,
-        )
-        # Take the slug from the resolved path rather than re-deriving it: the
-        # ``<repo-slug>/`` level of the artifact dir IS the storage identity, so
-        # a key built from it provably matches the one a reconciliation walk
-        # (which only ever sees directory names) derives for the same evaluation.
-        slug = eval_dir.parent.parent.name
-        if not _is_complete(eval_dir):
-            return None
+        # The slug is the ``<repo-slug>/`` level of the artifact dir — the storage
+        # identity — so a key built from it provably matches the one a
+        # reconciliation walk (which only ever sees directory names) derives for
+        # the same evaluation.
+        slug = repo_slug(repo.name)
         key = report_key(
             repo_slug=slug, task_id=task_id, evaluation_id=evaluation_id
         )
-        with self._locked():
-            existing = self._read_entries()
-            if any(entry.report_key == key for entry in existing):
-                return None
-            return self._publish(
-                seq=_next_seq(existing),
-                slug=slug,
+        # One contained descriptor for the whole judgement: completeness, the
+        # identity reads, and the manifest hashes all describe the directory this
+        # open accepted, not a name re-walked once per artifact.
+        try:
+            with opened_evaluations_dir(
+                self._config.data_dir,
+                repo_name=repo.name,
                 task_id=task_id,
                 evaluation_id=evaluation_id,
-                eval_dir=eval_dir,
-            )
+            ) as dir_fd:
+                if dir_fd is None or not _is_complete(dir_fd):
+                    return None
+                with self._locked():
+                    existing = self._read_entries()
+                    if any(entry.report_key == key for entry in existing):
+                        return None
+                    return self._publish(
+                        seq=_next_seq(existing),
+                        slug=slug,
+                        task_id=task_id,
+                        evaluation_id=evaluation_id,
+                        dir_fd=dir_fd,
+                    )
+        except EvaluationDamagedTreeError:
+            # A link at one of the tree's own hops, refused rather than followed:
+            # the same non-candidate answer :func:`_is_complete` gives a linked
+            # artifact, so the hook, the sweep, and the retention guard agree that
+            # a damaged dir is not a report and is not publication debt. Nothing
+            # inside the lock can raise this — every artifact read below converts
+            # its own failures — so this classifies the walk alone.
+            return None
 
     def unpublished_ids(self, repo: ManagedRepo, task_id: str) -> set[str]:
         """Evaluation ids of ``(repo, task_id)`` that retention must not delete.
@@ -901,45 +930,54 @@ class ReportCatalog:
         the price of the two sides never disagreeing. Read-only; gated.
         """
         self._require_enabled()
-        parent = task_evaluations_dir(
-            self._config.data_dir, repo_name=repo.name, task_id=task_id
-        )
-        if not parent.is_dir():
-            return set()
-        slug = parent.parent.name
+        slug = repo_slug(repo.name)
         known = {entry.report_key for entry in self.entries()}
         archived: dict[tuple[Path, str], bool] = {}
         owed: set[str] = set()
-        for eval_dir in sorted(parent.iterdir()):
-            if not eval_dir.is_dir() or not _is_complete(eval_dir):
-                continue
+        for evaluation_id in _level_names(
+            self._config.data_dir, repo_name=repo.name, task_id=task_id
+        ):
             key = report_key(
-                repo_slug=slug, task_id=task_id, evaluation_id=eval_dir.name
+                repo_slug=slug, task_id=task_id, evaluation_id=evaluation_id
             )
             if key in known:
                 continue
             try:
-                publishable = self._publishable(
-                    _read_candidate(
-                        eval_dir,
-                        slug=slug,
-                        task_id=task_id,
-                        evaluation_id=eval_dir.name,
-                    ),
-                    task_id,
-                    archived,
-                )
-            except ReportCatalogError as err:
-                _log.warning(
-                    "retention keeps unjudged report %s/%s/%s: %s",
-                    slug,
-                    task_id,
-                    eval_dir.name,
-                    err,
-                )
-                publishable = True
+                with opened_evaluations_dir(
+                    self._config.data_dir,
+                    repo_name=repo.name,
+                    task_id=task_id,
+                    evaluation_id=evaluation_id,
+                ) as dir_fd:
+                    if dir_fd is None or not _is_complete(dir_fd):
+                        continue
+                    try:
+                        publishable = self._publishable(
+                            _read_candidate(
+                                dir_fd,
+                                slug=slug,
+                                task_id=task_id,
+                                evaluation_id=evaluation_id,
+                            ),
+                            task_id,
+                            archived,
+                        )
+                    except ReportCatalogError as err:
+                        _log.warning(
+                            "retention keeps unjudged report %s/%s/%s: %s",
+                            slug,
+                            task_id,
+                            evaluation_id,
+                            err,
+                        )
+                        publishable = True
+            except EvaluationDamagedTreeError:
+                # Damage is not debt: a link at one of the tree's hops is the same
+                # non-candidate answer publication gives it, so retention stays free
+                # to prune a dir the feed will never publish.
+                continue
             if publishable:
-                owed.add(eval_dir.name)
+                owed.add(evaluation_id)
         return owed
 
     def reconcile(self) -> list[ReportCatalogEntry]:
@@ -982,19 +1020,18 @@ class ReportCatalog:
             seq = _next_seq(existing)
             added: list[ReportCatalogEntry] = []
             archived: dict[tuple[Path, str], bool] = {}
-            for slug, task_id, evaluation_id, eval_dir in self._scan_candidates():
+            for slug, task_id, evaluation_id in self._scan_candidates():
                 key = report_key(
                     repo_slug=slug, task_id=task_id, evaluation_id=evaluation_id
                 )
                 if key in known:
                     continue
                 try:
-                    entry = self._publish(
+                    entry = self._publish_id(
                         seq=seq,
                         slug=slug,
                         task_id=task_id,
                         evaluation_id=evaluation_id,
-                        eval_dir=eval_dir,
                         archived_cache=archived,
                     )
                 except Exception as err:  # noqa: BLE001 - one dir cannot stop the sweep
@@ -1017,6 +1054,48 @@ class ReportCatalog:
 
     # -- internals ------------------------------------------------------------
 
+    def _publish_id(
+        self,
+        *,
+        seq: int,
+        slug: str,
+        task_id: str,
+        evaluation_id: str,
+        archived_cache: dict[tuple[Path, str], bool] | None = None,
+    ) -> ReportCatalogEntry | None:
+        """Open one swept identity's artifact dir and publish it. Lock held.
+
+        The sweep's bridge from a directory *name* to the descriptor everything
+        else works from, and the reason the scan carries identities rather than
+        paths: the dir is re-opened here, under the containment rule, so nothing is
+        published on the strength of what an earlier walk of the same names saw. A
+        dir pruned since, replaced by a file, left incomplete, or reached through a
+        link is not a candidate any more — ``None``, no sequence consumed, retried
+        next sweep if it comes back.
+        """
+        try:
+            with opened_evaluations_dir(
+                self._config.data_dir,
+                repo_name=slug,
+                task_id=task_id,
+                evaluation_id=evaluation_id,
+            ) as dir_fd:
+                if dir_fd is None or not _is_complete(dir_fd):
+                    return None
+                return self._publish(
+                    seq=seq,
+                    slug=slug,
+                    task_id=task_id,
+                    evaluation_id=evaluation_id,
+                    dir_fd=dir_fd,
+                    archived_cache=archived_cache,
+                )
+        except EvaluationDamagedTreeError:
+            # Not a candidate, exactly as for the live hook: a link at a hop is the
+            # same answer a linked artifact gets, so no sequence is consumed and no
+            # entry is written.
+            return None
+
     def _publish(
         self,
         *,
@@ -1024,7 +1103,7 @@ class ReportCatalog:
         slug: str,
         task_id: str,
         evaluation_id: str,
-        eval_dir: Path,
+        dir_fd: int,
         archived_cache: dict[tuple[Path, str], bool] | None = None,
     ) -> ReportCatalogEntry | None:
         """Publish one candidate if the publication rule admits it. Lock held.
@@ -1039,7 +1118,7 @@ class ReportCatalog:
         partial-entry state to clean up.
         """
         candidate = _read_candidate(
-            eval_dir, slug=slug, task_id=task_id, evaluation_id=evaluation_id
+            dir_fd, slug=slug, task_id=task_id, evaluation_id=evaluation_id
         )
         if not self._publishable(candidate, task_id, archived_cache):
             return None
@@ -1049,6 +1128,7 @@ class ReportCatalog:
             slug=slug,
             task_id=task_id,
             evaluation_id=evaluation_id,
+            dir_fd=dir_fd,
         )
         self._append_line(entry)
         return entry
@@ -1088,6 +1168,7 @@ class ReportCatalog:
         slug: str,
         task_id: str,
         evaluation_id: str,
+        dir_fd: int,
     ) -> ReportCatalogEntry:
         """Assemble one catalog entry from an already-judged candidate.
 
@@ -1129,8 +1210,7 @@ class ReportCatalog:
             model=_str_field(evaluator, "model"),
             schema_version=_str_field(evaluator, "schema_version"),
             artifacts=tuple(
-                _artifact_digest(candidate.eval_dir / name)
-                for name in REQUIRED_ARTIFACTS
+                _artifact_digest(name, dir_fd=dir_fd) for name in REQUIRED_ARTIFACTS
             ),
             provenance=_provenance(candidate.evidence),
         )
@@ -1247,24 +1327,23 @@ class ReportCatalog:
         _require_unique_identity(found)
         return found
 
-    def _scan_candidates(self) -> list[tuple[str, str, str, Path]]:
-        """Every complete evaluation in the tree, in deterministic global order.
+    def _scan_candidates(self) -> list[tuple[str, str, str]]:
+        """Every evaluation identity in the tree, in deterministic global order.
 
         Walks the fixed ``<repo-slug>/<task-id>/<evaluation-id>/`` layout (a
-        stray file or extra nesting level is simply not a candidate) and keeps
-        only dirs holding the full artifact set. The sort key is
-        ``(evaluation order, repo slug, task id)``: evaluation order first so a
-        backfill numbers reports in generation order across repos, then slug and
-        task id to break the ties that scoped evaluation ids produce when two
-        repos evaluate in the same second — which is precisely the collision the
-        global sequence exists to resolve.
+        stray file, a linked hop, or an extra nesting level is simply not a
+        candidate). The sort key is ``(evaluation order, repo slug, task id)``:
+        evaluation order first so a backfill numbers reports in generation order
+        across repos, then slug and task id to break the ties that scoped
+        evaluation ids produce when two repos evaluate in the same second — which
+        is precisely the collision the global sequence exists to resolve.
+
+        Completeness is deliberately *not* filtered here: it is answered inside the
+        publication step from the descriptor it will hash, so the scan cannot
+        admit a dir on the strength of a check taken against an earlier walk of
+        the same names.
         """
-        base = self._config.data_dir / EVALUATIONS_SUBDIR
-        candidates = [
-            (slug, task_id, evaluation_id, eval_dir)
-            for slug, task_id, evaluation_id, eval_dir in _walk_evaluations(base)
-            if _is_complete(eval_dir)
-        ]
+        candidates = _walk_evaluations(self._config.data_dir)
         candidates.sort(
             key=lambda item: (evaluation_order_key(item[2]), item[0], item[1])
         )
@@ -1274,27 +1353,59 @@ class ReportCatalog:
 # -- module helpers -----------------------------------------------------------
 
 
-def _walk_evaluations(base: Path) -> Iterator[tuple[str, str, str, Path]]:
-    """Yield ``(repo_slug, task_id, evaluation_id, dir)`` for the evaluations tree.
+def _walk_evaluations(data_dir: Path) -> list[tuple[str, str, str]]:
+    """Every ``(repo_slug, task_id, evaluation_id)`` the evaluations tree holds.
 
-    A plain three-level walk, sorted at each level so the raw yield order is
-    itself stable (the caller re-sorts into global order). An absent tree yields
-    nothing — a hub that has never evaluated anything is not an error state.
+    A plain three-level walk, sorted at each level so the raw order is itself
+    stable (the caller re-sorts into global order). An absent tree yields nothing
+    — a hub that has never evaluated anything is not an error state.
+
+    Identity triples rather than directories, because a path handed forward is a
+    name the publication step would have to walk again: every step that reads a
+    candidate re-opens it through :func:`~orch_hub.evaluation.opened_evaluations_dir`
+    from these names, so the sweep is bound by the same containment rule as a feed
+    read rather than by whatever the tree looked like when it was listed
+    (:func:`_level_names`).
+
+    A repo directory whose name is not already a canonical slug is skipped: the
+    hub writes only slugged names, the slug rule is not injective, and re-opening
+    ``alpha!!`` by that name would open ``alpha`` — publishing one repo's report
+    under another's storage identity. It is the rule
+    :func:`_identity_fault` applies to a stored entry, applied here to the
+    directory that would produce one.
     """
-    if not base.is_dir():
-        return
-    for repo_dir in sorted(base.iterdir()):
-        if not repo_dir.is_dir():
+    found: list[tuple[str, str, str]] = []
+    for slug in _level_names(data_dir):
+        if repo_slug(slug) != slug:
             continue
-        for task_dir in sorted(repo_dir.iterdir()):
-            if not task_dir.is_dir():
-                continue
-            for eval_dir in sorted(task_dir.iterdir()):
-                if eval_dir.is_dir():
-                    yield repo_dir.name, task_dir.name, eval_dir.name, eval_dir
+        for task_id in _level_names(data_dir, repo_name=slug):
+            found.extend(
+                (slug, task_id, evaluation_id)
+                for evaluation_id in _level_names(
+                    data_dir, repo_name=slug, task_id=task_id
+                )
+            )
+    return found
 
 
-def _artifact_faults(eval_dir: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _level_names(data_dir: Path, **level: str) -> list[str]:
+    """Subdirectory names at one level of the evaluations tree, or none at all.
+
+    The sweep's census step. Anything that stops the level from being read as
+    hub-owned tree — absent, replaced by a file, reached through a link, or an
+    unsafe stored name — is simply not a level with candidates in it, which is the
+    answer a sweep needs: it must not abort a startup backfill over one damaged
+    subtree, and a damaged dir is not publishable anyway, so skipping it and
+    publishing everything else is the same verdict the read paths give.
+    """
+    try:
+        with opened_evaluations_dir(data_dir, **level) as dir_fd:
+            return [] if dir_fd is None else contained_dir_names(dir_fd)
+    except (OSError, ValueError, EvaluationDamagedTreeError):
+        return []
+
+
+def _artifact_faults(dir_fd: int) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """``(missing, uncontained)`` names among an evaluation dir's four artifacts.
 
     Two different defects, deliberately never merged into one list. *Missing* is
@@ -1318,13 +1429,15 @@ def _artifact_faults(eval_dir: Path) -> tuple[tuple[str, ...], tuple[str, ...]]:
     once rather than failing at the first). Containment itself is at the open, in
     :func:`_read_artifact_file` for a read and :func:`_artifact_digest` for a
     publication, because a name checked here can mean something else by the time
-    it is opened.
+    it is opened. Taking ``dir_fd`` rather than a path is what keeps the census
+    describing the same directory those opens will use, whatever the names above
+    it come to mean in between.
     """
     missing: list[str] = []
     uncontained: list[str] = []
     for name in REQUIRED_ARTIFACTS:
         try:
-            mode = os.lstat(eval_dir / name).st_mode
+            mode = os.lstat(name, dir_fd=dir_fd).st_mode
         except OSError:
             missing.append(name)
             continue
@@ -1350,7 +1463,20 @@ def _damaged_detail(names: tuple[str, ...]) -> str:
     )
 
 
-def _is_complete(eval_dir: Path) -> bool:
+def _damaged_hop_detail(err: EvaluationDamagedTreeError) -> str:
+    """The same verdict for a link at a *directory* hop rather than at a file.
+
+    Shares the "damaged" wording with :func:`_damaged_detail` on purpose: a
+    consumer separates damage from retention's designed end state, and which hop
+    of the tree carries the link is repair detail, not a second category. Before
+    the tree hops were walked no-follow, a linked evaluation dir published and
+    served an outside artifact set outright, and a *looped* one read as pruned —
+    the two failures this phrasing now names.
+    """
+    return f"report artifact set is damaged ({err})"
+
+
+def _is_complete(dir_fd: int) -> bool:
     """Whether an evaluation dir holds the full L1+L2 report artifact set.
 
     The candidate predicate, and the reason a failed semantic job or a
@@ -1372,7 +1498,7 @@ def _is_complete(eval_dir: Path) -> bool:
     artifacts are gone or damaged without restating the rule; publication and the
     bundle export must never be able to disagree about what a complete report is.
     """
-    missing, uncontained = _artifact_faults(eval_dir)
+    missing, uncontained = _artifact_faults(dir_fd)
     return not missing and not uncontained
 
 
@@ -1425,6 +1551,28 @@ def _require_unique_identity(entries: list[ReportCatalogEntry]) -> None:
         seen_key.add(entry.report_key)
 
 
+def _unaddressable(entry: ReportCatalogEntry) -> str | None:
+    """Why a stored identity cannot name a path in the tree at all, else ``None``.
+
+    The first of the two pre-IO audits both read paths run, and the narrower one:
+    it asks only whether the stored triple is a legal address
+    (:func:`~orch_hub.evaluation.tree_segments` — the same segment rule the walk
+    and the write paths use), so a hand-edited line carrying ``..`` or a separator
+    is refused as *unsafe* before the coherence question is even meaningful.
+    Reported rather than raised, like :func:`_identity_fault`: an immutable line no
+    retry heals is better named than served by a permanently failing endpoint.
+    """
+    try:
+        tree_segments(
+            repo_name=entry.repo_slug,
+            task_id=entry.task_id,
+            evaluation_id=entry.evaluation_id,
+        )
+    except ValueError as err:
+        return str(err)
+    return None
+
+
 def _identity_fault(entry: ReportCatalogEntry) -> str | None:
     """Why a stored entry cannot be trusted to address its artifacts, else ``None``.
 
@@ -1467,56 +1615,17 @@ def _identity_fault(entry: ReportCatalogEntry) -> str | None:
     return None
 
 
-@contextmanager
-def _opened_artifact(path: Path) -> Iterator[BinaryIO | None]:
-    """Open one artifact by its fixed name, following no link at its final hop.
+def _read_artifact_file(name: str, *, dir_fd: int) -> bytes | None:
+    """The whole contained artifact ``name``, or ``None`` if it is not one.
 
-    The containment defense for a *fixed* artifact name, which no pathname check
-    can provide. The name is closed, but the object standing under it is not, and
-    every path-based operation — ``resolve``, ``is_file``, ``lstat``,
-    ``read_bytes`` — walks that name again. Checking a pathname and then opening
-    the same pathname is therefore two walks of a tree that can change in between:
-    the check describes one object and the read returns another, so an artifact
-    replaced by a link to a target-repo file between them is served (or hashed) as
-    the published artifact. Widening the window is not required either — the swap
-    only has to land inside it.
-
-    So the open *is* the check, and it is the one every caller that turns an
-    artifact into bytes goes through — the bundle export, the raw byte read, and
-    the manifest digest publication records. ``O_NOFOLLOW`` refuses a symlink at
-    the artifact's own hop, so it never becomes a redirect that could be followed
-    anywhere, and everything after works on the descriptor: ``fstat`` and the read
-    describe exactly the object that was opened, whatever the name comes to mean
-    afterwards. ``O_NONBLOCK`` keeps the open from being turned into a hang — a
-    FIFO planted where the artifact was would otherwise wait for a writer forever,
-    on a request thread of the resident service (a regular file ignores the flag).
-
-    Yields ``None`` when what stands there is not a regular file — a directory, a
-    FIFO — since none of them is the published artifact. Raises ``OSError``
-    otherwise, with ``ELOOP`` meaning a refused link (the deliberate refusal, not
-    an IO fault). Links *above* the artifact stay followable on purpose: a hub
-    whose data dir is reached through one (a relocated volume, macOS's own
-    ``/var`` → ``/private/var``) must keep reading and publishing normally.
+    The read-side wrapper of :func:`~orch_hub.evaluation.opened_artifact`: both
+    feed read paths hand back or parse *these* bytes, so what a consumer receives
+    came from the object the open accepted rather than from whatever the name
+    resolves to now — and, because the open is relative to a descriptor the
+    contained walk produced, from inside the evaluations tree rather than from
+    wherever a directory above it was made to point.
     """
-    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            yield None
-            return
-        with open(fd, "rb", closefd=False) as handle:
-            yield handle
-    finally:
-        os.close(fd)
-
-
-def _read_artifact_file(path: Path) -> bytes | None:
-    """The whole contained artifact at ``path``, or ``None`` if it is not one.
-
-    The read-side wrapper of :func:`_opened_artifact`: both feed read paths hand
-    back or parse *these* bytes, so what a consumer receives came from the object
-    the open accepted rather than from whatever the name resolves to now.
-    """
-    with _opened_artifact(path) as handle:
+    with opened_artifact(name, dir_fd=dir_fd) as handle:
         return handle.read() if handle is not None else None
 
 
@@ -1573,7 +1682,7 @@ def _has_torn_tail(path: Path) -> bool:
         return False
 
 
-def _artifact_digest(path: Path) -> ReportArtifact:
+def _artifact_digest(name: str, *, dir_fd: int) -> ReportArtifact:
     """Hash and size one artifact file for the entry's manifest.
 
     Read in chunks: an evidence pack is bounded but not small, and nothing here
@@ -1594,17 +1703,17 @@ def _artifact_digest(path: Path) -> ReportArtifact:
     digest = hashlib.sha256()
     size = 0
     try:
-        with _opened_artifact(path) as handle:
+        with opened_artifact(name, dir_fd=dir_fd) as handle:
             if handle is None:
                 raise ReportCatalogError(
-                    f"artifact {path.name} is not a contained regular file"
+                    f"artifact {name} is not a contained regular file"
                 )
             while chunk := handle.read(_HASH_CHUNK):
                 digest.update(chunk)
                 size += len(chunk)
-    except OSError as err:
-        raise ReportCatalogError(f"unreadable artifact {path.name} ({err})") from err
-    return ReportArtifact(name=path.name, size=size, sha256=digest.hexdigest())
+    except (OSError, EvaluationDamagedTreeError) as err:
+        raise ReportCatalogError(f"unreadable artifact {name} ({err})") from err
+    return ReportArtifact(name=name, size=size, sha256=digest.hexdigest())
 
 
 def _bundle_json(name: str, data: bytes) -> object:
@@ -1639,15 +1748,29 @@ def _bundle_text(name: str, data: bytes) -> str:
         raise ReportCatalogError(f"undecodable report artifact {name} ({err})") from err
 
 
-def _read_json(path: Path) -> object:
-    """Parse one artifact JSON, raising :class:`ReportCatalogError` on failure."""
+def _read_json(name: str, *, dir_fd: int) -> object:
+    """Parse one artifact JSON, raising :class:`ReportCatalogError` on failure.
+
+    Through the same contained open the feed's reads and the manifest digest use
+    (:func:`_read_artifact_file`), so publication judges the identity of exactly
+    the bytes it is about to hash: a name a check found intact but that opens as
+    something else by now is refused here too, rather than deciding the report on
+    one file and publishing another. A refused link leaves the candidate undecided
+    (the sweep retries it, retention keeps it) rather than deciding it.
+    """
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as err:
-        raise ReportCatalogError(f"unreadable {path.name} ({err})") from err
+        data = _read_artifact_file(name, dir_fd=dir_fd)
+    except (OSError, EvaluationDamagedTreeError) as err:
+        raise ReportCatalogError(f"unreadable {name} ({err})") from err
+    if data is None:
+        raise ReportCatalogError(f"unreadable {name} (not a contained regular file)")
+    try:
+        return json.loads(data.decode("utf-8"))
+    except ValueError as err:
+        raise ReportCatalogError(f"unreadable {name} ({err})") from err
 
 
-def _read_json_object(path: Path) -> dict | None:
+def _read_json_object(name: str, *, dir_fd: int) -> dict | None:
     """Parse one artifact JSON as an object, or ``None`` when it is neither.
 
     The tolerant counterpart of :func:`_read_json`, for the static report — an
@@ -1659,13 +1782,13 @@ def _read_json_object(path: Path) -> dict | None:
     not heal from one that merely cannot be read right now.
     """
     try:
-        data = _read_json(path)
+        data = _read_json(name, dir_fd=dir_fd)
     except ReportCatalogError:
         return None
     return data if isinstance(data, dict) else None
 
 
-def _read_evidence(eval_dir: Path) -> dict | None:
+def _read_evidence(dir_fd: int) -> dict | None:
     """The evaluation's parsed evidence pack, or ``None`` when it is unusable.
 
     Read once per candidate and shared by every consumer (identity, repo path,
@@ -1680,13 +1803,20 @@ def _read_evidence(eval_dir: Path) -> dict | None:
     than quietly becoming "names no repo path, therefore not archived" — which the
     retention guard would read as permission to delete it.
     """
-    path = eval_dir / EVIDENCE_NAME
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (FileNotFoundError, ValueError):
+        raw = _read_artifact_file(EVIDENCE_NAME, dir_fd=dir_fd)
+    except FileNotFoundError:
         return None
-    except OSError as err:
-        raise ReportCatalogError(f"unreadable {path.name} ({err})") from err
+    except (OSError, EvaluationDamagedTreeError) as err:
+        raise ReportCatalogError(f"unreadable {EVIDENCE_NAME} ({err})") from err
+    if raw is None:
+        # Not a regular file: as settled a fact about this pack as a corrupt one,
+        # and no read will heal it either.
+        return None
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except ValueError:
+        return None
     return data if isinstance(data, dict) else None
 
 
@@ -1700,7 +1830,6 @@ class _Candidate:
     also keeps an entry build to a single read per file.
     """
 
-    eval_dir: Path
     report: dict
     evidence: dict | None
     target_source: str | None
@@ -1708,7 +1837,7 @@ class _Candidate:
 
 
 def _read_candidate(
-    eval_dir: Path, *, slug: str, task_id: str, evaluation_id: str
+    dir_fd: int, *, slug: str, task_id: str, evaluation_id: str
 ) -> _Candidate:
     """Read and identity-check one complete evaluation dir.
 
@@ -1725,19 +1854,20 @@ def _read_candidate(
     retries it, and retention keeps it — because the two are only the same answer
     when nothing is at stake, and here one of them is unrecoverable.
     """
-    report = _read_json(eval_dir / SEMANTIC_REPORT_NAME)
+    report = _read_json(SEMANTIC_REPORT_NAME, dir_fd=dir_fd)
     if not isinstance(report, dict):
         raise ReportCatalogError(
-            f"{SEMANTIC_REPORT_NAME} is not a JSON object in {eval_dir}"
+            f"{SEMANTIC_REPORT_NAME} is not a JSON object in"
+            f" {slug}/{task_id}/{evaluation_id}"
         )
     identity = dict(slug=slug, task_id=task_id, evaluation_id=evaluation_id)
     _require_identity(report, name=SEMANTIC_REPORT_NAME, **identity)
     _require_identity(
-        _read_json_object(eval_dir / STATIC_METRICS_NAME),
+        _read_json_object(STATIC_METRICS_NAME, dir_fd=dir_fd),
         name=STATIC_METRICS_NAME,
         **identity,
     )
-    evidence = _read_evidence(eval_dir)
+    evidence = _read_evidence(dir_fd)
     _require_identity(evidence, name=EVIDENCE_NAME, **identity)
     _require_identity(
         _mapping(evidence.get("target")) if evidence is not None else None,
@@ -1745,7 +1875,6 @@ def _read_candidate(
         **identity,
     )
     return _Candidate(
-        eval_dir=eval_dir,
         report=report,
         evidence=evidence,
         target_source=_str_field(report, "target_source"),

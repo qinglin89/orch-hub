@@ -13,6 +13,7 @@ import hashlib
 import itertools
 import json
 import os
+import shutil
 from dataclasses import replace
 from pathlib import Path
 
@@ -3424,6 +3425,59 @@ def test_generate_evidence_only_has_no_static_metrics(tmp_path, monkeypatch):
     assert detail["evidence"]["evaluation_id"] == eval_id
     assert detail["static_metrics"] is None  # evidence-only: no report artifact
     assert detail["semantic_report"] is None and detail["report_md"] is None
+
+
+@pytest.mark.parametrize("artifact", ["evidence.json", "report.md"])
+def test_detail_route_serves_nothing_through_a_linked_artifact(
+    tmp_path, monkeypatch, artifact
+):
+    # The dashboard sidecar is the second way a stored artifact becomes bytes a
+    # client sees, and it reads both a JSON slot and the Markdown one. A link
+    # planted where an artifact was published must not be followed — the target
+    # repo's own files sit one link away — and must not read as the ``null`` that
+    # means "this layer was never generated" either.
+    client, service, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    eval_id = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/evidence"
+    ).json()["evaluation_id"]
+    eval_dir = service.artifact_dir(repo, RUN_TASK_ID, eval_id)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("target repo content", encoding="utf-8")
+    (eval_dir / artifact).unlink(missing_ok=True)
+    (eval_dir / artifact).symlink_to(outside)
+
+    resp = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{eval_id}")
+
+    assert resp.status_code == 500
+    assert "damaged" in resp.json()["detail"]
+    assert "target repo content" not in resp.text
+
+
+def test_detail_route_refuses_a_linked_evaluation_directory(tmp_path, monkeypatch):
+    # The hop the artifact rule cannot see: a linked evaluation *dir* holds regular
+    # files, so a no-follow open of the artifact alone would hand back another
+    # tree's report under this task's id.
+    client, service, *_ , repo = make_eval_client(tmp_path, monkeypatch)
+    eval_id = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/evidence"
+    ).json()["evaluation_id"]
+    eval_dir = service.artifact_dir(repo, RUN_TASK_ID, eval_id)
+    outside = tmp_path / "outside-eval"
+    outside.mkdir()
+    (outside / "evidence.json").write_text('{"outside": true}', encoding="utf-8")
+    shutil.rmtree(eval_dir)
+    eval_dir.symlink_to(outside, target_is_directory=True)
+
+    detail = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/{eval_id}"
+    )
+    listing = client.get(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}")
+
+    # Not an evaluation at all as far as the listing is concerned, and the detail
+    # route 404s on that rather than serving the outside dir's pack.
+    assert listing.status_code == 200 and listing.json()["evaluations"] == []
+    assert detail.status_code == 404
+    assert "outside" not in detail.text
 
 
 def test_generate_metrics_refresh_creates_second_evaluation(tmp_path, monkeypatch):

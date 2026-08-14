@@ -33,7 +33,9 @@ import errno
 import hashlib
 import json
 import os
+import shutil
 import signal
+import stat
 import threading
 from pathlib import Path
 
@@ -57,6 +59,7 @@ from orch_hub.report_catalog import (
     CATALOG_NAME,
     CATALOG_SUBDIR,
     CONFIG_UNAVAILABLE_DETAIL,
+    INTEGRITY_VERIFIED,
     PACK_UNREADABLE_DETAIL,
     REPORT_KEY_PREFIX,
     REQUIRED_ARTIFACTS,
@@ -404,11 +407,145 @@ def test_an_artifact_standing_as_a_link_is_not_a_publishable_report(tmp_path):
     assert [entry.evaluation_id for entry in cat.reconcile()] == ["20260730T100000Z"]
 
 
+@pytest.mark.parametrize("hop", ["repo", "task", "evaluation"])
+def test_a_linked_directory_hop_is_not_a_publishable_report(tmp_path, hop):
+    # The file-hop rule cannot see this one: a linked *directory* holds perfectly
+    # regular artifact files, so completeness, hashing, and both read paths would
+    # all pass on an artifact set the hub never wrote — published with the hub's
+    # own digests on it. Every hop below the evaluations base gets the rule the
+    # artifact names have, so publication, the guard, and the reads agree.
+    config = cfg(tmp_path)
+    outside = tmp_path / "outside"
+    write_eval(cfg(outside))
+    outside_tree = outside / "hub-data" / "evaluations"
+    depth = {"repo": 1, "task": 2, "evaluation": 3}[hop]
+    parts = ("alpha", TASK_A, "20260730T100000Z")[:depth]
+    link = config.data_dir / "evaluations" / Path(*parts)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(outside_tree / Path(*parts), target_is_directory=True)
+    archive_task(tmp_path)
+    cat = catalog(config)
+
+    assert cat.reconcile() == []
+    assert cat.record_evaluation(repo(tmp_path), TASK_A, "20260730T100000Z") is None
+    assert cat.entries() == []
+    # And no publication debt either: an unpublishable dir is not owed, exactly as
+    # a linked artifact and an incomplete set are not.
+    assert cat.unpublished_ids(repo(tmp_path), TASK_A) == set()
+
+
+@pytest.mark.parametrize("hop", ["task", "evaluation"])
+def test_both_read_paths_report_a_linked_directory_hop_as_damaged(tmp_path, hop):
+    # Published while the tree was intact, then a directory above the artifacts
+    # became a link. Both feed reads must refuse it and must say *damaged*: read as
+    # "no longer retained" it would look like retention doing its job, and the
+    # operator who can repair the tree would never hear about it. (A loop reads the
+    # same way — it is never followed far enough to become one.)
+    config = cfg(tmp_path)
+    write_eval(config)
+    archive_task(tmp_path)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    evaluations = config.data_dir / "evaluations"
+    swapped = {
+        "task": evaluations / "alpha" / TASK_A,
+        "evaluation": evaluations / "alpha" / TASK_A / "20260730T100000Z",
+    }[hop]
+    shutil.move(swapped, swapped.parent / "moved-aside")
+    swapped.symlink_to(swapped.parent / "moved-aside", target_is_directory=True)
+
+    bundle = cat.read_bundle(entry)
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert bundle.available is False
+    assert "damaged" in bundle.detail
+    assert bundle.evidence is None and bundle.report_md is None
+    assert read.data is None
+    assert read.reason == ARTIFACT_UNREADABLE
+    assert "damaged" in read.detail
+    # The entry itself is untouched: the catalog is append-only, and repairing the
+    # tree restores both reads without republishing anything.
+    shutil.rmtree(swapped, ignore_errors=True)
+    swapped.unlink()
+    shutil.move(swapped.parent / "moved-aside", swapped)
+    assert cat.read_bundle(entry).available is True
+    assert cat.read_artifact_bytes(entry, EVIDENCE_NAME).data is not None
+
+
+def test_a_non_canonical_repo_directory_is_not_swept(tmp_path):
+    # The slug rule is idempotent but not injective: "alpha!!" and "alpha" name the
+    # same directory. A sweep that re-opened a hand-made "alpha!!" dir by that name
+    # would read the real "alpha" repo's report and publish it under a key derived
+    # from "alpha!!" — an entry every later read then rejects as incoherent, minted
+    # once and immutable. The hub writes only canonical slugs, so a dir that is not
+    # one is not a report of the hub's.
+    config = cfg(tmp_path)
+    write_eval(config, slug="alpha")
+    stray = config.data_dir / "evaluations" / "alpha!!"
+    shutil.copytree(config.data_dir / "evaluations" / "alpha", stray)
+    archive_task(tmp_path)
+
+    added = catalog(config).reconcile()
+
+    assert [(e.repo_slug, e.evaluation_id) for e in added] == [
+        ("alpha", "20260730T100000Z")
+    ]
+    assert all(entry.repo_slug == "alpha" for entry in catalog(config).entries())
+
+
+def test_a_looped_evaluation_directory_reads_as_damaged_not_pruned(tmp_path):
+    # Regression for the specific way a damaged tree used to disappear: resolving a
+    # looped directory raised (or, on newer Pythons, quietly returned), and both
+    # reads then answered "no longer retained" — retention's designed end state,
+    # reported for a tree an operator needs to repair. Walking the hops no-follow
+    # makes a loop just another link that is never followed far enough to be one.
+    config = cfg(tmp_path)
+    write_eval(config)
+    archive_task(tmp_path)
+    cat = catalog(config)
+    entry = cat.reconcile()[0]
+    eval_dir = config.data_dir / "evaluations" / "alpha" / TASK_A / "20260730T100000Z"
+    shutil.rmtree(eval_dir)
+    eval_dir.symlink_to(eval_dir, target_is_directory=True)
+
+    bundle = cat.read_bundle(entry)
+    read = cat.read_artifact_bytes(entry, EVIDENCE_NAME)
+
+    assert bundle.available is False and "damaged" in bundle.detail
+    assert read.reason == ARTIFACT_UNREADABLE and "damaged" in read.detail
+    assert "retained" not in bundle.detail
+
+
+def test_a_relocated_data_dir_publishes_and_reads_normally(tmp_path):
+    # The compatibility half of the same rule, and the reason it is stated per hop
+    # rather than as a blanket refusal of links: the tree may be *reached* through
+    # one — a relocated volume, or macOS's own /var → /private/var — and a hub
+    # living there must publish and serve exactly as one on a plain path does.
+    real = tmp_path / "volume" / "hub-data"
+    real.mkdir(parents=True)
+    link = tmp_path / "hub-data"
+    link.symlink_to(real, target_is_directory=True)
+    config = cfg(tmp_path)
+    assert config.data_dir == link
+    write_eval(config)
+    archive_task(tmp_path)
+    cat = catalog(config)
+
+    entries = cat.reconcile()
+
+    assert [entry.evaluation_id for entry in entries] == ["20260730T100000Z"]
+    bundle = cat.read_bundle(entries[0])
+    assert bundle.available is True
+    assert bundle.mismatched == () and bundle.unverified == ()
+    read = cat.read_artifact_bytes(entries[0], EVIDENCE_NAME)
+    assert read.integrity == INTEGRITY_VERIFIED
+
+
 def test_publication_refuses_a_link_planted_after_the_completeness_check(
     tmp_path, monkeypatch
 ):
-    # The static case above is only half the guarantee: completeness is checked by
-    # pathname and the manifest is hashed afterwards, so a swap landing between
+    # The static case above is only half the guarantee: completeness is a census
+    # over names and the manifest is hashed afterwards, so a swap landing between
     # the two is the window a check-then-hash publication is exposed in. Fired
     # here from inside the check itself. The digest must come from an open that
     # refuses the link, leaving the candidate undecided — no entry, retried later
@@ -421,14 +558,15 @@ def test_publication_refuses_a_link_planted_after_the_completeness_check(
     real_is_complete = report_catalog_module._is_complete
     swapped = False
 
-    def _swap_then_check(path: Path) -> bool:
+    def _swap_then_check(dir_fd: int) -> bool:
         nonlocal swapped
-        verdict = real_is_complete(path)
+        verdict = real_is_complete(dir_fd)
         if verdict and not swapped:
             swapped = True
-            artifact = path / EVIDENCE_NAME
-            artifact.unlink()
-            artifact.symlink_to(outside)
+            # Through the same descriptor publication holds, so the swap lands in
+            # the directory it is actually about to hash.
+            os.unlink(EVIDENCE_NAME, dir_fd=dir_fd)
+            os.symlink(outside, EVIDENCE_NAME, dir_fd=dir_fd)
         return verdict
 
     monkeypatch.setattr(report_catalog_module, "_is_complete", _swap_then_check)
@@ -1668,12 +1806,16 @@ def test_bundle_swapped_after_the_census_still_parses_the_opened_files(
     swapped = False
 
     def _swap_then_stat(fd):
+        # Only once the *artifact* descriptor is being validated: the read also
+        # validates the tree's directory descriptors on its way in, and a swap
+        # fired there would be the already-covered before-the-open case.
         nonlocal swapped
-        if not swapped:
+        info = real_fstat(fd)
+        if not swapped and stat.S_ISREG(info.st_mode):
             swapped = True
             artifact.unlink()
             artifact.symlink_to(outside)
-        return real_fstat(fd)
+        return info
 
     monkeypatch.setattr(os, "fstat", _swap_then_stat)
     bundle = cat.read_bundle(entry)
@@ -1995,12 +2137,16 @@ def test_raw_artifact_swapped_after_validation_still_serves_the_opened_file(
     swapped = False
 
     def _swap_then_stat(fd):
+        # Only once the *artifact* descriptor is being validated: the read also
+        # validates the tree's directory descriptors on its way in, and a swap
+        # fired there would be the already-covered before-the-open case.
         nonlocal swapped
-        if not swapped:
+        info = real_fstat(fd)
+        if not swapped and stat.S_ISREG(info.st_mode):
             swapped = True
             artifact.unlink()
             artifact.symlink_to(outside)
-        return real_fstat(fd)
+        return info
 
     monkeypatch.setattr(os, "fstat", _swap_then_stat)
     read = cat.read_artifact_bytes(entry, SEMANTIC_REPORT_MD_NAME)

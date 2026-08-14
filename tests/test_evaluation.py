@@ -34,6 +34,7 @@ from orch_hub.evaluation import (
     FIDELITY_RECONSTRUCTED,
     SOURCE_ACTIVE,
     SOURCE_ARCHIVED,
+    EvaluationDamagedTreeError,
     EvaluationDisabledError,
     EvaluationService,
     evaluation_artifact_dir,
@@ -2017,6 +2018,99 @@ def test_read_text_artifact_reads_verbatim_and_absent_is_none(tmp_path):
     # Containment: a path-traversal artifact name is rejected before any read.
     with pytest.raises(ValueError):
         service.read_text_artifact(repo, TASK, pack.evaluation_id, "../evidence.json")
+
+
+# -- artifact-tree containment ------------------------------------------------
+#
+# The hub writes only real directories and regular files under
+# <data_dir>/evaluations. A link standing at any hop inside that tree is something
+# the subsystem did not put there, and following one would serve a target-repo (or
+# any other outside) file to the dashboard as this evaluation's artifact. The rule
+# is per hop rather than a blanket refusal of links, because the tree itself may be
+# *reached* through one — see the relocated-data-dir case below.
+
+
+@pytest.mark.parametrize("reader", ["read_artifact", "read_text_artifact"])
+def test_reads_refuse_an_artifact_standing_as_a_link(tmp_path, reader):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    pack = service.generate_evidence(repo, TASK)
+    outside = repo.path / "docs" / "private.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("target repo content", encoding="utf-8")
+    linked = pack.evaluation_dir / "report.md"
+    linked.symlink_to(outside)
+
+    # Refused, and *named* as damage: read as absence it would be indistinguishable
+    # from an evidence-only evaluation, and the operator who can repair the tree
+    # would never hear about it.
+    with pytest.raises(EvaluationDamagedTreeError):
+        getattr(service, reader)(repo, TASK, pack.evaluation_id, "report.md")
+    # And the listing does not advertise bytes the read refuses to serve.
+    stored = service.list_evaluations(repo, TASK)
+    assert stored[0].artifacts == (EVIDENCE_NAME,)
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3])
+def test_reads_refuse_a_linked_directory_hop(tmp_path, depth):
+    # The artifact-hop rule cannot see this one: a linked *directory* holds
+    # perfectly regular files, so a no-follow open of the artifact alone would
+    # succeed and hand back an outside evaluation's bytes under this task's id.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    outside = tmp_path / "outside" / "evaluations" / "alpha" / TASK / "20990101T000000Z"
+    outside.mkdir(parents=True)
+    (outside / EVIDENCE_NAME).write_text('{"outside": true}', encoding="utf-8")
+    parts = ("alpha", TASK, "20990101T000000Z")[:depth]
+    link = config.data_dir / "evaluations" / Path(*parts)
+    link.parent.mkdir(parents=True, exist_ok=True)
+    link.symlink_to(
+        tmp_path / "outside" / "evaluations" / Path(*parts), target_is_directory=True
+    )
+
+    with pytest.raises(EvaluationDamagedTreeError):
+        service.read_artifact(repo, TASK, "20990101T000000Z", EVIDENCE_NAME)
+    if depth == 3:
+        # A linked evaluation dir is not an evaluation: the listing that gates the
+        # detail route does not offer it either.
+        assert service.list_evaluations(repo, TASK) == []
+    else:
+        # A linked repo/task hop cannot be enumerated at all — refused, not read as
+        # "this task has no evaluations".
+        with pytest.raises(EvaluationDamagedTreeError):
+            service.list_evaluations(repo, TASK)
+
+
+def test_reads_and_listing_work_through_a_relocated_data_dir(tmp_path):
+    # The compatibility half of the rule, and why it is stated per hop: a hub whose
+    # data dir is reached through a link — a relocated volume, or macOS's own
+    # /var -> /private/var — must read exactly as one on a plain path does.
+    real = tmp_path / "volume" / "hub-data"
+    real.mkdir(parents=True)
+    link = tmp_path / "hub-data"
+    link.symlink_to(real, target_is_directory=True)
+    config = make_config(tmp_path)
+    assert config.data_dir == link
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    pack = service.generate_evidence(repo, TASK)
+    (pack.evaluation_dir / "report.md").write_text("# a report\n", encoding="utf-8")
+
+    stored = service.list_evaluations(repo, TASK)
+    assert [s.evaluation_id for s in stored] == [pack.evaluation_id]
+    assert service.read_artifact(repo, TASK, pack.evaluation_id, EVIDENCE_NAME) == (
+        pack.to_dict()
+    )
+    assert (
+        service.read_text_artifact(repo, TASK, pack.evaluation_id, "report.md")
+        == "# a report\n"
+    )
 
 
 # -- retention / cleanup ------------------------------------------------------
