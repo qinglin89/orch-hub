@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # Architecture
@@ -82,7 +82,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 | Managed repos | ai-native-development registry / `aii-2` | hub reads/normalizes; never invents membership |
 | Launch readiness | computed from repo files, git state, `aii-2 status` | fails closed; gates run launch |
 | Task ids, summaries, status, blockers | target repo `.ai-tasks/index.md` + task frontmatter | read-only inventory; runtime overlays never replace task status |
-| Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records an observable-end stability verdict |
+| Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
 | Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; consumers decide protocol evolution |
@@ -103,10 +103,13 @@ Run launch: operator-selected repo/task → shared repo admission (no
 non-terminal remote intake), per-repo live-run serialization, task
 existence/status validation via the task store, readiness verification,
 external run dir creation, validated `.ai-deploy-lock.json` capture into the
-run dir, then deployed-orchestrator launch with a control dir inside it. An
-observable end rechecks the lock; only an unchanged capture is publishable
-protocol evidence. Capture failure degrades provenance without creating cohort
-admission policy. Cross-repo runs may overlap.
+run dir, then deployed-orchestrator launch with a control dir inside it. Launch
+readiness has compared actual target files with the deploy manifest; an observed
+end rechecks the lock and bounded complete lock/manifest target set against the
+actual files. Only the unchanged identity pair with a matching end payload is
+publishable. These are two point observations, not continuous monitoring;
+capture/check failure degrades provenance without creating cohort admission
+policy. Cross-repo runs may overlap.
 
 Human input flows through the control dir: the orchestrator writes question
 files; the hub lists them, can notify, writes answer files atomically, and
@@ -141,10 +144,11 @@ a producer-bounded best-effort git window, bounded per-session entry task files,
 and a producer-bounded `.ai/` eager/prefetch snapshot plus same-window `.ai/`
 patches, plus bounded ordered session read behavior from persisted ids and the
 configured Claude transcript store, plus each run's persisted deployed-protocol
-snapshot → schema-v17 `evidence.json` under the hub data dir. The pack computes
-an effective revision only when every contributing run verified the same commit;
-legacy, malformed, unverified, or mixed provenance is explicitly unavailable and
-never backfilled from current target state. Entry files come from existing log
+snapshot → schema-v18 `evidence.json` under the hub data dir. The pack publishes
+one effective protocol identity only when every contributing run verified the
+same `(source_git_commit, canonical_payload_sha256)` pair; legacy, malformed,
+unverified, revision-mixed, or payload-mixed provenance is explicitly
+unavailable and never backfilled from current target state. Entry files come from existing log
 brackets, live in the run dir, and carry exact/partial/reconstructed fidelity;
 snapshot-derived prefetch declarations
 supersede accumulated task state only when their frontmatter is complete.
@@ -180,8 +184,10 @@ Global report publication: a coherent durable L1+L2 evaluation whose task is
 archived → semantic-completion hook or deterministic startup reconciliation →
 one append-only catalog entry with global `seq`, stable opaque `report_key`,
 artifact hashes, evaluator identity, and explicit provenance availability,
-including `provenance.protocol.effective_revision` copied from the persisted
-evidence aggregate when available.
+including the atomic `provenance.protocol.effective_revision` plus
+`deploy_lock_hash` copied from the persisted evidence aggregate when available;
+older revision-only packs/catalog lines read back unavailable rather than being
+completed from later state.
 Reconciliation retries missed/newly eligible reports without a model call; a
 shared retention guard protects publishable or undecidable unpublished
 artifacts until cataloged. Candidate publication, by-key bundles, and byte-exact

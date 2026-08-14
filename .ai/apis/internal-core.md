@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # APIs: Internal — Core and Sidecar
@@ -52,7 +52,7 @@ and return `None` for absent or unsafe content.
 Input: managed repo, exact task id, and optional evaluation id.
 
 Output: `EvaluationTarget`, `RelatedRun` values, or a bounded `EvidencePack`
-persisted as schema-v17 `evidence.json` under the hub data dir.
+persisted as schema-v18 `evidence.json` under the hub data dir.
 
 Behavior: `EvaluationService` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` from every operation when disabled. Target resolution
@@ -61,10 +61,12 @@ persisted run records read-only via `runs.load_records` and matches exact
 `(repo_path, task_id)`. Evidence building reads run events, session summaries,
 bounded per-session entry task files, persisted run protocol snapshots,
 orchestrator logs, `spawn.out`, terminal record fields, and producer-bounded
-best-effort git-window commits. The protocol aggregate publishes one effective
-revision only when every contributing run durably verified the same deployed
-commit; legacy, malformed, unverified, and mixed captures remain unavailable
-with a reason and are never backfilled from the live target. Whole entry files
+best-effort git-window commits. The protocol aggregate publishes the atomic
+effective source-revision/deploy-lock-payload-digest pair only when every
+contributing run durably verified the same identity using its actual-file-backed
+end verdict; legacy, malformed, unverified, revision-mixed, and payload-mixed
+captures remain unavailable with a reason and are never backfilled from the live
+target. Whole entry files
 drive exact/partial/reconstructed fidelity; complete entry frontmatter is the
 preferred source for session-time prefetch facts and the pack's `.ai/` prefetch
 slice. The reader then uses persisted session ids against the Claude transcript
@@ -193,9 +195,10 @@ and the retention guard treats the same damaged candidate as non-debt.
 `unpublished_ids()` and publication share one artifact-derived eligibility rule;
 uncertain debt is protected from pruning. The catalog publishes
 provenance/artifacts only and never decides protocol evolution. Report protocol
-provenance comes from the persisted pack aggregate and serializes as
-`provenance.protocol.effective_revision`; current target deployment state is
-never consulted at catalog or API time.
+provenance comes from the persisted pack aggregate and serializes atomically as
+`provenance.protocol.effective_revision` plus `deploy_lock_hash`; current target
+deployment state is never consulted at catalog or API time, and legacy
+revision-only records read back unavailable.
 
 ## Usage Service
 

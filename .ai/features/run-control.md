@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-08-14
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # Features: Run Control
@@ -17,8 +17,8 @@ Each run attaches to one repo and one task. Same-repo live runs are serialized;
 cross-repo runs may overlap. A shared per-repo admission section also prevents
 a run start from overlapping a non-terminal hub-driven remote intake.
 
-Modules: admission, runs, intake, config, control_dir, models, readiness, task_store,
-orch_config.
+Modules: admission, runs, intake, config, control_dir, models, readiness,
+task_store, orch_config, protocol_provenance.
 
 APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
 `GET /api/runs/{run_id}`, `GET /api/runs/{run_id}/sessions`,
@@ -43,6 +43,13 @@ Implemented behavior:
 - Run dirs live outside target repos under `<data_dir>/runs/<run_id>/`, with
   `run.json`, a fresh `control/` dir, and `spawn.out`. `run_id` combines UTC
   timestamp, repo slug, task slug, and a collision suffix when needed.
+- After readiness has compared deployed target files with the manifest, launch
+  captures the validated `(source_git_commit, canonical_payload_sha256)` identity
+  from `.ai-deploy-lock.json` into run-owned `protocol.json`. At a directly
+  observed end, the manager rechecks the lock and bounded complete lock/manifest
+  target set against actual files; only an unchanged pair plus a matching payload
+  is stable/publishable. The two boundaries are point observations, no historical
+  state is backfilled, and provenance failure never changes run state.
 - Launch command is `/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
   <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
   <run>/control [extra args]`, with `cwd=<repo>`, stdin from devnull,

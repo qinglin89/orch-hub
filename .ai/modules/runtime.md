@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 2e00e023cf20630e53f5cde5ad21d30375cc7717
+last-updated: 2026-08-14
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # Modules: Runtime
@@ -83,6 +83,14 @@ fallback, and `recent_runs()` embeds the persisted effective config plus each
 run's persisted session snapshot and current active-or-archived `session-est`.
 Task estimates are deduped per `(repo, task)` and degrade to unknown on
 task-file read failures.
+
+Launch also captures the validated deployed protocol identity pair into
+run-owned `protocol.json` after the readiness actual-file gate and before spawn.
+At a directly observed live-to-ended transition, `_settle_protocol` rechecks the
+lock and verifies the bounded complete lock/manifest target set against actual
+files. Only an unchanged pair plus a matching payload is publishable; unobserved
+ends, receipt damage, redeployment, or target drift stay explicitly unavailable
+without changing run state or being repaired from later target state.
 
 The manager also owns notification trigger timing when a notifier is
 configured: run-end notifications fire once at the observed live-to-ended

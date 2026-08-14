@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
+last-updated: 2026-08-14
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # Project Overview
@@ -41,8 +41,10 @@ plus `report.md`, and expose evaluation evidence/static/semantic artifacts
 through protected HTTP routes. Complete L1+L2 reports for archived tasks are
 published to one append-only, globally ordered catalog with stable keys,
 cursor-paged discovery, contained bundle export, and byte-exact per-artifact
-verification reads; reconciliation heals missed publication without re-running
-the evaluator. The dashboard renders
+verification reads. Report protocol provenance is the unanimous atomic pair of
+source commit plus deploy-lock payload digest, backed per run by actual deployed
+file checks at launch and observed end; reconciliation heals missed publication
+without re-running the evaluator. The dashboard renders
 Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
 Codex is read from local session rollout `rate_limits`; Claude reads a
@@ -89,7 +91,8 @@ and links back to existing per-task detail.
 - Generate bounded, read-only evidence packs for active or archived tasks from
   task files, related run records/events/sessions/log diagnostics, best-effort
   git commit windows, `.ai/` snapshots/patches, and transcript-derived ordered
-  session memory-read behavior without retaining raw transcripts.
+  session memory-read behavior without retaining raw transcripts; protocol
+  evidence never backfills from current target files or receipts.
 - Compute deterministic static task-quality reports from evidence packs,
   including run/session rollups, taskfile/session-log protocol metrics, six
   score axes (including prefetch-set read completeness), evidence-backed
@@ -115,7 +118,8 @@ and links back to existing per-task detail.
   history selection with evaluator model/version identity, retention, and
   artifact inspection without target-repo mutation.
 - Publish archived tasks' complete L1+L2 reports through one durable cross-repo
-  feed with global order/identity, explicit artifact integrity/provenance, and
+  feed with global order/identity, explicit artifact integrity/provenance
+  (including the unanimous source-revision/payload-digest protocol pair), and
   contained bundle plus byte-exact artifact retrieval. orch-hub publishes;
   external consumers decide protocol evolution and any resulting improvement
   work.

@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -22,10 +22,11 @@ pid probing, or writes; `build_evidence` assembles a bounded `EvidencePack`
 from task content, related run records, metadata-only events, persisted session
 summaries and entry-task snapshots, bounded orchestrator-log and `spawn.out`
 excerpts, terminal fields, best-effort git-window commits, and a bounded `.ai/`
-snapshot. Schema-v17 packs keep each entry task file beside its session and each
-run's durable `protocol.json`; the computed top-level protocol section publishes
-one revision only when all runs completed stable end checks for the same commit.
-Missing, malformed, unverified, and mixed captures remain explicitly
+snapshot. Schema-v18 packs keep each entry task file beside its session and each
+run's durable schema-2 `protocol.json`; the computed top-level protocol section
+publishes one source-revision/deploy-lock-digest pair only when all runs completed
+actual-file-backed stable end checks for the same identity. Missing, malformed,
+unverified, revision-mixed, and payload-mixed captures remain explicitly
 unavailable. Entry files are capped at 64KB per entry and 192KB per pack, UTF-8
 boundary safe. Only a whole file counts toward
 `exact`/`partial`/`reconstructed` fidelity; a kept head remains marked partial
@@ -164,9 +165,10 @@ Catalog/source identity ambiguity fails closed. Published entries outlive
 retention-pruned artifacts, which remain auditable but bundle-unavailable.
 
 Protocol provenance is copied only from the persisted evidence pack's
-fail-closed aggregate into `provenance.protocol.effective_revision`; the catalog
-never reads a target's current deployment lock or invents a revision for legacy,
-unverified, or mixed runs.
+fail-closed aggregate into the atomic `provenance.protocol.effective_revision`
+plus `deploy_lock_hash` pair. The catalog never reads current target state or
+invents/completes an identity for legacy revision-only, unverified, or mixed
+runs; append-only legacy lines demote at readback.
 
 `unpublished_ids()` is injected as `EvaluationService.retention_guard` so a
 prune cannot destroy recoverable publication debt. The guard and publisher read

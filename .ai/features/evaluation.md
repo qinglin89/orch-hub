@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-14
-verified-against: 48af9aad8e546eaac18b7bdcb383c8aff6534924
+verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 ---
 
 # Features: Task Evaluation
@@ -56,13 +56,16 @@ Implemented behavior:
   fallback (`topic.md` versus `topic/index.md`). Snapshot roots and child reads
   stay inside the managed repo; document/router reads and git patch output are
   bounded at their producers, and a failed patch read preserves collected docs.
-- `evidence.json` records its shape as schema v17; pre-version and older-schema
-  packs remain readable as additive earlier shapes. Schema 16 adds bounded
-  session-entry files, fidelity, and prefetch-source provenance; schema 17 adds
-  each run's persisted `protocol.json` and the fail-closed cross-run effective
-  revision. A revision is available only when every contributing run completed
-  a stable end check for the same deployed commit; missing, corrupt, unverified,
-  or mixed provenance carries a reason and no revision.
+- `evidence.json` records its shape as schema v18; pre-version and older-schema
+  packs remain readable as earlier shapes. Schema 16 adds bounded session-entry
+  files/fidelity/prefetch-source provenance; schema 17 adds each run's persisted
+  `protocol.json`; schema 18 makes the aggregate the atomic source-revision plus
+  deploy-lock payload-digest pair and requires the schema-2 per-run actual-file
+  verdict. The pair is available only when every contributing run completed a
+  stable end check for the same identity; missing, corrupt, unverified,
+  revision-mixed, or payload-mixed provenance carries a reason and neither half.
+  Earlier stable/revision-only artifacts remain readable but unavailable and are
+  never repaired from current target state.
 - Git evidence uses ambient commit-date history reachable from HEAD over the
   run lifecycle window, capped at 50 commits and 64KB at the subprocess
   producer. A byte cut drops its partial trailing record and marks the evidence
@@ -281,10 +284,11 @@ Implemented behavior:
 - Feed items carry source/global identity, generated/cataloged times,
   evaluation-time target source plus publication-time archived state, evaluator
   backend/model/schema, artifact size/hash manifests, run/git provenance, and
-  `provenance.protocol.effective_revision` when the persisted pack's runs share
-  one verified deployed commit. Missing/mixed protocol evidence and absent
-  config evidence are explicitly unavailable with a reason, never inferred
-  from current target state.
+  atomic `provenance.protocol.effective_revision` plus `deploy_lock_hash` when
+  the persisted pack's runs share one verified deployed identity. Missing/mixed
+  protocol evidence, legacy revision-only records, and absent config evidence
+  are explicitly unavailable with a reason, never inferred from current target
+  state.
 - `#/reports` preserves global order, uses a visited-cursor trail for exact
   Previous navigation, and links each coherent row to existing per-task report
   detail. Every Run-history state exposes the gated `All evaluation reports →`
