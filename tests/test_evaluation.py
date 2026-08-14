@@ -47,6 +47,7 @@ from orch_hub.protocol_provenance import (
     DEPLOY_LOCK_NAME,
     DEPLOY_MANIFEST_NAME,
     PROTOCOL_SCHEMA_VERSION,
+    STABILITY_DRIFTED,
     STABILITY_STABLE,
     STABILITY_UNVERIFIED,
     capture_protocol,
@@ -1701,11 +1702,13 @@ def test_generate_evidence_rejects_unsafe_task_id(tmp_path):
 COMMIT_A = "6b62754694c289fc8822562cec22ab774e071b2c"
 COMMIT_B = "aa11bb22cc33dd44ee55ff6677889900aabbccdd"
 PAYLOAD = "5" * 64
+PAYLOAD_B = "6" * 64
 
 
 def protocol_artifact(
     *,
     commit: str = COMMIT_A,
+    payload: str = PAYLOAD,
     stability: str = STABILITY_STABLE,
     available: bool = True,
     detail: str | None = None,
@@ -1715,7 +1718,7 @@ def protocol_artifact(
         "schema_version": PROTOCOL_SCHEMA_VERSION,
         "available": available,
         "source_git_commit": commit if available else None,
-        "canonical_payload_sha256": PAYLOAD if available else None,
+        "canonical_payload_sha256": payload if available else None,
         "source_repo": "ai-native-deployment",
         "lock_schema_version": 1,
         "captured_ts": "2026-07-22T09:00:00+00:00",
@@ -1748,13 +1751,16 @@ def build_with_protocols(tmp_path, *protocols: dict | str | None):
     return make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
 
 
-def test_pack_publishes_the_revision_every_run_verified(tmp_path):
+def test_pack_publishes_the_identity_every_run_verified(tmp_path):
     pack = build_with_protocols(
         tmp_path, protocol_artifact(), protocol_artifact()
     )
 
     assert pack.protocol.available is True
-    assert pack.protocol.revision == COMMIT_A
+    assert (pack.protocol.revision, pack.protocol.payload_sha256) == (
+        COMMIT_A,
+        PAYLOAD,
+    )
     assert (pack.protocol.run_count, pack.protocol.verified_count) == (2, 2)
     assert pack.protocol.detail is None
 
@@ -1765,6 +1771,7 @@ def test_pack_publishes_the_revision_every_run_verified(tmp_path):
     assert data["protocol"] == {
         "available": True,
         "effective_revision": COMMIT_A,
+        "deploy_lock_hash": PAYLOAD,
         "run_count": 2,
         "verified_count": 2,
         "detail": None,
@@ -1786,11 +1793,11 @@ def test_pack_reports_a_run_without_a_capture_as_missing_not_absent(tmp_path):
     assert pack.protocol.available is False
     assert pack.protocol.revision is None
     assert pack.protocol.detail == (
-        "1 of 2 contributing runs carry no verified protocol revision"
+        "1 of 2 contributing runs carry no verified protocol identity"
     )
 
 
-def test_pack_refuses_a_revision_when_runs_span_a_redeployment(tmp_path):
+def test_pack_refuses_an_identity_when_runs_span_a_redeployment(tmp_path):
     pack = build_with_protocols(
         tmp_path,
         protocol_artifact(commit=COMMIT_A),
@@ -1802,6 +1809,40 @@ def test_pack_refuses_a_revision_when_runs_span_a_redeployment(tmp_path):
     assert (pack.protocol.run_count, pack.protocol.verified_count) == (2, 2)
     assert pack.protocol.available is False
     assert COMMIT_A in pack.protocol.detail and COMMIT_B in pack.protocol.detail
+
+
+def test_pack_refuses_an_identity_when_runs_verified_two_payloads(tmp_path):
+    pack = build_with_protocols(
+        tmp_path,
+        protocol_artifact(payload=PAYLOAD),
+        protocol_artifact(payload=PAYLOAD_B),
+    )
+
+    # One revision, two payloads: the runs read different protocol text, so the
+    # commit they share is not a cohort membership the pack may publish.
+    assert (pack.protocol.run_count, pack.protocol.verified_count) == (2, 2)
+    assert pack.protocol.available is False
+    data = pack.to_dict()["protocol"]
+    assert (data["effective_revision"], data["deploy_lock_hash"]) == (None, None)
+    assert "different protocol payloads" in data["detail"]
+
+
+def test_pack_publishes_nothing_for_a_run_whose_deployed_files_drifted(tmp_path):
+    # The case the payload half exists for: the lock never moved, so every
+    # lock-only comparison would have called this run stable, while its deployed
+    # protocol files stopped matching their receipt under it. Neither half of the
+    # identity reaches the pack.
+    pack = build_with_protocols(
+        tmp_path,
+        protocol_artifact(
+            stability=STABILITY_DRIFTED, detail="deployed files no longer match ..."
+        ),
+    )
+
+    assert pack.runs[0].protocol.source_git_commit == COMMIT_A  # readable for audit
+    assert pack.protocol.available is False
+    assert (pack.protocol.revision, pack.protocol.payload_sha256) == (None, None)
+    assert pack.protocol.verified_count == 0
 
 
 def test_pack_does_not_publish_an_unverified_capture(tmp_path):
@@ -1827,12 +1868,12 @@ def test_a_corrupt_capture_degrades_the_pack_instead_of_failing_it(tmp_path):
     assert pack.protocol.available is False
 
 
-def test_a_pack_with_no_runs_has_no_effective_revision(tmp_path):
+def test_a_pack_with_no_runs_has_no_effective_identity(tmp_path):
     pack = build_with_protocols(tmp_path)
 
     assert pack.protocol.available is False
     assert pack.protocol.run_count == 0
-    assert pack.protocol.detail == "no related runs to take a protocol revision from"
+    assert pack.protocol.detail == "no related runs to take a protocol identity from"
 
 
 def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
@@ -1894,7 +1935,13 @@ def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
     pack = make_service(config).build_evidence(repo, TASK, evaluation_id="e1")
 
     assert pack.runs[0].protocol.canonical_payload_sha256 == PAYLOAD
-    assert pack.protocol.available is True and pack.protocol.revision == COMMIT_A
+    assert pack.protocol.available is True
+    # The published identity is the lock's own pair, carried whole from the run's
+    # capture through the aggregate to the section a consumer cohorts by.
+    assert (pack.protocol.revision, pack.protocol.payload_sha256) == (
+        COMMIT_A,
+        PAYLOAD,
+    )
 
 
 # -- disabled mode (fail-closed for build + persist) --------------------------

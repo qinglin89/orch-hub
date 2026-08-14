@@ -1965,16 +1965,17 @@ def _provenance(evidence: dict | None) -> ReportProvenance:
     Only durable artifact content is consulted, so the record is reproducible
     from what the entry names. What the pack cannot answer is stated as
     explicitly unavailable *with a reason* — ``orchestrator_config`` always,
-    ``protocol`` for a pack predating the per-run capture or whose runs did not
-    verifiably share one revision, and ``runs``/``git`` when the pack is missing
-    or degraded — so a consumer never mistakes an absent field for a known-empty
-    one. An unreadable pack is not fatal: the report itself is still publishable,
-    just less cohortable.
+    ``protocol`` for a pack predating the per-run capture, one predating the
+    payload half of the identity, or one whose runs did not verifiably share one
+    identity, and ``runs``/``git`` when the pack is missing or degraded — so a
+    consumer never mistakes an absent field for a known-empty one. An unreadable
+    pack is not fatal: the report itself is still publishable, just less
+    cohortable.
 
     The protocol section is read, not re-derived: the pack already aggregated its
     runs' captures under the rule that owns publication
     (:func:`orch_hub.protocol_provenance.effective_protocol_from_dict`), and a
-    second rule here could publish a revision that one would not. Reading it from
+    second rule here could publish an identity that one would not. Reading it from
     the pack is also what keeps the entry reproducible — the repo's deployment
     lock has almost certainly moved on by publication time.
 
@@ -2021,6 +2022,7 @@ def _provenance(evidence: dict | None) -> ReportProvenance:
         git_detail=_str_field(git, "detail"),
         protocol_available=protocol.available,
         protocol_revision=protocol.revision,
+        protocol_payload_sha256=protocol.payload_sha256,
         protocol_detail=protocol.detail,
         config_available=False,
         config_detail=CONFIG_UNAVAILABLE_DETAIL,
@@ -2099,15 +2101,23 @@ def _artifact_from_dict(data: object) -> ReportArtifact | None:
 
 
 def _provenance_from_dict(data: object) -> ReportProvenance:
-    """Round-trip the nested provenance sections; anything absent stays unavailable."""
+    """Round-trip the nested provenance sections; anything absent stays unavailable.
+
+    The protocol section is read through the rule that owns publication rather
+    than field by field
+    (:func:`orch_hub.protocol_provenance.effective_protocol_from_dict`), which is
+    what keeps a line written by an older hub honest without migrating the
+    append-only catalog: an entry published under a revision alone, before the
+    identity became a pair, reads back unavailable with that reason instead of
+    serving half an identity to a consumer cohorting by it.
+    """
     if not isinstance(data, dict):
         return ReportProvenance()
     runs = data.get("runs")
     runs = runs if isinstance(runs, dict) else {}
     git = data.get("git")
     git = git if isinstance(git, dict) else {}
-    protocol = data.get("protocol")
-    protocol = protocol if isinstance(protocol, dict) else {}
+    protocol = effective_protocol_from_dict(data.get("protocol"))
     config = data.get("orchestrator_config")
     config = config if isinstance(config, dict) else {}
     raw_ids = runs.get("run_ids")
@@ -2130,9 +2140,10 @@ def _provenance_from_dict(data: object) -> ReportProvenance:
         ),
         git_newest_sha=_str_field(git, "newest_sha"),
         git_detail=_str_field(git, "detail"),
-        protocol_available=bool(protocol.get("available")),
-        protocol_revision=_str_field(protocol, "effective_revision"),
-        protocol_detail=_str_field(protocol, "detail"),
+        protocol_available=protocol.available,
+        protocol_revision=protocol.revision,
+        protocol_payload_sha256=protocol.payload_sha256,
+        protocol_detail=protocol.detail,
         config_available=bool(config.get("available")),
         config_detail=_str_field(config, "detail"),
     )

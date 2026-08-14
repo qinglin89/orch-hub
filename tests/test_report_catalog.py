@@ -51,6 +51,7 @@ from orch_hub.evaluation import (
     EvaluationService,
 )
 from orch_hub.models import ManagedRepo, ReportCatalogEntry
+from orch_hub.protocol_provenance import LEGACY_AGGREGATE_DETAIL
 from orch_hub.report_catalog import (
     ARTIFACT_IDENTITY,
     ARTIFACT_NOT_RETAINED,
@@ -74,6 +75,10 @@ TASK_A = "2026-07-30-alpha-task"
 TASK_B = "2026-07-30-beta-task"
 FIXED_TS = dt.datetime(2026, 7, 31, 8, 0, 0, tzinfo=dt.timezone.utc)
 PROTOCOL_COMMIT = "6b62754694c289fc8822562cec22ab774e071b2c"
+PROTOCOL_PAYLOAD = "5" * 64
+
+_OMIT = object()
+"""Leaves a key out of a hand-written section, as distinct from writing it null."""
 
 
 # -- fixtures -----------------------------------------------------------------
@@ -174,6 +179,7 @@ def write_eval(
 def protocol_section(
     *,
     revision: object = PROTOCOL_COMMIT,
+    payload: object = PROTOCOL_PAYLOAD,
     available: bool = True,
     runs: int = 1,
     verified: int | None = None,
@@ -185,13 +191,18 @@ def protocol_section(
     artifacts are: the catalog's contract is over the bytes on disk, so the tests
     have to be able to hand it a section the evidence layer would never emit.
     """
-    return {
+    section = {
         "available": available,
         "effective_revision": revision,
         "run_count": runs,
         "verified_count": runs if verified is None else verified,
         "detail": detail,
     }
+    if payload is not _OMIT:
+        # Absent, not null: a pack written before the identity became a pair has
+        # no such key at all, which is what the legacy read has to recognize.
+        section["deploy_lock_hash"] = payload
+    return section
 
 
 def lines(config: Config) -> list[dict]:
@@ -660,14 +671,12 @@ def test_entry_carries_hashes_evaluator_identity_and_explicit_provenance(tmp_pat
     # consumer never reads absence as "no protocol" / "default config". This pack
     # predates per-run protocol capture, which is its own named reason.
     assert prov.protocol_available is False and prov.protocol_revision is None
-    assert prov.protocol_detail == (
-        "evidence pack carries no protocol provenance section"
-    )
+    assert prov.protocol_detail == "no protocol provenance section was persisted"
     assert prov.config_available is False
     assert prov.config_detail == CONFIG_UNAVAILABLE_DETAIL
 
 
-def test_entry_publishes_the_protocol_revision_its_runs_verified(tmp_path):
+def test_entry_publishes_the_protocol_identity_its_runs_verified(tmp_path):
     config = cfg(tmp_path)
     write_eval(
         config,
@@ -678,22 +687,25 @@ def test_entry_publishes_the_protocol_revision_its_runs_verified(tmp_path):
     entry = catalog(config).reconcile()[0]
 
     # The cohort key an external consumer groups reports by: the deployed
-    # ai-native-development commit both runs verifiably ran under, read from the
-    # pack's durable per-run captures rather than from the repo (whose deployment
-    # has usually moved on by publication time).
+    # ai-native-development commit both runs verifiably ran under *and* the
+    # payload digest that commit deployed, read from the pack's durable per-run
+    # captures rather than from the repo (whose deployment has usually moved on by
+    # publication time).
     assert entry.provenance.protocol_available is True
     assert entry.provenance.protocol_revision == PROTOCOL_COMMIT
+    assert entry.provenance.protocol_payload_sha256 == PROTOCOL_PAYLOAD
     assert entry.provenance.protocol_detail is None
     assert entry.to_dict()["provenance"]["protocol"] == {
         "available": True,
         "effective_revision": PROTOCOL_COMMIT,
+        "deploy_lock_hash": PROTOCOL_PAYLOAD,
         "detail": None,
     }
 
 
-def test_entry_carries_the_packs_reason_when_no_revision_is_effective(tmp_path):
+def test_entry_carries_the_packs_reason_when_no_identity_is_effective(tmp_path):
     config = cfg(tmp_path)
-    reason = "1 of 2 contributing runs carry no verified protocol revision"
+    reason = "1 of 2 contributing runs carry no verified protocol identity"
     write_eval(
         config,
         run_ids=("r1", "r2"),
@@ -725,7 +737,40 @@ def test_a_protocol_section_claiming_a_revision_it_lacks_is_refused(tmp_path):
     assert entry.provenance.protocol_available is False
     assert entry.provenance.protocol_revision is None
     assert entry.provenance.protocol_detail == (
-        "evidence pack claims a protocol revision it does not carry"
+        "persisted protocol provenance claims a revision it does not carry"
+    )
+
+
+def test_a_pack_predating_the_payload_half_publishes_no_identity(tmp_path):
+    config = cfg(tmp_path)
+    # An evidence pack from before schema 18: a revision aggregated from per-run
+    # captures that compared deployment locks and never the deployed files. The
+    # report still publishes — cohorting is data, not an eligibility rule — but it
+    # publishes no half identity, and the digest is not completed from the repo's
+    # current lock (a later deployment by now) or from anything else.
+    write_eval(config, run_ids=("r1", "r2"), protocol=protocol_section(payload=_OMIT))
+
+    entry = catalog(config).reconcile()[0]
+
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_revision is None
+    assert entry.provenance.protocol_payload_sha256 is None
+    assert entry.provenance.protocol_detail == LEGACY_AGGREGATE_DETAIL
+    assert entry.to_dict()["provenance"]["protocol"]["deploy_lock_hash"] is None
+
+
+def test_a_protocol_section_claiming_a_payload_digest_it_lacks_is_refused(tmp_path):
+    config = cfg(tmp_path)
+    # Present but unusable, which is a rewritten pack rather than an older one: it
+    # gets the damage reason, not the legacy one.
+    write_eval(config, protocol=protocol_section(payload="deadbeef"))
+
+    entry = catalog(config).reconcile()[0]
+
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_revision is None
+    assert entry.provenance.protocol_detail == (
+        "persisted protocol provenance claims a payload digest it does not carry"
     )
 
 
@@ -744,7 +789,7 @@ def test_a_malformed_protocol_section_degrades_instead_of_raising(tmp_path):
     # candidate in the sweep its publication.
     assert entry.provenance.protocol_available is False
     assert entry.provenance.protocol_detail == (
-        "evidence pack protocol provenance is not a JSON object"
+        "persisted protocol provenance is not a JSON object"
     )
 
 
@@ -781,6 +826,34 @@ def test_a_line_from_before_protocol_provenance_still_deserializes(tmp_path):
     assert entry.provenance.protocol_available is False
     assert entry.provenance.protocol_revision is None
     assert entry.provenance.git_available is True  # every other section intact
+
+
+def test_a_line_published_under_a_revision_alone_reads_back_unavailable(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, protocol=protocol_section())
+    published = catalog(config).reconcile()[0]
+
+    # A line a running hub appended while a revision alone was the cohort key. The
+    # catalog is append-only and never migrated, so the demotion has to happen on
+    # the read: the entry stays auditable at its own `seq`, and the revision it was
+    # published under stops being served as an identity a consumer can cohort by —
+    # the payload behind it was never verified, and no later state may supply one.
+    path = config.data_dir / CATALOG_SUBDIR / CATALOG_NAME
+    line = published.to_dict()
+    line["provenance"]["protocol"] = {
+        "available": True,
+        "effective_revision": PROTOCOL_COMMIT,
+        "detail": None,
+    }
+    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    entry = catalog(config).entries()[0]
+
+    assert entry.seq == published.seq and entry.report_key == published.report_key
+    assert entry.provenance.protocol_available is False
+    assert entry.provenance.protocol_revision is None
+    assert entry.provenance.protocol_payload_sha256 is None
+    assert entry.provenance.protocol_detail == LEGACY_AGGREGATE_DETAIL
 
 
 def test_pre_schema_version_evidence_pack_publishes_with_full_provenance(tmp_path):

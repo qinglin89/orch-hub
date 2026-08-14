@@ -1744,16 +1744,22 @@ class ReportProvenance:
     is reverse-chronological), i.e. roughly the repo state the task ended at, not
     necessarily current HEAD.
 
-    ``protocol_revision`` is the ai-native-development commit whose deployed
-    protocol every contributing run verifiably ran under
+    ``protocol_revision`` and ``protocol_payload_sha256`` are the deployed
+    protocol identity every contributing run verifiably ran under
     (:class:`orch_hub.protocol_provenance.EffectiveProtocol`, taken from the
-    pack's durable per-run captures). It is the field a consumer cohorts reports
-    by when asking whether a protocol change helped, which is why it is
-    unanimity-gated rather than best-effort: a task whose runs span a
-    redeployment, or whose provenance the hub never verified, publishes the reason
-    and no revision. Packs written before the capture existed carry no such
-    section at all and are unavailable for that reason — never backfilled from the
-    repo's current deployment, which by publication time is usually a later one.
+    pack's durable per-run captures): the ai-native-development commit that
+    produced the payload, and the deploy lock's digest of the payload itself. They
+    are what a consumer cohorts reports by when asking whether a protocol change
+    helped, which is why they are unanimity-gated rather than best-effort — and
+    why they are carried as one fact: a revision published without the digest its
+    runs verified names a source tree the report cannot show the sessions read.
+    A task whose runs span a redeployment, whose runs verified different payloads
+    under one revision, or whose provenance the hub never verified publishes the
+    reason and neither field. Packs written before the capture existed carry no
+    such section at all, and packs from before the identity became a pair carry
+    only the revision; both are unavailable for their own stated reason — never
+    completed or backfilled from the repo's current deployment, which by
+    publication time is usually a later one.
     """
 
     runs_available: bool = False
@@ -1767,6 +1773,7 @@ class ReportProvenance:
     git_detail: str | None = None
     protocol_available: bool = False
     protocol_revision: str | None = None
+    protocol_payload_sha256: str | None = None
     protocol_detail: str | None = None
     config_available: bool = False
     config_detail: str | None = None
@@ -1790,6 +1797,7 @@ class ReportProvenance:
             "protocol": {
                 "available": self.protocol_available,
                 "effective_revision": self.protocol_revision,
+                "deploy_lock_hash": self.protocol_payload_sha256,
                 "detail": self.protocol_detail,
             },
             "orchestrator_config": {

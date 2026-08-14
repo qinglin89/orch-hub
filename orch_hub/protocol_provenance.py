@@ -100,11 +100,15 @@ nothing.
 
 A *report*, though, is about a task, and a task is worked by several runs. The
 same rule therefore applies once more across them
-(:func:`effective_protocol`): the revision an evaluation report is published
+(:func:`effective_protocol`): the identity an evaluation report is published
 under is the one every contributing run verified, and a set that is incomplete or
-disagrees has no effective revision — only a reason. Both the per-run predicate
-and the cross-run aggregate live here so the rule has one owner; a consumer reads
-the answer, never re-derives it from the parts.
+disagrees has no effective identity — only a reason. It aggregates over the whole
+pair, not over its revision half: two runs can name one commit and still have
+verified different payloads (a partial redeploy, a receipt rewritten between
+them), and publishing the commit they share would state exactly the false cohort
+membership the pair exists to prevent. Both the per-run predicate and the
+cross-run aggregate live here so the rule has one owner; a consumer reads the
+answer, never re-derives it from the parts.
 
 Because the two writes never overlap, this artifact needs no cross-writer lock
 (unlike :mod:`orch_hub.task_snapshots`, whose captures genuinely race); the
@@ -372,28 +376,35 @@ class ProtocolSnapshot:
 
 @dataclass(frozen=True)
 class EffectiveProtocol:
-    """The protocol revision a set of runs may be published under, or why none is.
+    """The protocol identity a set of runs may be published under, or why none is.
 
-    The cross-run counterpart of :meth:`ProtocolSnapshot.verified_revision`,
+    The cross-run counterpart of :meth:`ProtocolSnapshot.verified_identity`,
     carried by an evidence pack and copied onto the catalog entry a consumer
     cohorts by. ``available`` is again the single load-bearing flag: when it is
-    false ``revision`` is ``None`` and ``detail`` says why in operator-readable
+    false both halves are ``None`` and ``detail`` says why in operator-readable
     terms, so "the runs disagreed" and "the hub never verified them" are never
     served as an absent field a consumer could read as "no protocol".
 
+    The two halves are the :class:`ProtocolIdentity` the whole set verified, held
+    as flat fields because this record is a *serialized* section rather than a
+    comparison key — and set together or not at all, for the reason the identity
+    is atomic in the first place.
+
     ``run_count`` and ``verified_count`` are kept beside the verdict so the shape
     of the failure is machine-readable without parsing ``detail``: ``0/0`` is a
-    task with no runs, ``1/3`` an incomplete set, and ``3/3`` with no revision the
+    task with no runs, ``1/3`` an incomplete set, and ``3/3`` with no identity the
     disagreement case.
 
-    The field is ``revision`` but serializes as ``effective_revision``: within
-    this record the qualifier is redundant, while a consumer reading
-    ``provenance.protocol`` needs it to know the value is the *set's* revision and
-    not one run's captured one.
+    Both fields are renamed by :meth:`to_dict`, because a consumer reading
+    ``provenance.protocol`` needs what is redundant inside this record: that the
+    revision is the *set's* and not one run's captured one, and that the digest is
+    the one the deploy lock names for the payload (not a hash of the report, the
+    pack, or the tree the hub walked).
     """
 
     available: bool
     revision: str | None = None
+    payload_sha256: str | None = None
     run_count: int = 0
     verified_count: int = 0
     detail: str | None = None
@@ -402,6 +413,7 @@ class EffectiveProtocol:
         return {
             "available": self.available,
             "effective_revision": self.revision,
+            "deploy_lock_hash": self.payload_sha256,
             "run_count": self.run_count,
             "verified_count": self.verified_count,
             "detail": self.detail,
@@ -409,99 +421,141 @@ class EffectiveProtocol:
 
 
 MAX_LISTED_REVISIONS = 4
-"""How many distinct revisions a disagreement ``detail`` names before summarizing.
-Bounds the string a catalog line carries: revisions are full object names and a
-task's run count has no ceiling, so the reason stays a sentence rather than
-growing with the task."""
+"""How many distinct revisions — or payload digests — a disagreement ``detail``
+names before summarizing. Bounds the string a catalog line carries: both are full
+object names and a task's run count has no ceiling, so the reason stays a
+sentence rather than growing with the task."""
 
 
 def effective_protocol(
     snapshots: Sequence[ProtocolSnapshot | None],
 ) -> EffectiveProtocol:
-    """The one revision every contributing run verified, or an explained absence.
+    """The one identity every contributing run verified, or an explained absence.
 
     ``snapshots`` is one entry per contributing run, in run order, each the run's
     persisted capture or ``None`` for a run that wrote none (one predating the
     capture). The rule is unanimity over
-    :meth:`ProtocolSnapshot.verified_revision`, and it is deliberately the strict
-    reading of "the protocol this task ran under": a report published under a
-    revision two of its three runs used would state a cohort membership that is
+    :meth:`ProtocolSnapshot.verified_identity`, and it is deliberately the strict
+    reading of "the protocol this task ran under": a report published under an
+    identity two of its three runs used would state a cohort membership that is
     false for the third, and a consumer grouping by it cannot tell that from a
     true one. An incomplete or disagreeing set is worth less than an unavailable
     one only if the consumer is guessing — which the ``detail`` exists to stop.
 
-    Both failure modes are reported together when both hold: a set can be short of
-    verified runs *and* have the verified ones disagree, and naming only the first
-    would suggest the missing evidence is all that stands between the task and a
-    revision.
+    Unanimity is over the whole pair. A set whose runs verified one revision with
+    two different payload digests has no effective identity either, and says so in
+    the payload's own terms: the runs did not all read the same protocol text, and
+    publishing the revision they happen to share would hand a consumer a cohort
+    key for a payload half of them never ran under.
+
+    Every failure mode that holds is reported: a set can be short of verified runs
+    *and* have the verified ones disagree — about the revision, about the payload,
+    or about both — and naming only the first would suggest the missing evidence
+    is all that stands between the task and an identity.
     """
     total = len(snapshots)
     if not total:
         return EffectiveProtocol(
             available=False,
-            detail="no related runs to take a protocol revision from",
+            detail="no related runs to take a protocol identity from",
         )
-    revisions = [
-        snapshot.verified_revision
+    identities = [
+        snapshot.verified_identity
         for snapshot in snapshots
-        if snapshot is not None and snapshot.verified_revision is not None
+        if snapshot is not None and snapshot.verified_identity is not None
     ]
-    distinct = sorted(set(revisions))
+    distinct = sorted(
+        set(identities),
+        key=lambda identity: (
+            identity.source_git_commit,
+            identity.canonical_payload_sha256,
+        ),
+    )
     reasons = []
-    if len(revisions) < total:
+    if len(identities) < total:
         reasons.append(
-            f"{total - len(revisions)} of {total} contributing runs carry no"
-            " verified protocol revision"
+            f"{total - len(identities)} of {total} contributing runs carry no"
+            " verified protocol identity"
         )
     if len(distinct) > 1:
-        listed = ", ".join(distinct[:MAX_LISTED_REVISIONS])
-        extra = len(distinct) - MAX_LISTED_REVISIONS
-        reasons.append(
-            "contributing runs verified different protocol revisions: "
-            + listed
-            + (f" (+{extra} more)" if extra > 0 else "")
-        )
+        # Two identities differ in at least one half, so at least one of these
+        # holds. Which one is the operator's whole question: different revisions
+        # are a redeployment mid-task, different payloads under one revision are a
+        # tree that stopped matching what the revision deployed.
+        revisions = sorted({item.source_git_commit for item in distinct})
+        payloads = sorted({item.canonical_payload_sha256 for item in distinct})
+        if len(revisions) > 1:
+            reasons.append(
+                "contributing runs verified different protocol revisions: "
+                + _listed(revisions, MAX_LISTED_REVISIONS)
+            )
+        if len(payloads) > 1:
+            reasons.append(
+                "contributing runs verified different protocol payloads: "
+                + _listed(payloads, MAX_LISTED_REVISIONS)
+            )
     if reasons:
         return EffectiveProtocol(
             available=False,
             run_count=total,
-            verified_count=len(revisions),
+            verified_count=len(identities),
             detail="; ".join(reasons),
         )
     return EffectiveProtocol(
         available=True,
-        revision=distinct[0],
+        revision=distinct[0].source_git_commit,
+        payload_sha256=distinct[0].canonical_payload_sha256,
         run_count=total,
-        verified_count=len(revisions),
+        verified_count=len(identities),
     )
 
 
-def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
-    """Read a persisted aggregate section (an evidence pack's) fail-closed.
+LEGACY_AGGREGATE_DETAIL = (
+    "recorded by an earlier hub that published a protocol revision on its own:"
+    " the payload digest the revision must be published with is not in this"
+    " record"
+)
+"""Why a pre-pair aggregate does not publish. The counterpart of
+:data:`LEGACY_VERDICT_DETAIL` one level up: evidence packs before schema 18 and
+the catalog lines built from them carry ``effective_revision`` alone, and half an
+identity is not a weaker cohort key — it is one whose payload nothing here
+verified. Named because every report published before this is read through it."""
 
-    The reader for a consumer that holds the serialized pack rather than the
-    :class:`EffectiveProtocol` — today the report catalog, which reads
-    ``evidence.json`` as JSON. It lives here so the availability rule keeps one
-    owner: a second implementation at the catalog would be free to drift into
-    publishing a revision this module would not.
+
+def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
+    """Read a persisted aggregate section fail-closed.
+
+    The reader for a consumer that holds the serialized section rather than the
+    :class:`EffectiveProtocol`: the report catalog, which builds an entry from
+    ``evidence.json`` as JSON, and its own round-trip of the catalog line that
+    entry was written to. It lives here so the availability rule keeps one owner —
+    a second implementation at the catalog would be free to drift into publishing
+    an identity this module would not, and the demotions below are exactly where
+    that would happen quietly.
 
     Absence is distinguished from damage, because they mean different things to an
-    operator: ``None`` is a pack written before packs carried this section (the
-    common case for a while), while a present-but-wrong section is a pack
-    something rewrote. An unavailable section's own reason is carried through
-    verbatim — it already names which runs fell short — and a section claiming
-    availability without a well-formed object name is refused rather than
-    published as a cohort key no consumer can resolve.
+    operator: a missing section is a record written before records carried one,
+    while a present-but-wrong section is one something rewrote. An unavailable
+    section's own reason is carried through verbatim — it already names which runs
+    fell short — and a section claiming availability without a well-formed object
+    name is refused rather than published as a cohort key no consumer can resolve.
+
+    A section carrying a revision but no payload digest gets the same treatment
+    for the same reason, and is the common case rather than a defect: everything
+    written before the identity became a pair looks like that
+    (:data:`LEGACY_AGGREGATE_DETAIL`). Its revision is *not* completed from
+    anything — not the runs, not the repo's current lock — because the digest
+    those would supply is not one this record's runs were shown to have used.
     """
     if data is None:
         return EffectiveProtocol(
             available=False,
-            detail="evidence pack carries no protocol provenance section",
+            detail="no protocol provenance section was persisted",
         )
     if not isinstance(data, dict):
         return EffectiveProtocol(
             available=False,
-            detail="evidence pack protocol provenance is not a JSON object",
+            detail="persisted protocol provenance is not a JSON object",
         )
     runs = _int_field(data, "run_count") or 0
     verified = _int_field(data, "verified_count") or 0
@@ -518,11 +572,25 @@ def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
             available=False,
             run_count=runs,
             verified_count=verified,
-            detail="evidence pack claims a protocol revision it does not carry",
+            detail="persisted protocol provenance claims a revision it does not carry",
+        )
+    payload = _hex_field(data, "deploy_lock_hash", _SHA256)
+    if payload is None:
+        return EffectiveProtocol(
+            available=False,
+            run_count=runs,
+            verified_count=verified,
+            detail=(
+                LEGACY_AGGREGATE_DETAIL
+                if data.get("deploy_lock_hash") is None
+                else "persisted protocol provenance claims a payload digest it"
+                " does not carry"
+            ),
         )
     return EffectiveProtocol(
         available=True,
         revision=revision,
+        payload_sha256=payload,
         run_count=runs,
         verified_count=verified,
         detail=_str_field(data, "detail"),
@@ -890,10 +958,15 @@ def _digest_fd(handle: int, size: int) -> str | None:
     return digest.hexdigest()
 
 
-def _listed(reasons: Sequence[str]) -> str:
-    """Bounded join: the detail lands in an artifact and a catalog line."""
-    shown = ", ".join(reasons[:MAX_LISTED_PATHS])
-    extra = len(reasons) - MAX_LISTED_PATHS
+def _listed(values: Sequence[str], limit: int = MAX_LISTED_PATHS) -> str:
+    """Bounded join: the detail lands in an artifact and a catalog line.
+
+    One helper for both bounds — deployed paths and, at the aggregate,
+    revisions/payload digests (:data:`MAX_LISTED_REVISIONS`) — so a caller cannot
+    add a list that grows with the task by forgetting to cap it.
+    """
+    shown = ", ".join(values[:limit])
+    extra = len(values) - limit
     return shown + (f" (+{extra} more)" if extra > 0 else "")
 
 

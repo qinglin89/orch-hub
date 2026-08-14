@@ -24,6 +24,7 @@ from orch_hub.protocol_provenance import (
     ARTIFACT_NAME,
     DEPLOY_LOCK_NAME,
     DEPLOY_MANIFEST_NAME,
+    LEGACY_AGGREGATE_DETAIL,
     LEGACY_VERDICT_DETAIL,
     LOCK_MAX_BYTES,
     MAX_LISTED_REVISIONS,
@@ -1016,23 +1017,26 @@ def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
     assert read_protocol(run_dir) == snapshot
 
 
-# -- aggregating a task's runs into one effective revision --------------------
+# -- aggregating a task's runs into one effective identity ---------------------
 #
 # A run's capture answers for one run; a report answers for a task, which several
 # runs worked. The same fail-closed rule applies once more across them: the
-# revision published is the one every contributing run verified.
+# identity published is the one every contributing run verified — the whole pair,
+# so runs agreeing on a revision but not on the payload it deployed publish
+# nothing either.
 
 
 def snap(
     commit: str = COMMIT,
     *,
+    payload: str = PAYLOAD,
     stability: str = STABILITY_STABLE,
     available: bool = True,
 ) -> ProtocolSnapshot:
     return ProtocolSnapshot(
         available=available,
         source_git_commit=commit if available else None,
-        canonical_payload_sha256=PAYLOAD if available else None,
+        canonical_payload_sha256=payload if available else None,
         captured_ts=CAPTURED_AT.isoformat(),
         stability=stability,
         checked_ts=(
@@ -1041,19 +1045,22 @@ def snap(
     )
 
 
-def test_unanimous_verified_runs_have_an_effective_revision() -> None:
+def test_unanimous_verified_runs_have_an_effective_identity() -> None:
     result = effective_protocol([snap(), snap(), snap()])
 
     assert result.available is True
-    assert result.revision == COMMIT
+    assert (result.revision, result.payload_sha256) == (COMMIT, PAYLOAD)
     assert (result.run_count, result.verified_count) == (3, 3)
     assert result.detail is None
+    # The wire names carry what is redundant inside the record: whose revision
+    # this is, and which receipt the digest comes from.
     assert result.to_dict()["effective_revision"] == COMMIT
+    assert result.to_dict()["deploy_lock_hash"] == PAYLOAD
 
 
-def test_one_unverifiable_run_costs_the_whole_task_its_revision() -> None:
+def test_one_unverifiable_run_costs_the_whole_task_its_identity() -> None:
     # Every non-`stable` state and a run with no artifact at all are alike here:
-    # a report published under a revision one of its runs cannot be shown to have
+    # a report published under an identity one of its runs cannot be shown to have
     # used states a cohort membership that is false for that run.
     cases = {
         "no artifact": None,
@@ -1065,14 +1072,14 @@ def test_one_unverifiable_run_costs_the_whole_task_its_revision() -> None:
         result = effective_protocol([snap(), missing])
 
         assert result.available is False, label
-        assert result.revision is None, label
+        assert (result.revision, result.payload_sha256) == (None, None), label
         assert (result.run_count, result.verified_count) == (2, 1), label
         assert result.detail == (
-            "1 of 2 contributing runs carry no verified protocol revision"
+            "1 of 2 contributing runs carry no verified protocol identity"
         ), label
 
 
-def test_runs_spanning_a_redeployment_have_no_effective_revision() -> None:
+def test_runs_spanning_a_redeployment_have_no_effective_identity() -> None:
     result = effective_protocol([snap(COMMIT), snap(OTHER_COMMIT)])
 
     assert result.available is False
@@ -1083,38 +1090,66 @@ def test_runs_spanning_a_redeployment_have_no_effective_revision() -> None:
     )
 
 
-def test_both_defects_are_reported_together() -> None:
+def test_runs_verifying_one_revision_with_two_payloads_publish_nothing() -> None:
+    # The half a revision-keyed aggregate could not see: both runs verified the
+    # same source commit, and the bytes they verified under it differ — a partial
+    # redeploy, or a receipt rewritten between them. The runs did not read one
+    # protocol text, so the commit they share is not a cohort they both belong to.
+    result = effective_protocol(
+        [snap(payload=PAYLOAD), snap(payload=OTHER_PAYLOAD)]
+    )
+
+    assert result.available is False
+    assert (result.revision, result.payload_sha256) == (None, None)
+    assert (result.run_count, result.verified_count) == (2, 2)
+    assert result.detail == (
+        "contributing runs verified different protocol payloads: "
+        + ", ".join(sorted((PAYLOAD, OTHER_PAYLOAD)))
+    )
+
+
+def test_every_defect_that_holds_is_reported() -> None:
     # Naming only the incompleteness would suggest the missing evidence is all
-    # that stands between this task and a revision. It is not: the runs that did
-    # verify one disagree.
-    result = effective_protocol([snap(COMMIT), snap(OTHER_COMMIT), None])
+    # that stands between this task and an identity. It is not: the runs that did
+    # verify one disagree — and here about both halves at once, which is two
+    # different operator facts (a redeployment, and a tree that stopped matching
+    # what a revision deployed).
+    result = effective_protocol(
+        [snap(COMMIT), snap(OTHER_COMMIT, payload=OTHER_PAYLOAD), None]
+    )
 
     assert result.available is False
     assert result.detail is not None
     assert "1 of 3 contributing runs carry no verified" in result.detail
     assert "verified different protocol revisions" in result.detail
+    assert "verified different protocol payloads" in result.detail
 
 
 def test_a_disagreement_detail_stays_bounded() -> None:
     commits = [f"{index:040x}" for index in range(1, 8)]
+    payloads = [f"{index:064x}" for index in range(1, 8)]
 
-    result = effective_protocol([snap(commit) for commit in commits])
+    for values, snapshots in (
+        (commits, [snap(commit) for commit in commits]),
+        (payloads, [snap(payload=payload) for payload in payloads]),
+    ):
+        result = effective_protocol(snapshots)
 
-    # A task's run count has no ceiling, so the reason summarizes rather than
-    # growing with it. The listed ones are the first in the same sorted order the
-    # rule compares by, so the message is deterministic.
-    assert result.detail is not None
-    assert result.detail.endswith("(+3 more)")
-    assert all(commit in result.detail for commit in commits[:MAX_LISTED_REVISIONS])
-    assert commits[MAX_LISTED_REVISIONS] not in result.detail
+        # A task's run count has no ceiling, so the reason summarizes rather than
+        # growing with it. The listed ones are the first in the same sorted order
+        # the rule compares by, so the message is deterministic.
+        assert result.detail is not None
+        assert result.detail.endswith("(+3 more)")
+        assert all(value in result.detail for value in values[:MAX_LISTED_REVISIONS])
+        assert values[MAX_LISTED_REVISIONS] not in result.detail
 
 
-def test_a_task_with_no_runs_has_no_effective_revision() -> None:
+def test_a_task_with_no_runs_has_no_effective_identity() -> None:
     result = effective_protocol([])
 
     assert result.available is False
     assert (result.run_count, result.verified_count) == (0, 0)
-    assert result.detail == "no related runs to take a protocol revision from"
+    assert result.detail == "no related runs to take a protocol identity from"
 
 
 # -- reading a persisted aggregate (the catalog's view) -----------------------
@@ -1134,9 +1169,9 @@ def test_an_absent_section_is_distinguished_from_a_damaged_one() -> None:
     damaged = effective_protocol_from_dict([COMMIT])
 
     assert absent.available is False
-    assert absent.detail == "evidence pack carries no protocol provenance section"
+    assert absent.detail == "no protocol provenance section was persisted"
     assert damaged.available is False
-    assert damaged.detail == "evidence pack protocol provenance is not a JSON object"
+    assert damaged.detail == "persisted protocol provenance is not a JSON object"
 
 
 def test_an_unavailable_section_carries_its_own_reason_through() -> None:
@@ -1156,21 +1191,75 @@ def test_an_unavailable_section_carries_its_own_reason_through() -> None:
 def test_a_section_claiming_a_revision_it_does_not_carry_is_refused() -> None:
     for revision in (None, "", "HEAD", "main", COMMIT[:8], 7):
         result = effective_protocol_from_dict(
-            {"available": True, "effective_revision": revision, "run_count": 1}
+            {
+                "available": True,
+                "effective_revision": revision,
+                "deploy_lock_hash": PAYLOAD,
+                "run_count": 1,
+            }
         )
 
         assert result.available is False, revision
         assert result.revision is None, revision
         assert result.detail == (
-            "evidence pack claims a protocol revision it does not carry"
+            "persisted protocol provenance claims a revision it does not carry"
         )
 
 
-def test_a_persisted_revision_is_normalized_like_a_captured_one() -> None:
+def test_a_pre_pair_section_publishes_nothing_rather_than_half_an_identity() -> None:
+    # Every pack and catalog line written before schema 18: a revision with no
+    # payload digest. The revision stays out of the published identity rather than
+    # being completed from the runs or from the repo's current lock — the digest
+    # those would supply is not one this record's runs were shown to have used.
+    legacy = effective_protocol_from_dict(
+        {
+            "available": True,
+            "effective_revision": COMMIT,
+            "run_count": 2,
+            "verified_count": 2,
+        }
+    )
+
+    assert legacy.available is False
+    assert (legacy.revision, legacy.payload_sha256) == (None, None)
+    assert legacy.detail == LEGACY_AGGREGATE_DETAIL
+    # The counts survive the demotion: they say the set was complete, which is
+    # what distinguishes this from a task whose runs never verified anything.
+    assert (legacy.run_count, legacy.verified_count) == (2, 2)
+
+
+def test_a_section_claiming_a_payload_digest_it_does_not_carry_is_refused() -> None:
+    # Present but unusable is a rewritten record, not an older one, so it does not
+    # get the legacy reason — an operator reading it should look for what edited
+    # the file.
+    for payload in ("", "not-a-digest", PAYLOAD[:32], COMMIT, 7):
+        result = effective_protocol_from_dict(
+            {
+                "available": True,
+                "effective_revision": COMMIT,
+                "deploy_lock_hash": payload,
+                "run_count": 1,
+            }
+        )
+
+        assert result.available is False, payload
+        assert (result.revision, result.payload_sha256) == (None, None), payload
+        assert result.detail == (
+            "persisted protocol provenance claims a payload digest it does not"
+            " carry"
+        ), payload
+
+
+def test_a_persisted_identity_is_normalized_like_a_captured_one() -> None:
     result = effective_protocol_from_dict(
-        {"available": True, "effective_revision": f"  {COMMIT.upper()} "}
+        {
+            "available": True,
+            "effective_revision": f"  {COMMIT.upper()} ",
+            "deploy_lock_hash": f"{PAYLOAD.upper()}\n",
+        }
     )
 
     # Same normalization the capture applies, so a hand-edited pack cannot split a
     # cohort by case or stray whitespace.
-    assert result.available is True and result.revision == COMMIT
+    assert result.available is True
+    assert (result.revision, result.payload_sha256) == (COMMIT, PAYLOAD)

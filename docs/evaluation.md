@@ -230,23 +230,64 @@ Each item carries the source identity (repo/task/evaluation), the global
 identity, generated and published timestamps, the archived-target facts, the
 evaluator's backend/model/schema, the artifact names with their sizes and
 sha256 digests, and provenance for cohorting (run ids, git commit window,
-effective protocol revision).
+effective protocol identity).
 Provenance the evidence pack does not carry is reported as **explicitly
 unavailable with a reason** — today that is always the case for the
 orchestrator `effective-config` snapshot, since evidence packs record it
 nowhere.
 
-`provenance.protocol.effective_revision` is the ai-native-development commit
-whose deployed protocol the report's runs ran under — the cohort key for asking
-whether a protocol change helped. Each run stamps its repo's
-`.ai-deploy-lock.json` into its run dir before the orchestrator starts, and the
-hub re-checks it when the run ends; a report publishes a revision only when
-**every** contributing run verified the **same** one. Anything else — a run from
-before the hub captured this, a deployment that moved mid-run, a run whose end
-the hub was not up to observe, or runs that span a redeployment — is
-`available: false` with a `detail` naming which of those it was. Nothing is ever
-backfilled from a repo's current deployment lock, which by publication time
-usually names a later revision than the runs used.
+### Protocol provenance
+
+`provenance.protocol` is the cohort key for asking whether a protocol change
+helped, and it is a **pair**:
+
+- `effective_revision` — the ai-native-development commit whose canonical
+  protocol produced the deployed payload.
+- `deploy_lock_hash` — `.ai-deploy-lock.json`'s digest of that payload.
+
+Neither is published without the other. The commit alone names a source tree the
+hub cannot show the sessions read, and the digest alone names bytes with no place
+in any history; a consumer cohorting by half of it would group reports the hub
+never confirmed belong together.
+
+Three distinct things stand behind that pair, and they are worth keeping apart
+when reading a `detail`:
+
+1. **Copying the lock (per run, at launch).** Before the orchestrator starts, the
+   hub stamps the repo's `.ai-deploy-lock.json` into the hub-owned run dir as
+   `protocol.json`. That freezes *what the deploy claimed*, so evaluation never
+   reads today's lock for yesterday's run. It is a copy of a receipt, not a check
+   of the tree.
+2. **Validating the actual files (per run, at two boundaries).** A receipt is not
+   the tree: hand-editing a deployed protocol file — which the protocol forbids,
+   and which is therefore the case worth catching — leaves both receipts
+   untouched. At **launch**, readiness has already run `aii-2 status`, which
+   compares every deployed file against `.ai-deploy-manifest.json`; the run exists
+   only because that passed. At the **end** of a run whose exit the hub observed
+   itself, the hub re-reads the lock and then hashes every deployed file the lock
+   names against the manifest's record of it. Only a run that passed both keeps a
+   publishable identity. These are two point observations: nothing is watched
+   between them, and the hub claims nothing about a file edited and restored in
+   between.
+3. **Aggregating over the task (across runs).** A report is about a task, which
+   several runs worked, so the pair is published only when **every** contributing
+   run verified **one and the same** pair.
+
+Anything else is `available: false` with both fields `null` and a `detail`
+naming which case it was: a run from before the hub captured this, a deployment
+that moved mid-run, deployed files that no longer matched their receipt, a run
+whose end the hub was not up to observe, runs that span a redeployment, or runs
+that agree on a revision but verified **different payloads** under it. Reports
+published before the identity became a pair (evidence schema 17 and earlier)
+carry a revision reached by comparing lock copies alone; they read back
+unavailable with that reason rather than being served as a verified identity with
+a field missing.
+
+Nothing is ever backfilled or completed from a repo's current deployment lock or
+files, which by publication time usually name a later revision than the runs
+used. The practical cost is that every run that ended before the hub verified
+payloads publishes no identity, so older tasks read as protocol-provenance
+unavailable — which is the honest state, not a defect to repair.
 
 ### Fetching one report
 

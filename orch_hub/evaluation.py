@@ -122,7 +122,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "17"
+EVIDENCE_SCHEMA_VERSION = "18"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -180,13 +180,23 @@ earlier pack could state at all. It is the first evidence here that a report is
 *cohortable* by: up to v16 two reports written months and several protocol
 revisions apart were indistinguishable to a consumer grouping them, so the
 question "did this change to the protocol help?" had no answer in the artifacts.
-A persisted pack with no ``schema_version`` key is version 1 and predates all of
-it.
+``18`` makes that cohort key the whole **deployed identity**: the aggregate
+carries the deploy lock's payload digest (``protocol.deploy_lock_hash``) beside
+the revision, agreement is required on both, and — the part a version stamp has
+to separate — a v17 ``stable`` run reached that verdict by comparing two lock
+reads, while a v18 one compared the deployed files against their receipt. So the
+same two runs can be publishable in v17 and unavailable here, and a v17
+``effective_revision`` is not this section's revision with a field missing: it is
+a weaker claim, and is read back unavailable rather than completed
+(:data:`orch_hub.protocol_provenance.LEGACY_AGGREGATE_DETAIL`). A persisted pack
+with no ``schema_version`` key is version 1 and predates all of it.
 
-Only *additive* so far, deliberately: every consumer of a persisted pack reads
+Only *additive* in shape, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
 evaluation detail route), so packs written before a bump stay readable rather
-than needing migration.
+than needing migration. Additive shape is not additive *meaning*, which is what
+the stamp is for — v18 is the first bump that also narrows what an existing
+section is allowed to claim.
 """
 
 EVIDENCE_LOG_MAX_LINES = 200
@@ -1016,15 +1026,16 @@ class EvidencePack:
 
     @property
     def protocol(self) -> EffectiveProtocol:
-        """The deployed protocol revision this task's runs are publishable under.
+        """The deployed protocol identity this task's runs are publishable under.
 
-        Computed from the runs rather than stored beside them
+        The revision *and* the payload digest its runs verified, since a consumer
+        cohorts by the pair. Computed from the runs rather than stored beside them
         (:func:`orch_hub.protocol_provenance.effective_protocol`), for the same
         reason ``entry_fidelity`` is: an aggregate that can be set independently of
         the parts it summarizes can contradict them, and this one decides what a
         published report claims about protocol cohort membership. A pack with no
-        runs, with a run that recorded no verified revision, or whose runs verified
-        different revisions carries the reason instead of a revision.
+        runs, with a run that recorded no verified identity, or whose runs verified
+        different revisions or different payloads carries the reason instead.
         """
         return effective_protocol([run.protocol for run in self.runs])
 

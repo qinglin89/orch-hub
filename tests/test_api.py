@@ -59,6 +59,7 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import OrchestratorConfigError, parse_effective_config
 from orch_hub.registry import RegistryError
+from orch_hub.protocol_provenance import LEGACY_AGGREGATE_DETAIL
 from orch_hub.report_catalog import REQUIRED_ARTIFACTS, ReportCatalog
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
@@ -3927,15 +3928,18 @@ def test_report_feed_serializes_global_identity_hashes_and_provenance(
     # pack predates per-run protocol capture, so it carries no revision at all.
     assert item["provenance"]["protocol"]["available"] is False
     assert item["provenance"]["protocol"]["effective_revision"] is None
+    assert item["provenance"]["protocol"]["deploy_lock_hash"] is None
     assert item["provenance"]["protocol"]["detail"]
     assert item["provenance"]["orchestrator_config"]["detail"]
 
 
-def test_report_feed_serializes_the_effective_protocol_revision(tmp_path, monkeypatch):
+def test_report_feed_serializes_the_effective_protocol_identity(tmp_path, monkeypatch):
     # The cohort key the feed exists to hand an external consumer: the deployed
-    # ai-native-development commit this report's runs verifiably ran under, taken
-    # from the durable evidence pack and never from the repo's current deployment.
+    # ai-native-development commit this report's runs verifiably ran under, with
+    # the deploy lock's digest of the payload that commit deployed, taken from the
+    # durable evidence pack and never from the repo's current deployment.
     revision = "6b62754694c289fc8822562cec22ab774e071b2c"
+    payload = "5" * 64
     client, _config, _repo = make_feed_client(
         tmp_path,
         monkeypatch,
@@ -3943,6 +3947,7 @@ def test_report_feed_serializes_the_effective_protocol_revision(tmp_path, monkey
         protocol={
             "available": True,
             "effective_revision": revision,
+            "deploy_lock_hash": payload,
             "run_count": 2,
             "verified_count": 2,
             "detail": None,
@@ -3954,13 +3959,46 @@ def test_report_feed_serializes_the_effective_protocol_revision(tmp_path, monkey
     assert item["provenance"]["protocol"] == {
         "available": True,
         "effective_revision": revision,
+        "deploy_lock_hash": payload,
         "detail": None,
     }
 
     # The by-key bundle resolves to the same entry, so a consumer that stored the
     # key re-reads the same cohort membership it imported.
     bundle = client.get(f"/api/evaluation/reports/{item['report_key']}").json()
-    assert bundle["entry"]["provenance"]["protocol"]["effective_revision"] == revision
+    protocol = bundle["entry"]["provenance"]["protocol"]
+    assert (protocol["effective_revision"], protocol["deploy_lock_hash"]) == (
+        revision,
+        payload,
+    )
+
+
+def test_report_feed_serves_no_half_identity_for_a_pre_pair_pack(
+    tmp_path, monkeypatch
+):
+    # Every report published before the identity became a pair: a revision whose
+    # payload nothing verified. The feed says unavailable with the reason rather
+    # than serving the revision alone, which a consumer would cohort by exactly as
+    # if the hub had confirmed the bytes behind it.
+    client, _config, _repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z",),
+        protocol={
+            "available": True,
+            "effective_revision": "6b62754694c289fc8822562cec22ab774e071b2c",
+            "run_count": 2,
+            "verified_count": 2,
+            "detail": None,
+        },
+    )
+
+    item = client.get("/api/evaluation/reports").json()["reports"][0]
+
+    assert item["provenance"]["protocol"]["available"] is False
+    assert item["provenance"]["protocol"]["effective_revision"] is None
+    assert item["provenance"]["protocol"]["deploy_lock_hash"] is None
+    assert item["provenance"]["protocol"]["detail"] == LEGACY_AGGREGATE_DETAIL
 
 
 def test_report_feed_paging_reaches_every_report_exactly_once(tmp_path, monkeypatch):
