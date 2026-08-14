@@ -2303,9 +2303,8 @@ def test_prune_evaluations_is_scoped_to_one_task(tmp_path):
 
 
 def test_prune_never_deletes_through_a_linked_evaluation_dir(tmp_path):
-    # Deletion is the one write path that stays pathname-based (shutil.rmtree takes
-    # a dir_fd only above this package's Python floor), so the two properties it
-    # leans on are pinned here rather than inherited by accident.
+    # Deletion holds the same no-follow rule the reads and writes do, at the
+    # evaluation's own hop.
     config = make_config(tmp_path)
     repo = make_repo(tmp_path)
     write_active_task(repo, TASK, "# body")
@@ -2326,9 +2325,9 @@ def test_prune_never_deletes_through_a_linked_evaluation_dir(tmp_path):
     assert service.prune_evaluations(repo, TASK, keep=1) == []
 
     # 2. And if one reaches the deletion list anyway (a dir swapped for a link
-    #    after the listing), two things stop it. A link out of the tree is refused
-    #    by artifact_dir's resolve() assertion before rmtree runs at all — loudly,
-    #    which auto_prune swallows into "no retention this pass".
+    #    after the listing), the delete opens that hop O_NOFOLLOW and leaves it
+    #    alone. Reported as retained, not as removed: a caller told the id was
+    #    deleted would reason about history the tree still holds.
     def forced(*_a, **_k):
         return [
             StoredEvaluation(evaluation_id=keeper.evaluation_id, artifacts=()),
@@ -2336,24 +2335,199 @@ def test_prune_never_deletes_through_a_linked_evaluation_dir(tmp_path):
         ]
 
     service.list_evaluations = forced  # type: ignore[method-assign]
-    with pytest.raises(ValueError):
-        service.prune_evaluations(repo, TASK, keep=1)
+    assert service.prune_evaluations(repo, TASK, keep=1) == []
     assert (outside / EVIDENCE_NAME).is_file()
     assert (task_dir / linked_id).is_symlink()
 
-    # A link *inside* the tree passes that assertion — and is then refused by
-    # rmtree itself, which lstats its own argument and will not delete through a
-    # symbolic link. ignore_errors turns that into "left alone", so the cost is a
-    # retained evaluation, never another evaluation's artifacts.
+    # A link pointing *inside* the tree is refused by exactly the same hop check.
+    # It is the case the resolve() assertion on a pathname cannot see at all —
+    # the target stays under the base, so only the no-follow open catches it.
     sibling = task_dir / "20990101T000001Z"
     sibling.mkdir()
     (sibling / EVIDENCE_NAME).write_text('{"sibling": true}', encoding="utf-8")
     (task_dir / linked_id).unlink()
     (task_dir / linked_id).symlink_to(sibling, target_is_directory=True)
 
-    assert service.prune_evaluations(repo, TASK, keep=1) == [linked_id]
+    assert service.prune_evaluations(repo, TASK, keep=1) == []
     assert (sibling / EVIDENCE_NAME).is_file()
     assert (task_dir / linked_id).is_symlink()
+
+
+def test_prune_never_deletes_through_a_swapped_intermediate_hop(tmp_path):
+    # The hop *above* the evaluation is the half a final-component check cannot
+    # cover: shutil.rmtree lstats its own argument, but the kernel has already
+    # resolved <repo-slug>/<task-id> by then. The listing proves those hops were
+    # real when it ran; the delete that follows re-walks them itself.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    doomed = service.generate_evidence(repo, TASK)
+    keeper = service.generate_evidence(repo, TASK)
+    base = config.data_dir / EVALUATIONS_SUBDIR
+
+    # An outside tree shaped exactly like the one being pruned, holding the id the
+    # prune is about to delete.
+    outside = tmp_path / "outside"
+    victim = outside / TASK / doomed.evaluation_id
+    victim.mkdir(parents=True)
+    (victim / EVIDENCE_NAME).write_text('{"outside": true}', encoding="utf-8")
+    (outside / "sentinel").write_text("sentinel", encoding="utf-8")
+
+    # The swap: after the reservation/listing proved it real, the <repo-slug> hop
+    # becomes a link to that outside tree.
+    real_repo_dir = tmp_path / "stashed-repo-dir"
+    (base / "alpha").rename(real_repo_dir)
+    (base / "alpha").symlink_to(outside, target_is_directory=True)
+
+    def forced(*_a, **_k):
+        return [
+            StoredEvaluation(evaluation_id=keeper.evaluation_id, artifacts=()),
+            StoredEvaluation(evaluation_id=doomed.evaluation_id, artifacts=()),
+        ]
+
+    service.list_evaluations = forced  # type: ignore[method-assign]
+    assert service.prune_evaluations(repo, TASK, keep=1) == []
+
+    # Nothing outside the tree was touched, and the link itself was not consumed.
+    assert (victim / EVIDENCE_NAME).is_file()
+    assert (outside / "sentinel").is_file()
+    assert (base / "alpha").is_symlink()
+    # The evaluation the prune actually meant is still there, unpruned — a delete
+    # it could not perform safely is a retained evaluation, never a wrong one.
+    assert (real_repo_dir / TASK / doomed.evaluation_id / EVIDENCE_NAME).is_file()
+
+
+def test_prune_never_deletes_through_an_in_tree_intermediate_hop(tmp_path):
+    # The variant no pathname check can see: the swapped <repo-slug> hop points at
+    # another directory *inside* the tree, so resolve() finds the target still under
+    # the base and approves it. Only opening the hop no-follow catches this one —
+    # and what it protects is another repo's evaluation history, not an outside file.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    doomed = service.generate_evidence(repo, TASK)
+    keeper = service.generate_evidence(repo, TASK)
+    base = config.data_dir / EVALUATIONS_SUBDIR
+
+    # A second repo's subtree, inside the tree, holding the same ids.
+    decoy = base / "decoy"
+    for eid in (doomed.evaluation_id, keeper.evaluation_id):
+        (decoy / TASK / eid).mkdir(parents=True)
+        (decoy / TASK / eid / EVIDENCE_NAME).write_text(
+            '{"decoy": 1}', encoding="utf-8"
+        )
+
+    real_repo_dir = tmp_path / "stashed-repo-dir"
+    (base / "alpha").rename(real_repo_dir)
+    (base / "alpha").symlink_to(decoy, target_is_directory=True)
+
+    # The pathname the old delete would have used passes the escape assertion,
+    # because the link's target really is inside the tree.
+    approved = evaluation_artifact_dir(
+        config.data_dir,
+        repo_name="alpha",
+        task_id=TASK,
+        evaluation_id=doomed.evaluation_id,
+    )
+    assert approved.resolve() == (decoy / TASK / doomed.evaluation_id).resolve()
+
+    def forced(*_a, **_k):
+        return [
+            StoredEvaluation(evaluation_id=keeper.evaluation_id, artifacts=()),
+            StoredEvaluation(evaluation_id=doomed.evaluation_id, artifacts=()),
+        ]
+
+    service.list_evaluations = forced  # type: ignore[method-assign]
+    assert service.prune_evaluations(repo, TASK, keep=1) == []
+
+    # The decoy repo's evaluations are intact — retention for one repo never
+    # reaches another's history.
+    assert (decoy / TASK / doomed.evaluation_id / EVIDENCE_NAME).is_file()
+    assert (decoy / TASK / keeper.evaluation_id / EVIDENCE_NAME).is_file()
+    assert (real_repo_dir / TASK / doomed.evaluation_id / EVIDENCE_NAME).is_file()
+
+
+def test_generate_evidence_cleanup_never_deletes_through_a_swapped_hop(tmp_path):
+    # Same window on the failure-cleanup path: the dir is reserved, the build then
+    # fails, and the cleanup runs against hops that are no longer what the
+    # reservation walked.
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+    base = config.data_dir / EVALUATIONS_SUBDIR
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sentinel").write_text("sentinel", encoding="utf-8")
+
+    swapped: dict[str, str] = {}
+    real_build = service.build_evidence
+
+    def build_then_swap(repo_arg, task_arg, *, evaluation_id):
+        # Between the reservation and the cleanup, exactly where the race lives.
+        victim = outside / TASK / evaluation_id
+        victim.mkdir(parents=True)
+        (victim / EVIDENCE_NAME).write_text('{"outside": true}', encoding="utf-8")
+        (base / "alpha").rename(tmp_path / "stashed-repo-dir")
+        (base / "alpha").symlink_to(outside, target_is_directory=True)
+        swapped["id"] = evaluation_id
+        raise RuntimeError("build failed")
+
+    service.build_evidence = build_then_swap  # type: ignore[method-assign]
+    with pytest.raises(RuntimeError):
+        service.generate_evidence(repo, TASK)
+    service.build_evidence = real_build  # type: ignore[method-assign]
+
+    # The cleanup refused the swapped hop rather than deleting the matching dir it
+    # now pointed at; the leaked reserved dir is the intended cost.
+    assert (outside / TASK / swapped["id"] / EVIDENCE_NAME).is_file()
+    assert (outside / "sentinel").is_file()
+    assert (tmp_path / "stashed-repo-dir" / TASK / swapped["id"]).is_dir()
+
+
+def test_remove_evaluation_deletes_a_populated_dir_through_a_relocated_data_dir(
+    tmp_path,
+):
+    # The ordinary path still works, and still works when the evaluations base is
+    # itself reached through a link (a relocated data dir) — links above the tree
+    # stay followable; only hops inside it are refused.
+    real = tmp_path / "volume" / "hub-data"
+    real.mkdir(parents=True)
+    (tmp_path / "hub-data").symlink_to(real, target_is_directory=True)
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    write_active_task(repo, TASK, "# body")
+    service = make_service(config)
+
+    pack = service.generate_evidence(repo, TASK)
+    eval_dir = real / EVALUATIONS_SUBDIR / "alpha" / TASK / pack.evaluation_id
+    # A nested dir the hub never writes: a flat unlink would leave it, and its
+    # parent, behind forever.
+    (eval_dir / "nested").mkdir()
+    (eval_dir / "nested" / "leftover.json").write_text("{}", encoding="utf-8")
+    assert (eval_dir / EVIDENCE_NAME).is_file()
+
+    assert service.remove_evaluation(repo, TASK, pack.evaluation_id) is True
+    assert not eval_dir.exists()
+    assert service.list_evaluations(repo, TASK) == []
+    # Idempotent: already gone is the caller's goal, not a failure.
+    assert service.remove_evaluation(repo, TASK, pack.evaluation_id) is True
+
+
+def test_remove_evaluation_reports_absent_levels_and_fails_closed_when_disabled(
+    tmp_path,
+):
+    config = make_config(tmp_path)
+    repo = make_repo(tmp_path)
+    service = make_service(config)
+    # Nothing generated yet: no parent level to remove from.
+    assert service.remove_evaluation(repo, TASK, "20990101T000000Z") is False
+
+    disabled = EvaluationService(make_config(tmp_path, enabled=False))
+    with pytest.raises(EvaluationDisabledError):
+        disabled.remove_evaluation(repo, TASK, "20990101T000000Z")
 
 
 def test_generate_evidence_auto_prunes_to_config_cap(tmp_path):

@@ -65,7 +65,6 @@ from __future__ import annotations
 
 import datetime as dt
 import re
-import shutil
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
@@ -350,7 +349,10 @@ class StaticEvaluator:
         evaluations tree's own no-follow walk, so this layer holds no containment
         rule of its own. If it fails, the whole evaluation dir is
         removed so no half-pair (evidence without metrics) is left behind,
-        mirroring ``generate_evidence``'s own failure cleanup. Read-only over
+        mirroring ``generate_evidence``'s own failure cleanup — and through
+        :meth:`EvaluationService.remove_evaluation`, the same walk again, because a
+        cleanup that named the dir instead could be redirected by a link swapped in
+        at the repo/task hop while this generation was running. Read-only over
         target repo/run state — the only writes are the two hub-owned artifacts.
 
         Retention is applied via ``generate_evidence(prune=False)`` +
@@ -362,13 +364,12 @@ class StaticEvaluator:
         self._require_enabled()
         pack = self._service.generate_evidence(repo, task_id, prune=False)
         report = _build_report(pack, self._clock().isoformat())
-        assert pack.evaluation_dir is not None  # generate_evidence always sets it
         try:
             self._service.write_artifact(
                 repo, task_id, pack.evaluation_id, STATIC_METRICS_NAME, report.to_dict()
             )
         except Exception:
-            shutil.rmtree(pack.evaluation_dir, ignore_errors=True)
+            self._service.remove_evaluation(repo, task_id, pack.evaluation_id)
             raise
         # Only now that the evidence+metrics pair is durable: retention can never
         # have deleted older evaluations for a metrics generation that then failed.

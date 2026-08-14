@@ -1734,7 +1734,9 @@ class SemanticEvaluator:
 
         Atomic and fail-closed: :meth:`EvaluationService.generate_evidence` mints
         and reserves the dir (removing it on its own failure), and all three writes
-        below go back through :meth:`EvaluationService.write_artifact` /
+        below — plus the cleanup that removes them
+        (:meth:`~EvaluationService.remove_evaluation`) — go back through
+        :meth:`EvaluationService.write_artifact` /
         :meth:`~EvaluationService.write_text_artifact`, so they land in the tree by
         the same no-follow walk the reads use instead of by a pathname this layer
         holds. Every step after the reservation is
@@ -1758,8 +1760,6 @@ class SemanticEvaluator:
         """
         self._require_enabled()
         pack = self._service.generate_evidence(repo, task_id, prune=False)
-        assert pack.evaluation_dir is not None  # generate_evidence always sets it
-        eval_dir = pack.evaluation_dir
         try:
             static_report = self._static.build_report(pack)
             self._service.write_artifact(
@@ -1794,8 +1794,10 @@ class SemanticEvaluator:
             # generate_evidence created this dir; remove the whole reserved
             # evaluation (evidence + static + any partial semantic write) so a
             # failed evaluation leaves nothing behind — the same no-half-pair
-            # cleanup the static/evidence generators use.
-            shutil.rmtree(eval_dir, ignore_errors=True)
+            # cleanup the static/evidence generators use, and through the same
+            # no-follow walk that reserved and wrote it, so a hop swapped for a link
+            # during the (model-latency-long) turn above cannot redirect the delete.
+            self._service.remove_evaluation(repo, task_id, pack.evaluation_id)
             raise
         # Offer the report to the global feed only now: the artifact set above is
         # durable, so a published report is always one that exists on disk. The

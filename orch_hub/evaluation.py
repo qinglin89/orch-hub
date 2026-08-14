@@ -31,13 +31,15 @@ The subsystem is built from four composable primitives:
   stored there is a second, stronger primitive: a pathname is re-walked by every
   operation that uses it, so :func:`opened_evaluations_dir` walks the tree's own
   hops following no link and :func:`opened_artifact` /
-  :func:`write_contained_artifact` open each artifact relative to that descriptor.
-  The tree may be *reached* through a link (a relocated data dir); nothing inside
-  it may be. Every consumer that turns a stored artifact into bytes — this
-  module's own readers, the global report feed's exports, and the digests
-  publication records — goes through them, and so does every path that creates a
-  directory or writes an artifact *into* the tree: the hub must not be the thing
-  that populates a tree its own reads would then refuse as damaged.
+  :func:`write_contained_artifact` / :func:`remove_contained_evaluation` act
+  relative to that descriptor. The tree may be *reached* through a link (a
+  relocated data dir); nothing inside it may be. Every consumer that turns a stored
+  artifact into bytes — this module's own readers, the global report feed's
+  exports, and the digests publication records — goes through them, and so does
+  every path that creates a directory, writes an artifact *into* the tree, or takes
+  one back out of it: the hub must not be the thing that populates a tree its own
+  reads would then refuse as damaged, nor the thing that deletes what a swapped hop
+  renamed into its place.
 - **evidence pack build + persist** — assemble a bounded :class:`EvidencePack`
   from the target task, its related runs (each run's metadata-only history
   events, per-session context snapshot, and *bounded* log/``spawn.out`` tails),
@@ -64,7 +66,6 @@ import json
 import logging
 import os
 import re
-import shutil
 import stat
 from collections.abc import Callable, Collection, Iterator, Sequence
 from contextlib import contextmanager
@@ -324,8 +325,12 @@ def task_evaluations_dir(data_dir: Path, *, repo_name: str, task_id: str) -> Pat
     fails closed with ``ValueError`` rather than building a path that could escape
     the tree. As a final defense the resolved target is asserted to stay under the
     resolved evaluations base. Pure path math: it creates nothing, and — unlike
-    :func:`opened_evaluations_dir` — it *follows* links, so it is for the write and
-    delete paths that name a directory, never for reading artifacts out of one.
+    :func:`opened_evaluations_dir` — it *follows* links, so it is for **naming** a
+    directory (an error message, an :class:`EvidencePack`'s recorded location),
+    never for reaching one. Every operation that creates, reads, writes, or removes
+    something in the tree goes through the descriptor walk instead; the ``resolve()``
+    assertion below is a check on names at check time, and the kernel resolves them
+    again whenever a caller hands the result back to it.
     """
     base = data_dir / EVALUATIONS_SUBDIR
     target = base.joinpath(*tree_segments(repo_name=repo_name, task_id=task_id))
@@ -345,9 +350,10 @@ def evaluation_artifact_dir(
 
     Layout is ``<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/``,
     validated and contained exactly as :func:`task_evaluations_dir` is, with the
-    same pure-path-math and link-following caveats: this is the dir a generation
-    creates and writes into and a prune removes, while every *read* of what stands
-    inside it goes through :func:`opened_evaluations_dir`.
+    same pure-path-math and link-following caveats: this *names* the dir a
+    generation creates and writes into and a prune removes, while reaching it —
+    to create, read, write, or remove — goes through
+    :func:`opened_evaluations_dir`.
     """
     base = data_dir / EVALUATIONS_SUBDIR
     target = base.joinpath(
@@ -660,6 +666,99 @@ def write_contained_artifact(
         finally:
             os.close(fd)
         os.replace(tmp, artifact, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+
+
+def remove_contained_evaluation(
+    data_dir: Path,
+    *,
+    repo_name: str,
+    task_id: str,
+    evaluation_id: str,
+) -> bool:
+    """Remove one evaluation dir and its artifacts, following no hop of the tree.
+
+    The delete mirror of :func:`read_contained_artifact` /
+    :func:`write_contained_artifact`, and the only way the subsystem removes
+    anything from the tree: retention's per-evaluation deletion and the three
+    generation paths' failure cleanups. It closes the last place a *pathname* was
+    still being handed to the kernel — ``shutil.rmtree(<base>/<repo>/<task>/<eval>)``
+    ``lstat``s its own final argument and so refuses a link standing *there*, but
+    the kernel has already resolved ``<repo>`` and ``<task>`` by the time it looks,
+    and those it follows. A link at either hop — swapped in after the listing or
+    the reservation, or simply pointing at another dir inside the tree, which
+    :func:`evaluation_artifact_dir`'s ``resolve()`` assertion cannot see at all —
+    redirected the delete at whatever it named. So the parent is walked
+    ``O_NOFOLLOW`` (:func:`opened_evaluations_dir`) and the removal happens relative
+    to that descriptor, the same rule the reads and writes hold.
+
+    Best-effort by contract, matching the ``rmtree(ignore_errors=True)`` it
+    replaces: every caller is either retention (one un-removable dir must not fail
+    the pass) or a failure cleanup (which must not mask the exception it is
+    unwinding). Returns whether the evaluation is gone — ``False`` covers an absent
+    parent level, a link or non-directory standing where the evaluation should be,
+    and any IO fault, all of which leave what is there untouched. A leaked
+    directory is the intended cost: the read paths already surface tree damage
+    loudly, and retention self-corrects once an operator repairs it.
+    """
+    name = _safe_segment(evaluation_id, label="evaluation id")
+    try:
+        with opened_evaluations_dir(
+            data_dir, repo_name=repo_name, task_id=task_id
+        ) as parent_fd:
+            if parent_fd is None:
+                return False
+            return _remove_dir_at(name, dir_fd=parent_fd)
+    except (OSError, EvaluationDamagedTreeError):
+        # A link at the repo/task hop is damage to report through the read paths,
+        # not something to delete around.
+        return False
+
+
+def _remove_dir_at(name: str, *, dir_fd: int) -> bool:
+    """Recursively remove the real directory ``name`` inside an opened dir.
+
+    The descent half of :func:`remove_contained_evaluation`: each level is opened
+    ``O_NOFOLLOW`` relative to its parent's descriptor and its entries are unlinked
+    relative to that one, so no name is ever resolved from the tree root twice.
+    ``os.unlink`` removes a link rather than following it, so only real
+    subdirectories are descended into — which the hub never writes inside an
+    evaluation dir, but a flat delete would leave one behind forever.
+
+    The residual race is the final ``rmdir``, which takes ``name`` again: a
+    directory swapped in between could be removed instead. It is bounded to the
+    already-contained parent (no ``unlinkat``-by-descriptor exists to close it) and
+    only ever names a sibling entry of the dir the caller meant, never anything
+    outside the tree.
+    """
+    try:
+        fd = os.open(name, _TREE_HOP_FLAGS, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return True  # Already gone: the caller's goal holds.
+    except OSError:
+        return False  # ELOOP for a link at this hop, or any other fault.
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            return False
+        # Materialized before the first unlink: mutating a directory mid-``readdir``
+        # may skip entries, which would leave the dir non-empty for no visible
+        # reason.
+        with os.scandir(fd) as entries:
+            children = [(e.name, e.is_dir(follow_symlinks=False)) for e in entries]
+        for child, is_dir in children:
+            if is_dir:
+                if not _remove_dir_at(child, dir_fd=fd):
+                    return False
+            else:
+                os.unlink(child, dir_fd=fd)
+    except OSError:
+        return False
+    finally:
+        os.close(fd)
+    try:
+        os.rmdir(name, dir_fd=dir_fd)
+    except OSError:
+        return False
+    return True
 
 
 def contained_dir_names(dir_fd: int) -> list[str]:
@@ -1468,31 +1567,25 @@ class EvaluationService:
         discard the evidence/metrics/report it just persisted — the guard keeps the
         fresh evaluation at a transient ``keep + 1`` that self-corrects next generation.
         Scoped strictly to this ``(repo, task)`` subtree — other tasks' evaluations
-        are never touched — and removals go through the contained
-        :meth:`artifact_dir` (rejecting unsafe segments). Best-effort per dir
-        (``rmtree(ignore_errors=True)``, matching the generate-failure cleanup), so
-        one un-removable dir cannot fail the prune. Returns the ids it removed,
-        newest-first among the removed. Gated and hub-owned: it only ever deletes
-        the subsystem's own artifacts, never target repo/task/run state.
+        are never touched — and removals go through :meth:`remove_evaluation`.
+        Best-effort per dir, so one un-removable dir cannot fail the prune. Returns
+        the ids it actually removed, newest-first among the removed; a candidate
+        left behind by tree damage is reported as retained rather than as deleted,
+        because a caller that believed a false deletion would be reasoning about
+        history the tree still holds. Gated and hub-owned: it only ever deletes the
+        subsystem's own artifacts, never target repo/task/run state.
 
-        Deletion is the one write path that stays *path*-based, because
-        ``shutil.rmtree`` takes a ``dir_fd`` only on Python 3.13+, above this
-        package's floor. Three existing properties contain it, relied on
-        deliberately and pinned by tests rather than inherited by accident:
+        Both halves are contained, and both are needed:
 
         - What it deletes comes from :meth:`list_evaluations`, the contained walk,
           so a linked evaluation dir is never a candidate and a link at the
           ``<repo-slug>``/``<task-id>`` hop refuses the whole prune as damage
           instead of enumerating another tree's ids into a deletion list.
-        - Should one reach the deletion list anyway (a dir swapped for a link after
-          the listing), :meth:`artifact_dir`'s ``resolve()`` assertion refuses a
-          link pointing *out* of the tree before ``rmtree`` runs.
-        - A link pointing *inside* the tree passes that assertion and is then
-          refused by ``rmtree`` itself, which ``lstat``s its own argument and will
-          not delete through a symbolic link. ``ignore_errors`` turns that into
-          "left alone", so the cost is a retained evaluation, never another
-          evaluation's artifacts. Its interior walk is descriptor-based on every
-          platform this runs on.
+        - The deletion itself re-walks those hops ``O_NOFOLLOW`` rather than naming
+          them, so a dir swapped for a link *after* the listing is left alone
+          instead of redirecting the delete. A listing cannot carry containment to
+          the deletion that follows it, for the same reason a pathname cannot carry
+          it to a read (:func:`opened_evaluations_dir`).
 
         An injected ``retention_guard`` extends ``protect`` with every evaluation
         the global report feed still owes a publication (see the class docstring):
@@ -1524,9 +1617,8 @@ class EvaluationService:
         for entry in stored[limit:]:
             if entry.evaluation_id in protected:
                 continue
-            eval_dir = self.artifact_dir(repo, task_id, entry.evaluation_id)
-            shutil.rmtree(eval_dir, ignore_errors=True)
-            removed.append(entry.evaluation_id)
+            if self.remove_evaluation(repo, task_id, entry.evaluation_id):
+                removed.append(entry.evaluation_id)
         return removed
 
     def auto_prune(
@@ -1658,6 +1750,30 @@ class EvaluationService:
             text=text,
         )
 
+    def remove_evaluation(
+        self, repo: ManagedRepo, task_id: str, evaluation_id: str
+    ) -> bool:
+        """Remove one evaluation dir and everything in it; report whether it is gone.
+
+        The delete counterpart of :meth:`write_artifact`, and the single seam the
+        subsystem deletes through — retention (:meth:`prune_evaluations`) and the
+        three generation paths' failure cleanups, including the static and semantic
+        layers', which call this rather than running ``shutil.rmtree`` on
+        ``pack.evaluation_dir`` themselves. Containment is
+        :func:`remove_contained_evaluation`: no hop of the tree is resolved from a
+        pathname, so a link at the repo/task hop cannot redirect the delete at
+        another evaluation's artifacts. Best-effort and never raising for tree
+        state, which is what lets a failure cleanup call it while unwinding. Gated;
+        hub-owned artifacts only, never target repo/task/run state.
+        """
+        self._require_enabled()
+        return remove_contained_evaluation(
+            self._config.data_dir,
+            repo_name=repo.name,
+            task_id=task_id,
+            evaluation_id=evaluation_id,
+        )
+
     def build_evidence(
         self, repo: ManagedRepo, task_id: str, *, evaluation_id: str
     ) -> EvidencePack:
@@ -1741,8 +1857,9 @@ class EvaluationService:
         except Exception:
             # This call created the dir; remove it so a failed generate leaves no
             # empty evaluation dir (the run manager cleans a failed spawn the same
-            # way). ``ignore_errors`` keeps cleanup itself from masking the cause.
-            shutil.rmtree(evaluation_dir, ignore_errors=True)
+            # way). Contained by the same walk that reserved it, and best-effort so
+            # cleanup itself never masks the cause.
+            self.remove_evaluation(repo, task_id, evaluation_id)
             raise
         # Retention for the standalone evidence path only: this method's artifacts
         # are complete once evidence.json is written above, so it is safe to prune
