@@ -1232,7 +1232,7 @@ def test_a_section_claiming_a_payload_digest_it_does_not_carry_is_refused() -> N
     # Present but unusable is a rewritten record, not an older one, so it does not
     # get the legacy reason — an operator reading it should look for what edited
     # the file.
-    for payload in ("", "not-a-digest", PAYLOAD[:32], COMMIT, 7):
+    for payload in (None, "", "not-a-digest", PAYLOAD[:32], COMMIT, 7):
         result = effective_protocol_from_dict(
             {
                 "available": True,

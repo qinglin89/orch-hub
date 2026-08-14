@@ -582,7 +582,7 @@ def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
             verified_count=verified,
             detail=(
                 LEGACY_AGGREGATE_DETAIL
-                if data.get("deploy_lock_hash") is None
+                if "deploy_lock_hash" not in data
                 else "persisted protocol provenance claims a payload digest it"
                 " does not carry"
             ),
