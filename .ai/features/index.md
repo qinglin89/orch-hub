@@ -38,4 +38,6 @@ verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 | run-observability.md | Log viewing, run history/audit |
 | dashboard.md | Mobile dashboard shell, theme, responsiveness, accessibility, Overview, route infrastructure |
 | dashboard-views.md | Mobile dashboard routed view catalog: repo/task/start/history/log/evaluation/report-feed/intake |
-| ops.md | Agent subscription usage, notifications, launchd service, remote intake, future IM bot surface |
+| ops.md | Notifications, launchd service, future IM bot surface |
+| usage.md | Agent subscription usage display: Claude cache/collector, Codex rollouts, statusLine fallback |
+| intake.md | Remote intake-task: admission, draft/revise/confirm/cancel lifecycle |
