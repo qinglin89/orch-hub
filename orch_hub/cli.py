@@ -514,11 +514,23 @@ def _cmd_eval_catalog_repair(args: argparse.Namespace) -> int:
     Exit code follows the same rule as ``verify``: 0 when the catalog on disk now
     serves the feed. A refusal, or a plan that has not been confirmed yet, is
     non-zero.
+
+    A catalog that cannot be read or backed up at all is reported the way every
+    other operational failure in this CLI is — one ``error:`` line and a non-zero
+    exit. ``verify`` reaches that state as a finding, since an unreadable file is
+    something a diagnosis can still describe; a repair has nothing to say about a
+    file it never read, and a traceback is not an operator diagnostic.
     """
+    from .report_catalog import ReportCatalogError
+
     catalog = _open_catalog()
     if catalog is None:
         return 1
-    result = catalog.repair(apply=args.confirm)
+    try:
+        result = catalog.repair(apply=args.confirm)
+    except ReportCatalogError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     if args.json:
         print(json.dumps(result.to_dict(), indent=2))
         return 0 if result.serves_feed else 1

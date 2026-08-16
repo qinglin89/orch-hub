@@ -324,6 +324,15 @@ repair is the one path that rewrites an append-only file, so the bytes it replac
 are kept: an operator who disagrees with the result has the original, and the
 backup is inert to every read path (only :data:`CATALOG_NAME` is ever read)."""
 
+_BACKUP_NAME_ATTEMPTS = 100
+"""How many free backup names one repair looks for before refusing to write.
+
+The stamp in a backup's name is second-resolution, so repeated repairs inside one
+second are the ordinary collision (:func:`_write_new_file` suffixes past them). A
+bound is here because the loop's other exit is a directory something else is
+filling as fast as this walks it, and a repair that cannot preserve the bytes it
+is about to replace must stop rather than spin — or, worse, proceed unbacked."""
+
 
 class ReportCatalogError(Exception):
     """A report could not be cataloged (unreadable/malformed source artifacts).
@@ -711,12 +720,7 @@ class ReportCatalog:
             )
         if missing:
             return ReportBundle(
-                entry=entry,
-                available=False,
-                detail=(
-                    "report artifact set is incomplete"
-                    f" (missing {', '.join(missing)})"
-                ),
+                entry=entry, available=False, detail=_incomplete_detail(missing)
             )
         cataloged = _cataloged_digests(entry)
         raw: dict[str, bytes] = {}
@@ -742,7 +746,7 @@ class ReportCatalog:
                 return ReportBundle(
                     entry=entry,
                     available=False,
-                    detail=f"unreadable report artifact {name} ({err})",
+                    detail=_unreadable_artifact_detail(name, err),
                 )
             if data is None:
                 # Not a regular file — a directory or FIFO standing where the
@@ -928,15 +932,22 @@ class ReportCatalog:
         fetch time and leave the traversal whole, so they are reported without
         claiming the feed is down.
 
-        The artifact census walks each distinct entry's dir through the same
-        contained descriptor a bundle read uses, and keeps *damaged* apart from
-        *pruned* for the reason the whole verb exists: pruned artifacts are this
-        feed's designed end state, while a link at an artifact or at a tree hop is
-        damage the hub never wrote and retention can no longer reclaim, so it
-        accumulates silently until an operator clears it. Both damage shapes are
-        kept — :func:`_artifact_faults` for the artifacts themselves and
+        The artifact census walks each entry's dir through the same contained
+        descriptor a bundle read uses, and keeps *damaged* apart from *pruned* for
+        the reason the whole verb exists: pruned artifacts are this feed's designed
+        end state, while a link at an artifact or at a tree hop is damage the hub
+        never wrote and retention can no longer reclaim, so it accumulates silently
+        until an operator clears it. Both damage shapes are kept —
+        :func:`_artifact_faults` for the artifacts themselves and
         :class:`~orch_hub.evaluation.EvaluationDamagedTreeError` for the directory
         hops — rather than restated here.
+
+        The census walks each *identity* once, not each ``report_key`` once
+        (:func:`_census_identity`). The difference is exactly the damaged file this
+        verb is for: two lines can share a key and still be different reports, and
+        skipping the second on its key alone would drop its findings from a report
+        that promises to name every defect — while it is the duplicate-key finding
+        above that tells the operator the two collide.
 
         Strictly read-only and lock-free, like every other read: it publishes
         nothing, evaluates nothing, calls no model, and writes no byte — a verify
@@ -986,12 +997,15 @@ class ReportCatalog:
         ]
         defects.extend(_duplicate_defects(scanned))
         census: Counter[str] = Counter()
-        seen: set[str] = set()
+        seen: set[tuple[str, str, str, str]] = set()
         for line in scanned:
             entry = line.entry
-            if entry is None or entry.report_key in seen:
+            if entry is None:
                 continue
-            seen.add(entry.report_key)
+            identity = _census_identity(entry)
+            if identity in seen:
+                continue
+            seen.add(identity)
             state, detail, where = self._entry_artifacts(entry)
             census[state] += 1
             if detail is not None:
@@ -1030,12 +1044,16 @@ class ReportCatalog:
         """One entry's artifact state, why it is a defect, and where to go fix it.
 
         Exactly the classification :meth:`read_bundle` performs for a single fetch,
-        stopping at the census instead of going on to read bytes: the same
-        stored-identity audits, the same contained walk, the same per-name
-        :func:`_artifact_faults`, and the same order — a link is reported ahead of
-        an absence, because a set that is both damaged and partly pruned is damaged.
-        Sharing those rules is what makes a verify run's count of *pruned* entries
-        the same set of entries a fetch answers "no longer retained" for.
+        stopping at the last step it takes — the same stored-identity audits, the
+        same contained walk, the same per-name :func:`_artifact_faults`, the same
+        per-artifact open, and the same order, since a link is reported ahead of an
+        absence and an absence ahead of a fault. Sharing those rules is the whole
+        promise of the census: a state it counts is the answer a fetch of that
+        entry gives, so *retained* is a bundle a consumer can actually take and
+        *pruned* is the set of entries a fetch answers "no longer retained" for.
+        Only an absent evaluation dir is pruned — retention removes the directory,
+        so a dir that is still there with nothing in it is a set that lost its
+        files some other way, which a fetch reports as incomplete.
 
         ``None`` as the detail means the state is not a defect: a complete set, or
         the designed end state of an entry outliving artifacts retention removed.
@@ -1066,7 +1084,7 @@ class ReportCatalog:
             with self._opened_dir(entry) as dir_fd:
                 if dir_fd is None:
                     return ARTIFACTS_PRUNED, None, None
-                missing, uncontained = _artifact_faults(dir_fd)
+                state, detail = _fetchable_state(dir_fd)
         except EvaluationDamagedTreeError as err:
             return ARTIFACTS_DAMAGED, _damaged_hop_detail(err), where
         except OSError as err:
@@ -1075,17 +1093,9 @@ class ReportCatalog:
                 f"unreadable report artifacts ({err})",
                 where,
             )
-        if uncontained:
-            return ARTIFACTS_DAMAGED, _damaged_detail(uncontained), where
-        if not missing:
-            return ARTIFACTS_RETAINED, None, None
-        if len(missing) == len(REQUIRED_ARTIFACTS):
-            return ARTIFACTS_PRUNED, None, None
-        return (
-            ARTIFACTS_INCOMPLETE,
-            f"report artifact set is incomplete (missing {', '.join(missing)})",
-            where,
-        )
+        # A directory only where there is something to go clear: the two states
+        # that are not defects name none, since there is nothing there to act on.
+        return state, detail, (None if detail is None else where)
 
     # -- writes ---------------------------------------------------------------
 
@@ -1389,18 +1399,25 @@ class ReportCatalog:
     def _backup_catalog(self, raw: bytes) -> Path:
         """Copy the pre-repair bytes beside the catalog and return the copy's path.
 
-        Named from the repair's own clock rather than overwriting one fixed name,
-        so a second repair cannot destroy the evidence of the first. The suffix
-        keeps it inert: every read path opens :data:`CATALOG_NAME` by name and the
-        candidate sweep never looks in this directory at all, so the copy is a file
-        for an operator, not a second catalog the hub might find.
+        The evidence a confirmed repair is allowed to write over the catalog *for*,
+        so it is the one file here that must never be replaced: a backup a later
+        repair overwrote is worse than no backup, because it still looks like the
+        original. The name carries the repair's own clock, but the clock is a
+        label and not the guarantee — a second-resolution stamp collides between
+        two repairs in one second, and the operator running them is exactly the
+        operator who has just lost the state they were preserving. So the write
+        *takes* a free name (:func:`_write_new_file`) rather than trusting the
+        stamp to be one, and a repair that cannot get one writes nothing at all.
+
+        The suffix keeps the copy inert: every read path opens :data:`CATALOG_NAME`
+        by name and the candidate sweep never looks in this directory at all, so it
+        is a file for an operator, not a second catalog the hub might find.
         """
-        backup = self.catalog_dir / (
-            f"{CATALOG_NAME}.{self._clock().strftime('%Y%m%dT%H%M%SZ')}"
-            f"{CATALOG_BACKUP_SUFFIX}"
+        stamp = self._clock().strftime("%Y%m%dT%H%M%SZ")
+        return _write_new_file(
+            self.catalog_dir / f"{CATALOG_NAME}.{stamp}{CATALOG_BACKUP_SUFFIX}",
+            raw,
         )
-        _write_catalog(backup, raw)
-        return backup
 
     # -- internals ------------------------------------------------------------
 
@@ -1824,6 +1841,27 @@ def _damaged_detail(names: tuple[str, ...]) -> str:
     )
 
 
+def _incomplete_detail(names: tuple[str, ...]) -> str:
+    """Why a set is neither whole nor gone: these published artifacts are absent.
+
+    Shared by the bundle read and the audit census for the same reason
+    :func:`_damaged_detail` is: an operator comparing a verify run with a failed
+    fetch must not have to decide whether two wordings mean one state.
+    """
+    return f"report artifact set is incomplete (missing {', '.join(names)})"
+
+
+def _unreadable_artifact_detail(name: str, err: OSError) -> str:
+    """Why one artifact that is *there* still cannot be read.
+
+    Distinct from absence and from damage on purpose: the file the hub published
+    is still standing at its own hop, so this is neither retention's end state nor
+    a redirected read — it is an IO fault (a mode, a failing device) that stays
+    until something outside this subsystem changes.
+    """
+    return f"unreadable report artifact {name} ({err})"
+
+
 def _damaged_hop_detail(err: EvaluationDamagedTreeError) -> str:
     """The same verdict for a link at a *directory* hop rather than at a file.
 
@@ -1835,6 +1873,53 @@ def _damaged_hop_detail(err: EvaluationDamagedTreeError) -> str:
     the two failures this phrasing now names.
     """
     return f"report artifact set is damaged ({err})"
+
+
+def _fetchable_state(dir_fd: int) -> tuple[str, str | None]:
+    """What a bundle fetch of this opened evaluation dir would answer, and why.
+
+    The census half of :meth:`ReportCatalog._read_opened_bundle`, in its order and
+    with its wordings, so :meth:`ReportCatalog.audit` reports the state a fetch
+    reaches rather than a second opinion about the same directory. The census is
+    the only thing a verify run says about an entry's artifacts, so anything it
+    cannot see it would report as a healthy report a consumer can take.
+
+    Two steps, because the names and the objects are different questions.
+    :func:`_artifact_faults` describes the names — a link where a file should be,
+    an absent or non-regular one — and the open then proves the object is there to
+    read: a published artifact left unreadable (a mode, a failing device) passes
+    every ``lstat`` and still fails every fetch. Absence found at the open is the
+    ordinary race, and gets absence's answer.
+
+    Opened, not read, and that is the one deliberate gap: an audit walks every
+    published entry, so reading the bytes would make a verify run cost the whole
+    catalog's artifact volume — for the faults that appear only mid-file, which
+    the fetch itself still reports. What is bought is the class of fault that is
+    *permanent* until an operator acts, which is what the verb is for.
+
+    Yields the same ``(state, detail)`` vocabulary the census counts, with
+    ``None`` for the two states that are not defects.
+    """
+    missing, uncontained = _artifact_faults(dir_fd)
+    if uncontained:
+        return ARTIFACTS_DAMAGED, _damaged_detail(uncontained)
+    if missing:
+        return ARTIFACTS_INCOMPLETE, _incomplete_detail(missing)
+    for name in REQUIRED_ARTIFACTS:
+        try:
+            with opened_artifact(name, dir_fd=dir_fd) as handle:
+                published = handle is not None
+        except EvaluationDamagedTreeError:
+            return ARTIFACTS_DAMAGED, _damaged_detail((name,))
+        except FileNotFoundError:
+            return ARTIFACTS_PRUNED, None
+        except OSError as err:
+            return ARTIFACTS_UNREADABLE, _unreadable_artifact_detail(name, err)
+        if not published:
+            # Swapped for a directory or a FIFO between the census and the open:
+            # not the published artifact, so not retained — a fetch says the same.
+            return ARTIFACTS_PRUNED, None
+    return ARTIFACTS_RETAINED, None
 
 
 def _is_complete(dir_fd: int) -> bool:
@@ -1982,6 +2067,22 @@ _ARTIFACT_DEFECTS = {
 """Which artifact states are defects, and under which code they are reported.
 ``retained`` and ``pruned`` are absent on purpose: a complete set is nothing to
 report, and an entry outliving pruned artifacts is the feed working as designed."""
+
+
+def _census_identity(entry: ReportCatalogEntry) -> tuple[str, str, str, str]:
+    """Everything an entry's artifact verdict is a function of.
+
+    The audit's dedup key, and it is the *whole* identity rather than the
+    ``report_key`` alone for a reason the verb exists to serve: a damaged catalog
+    is precisely where two lines carry one key and different sources, and a census
+    keyed on the key would then examine the first line and silently answer for the
+    second — hiding, say, an unaddressable identity or a damaged artifact set
+    behind a duplicate-key finding that says nothing about either. Every field
+    :meth:`ReportCatalog._entry_artifacts` reads is here, so two lines collapse
+    only when they provably get the same answer, which is what keeps a
+    byte-identical repeat from being counted twice.
+    """
+    return (entry.repo_slug, entry.task_id, entry.evaluation_id, entry.report_key)
 
 
 def _duplicate_defects(scanned: list[_ScannedLine]) -> list[CatalogDefect]:
@@ -2180,14 +2281,75 @@ def _write_catalog(path: Path, data: bytes) -> None:
     makes the rename itself survive, since an entry that is fsynced but not linked
     durably is still a file that can disappear.
     """
+    tmp = _staged_bytes(path, data)
+    os.replace(tmp, path)
+    _fsync_dir(path.parent)
+
+
+def _write_new_file(path: Path, data: bytes) -> Path:
+    """Write ``data`` to ``path``, or to the next free name beside it. Never over one.
+
+    The write for a file whose whole value is that it is *not* the current one: a
+    repair's pre-repair backup. :func:`_write_catalog` commits with a rename, which
+    replaces whatever stood there — correct for the catalog, and destruction here,
+    since two repairs within one clock second would otherwise name the same backup
+    and the second would erase the first's evidence.
+
+    So the name is taken rather than assumed free: the bytes are staged in the same
+    directory and committed with ``os.link``, which is the primitive that *cannot*
+    replace an existing name — it fails with ``EEXIST`` instead, and this then tries
+    the next suffixed candidate. Committing by link rather than by an exclusive
+    create also keeps the file all-or-nothing: the name appears already holding
+    every byte, so a crash mid-write leaves no truncated file wearing the backup's
+    name. Returns the name that was actually taken; the caller reports it rather
+    than assuming the one it asked for.
+    """
+    tmp = _staged_bytes(path, data)
+    try:
+        for index in range(_BACKUP_NAME_ATTEMPTS):
+            candidate = (
+                path
+                if index == 0
+                else path.with_name(f"{path.stem}-{index}{path.suffix}")
+            )
+            try:
+                os.link(tmp, candidate)
+            except FileExistsError:
+                continue
+            _fsync_dir(path.parent)
+            return candidate
+    finally:
+        tmp.unlink(missing_ok=True)
+    raise ReportCatalogError(
+        f"no free name for {path.name} beside {CATALOG_NAME} after"
+        f" {_BACKUP_NAME_ATTEMPTS} attempts"
+    )
+
+
+def _staged_bytes(path: Path, data: bytes) -> Path:
+    """Write ``data`` durably to a temp file beside ``path`` and return it.
+
+    Same directory, so the commit that follows — a rename or a link — is a
+    directory operation rather than a copy across filesystems, and the ``fsync``
+    is what makes the commit publish bytes that are actually on the device.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     with tmp.open("wb") as handle:
         handle.write(data)
         handle.flush()
         os.fsync(handle.fileno())
-    os.replace(tmp, path)
-    dir_fd = os.open(path.parent, os.O_RDONLY)
+    return tmp
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename or a link into ``path`` itself durable.
+
+    A file whose bytes are fsynced but whose directory entry is not can still
+    disappear, which for a catalog replacement or its backup means losing the
+    thing the write existed to preserve.
+    """
+    dir_fd = os.open(path, os.O_RDONLY)
     try:
         os.fsync(dir_fd)
     finally:

@@ -639,6 +639,27 @@ def test_eval_catalog_repair_refuses_a_conflict_and_writes_nothing(
     assert list(path.parent.glob("*.bak")) == []
 
 
+@pytest.mark.parametrize("argv", [[], ["--confirm"], ["--json", "--confirm"]])
+def test_eval_catalog_repair_reports_an_unreadable_catalog(
+    monkeypatch, capsys, tmp_path, argv
+):
+    # Verify can describe a catalog it cannot read — that is a finding. Repair has
+    # nothing to say about a file it never read, and an operator verb's answer to
+    # that is one `error:` line and a non-zero exit, not a traceback.
+    path = catalog_env(monkeypatch, tmp_path)
+    path.mkdir()
+
+    rc = cli.main(["eval", "catalog", "repair", *argv])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.err.startswith("error: unreadable catalog.jsonl")
+    # Nothing half-said on stdout either: no plan, and no JSON a script would parse
+    # as a result.
+    assert captured.out == ""
+    assert list(path.parent.glob("*.bak")) == []
+
+
 def test_eval_catalog_verify_disabled_exits_nonzero(monkeypatch, capsys, tmp_path):
     catalog_env(monkeypatch, tmp_path)
     monkeypatch.setenv(EVAL_ENABLED_ENV, "0")

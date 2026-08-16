@@ -2108,14 +2108,21 @@ class CatalogAudit:
 
     The artifact census counts entries, not lines, and keeps states apart that a
     coarser count would fold together. ``pruned`` is the designed end state of an
-    entry outliving the artifacts it indexes and is **not** a defect; ``damaged``
-    is a symbolic link standing where the hub wrote a regular artifact or a tree
-    directory, which the hub never writes, cannot reclaim (a prune refuses the
-    linked hop and keeps the id), and only an operator can clear. Reporting the
-    second as the first would hide the one state that accumulates until someone
-    acts. ``incomplete`` is a partially removed set, ``unreadable`` an IO fault, and
-    ``unaddressable`` a stored identity that cannot be trusted to name its own
-    artifacts.
+    entry outliving the artifacts it indexes — retention removes the evaluation
+    *directory*, so it is that directory's absence and **not** a defect;
+    ``damaged`` is a symbolic link standing where the hub wrote a regular artifact
+    or a tree directory, which the hub never writes, cannot reclaim (a prune
+    refuses the linked hop and keeps the id), and only an operator can clear.
+    Reporting the second as the first would hide the one state that accumulates
+    until someone acts. ``incomplete`` is a directory that is still there without
+    the whole published set (however few of it survive), ``unreadable`` an IO
+    fault in a file that is still standing, and ``unaddressable`` a stored identity
+    that cannot be trusted to name its own artifacts.
+
+    Every count is the answer a fetch of that entry gives, because a census an
+    operator reads as "these reports are fine" has to be one a consumer can act
+    on: the states come from the classification :meth:`read_bundle` performs, over
+    the same descriptor and the same per-artifact opens.
     """
 
     catalog_path: Path

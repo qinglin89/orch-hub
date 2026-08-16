@@ -68,6 +68,7 @@ from orch_hub.report_catalog import (
     DEFECT_INCOMPLETE_ARTIFACTS,
     DEFECT_UNADDRESSABLE,
     DEFECT_UNPARSEABLE_LINE,
+    DEFECT_UNREADABLE_ARTIFACTS,
     INTEGRITY_VERIFIED,
     PACK_UNREADABLE_DETAIL,
     REPAIR_DROP_DUPLICATE_LINE,
@@ -2415,6 +2416,51 @@ def test_verify_names_a_duplicate_report_key(tmp_path):
     assert "line 1" in duplicates[0].detail
 
 
+def test_a_line_colliding_on_a_key_is_still_examined_for_its_own_defects(tmp_path):
+    # A duplicate key is exactly where two lines are *not* interchangeable: the
+    # second still names its own source, and here that source no longer derives the
+    # key it carries. Censusing by key alone would answer for the second line out of
+    # the first line's directory — reporting one healthy retained report and never
+    # mentioning the identity fault — which is the one failure a verb promising to
+    # name every defect cannot have.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1]["report_key"] = rows[0]["report_key"]
+    rewrite_lines(config, rows)
+
+    audit = catalog(config).audit()
+
+    assert [(d.kind, d.line) for d in audit.defects] == [
+        (DEFECT_DUPLICATE_KEY, 2),
+        (DEFECT_UNADDRESSABLE, 2),
+    ]
+    # Both lines censused: one addressable report, and one line whose stored triple
+    # cannot be trusted to name the artifacts a fetch would serve under it.
+    assert (audit.retained, audit.unaddressable, audit.pruned) == (1, 1, 0)
+    assert audit.serves_feed is False
+
+
+def test_a_byte_identical_repeat_is_censused_once(tmp_path):
+    # The other side of that rule, and the reason the dedup exists at all: a repeat
+    # line is the same identity resolving to the same directory, so counting it
+    # twice would inflate the census with work the repair drops losslessly.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rewrite_lines(config, rows + [rows[0]])
+
+    audit = catalog(config).audit()
+
+    assert (audit.lines, audit.entries) == (3, 3)
+    assert (audit.retained, audit.pruned) == (2, 0)
+    # Still reported as the ambiguity it is — the census collapses the pair, the
+    # duplicate audits do not.
+    assert sorted(d.kind for d in audit.defects) == sorted(
+        [DEFECT_DUPLICATE_SEQ, DEFECT_DUPLICATE_KEY]
+    )
+
+
 def test_verify_names_an_unparseable_line_without_claiming_the_feed_is_down(tmp_path):
     # A line every read already skips. It is reported — it is not something the
     # writer can produce — but folding it into the feed-blocking signal would tell
@@ -2537,6 +2583,92 @@ def test_verify_reports_a_partially_pruned_set_as_incomplete(tmp_path):
     assert audit.serves_feed is True
 
 
+def emptied_dir(eval_dir: Path, monkeypatch) -> None:
+    """Every artifact gone, the evaluation dir still standing.
+
+    Not what retention produces — it removes the whole dir — so it is a set that
+    lost its files some other way, and reporting it as pruned would tell an
+    operator the feed was working as designed.
+    """
+    for artifact in REQUIRED_ARTIFACTS:
+        (eval_dir / artifact).unlink()
+
+
+def unreadable_artifact(eval_dir: Path, monkeypatch) -> None:
+    """A published artifact that is still there and will not open.
+
+    Injected rather than ``chmod``-ed so the case holds for a root test runner
+    too, and at the open, because that is where a fetch of these bytes fails.
+    """
+    forbid_artifact_open(monkeypatch, error=OSError(errno.EIO, "input/output error"))
+
+
+def linked_artifact(eval_dir: Path, monkeypatch) -> None:
+    (eval_dir / EVIDENCE_NAME).unlink()
+    (eval_dir / EVIDENCE_NAME).symlink_to(eval_dir.parent / "outside.json")
+
+
+@pytest.mark.parametrize(
+    "damage, state, defect",
+    [
+        pytest.param(lambda d, m: None, "retained", None, id="intact"),
+        pytest.param(lambda d, m: shutil.rmtree(d), "pruned", None, id="dir-removed"),
+        pytest.param(
+            emptied_dir, "incomplete", DEFECT_INCOMPLETE_ARTIFACTS, id="emptied-dir"
+        ),
+        pytest.param(
+            lambda d, m: (d / SEMANTIC_REPORT_MD_NAME).unlink(),
+            "incomplete",
+            DEFECT_INCOMPLETE_ARTIFACTS,
+            id="partly-pruned",
+        ),
+        pytest.param(
+            unreadable_artifact,
+            "unreadable",
+            DEFECT_UNREADABLE_ARTIFACTS,
+            id="unreadable-artifact",
+        ),
+        pytest.param(
+            linked_artifact, "damaged", DEFECT_DAMAGED_ARTIFACTS, id="linked-artifact"
+        ),
+    ],
+)
+def test_the_census_reports_the_state_a_fetch_of_that_entry_gives(
+    tmp_path, monkeypatch, damage, state, defect
+):
+    # The property the census is only worth counting if it has: an operator reading
+    # "1 retained" has been told a consumer can take that bundle, and each other
+    # bucket is the reason a consumer cannot. So both verdicts are taken from one
+    # classification over one descriptor — the names, and then the opens, since a
+    # file that lstats perfectly can still refuse every fetch of it.
+    config = cfg(tmp_path)
+    publish_many(config, 1)
+    eval_dir = (
+        config.data_dir / "evaluations" / "repo0" / "2026-07-30-task-0"
+        / "20260730T100000Z"
+    )
+    cat = catalog(config)
+    entry = cat.entries()[0]
+    damage(eval_dir, monkeypatch)
+
+    audit = cat.audit()
+    bundle = cat.read_bundle(entry)
+
+    assert getattr(audit, state) == 1
+    if defect is None:
+        # The two non-defects: a whole set, and an entry outliving artifacts
+        # retention removed.
+        assert audit.defects == ()
+        assert bundle.available is (state == "retained")
+        return
+    assert [d.kind for d in audit.defects] == [defect]
+    # One wording as well as one verdict: an operator comparing a verify run with a
+    # failed fetch must not have to decide whether two sentences mean one state.
+    assert audit.defects[0].detail == bundle.detail
+    assert audit.defects[0].path == eval_dir
+    assert bundle.available is False
+
+
 def test_verify_reports_a_stored_identity_that_cannot_address_its_artifacts(tmp_path):
     # An edited source identity: the line still parses and still lists in the feed,
     # but its key no longer derives from the triple it carries, so it cannot be
@@ -2643,6 +2775,58 @@ def test_confirmed_repair_preserves_every_published_seq_and_key(tmp_path):
     assert lines(config) == published
     assert result.backup_path.read_text(encoding="utf-8") == damaged
     assert result.backup_path.name.endswith(CATALOG_BACKUP_SUFFIX)
+
+
+def test_a_second_repair_in_one_second_cannot_erase_the_first_backup(tmp_path):
+    # The backup is the whole reason a repair is allowed to rewrite an append-only
+    # file, so it is the one file here that must never be replaced — and the second
+    # repair inside one clock second is not an exotic race but what an operator
+    # working through a damaged catalog actually does. A stamp alone cannot promise
+    # a free name, so the write takes one.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rewrite_lines(config, rows + [rows[0]])
+    # The fixed clock every other test uses: both repairs stamp the same second.
+    first = catalog(config).repair(apply=True)
+    first_bytes = first.backup_path.read_bytes()
+    rewrite_lines(config, rows + [rows[1]])
+
+    second = catalog(config).repair(apply=True)
+
+    assert second.applied is True
+    assert second.backup_path != first.backup_path
+    assert first.backup_path.read_bytes() == first_bytes
+    assert second.backup_path.read_bytes() != first_bytes
+    # Both are backups by name, so an operator finds them by the same glob, and
+    # neither is a stray temp file left where a read path might meet it.
+    backups = sorted(path.name for path in first.backup_path.parent.glob("*.bak"))
+    assert len(backups) == 2
+    assert list(first.backup_path.parent.glob("*.tmp")) == []
+
+
+def test_a_repair_that_cannot_back_up_leaves_the_catalog_alone(tmp_path, monkeypatch):
+    # The backup is a precondition of the rewrite, not a courtesy beside it: if the
+    # bytes about to be replaced cannot be preserved, the repair has nothing to
+    # offer an operator who disagrees with its result, so it does not run.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rewrite_lines(config, rows + [rows[0]])
+    damaged = catalog_text(config)
+    monkeypatch.setattr(report_catalog_module, "_BACKUP_NAME_ATTEMPTS", 1)
+    taken = config.data_dir / CATALOG_SUBDIR / (
+        f"{CATALOG_NAME}.20260731T080000Z{CATALOG_BACKUP_SUFFIX}"
+    )
+    taken.write_text("an earlier repair's evidence", encoding="utf-8")
+    before = snapshot(config.data_dir)
+
+    with pytest.raises(ReportCatalogError):
+        catalog(config).repair(apply=True)
+
+    assert catalog_text(config) == damaged
+    # Including the name it wanted: refusing to write is refusing to write.
+    assert snapshot(config.data_dir) == before
 
 
 @pytest.mark.parametrize("field", ["seq", "report_key"])

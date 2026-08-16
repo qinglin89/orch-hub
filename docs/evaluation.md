@@ -432,12 +432,18 @@ The census keeps those two apart on purpose:
 
 | State | Meaning |
 |---|---|
-| `retained` | The complete L1+L2 set is still on disk. |
-| `pruned` | Retention removed the artifacts. **Not a defect** — an entry outliving what it indexes is the design. |
-| `incomplete` | Part of the set is gone. Retention removes whole dirs, so this is not retention's doing. |
+| `retained` | The complete L1+L2 set is on disk and every file opens. |
+| `pruned` | The evaluation directory is gone, which is what retention removes. **Not a defect** — an entry outliving what it indexes is the design. |
+| `incomplete` | The directory is still there without the whole set (however much of it is missing). Retention removes whole dirs, so this is not retention's doing. |
 | `damaged` | A symlink stands where the hub wrote an artifact, or at a `<repo>/<task>/<evaluation>` directory hop. |
-| `unreadable` | The artifacts are there but IO failed. |
+| `unreadable` | An artifact is still standing and will not open. |
 | `unaddressable` | The line's stored identity is not the one its `report_key` derives from. |
+
+Each state is the answer a bundle fetch of that entry gives, so `retained` means a
+consumer can actually take that report — verify opens all four artifacts, it does
+not merely list them. It stops at the open rather than reading the bytes, so a
+verify run costs the same whatever the catalog indexes; a fault that appears only
+part-way through a file is left for the fetch that meets it.
 
 `damaged` is the state worth acting on. The hub never writes a symlink inside the
 evaluations tree, every read refuses one rather than following it, and a prune
@@ -473,9 +479,13 @@ whatever damaged the file.
 A confirmed repair copies the original to
 `report-catalog/catalog.jsonl.<timestamp>.bak` before replacing it (the copy is
 inert — only `catalog.jsonl` is ever read), and writes through a temp file plus
-rename so a crash leaves either the old file or the new one. Exit code follows
-`verify`: `0` when the catalog on disk now serves the feed, so an unconfirmed
-plan against a broken catalog is non-zero.
+rename so a crash leaves either the old file or the new one. A backup never
+overwrites one: the stamp is second-resolution, so a second repair within the same
+second takes the next free name (`...<timestamp>-1.bak`) rather than erasing the
+evidence the first one preserved. Exit code follows `verify`: `0` when the catalog
+on disk now serves the feed, so an unconfirmed plan against a broken catalog is
+non-zero. A catalog that cannot be read or backed up at all prints one `error:`
+line and exits non-zero.
 
 ### From the dashboard
 
