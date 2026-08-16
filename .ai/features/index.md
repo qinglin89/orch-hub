@@ -32,7 +32,8 @@ verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
 | File | Contains |
 |---|---|
 | core.md | Repo discovery/readiness, task inventory, HTTP foundation, auth/private access |
-| evaluation.md | Task evaluation foundation, task static metrics, task semantic evaluator, global report feed |
+| evaluation.md | Task evaluation foundation, task static metrics (Layer 1) |
+| evaluation-reporting.md | Task semantic evaluator (Layer 2), global evaluation report feed |
 | run-control.md | Run lifecycle, control-dir channel, question relay |
 | run-observability.md | Log viewing, run history/audit |
 | dashboard.md | Mobile dashboard shell, theme, responsiveness, accessibility, Overview, route infrastructure |

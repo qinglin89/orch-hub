@@ -6,7 +6,7 @@ verified-against: 40d3725f9c85ad2fc9dbcaa60a68f3a1c00f1e93
 # Features: Core
 
 Discovery/readiness, task inventory, HTTP foundation, and auth. Task
-evaluation layers: `evaluation.md`.
+evaluation layers: `evaluation.md` + `evaluation-reporting.md`.
 
 ## Repo Discovery and Readiness
 
