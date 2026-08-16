@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-10
-verified-against: ab12e95c39d0c269fa4dbbe9788695631eb1ff36
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
 # Modules: Core
@@ -188,6 +188,7 @@ Responsibility: central wrapper for running commands with cwd, capture, timeout,
 and concise output extraction. Optional capped stdout mode streams and counts the
 whole output while retaining only its bounded head; one absolute deadline covers
 drain plus wait, and expiry kills/reaps the child before raising `TimeoutExpired`.
+Missing executables are surfaced distinctly from ordinary command failures.
 Do not hide command failures that readiness or API callers need to report.
 The detached orchestrator launch is not routed through this blocking wrapper;
 `RunManager` uses `subprocess.Popen` directly so it can keep a process handle
