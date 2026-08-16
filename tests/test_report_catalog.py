@@ -36,6 +36,7 @@ import os
 import shutil
 import signal
 import stat
+import subprocess
 import threading
 from pathlib import Path
 
@@ -57,18 +58,31 @@ from orch_hub.report_catalog import (
     ARTIFACT_NOT_RETAINED,
     ARTIFACT_UNKNOWN,
     ARTIFACT_UNREADABLE,
+    CATALOG_BACKUP_SUFFIX,
     CATALOG_NAME,
     CATALOG_SUBDIR,
     CONFIG_UNAVAILABLE_DETAIL,
+    DEFECT_DAMAGED_ARTIFACTS,
+    DEFECT_DUPLICATE_KEY,
+    DEFECT_DUPLICATE_SEQ,
+    DEFECT_INCOMPLETE_ARTIFACTS,
+    DEFECT_UNADDRESSABLE,
+    DEFECT_UNPARSEABLE_LINE,
     INTEGRITY_VERIFIED,
     PACK_UNREADABLE_DETAIL,
+    REPAIR_DROP_DUPLICATE_LINE,
+    REPAIR_DROP_TORN_TAIL,
     REPORT_KEY_PREFIX,
     REQUIRED_ARTIFACTS,
     ReportCatalog,
     ReportCatalogError,
     report_key,
 )
-from orch_hub.semantic import SEMANTIC_REPORT_MD_NAME, SEMANTIC_REPORT_NAME
+from orch_hub.semantic import (
+    SEMANTIC_REPORT_MD_NAME,
+    SEMANTIC_REPORT_NAME,
+    ClaudeSemanticBackend,
+)
 from orch_hub.static_metrics import STATIC_METRICS_NAME
 
 TASK_A = "2026-07-30-alpha-task"
@@ -2304,6 +2318,423 @@ def test_raw_artifact_reads_through_a_symlinked_data_dir(tmp_path):
     assert read.integrity == "verified"
 
 
+# -- operator verify and repair ------------------------------------------------
+#
+# The verb pair the read-side audits above imply. Those refuse to guess, which
+# leaves an operator holding the question with nothing but a 500 and a hand edit;
+# these are the answer. Verify enumerates everything the read path raises on the
+# *first* of, located by line and identity. Repair does only what provably leaves
+# every published seq/report_key where it is, and refuses — writing nothing at all
+# — when it would have to choose between two published identities.
+
+
+def snapshot(root: Path) -> dict[str, bytes]:
+    """Every regular file under ``root`` by relative path, for before/after diffs.
+
+    The literal form of "changes nothing on disk": both verbs are read-only until
+    an operator confirms one, and a diff of the bytes is the only assertion that
+    does not have to trust the code under test about which files it touches.
+    """
+    return {
+        str(path.relative_to(root)): path.read_bytes()
+        for path in sorted(root.rglob("*"))
+        if not path.is_symlink() and path.is_file()
+    }
+
+
+def catalog_text(config: Config) -> str:
+    return (config.data_dir / CATALOG_SUBDIR / CATALOG_NAME).read_text(
+        encoding="utf-8"
+    )
+
+
+def append_raw(config: Config, raw: bytes) -> None:
+    """Append bytes the writer would never produce (a hand edit, a crashed write)."""
+    path = config.data_dir / CATALOG_SUBDIR / CATALOG_NAME
+    path.write_bytes(path.read_bytes() + raw)
+
+
+def boom(*args, **kwargs):
+    raise AssertionError("a verify run must not reach this")
+
+
+def test_verify_reports_a_clean_catalog_and_changes_nothing(tmp_path):
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    before = snapshot(config.data_dir)
+
+    audit = catalog(config).audit()
+
+    assert audit.serves_feed is True
+    assert audit.defects == ()
+    assert (audit.present, audit.lines, audit.entries) == (True, 2, 2)
+    assert (audit.retained, audit.pruned, audit.damaged) == (2, 0, 0)
+    # A diagnosis, not an action: nothing is published, pruned, or written.
+    assert snapshot(config.data_dir) == before
+
+
+def test_verify_names_every_duplicate_sequence_with_its_line_and_identity(tmp_path):
+    # The read path raises at the first repeat it meets, because a traversal it
+    # cannot promise is exactly-once must serve nothing. An operator repairing the
+    # file needs the opposite: which line introduced the ambiguity, which line it
+    # collides with, and the identity at stake.
+    config = cfg(tmp_path)
+    publish_many(config, 3)
+    rows = lines(config)
+    rows[2]["seq"] = rows[0]["seq"]
+    rewrite_lines(config, rows)
+
+    audit = catalog(config).audit()
+
+    assert audit.serves_feed is False
+    duplicates = [d for d in audit.defects if d.kind == DEFECT_DUPLICATE_SEQ]
+    assert [(d.line, d.seq) for d in duplicates] == [(3, 1)]
+    assert duplicates[0].report_key == rows[2]["report_key"]
+    assert "line 1" in duplicates[0].detail
+    assert duplicates[0].blocks_feed is True
+    with pytest.raises(ReportCatalogError):
+        catalog(config).entries()
+
+
+def test_verify_names_a_duplicate_report_key(tmp_path):
+    # The same audit from the other side: one source evaluation with two global
+    # identities. Reported under its own code, because it is a different repair.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1]["report_key"] = rows[0]["report_key"]
+    rewrite_lines(config, rows)
+
+    audit = catalog(config).audit()
+
+    assert audit.serves_feed is False
+    duplicates = [d for d in audit.defects if d.kind == DEFECT_DUPLICATE_KEY]
+    assert [(d.line, d.report_key) for d in duplicates] == [
+        (2, rows[0]["report_key"])
+    ]
+    assert "line 1" in duplicates[0].detail
+
+
+def test_verify_names_an_unparseable_line_without_claiming_the_feed_is_down(tmp_path):
+    # A line every read already skips. It is reported — it is not something the
+    # writer can produce — but folding it into the feed-blocking signal would tell
+    # a health check the feed is down when every published report still traverses.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    append_raw(config, b"{not json\n")
+
+    audit = catalog(config).audit()
+
+    assert audit.serves_feed is True
+    assert (audit.lines, audit.entries) == (3, 2)
+    assert [(d.kind, d.line, d.blocks_feed) for d in audit.defects] == [
+        (DEFECT_UNPARSEABLE_LINE, 3, False)
+    ]
+    assert [entry.seq for entry in catalog(config).entries()] == [1, 2]
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        pytest.param(lambda rows: rows, id="clean"),
+        pytest.param(
+            lambda rows: [rows[0], dict(rows[1], seq=rows[0]["seq"])], id="dup-seq"
+        ),
+        pytest.param(
+            lambda rows: [rows[0], dict(rows[1], report_key=rows[0]["report_key"])],
+            id="dup-key",
+        ),
+    ],
+)
+def test_verify_agrees_with_the_read_paths_about_serving_the_feed(tmp_path, damage):
+    # The property that makes a clean verify worth trusting: both verdicts come
+    # from one parse and one uniqueness rule, so "verify says clean" and "the feed
+    # reads" can never become different questions.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rewrite_lines(config, damage(lines(config)))
+    cat = catalog(config)
+
+    try:
+        cat.entries()
+    except ReportCatalogError:
+        readable = False
+    else:
+        readable = True
+
+    assert cat.audit().serves_feed is readable
+
+
+def test_verify_keeps_damaged_artifacts_apart_from_pruned_ones(tmp_path):
+    # The distinction the whole verb exists for. Pruned artifacts are this feed's
+    # designed end state — the entry outlives them by construction. A link standing
+    # where the hub wrote an artifact is damage the hub never writes and retention
+    # can no longer reclaim, so it accumulates until an operator clears it;
+    # reporting it as retention doing its job would hide exactly that.
+    config = cfg(tmp_path)
+    publish_many(config, 3)
+    evaluations = config.data_dir / "evaluations"
+    shutil.rmtree(evaluations / "repo1")
+    artifact = (
+        evaluations / "repo2" / "2026-07-30-task-2" / "20260730T100002Z" / EVIDENCE_NAME
+    )
+    artifact.unlink()
+    artifact.symlink_to(tmp_path / "outside.json")
+
+    audit = catalog(config).audit()
+
+    assert (audit.retained, audit.pruned, audit.damaged) == (1, 1, 1)
+    # One defect, not two: the pruned entry is the feed working as designed.
+    assert [d.kind for d in audit.defects] == [DEFECT_DAMAGED_ARTIFACTS]
+    assert EVIDENCE_NAME in audit.defects[0].detail
+    assert "symbolic link" in audit.defects[0].detail
+    assert audit.defects[0].blocks_feed is False
+    # Clearing this is an `rm` in the evaluations tree, not a catalog edit, so the
+    # finding has to name the directory rather than only the report.
+    assert audit.defects[0].path == artifact.parent
+    assert audit.serves_feed is True
+
+
+def test_verify_reports_a_linked_directory_hop_as_damaged(tmp_path):
+    # Damage's second shape and second source: not the per-name artifact census but
+    # the contained walk itself, which refuses a linked hop rather than following
+    # it. Both must land in the same census bucket, since which hop carries the
+    # link is repair detail rather than a different state.
+    config = cfg(tmp_path)
+    write_eval(config)
+    archive_task(tmp_path)
+    catalog(config).reconcile()
+    swapped = config.data_dir / "evaluations" / "alpha" / TASK_A
+    shutil.move(swapped, swapped.parent / "moved-aside")
+    swapped.symlink_to(swapped.parent / "moved-aside", target_is_directory=True)
+
+    audit = catalog(config).audit()
+
+    assert (audit.damaged, audit.pruned, audit.retained) == (1, 0, 0)
+    assert [d.kind for d in audit.defects] == [DEFECT_DAMAGED_ARTIFACTS]
+    assert "damaged" in audit.defects[0].detail
+    assert audit.defects[0].path == swapped / "20260730T100000Z"
+    assert audit.serves_feed is True
+
+
+def test_verify_reports_a_partially_pruned_set_as_incomplete(tmp_path):
+    # Neither gone nor whole. Distinct from pruned because a fetch fails for a
+    # reason retention is not supposed to produce: it removes whole dirs.
+    config = cfg(tmp_path)
+    publish_many(config, 1)
+    eval_dir = (
+        config.data_dir / "evaluations" / "repo0" / "2026-07-30-task-0"
+        / "20260730T100000Z"
+    )
+    (eval_dir / SEMANTIC_REPORT_MD_NAME).unlink()
+
+    audit = catalog(config).audit()
+
+    assert (audit.incomplete, audit.pruned, audit.retained) == (1, 0, 0)
+    assert audit.defects[0].kind == DEFECT_INCOMPLETE_ARTIFACTS
+    assert SEMANTIC_REPORT_MD_NAME in audit.defects[0].detail
+    assert audit.defects[0].path == eval_dir
+    assert audit.serves_feed is True
+
+
+def test_verify_reports_a_stored_identity_that_cannot_address_its_artifacts(tmp_path):
+    # An edited source identity: the line still parses and still lists in the feed,
+    # but its key no longer derives from the triple it carries, so it cannot be
+    # trusted to name the artifacts a fetch would serve under it.
+    config = cfg(tmp_path)
+    publish_many(config, 1)
+    rows = lines(config)
+    rows[0]["evaluation_id"] = "20260730T999999Z"
+    rewrite_lines(config, rows)
+
+    audit = catalog(config).audit()
+
+    assert audit.unaddressable == 1
+    assert [d.kind for d in audit.defects] == [DEFECT_UNADDRESSABLE]
+    assert audit.defects[0].report_key == rows[0]["report_key"]
+    # No tree path: whatever directory an untrustworthy triple resolves to is not
+    # evidence of anything, and the repair is on the line the defect names.
+    assert audit.defects[0].path is None
+    # Still listed: dropping it from the traversal would be the silent skip the
+    # cursor policy forbids.
+    assert audit.serves_feed is True
+    assert len(catalog(config).entries()) == 1
+
+
+def test_verify_performs_no_evaluation_and_no_model_call(tmp_path, monkeypatch):
+    # The verb has to be safe to run as a habit, including against a live hub, so
+    # it must not be a back door into generation. Nothing that could spend a model
+    # turn, mint an evaluation, or append a line is even reachable from it.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    before = snapshot(config.data_dir)
+    monkeypatch.setattr(ClaudeSemanticBackend, "evaluate", boom)
+    monkeypatch.setattr(EvaluationService, "generate_evidence", boom)
+    monkeypatch.setattr(ReportCatalog, "_publish", boom)
+    monkeypatch.setattr(subprocess, "run", boom)
+    monkeypatch.setattr(subprocess, "Popen", boom)
+
+    audit = catalog(config).audit()
+
+    assert audit.entries == 2
+    assert snapshot(config.data_dir) == before
+
+
+def test_a_torn_multibyte_tail_costs_its_own_line_not_the_whole_catalog(tmp_path):
+    # A crashed append can cut a line mid UTF-8 sequence. Decoding is per line, so
+    # those bytes cost their own line and nothing else — a whole-file decode would
+    # have taken every published report down with them.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    intact = (config.data_dir / CATALOG_SUBDIR / CATALOG_NAME).read_bytes()
+    append_raw(config, '{"seq": 3, "summary": "é'.encode("utf-8")[:-1])
+
+    assert [entry.seq for entry in catalog(config).entries()] == [1, 2]
+    audit = catalog(config).audit()
+    assert audit.serves_feed is True
+    assert [(d.kind, d.line) for d in audit.defects] == [(DEFECT_UNPARSEABLE_LINE, 3)]
+
+    result = catalog(config).repair(apply=True)
+
+    assert [action.kind for action in result.actions] == [REPAIR_DROP_TORN_TAIL]
+    assert (config.data_dir / CATALOG_SUBDIR / CATALOG_NAME).read_bytes() == intact
+
+
+def test_repair_plans_without_writing_until_it_is_confirmed(tmp_path):
+    # The default is to describe, not to rewrite: the file is the durable record of
+    # every global publication identity, and this is the one path that replaces it.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = catalog_text(config).splitlines()
+    rewrite_lines(config, lines(config) + [lines(config)[0]])
+    before = snapshot(config.data_dir)
+
+    plan = catalog(config).repair()
+
+    assert [action.kind for action in plan.actions] == [REPAIR_DROP_DUPLICATE_LINE]
+    assert plan.actions[0].line == 3
+    assert "line 1" in plan.actions[0].detail
+    assert (plan.applied, plan.backup_path, plan.refused) == (False, None, None)
+    # The catalog on disk is still the broken one, and says so.
+    assert plan.serves_feed is False
+    assert snapshot(config.data_dir) == before
+    assert catalog_text(config).splitlines()[:2] == rows
+
+
+def test_confirmed_repair_preserves_every_published_seq_and_key(tmp_path):
+    # The admission rule, stated as the property it protects: a byte-identical
+    # repeat leaves identical bytes behind, so the surviving entry keeps the exact
+    # seq and report_key a consumer may already have stored.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    published = lines(config)
+    rewrite_lines(config, published + [published[0]])
+    damaged = catalog_text(config)
+
+    result = catalog(config).repair(apply=True)
+
+    assert result.applied is True and result.serves_feed is True
+    assert [entry.seq for entry in catalog(config).entries()] == [1, 2]
+    assert [entry.report_key for entry in catalog(config).entries()] == [
+        row["report_key"] for row in published
+    ]
+    # Surviving lines are the original bytes, not a re-serialization through this
+    # hub's current record shape.
+    assert lines(config) == published
+    assert result.backup_path.read_text(encoding="utf-8") == damaged
+    assert result.backup_path.name.endswith(CATALOG_BACKUP_SUFFIX)
+
+
+@pytest.mark.parametrize("field", ["seq", "report_key"])
+def test_repair_refuses_a_conflict_between_distinct_entries(tmp_path, field):
+    # Two published entries colliding on an identity can only be separated by
+    # renumbering or dropping one, and both move an identity a consumer may already
+    # have imported. That is not a verb's decision, so nothing is written at all —
+    # not even the safe part, which would invalidate the line numbers verify just
+    # handed the operator.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1][field] = rows[0][field]
+    rewrite_lines(config, rows)
+    before = snapshot(config.data_dir)
+
+    result = catalog(config).repair(apply=True)
+
+    assert result.refused is not None
+    assert "lines 1 and 2" in result.refused
+    assert (result.actions, result.applied, result.serves_feed) == ((), False, False)
+    assert snapshot(config.data_dir) == before
+
+
+def test_repair_refuses_rather_than_half_fixing_a_conflicted_catalog(tmp_path):
+    # A file holding both a safe repeat and an unresolvable conflict: the safe drop
+    # is still refused, because a half-repaired file is one an operator would edit
+    # against stale line numbers.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rewrite_lines(config, [rows[0], rows[0], dict(rows[1], seq=rows[0]["seq"])])
+    before = snapshot(config.data_dir)
+
+    result = catalog(config).repair(apply=True)
+
+    assert result.refused is not None and result.actions == ()
+    assert snapshot(config.data_dir) == before
+
+
+def test_repair_leaves_an_interior_unparseable_line_alone(tmp_path):
+    # Already skipped by every read, so removing it buys nothing — and it is the
+    # only surviving evidence of whatever damaged the file.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    path = config.data_dir / CATALOG_SUBDIR / CATALOG_NAME
+    path.write_bytes(b"{not json\n" + path.read_bytes())
+    before = snapshot(config.data_dir)
+
+    result = catalog(config).repair(apply=True)
+
+    assert result.actions == () and result.applied is False
+    assert result.serves_feed is True
+    assert snapshot(config.data_dir) == before
+
+
+def test_repair_of_a_clean_catalog_does_nothing_at_all(tmp_path):
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    before = snapshot(config.data_dir)
+
+    result = catalog(config).repair(apply=True)
+
+    assert (result.actions, result.applied, result.serves_feed) == ((), False, True)
+    assert result.backup_path is None
+    assert snapshot(config.data_dir) == before
+
+
+def test_publication_retention_and_the_feed_are_unchanged_by_a_verify_run(tmp_path):
+    # The guarantee that makes the verb safe to wire into an operator's habits:
+    # every behavior the feed, publication, and retention had before a verify (and
+    # a no-op repair) is bit-for-bit what they have after.
+    config = cfg(tmp_path, retention=1)
+    write_eval(config, evaluation_id="20260730T100000Z")
+    write_eval(config, evaluation_id="20260730T110000Z")
+    cat = catalog(config)
+    cat.reconcile()
+    before_page = cat.page().to_dict()
+    before_bundle = cat.read_bundle(cat.entries()[0])
+    before_owed = cat.unpublished_ids(repo(tmp_path), TASK_A)
+    before = snapshot(config.data_dir)
+
+    assert cat.audit().serves_feed is True
+    assert cat.repair(apply=True).actions == ()
+
+    assert cat.page().to_dict() == before_page
+    assert cat.read_bundle(cat.entries()[0]) == before_bundle
+    assert cat.unpublished_ids(repo(tmp_path), TASK_A) == before_owed
+    assert cat.reconcile() == []
+    assert snapshot(config.data_dir) == before
+
+
 # -- disabled mode ------------------------------------------------------------
 
 
@@ -2313,6 +2744,9 @@ def test_raw_artifact_reads_through_a_symlinked_data_dir(tmp_path):
         lambda cat, rp: cat.entries(),
         lambda cat, rp: cat.find("rpt-x"),
         lambda cat, rp: cat.page(),
+        lambda cat, rp: cat.audit(),
+        lambda cat, rp: cat.repair(),
+        lambda cat, rp: cat.repair(apply=True),
         lambda cat, rp: cat.read_bundle(
             ReportCatalogEntry(
                 seq=1,

@@ -404,6 +404,79 @@ offending value and publication pauses (retention also stops pruning meanwhile,
 so nothing is lost) until the file is repaired. A damaged catalog is inert, not
 dangerous.
 
+### Verifying and repairing the catalog
+
+Two CLI-only verbs turn that `500` into something you can act on. They are local
+operations on durable publication state, so they are deliberately not exposed on
+the dashboard, and neither runs automatically at startup — a broken catalog is
+already fail-closed and safe, and silently self-repairing it at boot would trade
+a visible halt for an invisible rewrite.
+
+```
+orch-hub eval catalog verify [--json]
+```
+
+Read-only: it publishes nothing, evaluates nothing, makes no model call, and
+writes no byte, so it is safe against a live hub. It prints the entry/line count,
+the artifact census, and every defect it finds, each located by catalog line
+number plus the `seq`/`report_key` it collides with — duplicates, lines that do
+not parse, and entries whose stored identity cannot address their own artifacts.
+
+**Exit code is `0` exactly when the feed can be traversed.** Non-zero means a
+repeated `seq`/`report_key` or an unreadable catalog: the same condition that
+makes the feed routes answer `500`. Damaged and pruned artifacts are reported but
+do not change the exit code, so a health check can tell "the feed is down" from
+"there is a symlink to clear".
+
+The census keeps those two apart on purpose:
+
+| State | Meaning |
+|---|---|
+| `retained` | The complete L1+L2 set is still on disk. |
+| `pruned` | Retention removed the artifacts. **Not a defect** — an entry outliving what it indexes is the design. |
+| `incomplete` | Part of the set is gone. Retention removes whole dirs, so this is not retention's doing. |
+| `damaged` | A symlink stands where the hub wrote an artifact, or at a `<repo>/<task>/<evaluation>` directory hop. |
+| `unreadable` | The artifacts are there but IO failed. |
+| `unaddressable` | The line's stored identity is not the one its `report_key` derives from. |
+
+`damaged` is the state worth acting on. The hub never writes a symlink inside the
+evaluations tree, every read refuses one rather than following it, and a prune
+walks the tree's own hops no-follow — so it refuses the linked hop and reports the
+id as *retained*. Damage therefore accumulates until you remove the link by hand;
+folding it into `pruned` would present it as retention doing its job. Because that
+repair is in the tree rather than in the catalog file, those findings print the
+evaluation directory on an `at:` line (and carry `path` in `--json`), so clearing
+one does not mean reconstructing
+`<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/` by hand.
+
+```
+orch-hub eval catalog repair [--confirm] [--json]
+```
+
+Without `--confirm` it only prints the plan. The rule it admits lines under is
+narrow and absolute: **every already-published `seq` and `report_key` stays
+exactly where it is, or nothing happens.** Two drops qualify —
+
+- a line byte-identical to an earlier one (a merged catalog, or a backup restored
+  over a live one), since the surviving copy is the same bytes;
+- trailing bytes from an interrupted append that parse as no entry at all.
+
+Everything else is **refused**, with the conflicting line pair named and *nothing*
+written — not even the safe drops, so the line numbers `verify` gave you stay
+valid. In particular, two *distinct* entries sharing a `seq` or a `report_key` can
+only be separated by renumbering or dropping one, and both move an identity a
+consumer may already have imported; that decision belongs to whoever knows what
+has been consumed. Interior lines that merely fail to parse are also left alone:
+every read already skips them, and they are the only surviving evidence of
+whatever damaged the file.
+
+A confirmed repair copies the original to
+`report-catalog/catalog.jsonl.<timestamp>.bak` before replacing it (the copy is
+inert — only `catalog.jsonl` is ever read), and writes through a temp file plus
+rename so a crash leaves either the old file or the new one. Exit code follows
+`verify`: `0` when the catalog on disk now serves the feed, so an unconfirmed
+plan against a broken catalog is non-zero.
+
 ### From the dashboard
 
 Run history carries an `All evaluation reports →` link on evaluation-enabled

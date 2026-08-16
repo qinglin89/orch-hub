@@ -13,6 +13,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config import Config
 from .launchd import (
@@ -32,6 +33,10 @@ from .models import ManagedRepo, ReadinessReport, repos_payload
 from .notifications import build_notifier, probe_notification
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
+
+if TYPE_CHECKING:  # imported lazily in the handlers; see `_open_catalog`
+    from .models import CatalogAudit
+    from .report_catalog import ReportCatalog
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -56,11 +61,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     repos_p = sub.add_parser("repos", help="list managed repos with readiness")
-    repos_p.add_argument(
-        "--json",
-        action="store_true",
-        help="emit stable JSON instead of human-readable text",
-    )
+    _add_json_arg(repos_p)
     launchd_p = sub.add_parser(
         "launchd", help="manage the macOS launchd service"
     )
@@ -130,7 +131,44 @@ def _build_parser() -> argparse.ArgumentParser:
         help="check the semantic evaluator is enabled, configured, and available",
     )
     eval_doctor_p.set_defaults(eval_handler=_cmd_eval_doctor)
+
+    # The global report catalog's operator surface. Grouped under `catalog`
+    # because the two verbs are one workflow — diagnose, then decide — and
+    # deliberately CLI-only: `repair` rewrites durable publication state on the
+    # local disk, which is not a thing to expose on the remote dashboard.
+    eval_catalog_p = eval_sub.add_parser(
+        "catalog", help="inspect or repair the global report catalog"
+    )
+    eval_catalog_sub = eval_catalog_p.add_subparsers(
+        dest="catalog_command", required=True
+    )
+    catalog_verify_p = eval_catalog_sub.add_parser(
+        "verify",
+        help="report catalog integrity; changes nothing on disk",
+    )
+    _add_json_arg(catalog_verify_p)
+    catalog_verify_p.set_defaults(eval_handler=_cmd_eval_catalog_verify)
+
+    catalog_repair_p = eval_catalog_sub.add_parser(
+        "repair",
+        help="drop provably redundant catalog lines, preserving every published id",
+    )
+    catalog_repair_p.add_argument(
+        "--confirm",
+        action="store_true",
+        help="apply the plan (without it, the plan is printed and nothing is written)",
+    )
+    _add_json_arg(catalog_repair_p)
+    catalog_repair_p.set_defaults(eval_handler=_cmd_eval_catalog_repair)
     return parser
+
+
+def _add_json_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="emit stable JSON instead of human-readable text",
+    )
 
 
 def _add_launchd_deploy_args(parser: argparse.ArgumentParser) -> None:
@@ -408,6 +446,143 @@ def _cmd_eval_doctor(args: argparse.Namespace) -> int:
     if doctor.detail:
         print(f"detail: {doctor.detail}")
     return 0 if doctor.available else 1
+
+
+def _open_catalog() -> "ReportCatalog | None":
+    """Resolve an enabled report catalog, or print why there is none.
+
+    Shared by both catalog verbs so a malformed service env and a disabled
+    subsystem read the same either way. ``report_catalog`` is imported here rather
+    than at module scope for the reason ``eval doctor`` imports its backend
+    locally: it pulls in the whole evaluation/semantic chain, which `repos` and the
+    launchd verbs have no use for.
+    """
+    from .report_catalog import ReportCatalog
+
+    try:
+        config = Config.from_env()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return None
+    if not config.evaluation_enabled:
+        print(
+            "error: task evaluation is disabled (ORCH_HUB_EVAL_ENABLED); the "
+            "report catalog is not served",
+            file=sys.stderr,
+        )
+        return None
+    return ReportCatalog(config)
+
+
+def _cmd_eval_catalog_verify(args: argparse.Namespace) -> int:
+    """Report the global report catalog's integrity without changing anything.
+
+    A diagnosis, deliberately not an action: it publishes nothing, evaluates
+    nothing, makes no model call, and writes no byte, so it is safe to run against
+    a live hub — including while a reconciliation sweep is appending.
+
+    Exit 0 means the feed can be traversed. Non-zero means it cannot: a repeated
+    ``seq``/``report_key`` or an unreadable catalog, which is exactly the state
+    that makes the feed routes answer 500 and pauses publication. Damaged or
+    pruned artifacts are reported but do not change the exit code — they leave the
+    traversal whole and each answers for itself at fetch time, and folding them
+    into the same signal would make a health check unable to tell "the feed is
+    down" from "an operator has a symlink to clear".
+    """
+    catalog = _open_catalog()
+    if catalog is None:
+        return 1
+    audit = catalog.audit()
+    if args.json:
+        print(json.dumps(audit.to_dict(), indent=2))
+    else:
+        _print_audit(audit)
+    return 0 if audit.serves_feed else 1
+
+
+def _cmd_eval_catalog_repair(args: argparse.Namespace) -> int:
+    """Apply, or merely plan, the catalog's identity-preserving repair.
+
+    Without ``--confirm`` this only describes what it would drop: the file is
+    durable publication state, so an operator sees the plan before it runs. Every
+    planned drop leaves each published ``seq``/``report_key`` exactly where it was
+    (a byte-identical repeat, or an interrupted append's trailing bytes); a
+    conflict between two *distinct* entries is refused instead, with nothing
+    written, because resolving it means moving an identity a consumer may already
+    have imported.
+
+    Exit code follows the same rule as ``verify``: 0 when the catalog on disk now
+    serves the feed. A refusal, or a plan that has not been confirmed yet, is
+    non-zero.
+    """
+    catalog = _open_catalog()
+    if catalog is None:
+        return 1
+    result = catalog.repair(apply=args.confirm)
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0 if result.serves_feed else 1
+    print(f"catalog: {result.catalog_path}")
+    if result.refused:
+        # Keep the two streams in the order they were written: the refusal is the
+        # answer to the line above it, and a buffered stdout would otherwise print
+        # it after.
+        sys.stdout.flush()
+        print(f"error: repair refused: {result.refused}", file=sys.stderr)
+        print("nothing was changed; resolve the conflict by hand, then re-verify")
+        return 1
+    if not result.actions:
+        print("nothing to repair")
+        return 0 if result.serves_feed else 1
+    print("plan:")
+    for action in result.actions:
+        print(f"  drop line {action.line}: {action.detail}")
+    if not result.applied:
+        print("dry run: nothing was changed; re-run with --confirm to apply")
+        return 0 if result.serves_feed else 1
+    print(f"repaired: dropped {len(result.actions)} line(s)")
+    print(f"backup: {result.backup_path}")
+    print(f"serves feed: {'yes' if result.serves_feed else 'no'}")
+    return 0 if result.serves_feed else 1
+
+
+def _print_audit(audit: "CatalogAudit") -> None:
+    """Human form of a catalog audit: the census first, then every located defect.
+
+    Each defect line leads with where it is — the catalog line number, and the
+    ``seq``/``report_key`` when the finding is about an entry rather than about
+    bytes that would not parse — because that prefix is what an operator edits
+    against. Findings repaired in the evaluations tree rather than in the catalog
+    file (a damaged, incomplete, or unreadable artifact set) carry the directory on
+    a second line, so clearing one is not a path-reconstruction exercise. The
+    machine ``kind`` stays in the ``--json`` form.
+    """
+    print(f"catalog: {audit.catalog_path}")
+    print(f"present: {'yes' if audit.present else 'no'}")
+    print(f"lines: {audit.lines}")
+    print(f"entries: {audit.entries}")
+    print(f"serves feed: {'yes' if audit.serves_feed else 'no'}")
+    print(
+        "artifacts: "
+        f"{audit.retained} retained, {audit.pruned} pruned, "
+        f"{audit.incomplete} incomplete, {audit.damaged} damaged, "
+        f"{audit.unreadable} unreadable, {audit.unaddressable} unaddressable"
+    )
+    if not audit.defects:
+        print("defects: none")
+        return
+    print("defects:")
+    for defect in audit.defects:
+        where = []
+        if defect.line is not None:
+            where.append(f"line {defect.line}")
+        if defect.seq is not None:
+            where.append(f"seq {defect.seq}")
+        if defect.report_key:
+            where.append(defect.report_key)
+        print(f"  {' '.join(where) or 'catalog'}: {defect.detail}")
+        if defect.path:
+            print(f"    at: {defect.path}")
 
 
 def _redact_secret(text: str, secret: str | None) -> str:

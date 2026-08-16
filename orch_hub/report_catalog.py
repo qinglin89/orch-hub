@@ -60,6 +60,20 @@ address its own artifacts, so its bundle is explicitly unavailable
 (:func:`_identity_fault`). Both refuse to guess, because the alternative is
 handing a consumer a report it will import as authentic.
 
+Refusing to guess leaves someone else holding the question, though, and until now
+that someone read a ``500`` and edited the file blind. :meth:`ReportCatalog.audit`
+is the diagnosis those refusals imply — every defect at once, each pinned to a line
+number and to the identity it collides with, plus the artifact census that keeps
+*pruned* (an entry outliving what it indexes, by design) apart from *damaged* (a
+link the hub never wrote, which retention can no longer reclaim and only an
+operator can clear). :meth:`ReportCatalog.repair` is the narrow companion: it drops
+byte-identical repeats and an interrupted append's trailing bytes — the two edits
+that provably leave every published ``seq``/``report_key`` where it was — and
+refuses outright, writing nothing, when two *distinct* entries collide. It is
+operator-invoked and never runs at startup: a broken catalog is already inert and
+safe, so self-repairing it at boot would trade a visible halt for an invisible
+rewrite of durable publication state.
+
 Publication is gated on the evaluated task being **archived**, because the feed
 exists to hand a consumer finished protocol stories, not in-progress ones. Being
 archived is an event that happens *after* the report is written, and no artifact
@@ -131,6 +145,10 @@ from .evaluation import (
     tree_segments,
 )
 from .models import (
+    CatalogAudit,
+    CatalogDefect,
+    CatalogRepair,
+    CatalogRepairAction,
     ManagedRepo,
     ReportArtifact,
     ReportArtifactRead,
@@ -247,6 +265,64 @@ INTEGRITY_UNVERIFIED = "unverified"
 over a whole set. ``unverified`` is deliberately not folded into ``verified``:
 an artifact the entry holds no usable digest for was never compared to anything,
 which is a weaker claim than a match."""
+
+DEFECT_UNREADABLE_CATALOG = "unreadable_catalog"
+DEFECT_UNPARSEABLE_LINE = "unparseable_line"
+DEFECT_NOT_AN_ENTRY = "not_an_entry"
+DEFECT_DUPLICATE_SEQ = "duplicate_seq"
+DEFECT_DUPLICATE_KEY = "duplicate_report_key"
+DEFECT_UNADDRESSABLE = "unaddressable_identity"
+DEFECT_INCOMPLETE_ARTIFACTS = "incomplete_artifacts"
+DEFECT_DAMAGED_ARTIFACTS = "damaged_artifacts"
+DEFECT_UNREADABLE_ARTIFACTS = "unreadable_artifacts"
+"""What :meth:`ReportCatalog.audit` can find wrong, as stable machine codes.
+
+Two of them stop the feed and the rest do not, which is the distinction the verify
+verb's exit code is built on: a repeated ``seq``/``report_key`` (or a catalog that
+will not read at all) makes every read path fail closed
+(:func:`_require_unique_identity`), while a skipped line, a partially pruned or
+damaged artifact set, and a stored identity that cannot address its own artifacts
+each answer for themselves at fetch time and leave the traversal whole.
+
+``DEFECT_DAMAGED_ARTIFACTS`` is deliberately not folded into the *pruned* census
+that has no defect at all. Retention removing artifacts is this feed's designed
+end state; a link standing at an artifact or at a tree hop is damage the hub never
+writes, cannot reclaim — a prune walks the tree's own hops no-follow, so it refuses
+the linked hop and reports the id as retained — and only an operator can clear.
+Reporting it as retention doing its job would hide the one state that accumulates
+until someone acts on it."""
+
+ARTIFACTS_RETAINED = "retained"
+ARTIFACTS_PRUNED = "pruned"
+ARTIFACTS_INCOMPLETE = "incomplete"
+ARTIFACTS_DAMAGED = "damaged"
+ARTIFACTS_UNREADABLE = "unreadable"
+ARTIFACTS_UNADDRESSABLE = "unaddressable"
+"""The per-entry artifact states :meth:`ReportCatalog.audit` censuses.
+
+The same partition the bundle read reports one entry at a time
+(:meth:`ReportCatalog.read_bundle`), counted across the whole catalog — derived
+from the same two sources, so the census and a fetch can never disagree about one
+entry: the per-name census :func:`_artifact_faults` for the artifacts themselves,
+and :class:`~orch_hub.evaluation.EvaluationDamagedTreeError` out of the contained
+walk that produced the descriptor it reads from."""
+
+REPAIR_DROP_DUPLICATE_LINE = "drop_duplicate_line"
+REPAIR_DROP_TORN_TAIL = "drop_torn_tail"
+"""The only two things :meth:`ReportCatalog.repair` will do to the file.
+
+Both are provably identity-preserving, which is the whole admission rule: a
+byte-identical repeat leaves an identical surviving line carrying the same
+published ``seq``/``report_key``, and a trailing partial line is bytes no reader
+has ever parsed into an entry. Everything else — renumbering, dropping a distinct
+entry, rewriting a field — moves a published identity a consumer may already have
+stored, and is refused rather than automated."""
+
+CATALOG_BACKUP_SUFFIX = ".bak"
+"""Extension of the timestamped pre-repair copy written beside the catalog. The
+repair is the one path that rewrites an append-only file, so the bytes it replaces
+are kept: an operator who disagrees with the result has the original, and the
+backup is inert to every read path (only :data:`CATALOG_NAME` is ever read)."""
 
 
 class ReportCatalogError(Exception):
@@ -832,6 +908,185 @@ class ReportCatalog:
             recorded_sha256=expected,
         )
 
+    def audit(self) -> CatalogAudit:
+        """Diagnose the catalog: what it holds, what is wrong, and where.
+
+        The operator surface behind ``orch-hub eval catalog verify``, and the
+        answer to a question the feed routes deliberately cannot give. Their
+        fail-closed audit (:func:`_require_unique_identity`) raises on the *first*
+        ambiguity it meets, because a read that cannot promise exactly-once
+        traversal must serve nothing; an operator repairing the file needs the
+        opposite — every defect at once, each located by line number and by the
+        ``seq``/``report_key`` it collides with. So this re-scans the file through
+        the same parse (:func:`_scan_catalog`, shared with
+        :meth:`_read_entries` so a clean verdict here and a working feed cannot
+        drift apart) and enumerates what that function would have raised on.
+
+        ``serves_feed`` is the only thing severity means: it is false exactly when
+        a read path fails closed — a repeated sequence or key, or a catalog that
+        will not read at all. The other findings each answer for themselves at
+        fetch time and leave the traversal whole, so they are reported without
+        claiming the feed is down.
+
+        The artifact census walks each distinct entry's dir through the same
+        contained descriptor a bundle read uses, and keeps *damaged* apart from
+        *pruned* for the reason the whole verb exists: pruned artifacts are this
+        feed's designed end state, while a link at an artifact or at a tree hop is
+        damage the hub never wrote and retention can no longer reclaim, so it
+        accumulates silently until an operator clears it. Both damage shapes are
+        kept — :func:`_artifact_faults` for the artifacts themselves and
+        :class:`~orch_hub.evaluation.EvaluationDamagedTreeError` for the directory
+        hops — rather than restated here.
+
+        Strictly read-only and lock-free, like every other read: it publishes
+        nothing, evaluates nothing, calls no model, and writes no byte — a verify
+        run must be safe to make a habit of, including while a reconciliation
+        sweep is appending. It is therefore a diagnosis *of a moment*: a concurrent
+        append adds a line this scan did not see, which is the same freshness a
+        feed poll has.
+        """
+        self._require_enabled()
+        path = self.catalog_path
+        try:
+            present = path.is_file()
+        except OSError:  # pragma: no cover - an unstattable data dir
+            present = False
+        try:
+            raw = self._catalog_bytes()
+        except ReportCatalogError as err:
+            # The one finding that is about the file rather than about anything in
+            # it, and it is feed-blocking for the same reason the read path raises:
+            # an unreadable catalog must never be mistaken for an empty one.
+            return CatalogAudit(
+                catalog_path=path,
+                present=present,
+                serves_feed=False,
+                defects=(
+                    CatalogDefect(
+                        kind=DEFECT_UNREADABLE_CATALOG,
+                        detail=str(err),
+                        blocks_feed=True,
+                    ),
+                ),
+            )
+        scanned = _scan_catalog(raw)
+        defects = [
+            CatalogDefect(
+                kind=line.fault,
+                line=line.lineno,
+                detail=(
+                    "line does not parse as JSON and is skipped by every read"
+                    if line.fault == DEFECT_UNPARSEABLE_LINE
+                    else "line is JSON but carries no seq/report_key, so it is"
+                    " skipped by every read"
+                ),
+            )
+            for line in scanned
+            if line.entry is None
+        ]
+        defects.extend(_duplicate_defects(scanned))
+        census: Counter[str] = Counter()
+        seen: set[str] = set()
+        for line in scanned:
+            entry = line.entry
+            if entry is None or entry.report_key in seen:
+                continue
+            seen.add(entry.report_key)
+            state, detail, where = self._entry_artifacts(entry)
+            census[state] += 1
+            if detail is not None:
+                defects.append(
+                    CatalogDefect(
+                        kind=_ARTIFACT_DEFECTS[state],
+                        line=line.lineno,
+                        seq=entry.seq,
+                        report_key=entry.report_key,
+                        path=where,
+                        detail=detail,
+                    )
+                )
+        # File order, so the list reads as a walk down the file an operator is
+        # about to edit. Findings with no line of their own sort first: they are
+        # about the catalog rather than about anything in it.
+        defects.sort(key=lambda defect: (defect.line or 0, defect.kind))
+        return CatalogAudit(
+            catalog_path=path,
+            present=present,
+            lines=len(scanned),
+            entries=sum(1 for line in scanned if line.entry is not None),
+            serves_feed=not any(defect.blocks_feed for defect in defects),
+            retained=census[ARTIFACTS_RETAINED],
+            pruned=census[ARTIFACTS_PRUNED],
+            incomplete=census[ARTIFACTS_INCOMPLETE],
+            damaged=census[ARTIFACTS_DAMAGED],
+            unreadable=census[ARTIFACTS_UNREADABLE],
+            unaddressable=census[ARTIFACTS_UNADDRESSABLE],
+            defects=tuple(defects),
+        )
+
+    def _entry_artifacts(
+        self, entry: ReportCatalogEntry
+    ) -> tuple[str, str | None, Path | None]:
+        """One entry's artifact state, why it is a defect, and where to go fix it.
+
+        Exactly the classification :meth:`read_bundle` performs for a single fetch,
+        stopping at the census instead of going on to read bytes: the same
+        stored-identity audits, the same contained walk, the same per-name
+        :func:`_artifact_faults`, and the same order — a link is reported ahead of
+        an absence, because a set that is both damaged and partly pruned is damaged.
+        Sharing those rules is what makes a verify run's count of *pruned* entries
+        the same set of entries a fetch answers "no longer retained" for.
+
+        ``None`` as the detail means the state is not a defect: a complete set, or
+        the designed end state of an entry outliving artifacts retention removed.
+        The path accompanies the states an operator clears in the tree rather than
+        in the catalog file; an unaddressable identity gets none, because whatever
+        directory its triple resolves to is not evidence of anything and the repair
+        is on the line, which the defect already names.
+        """
+        unsafe = _unaddressable(entry)
+        if unsafe is not None:
+            return (
+                ARTIFACTS_UNADDRESSABLE,
+                f"unsafe stored report identity ({unsafe})",
+                None,
+            )
+        fault = _identity_fault(entry)
+        if fault is not None:
+            return (
+                ARTIFACTS_UNADDRESSABLE,
+                f"incoherent stored report identity ({fault})",
+                None,
+            )
+        # Pure path math, and used only to *name* the dir in a finding — reaching
+        # it is the contained walk's job, below. The identity audits above are what
+        # make this safe to compute at all.
+        where = self.artifact_dir(entry)
+        try:
+            with self._opened_dir(entry) as dir_fd:
+                if dir_fd is None:
+                    return ARTIFACTS_PRUNED, None, None
+                missing, uncontained = _artifact_faults(dir_fd)
+        except EvaluationDamagedTreeError as err:
+            return ARTIFACTS_DAMAGED, _damaged_hop_detail(err), where
+        except OSError as err:
+            return (
+                ARTIFACTS_UNREADABLE,
+                f"unreadable report artifacts ({err})",
+                where,
+            )
+        if uncontained:
+            return ARTIFACTS_DAMAGED, _damaged_detail(uncontained), where
+        if not missing:
+            return ARTIFACTS_RETAINED, None, None
+        if len(missing) == len(REQUIRED_ARTIFACTS):
+            return ARTIFACTS_PRUNED, None, None
+        return (
+            ARTIFACTS_INCOMPLETE,
+            f"report artifact set is incomplete (missing {', '.join(missing)})",
+            where,
+        )
+
     # -- writes ---------------------------------------------------------------
 
     def record_evaluation(
@@ -1051,6 +1306,101 @@ class ReportCatalog:
                 added.append(entry)
                 seq += 1
             return added
+
+    def repair(self, *, apply: bool = False) -> CatalogRepair:
+        """Drop the catalog's provably redundant lines, or refuse to touch it.
+
+        The other half of the operator surface (``orch-hub eval catalog repair``),
+        and the only path in the subsystem that rewrites an append-only file. What
+        it may do is therefore fixed by one rule rather than by judgement: **every
+        already-published entry keeps its ``seq`` and its ``report_key``, or nothing
+        happens at all.** Two drops satisfy it, and they are the two an operator
+        cannot make safely by hand at scale:
+
+        - a line byte-identical to an earlier one, which a merged catalog or a
+          backup restored over a live one produces wholesale. The surviving copy is
+          the same bytes, so the entry set is unchanged and only the ambiguity goes
+          away;
+        - trailing bytes from an interrupted append that parse as nothing. No read
+          has ever seen an entry there, and the next append would only fence them
+          off as their own permanently unparseable line.
+
+        Everything else is refused, explicitly, with the conflict named: two
+        *distinct* entries sharing a ``seq`` or a ``report_key`` can only be
+        separated by renumbering or dropping one, and both move an identity a
+        consumer may already have imported — a decision that belongs to whoever
+        knows what has been consumed, not to a verb. A refusal writes **nothing**,
+        not even the safe drops: half-repairing a file an operator is about to edit
+        by hand would invalidate the line numbers ``verify`` just gave them.
+
+        Interior lines that merely fail to parse are also left alone. They are
+        inert — every read skips them — and they are the only surviving evidence of
+        whatever damaged the file, which a repair verb has no business destroying.
+
+        Deliberately **not** wired into startup. A damaged catalog is already
+        fail-closed and safe: publication pauses, retention stops pruning, and
+        nothing is lost. Repairing it silently at boot would trade a visible halt
+        for an invisible rewrite of durable publication state. So the plan is
+        computed and returned; ``apply=True`` — the confirmed operator decision —
+        is what writes, after copying the original beside the catalog
+        (:data:`CATALOG_BACKUP_SUFFIX`).
+
+        The whole plan-and-write cycle runs under :meth:`_locked`, the same
+        transaction publication allocates sequences in, so a concurrent hook or
+        sweep cannot append between the scan and the replacement and have its line
+        dropped. Gated.
+        """
+        self._require_enabled()
+        with self._locked():
+            raw = self._catalog_bytes()
+            scanned = _scan_catalog(raw)
+            # ``serves_feed`` describes the file as it stands, so it is measured by
+            # the audit that decides it (:func:`_duplicate_defects`) rather than
+            # inferred from the plan: a refusal and an unconfirmed plan both leave
+            # a duplicate-bearing catalog on disk, and reporting either as working
+            # would tell a health check the opposite of what the feed answers.
+            conflict = _identity_conflict(scanned)
+            if conflict is not None:
+                return CatalogRepair(
+                    catalog_path=self.catalog_path,
+                    refused=conflict,
+                    serves_feed=not _duplicate_defects(scanned),
+                )
+            actions = tuple(_repair_plan(raw, scanned))
+            if not actions or not apply:
+                return CatalogRepair(
+                    catalog_path=self.catalog_path,
+                    actions=actions,
+                    serves_feed=not _duplicate_defects(scanned),
+                )
+            repaired = _repaired_bytes(raw, actions)
+            backup = self._backup_catalog(raw)
+            _write_catalog(self.catalog_path, repaired)
+            return CatalogRepair(
+                catalog_path=self.catalog_path,
+                actions=actions,
+                applied=True,
+                backup_path=backup,
+                # Re-measured over the bytes actually written, so the claim is
+                # about the repaired file rather than about the plan's intent.
+                serves_feed=not _duplicate_defects(_scan_catalog(repaired)),
+            )
+
+    def _backup_catalog(self, raw: bytes) -> Path:
+        """Copy the pre-repair bytes beside the catalog and return the copy's path.
+
+        Named from the repair's own clock rather than overwriting one fixed name,
+        so a second repair cannot destroy the evidence of the first. The suffix
+        keeps it inert: every read path opens :data:`CATALOG_NAME` by name and the
+        candidate sweep never looks in this directory at all, so the copy is a file
+        for an operator, not a second catalog the hub might find.
+        """
+        backup = self.catalog_dir / (
+            f"{CATALOG_NAME}.{self._clock().strftime('%Y%m%dT%H%M%SZ')}"
+            f"{CATALOG_BACKUP_SUFFIX}"
+        )
+        _write_catalog(backup, raw)
+        return backup
 
     # -- internals ------------------------------------------------------------
 
@@ -1303,29 +1653,40 @@ class ReportCatalog:
         size and makes the cursor contract hold even if a line were ever written
         out of order.
         """
-        try:
-            text = self.catalog_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return []
-        except OSError as err:
-            raise ReportCatalogError(f"unreadable {CATALOG_NAME} ({err})") from err
         found: list[ReportCatalogEntry] = []
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            if not line.strip():
+        for line in _scan_catalog(self._catalog_bytes()):
+            if line.entry is None:
+                _log.warning(
+                    "report catalog line %d skipped (%s)", line.lineno, line.fault
+                )
                 continue
-            try:
-                data = json.loads(line)
-            except ValueError:
-                _log.warning("report catalog line %d is not valid JSON", lineno)
-                continue
-            entry = _entry_from_dict(data)
-            if entry is None:
-                _log.warning("report catalog line %d is not a catalog entry", lineno)
-                continue
-            found.append(entry)
+            found.append(line.entry)
         found.sort(key=lambda entry: entry.seq)
         _require_unique_identity(found)
         return found
+
+    def _catalog_bytes(self) -> bytes:
+        """The catalog file's raw bytes; empty when nothing has been published.
+
+        Bytes rather than text, and the reason is durability rather than taste: a
+        crashed append can cut a line mid UTF-8 sequence, and a whole-file
+        ``read_text`` would then refuse to decode *the entire catalog* over those
+        few trailing bytes — one interrupted write taking the feed down is exactly
+        the failure the torn-tail heal exists to prevent. Decoding is per line
+        instead (:func:`_scan_catalog`), so undecodable bytes cost their own line
+        and nothing else.
+
+        A missing file is an empty catalog, not an error (nothing published yet).
+        An IO failure is neither: it raises, so every read fails closed rather than
+        reporting a readable-but-unreachable catalog as empty — which publication
+        would then number from 1 again.
+        """
+        try:
+            return self.catalog_path.read_bytes()
+        except FileNotFoundError:
+            return b""
+        except OSError as err:
+            raise ReportCatalogError(f"unreadable {CATALOG_NAME} ({err})") from err
 
     def _scan_candidates(self) -> list[tuple[str, str, str]]:
         """Every evaluation identity in the tree, in deterministic global order.
@@ -1549,6 +1910,288 @@ def _require_unique_identity(entries: list[ReportCatalogEntry]) -> None:
             )
         seen_seq.add(entry.seq)
         seen_key.add(entry.report_key)
+
+
+@dataclass(frozen=True)
+class _ScannedLine:
+    """One non-blank catalog line, as both readers and the audit see it.
+
+    ``entry`` and ``fault`` are exclusive: a line either round-trips into an entry
+    or carries the machine code saying why it did not. ``text`` is the decoded line
+    (``None`` when the bytes are not UTF-8 at all), kept so the repair can compare
+    lines for byte-identity without decoding twice.
+    """
+
+    lineno: int
+    text: str | None
+    entry: ReportCatalogEntry | None
+    fault: str | None
+
+
+def _scan_catalog(raw: bytes) -> list[_ScannedLine]:
+    """Parse the catalog's bytes into located lines, keeping what failed and why.
+
+    The one parse both the feed's readers (:meth:`ReportCatalog._read_entries`) and
+    the operator audit (:meth:`ReportCatalog.audit`) go through, so "verify says
+    clean" and "the feed reads" cannot become different questions. The readers drop
+    the line numbers and the faults; the audit is the caller that needs them.
+
+    Split on ``\\n`` alone and decoded per line. Both matter, and neither is
+    cosmetic: the writer emits exactly one ``\\n`` per record, so splitting on the
+    wider set of Unicode line breaks ``str.splitlines`` recognizes could cut a line
+    *inside* a JSON string, and decoding per line keeps a torn tail that cut a
+    multi-byte character from making the whole catalog undecodable. Line numbers
+    are 1-based over that split, so they are the ones an operator's editor shows.
+
+    Blank lines are skipped rather than reported: the torn-tail heal writes one
+    deliberately (:meth:`ReportCatalog._append_line`), so they are the write path
+    working, not damage.
+    """
+    scanned: list[_ScannedLine] = []
+    for lineno, chunk in enumerate(raw.split(b"\n"), start=1):
+        if not chunk.strip():
+            continue
+        try:
+            text = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            scanned.append(
+                _ScannedLine(lineno, None, None, DEFECT_UNPARSEABLE_LINE)
+            )
+            continue
+        try:
+            data = json.loads(text)
+        except ValueError:
+            scanned.append(
+                _ScannedLine(lineno, text, None, DEFECT_UNPARSEABLE_LINE)
+            )
+            continue
+        entry = _entry_from_dict(data)
+        if entry is None:
+            scanned.append(_ScannedLine(lineno, text, None, DEFECT_NOT_AN_ENTRY))
+            continue
+        scanned.append(_ScannedLine(lineno, text, entry, None))
+    return scanned
+
+
+_ARTIFACT_DEFECTS = {
+    ARTIFACTS_INCOMPLETE: DEFECT_INCOMPLETE_ARTIFACTS,
+    ARTIFACTS_DAMAGED: DEFECT_DAMAGED_ARTIFACTS,
+    ARTIFACTS_UNREADABLE: DEFECT_UNREADABLE_ARTIFACTS,
+    ARTIFACTS_UNADDRESSABLE: DEFECT_UNADDRESSABLE,
+}
+"""Which artifact states are defects, and under which code they are reported.
+``retained`` and ``pruned`` are absent on purpose: a complete set is nothing to
+report, and an entry outliving pruned artifacts is the feed working as designed."""
+
+
+def _duplicate_defects(scanned: list[_ScannedLine]) -> list[CatalogDefect]:
+    """Every repeated ``seq``/``report_key``, located at the line that repeats it.
+
+    The enumerating counterpart of :func:`_require_unique_identity`, which raises at
+    the first repeat because a read that cannot promise exactly-once traversal must
+    serve nothing. An operator needs the whole list, and needs each item pinned to
+    the line that *introduced* the ambiguity plus the earlier line it collides with
+    — that pair is the edit to make.
+
+    Both audits are applied to every line rather than short-circuiting on the
+    first, so a line repeating a sequence *and* a key reports both: they are
+    different breakages (an ambiguous cursor, versus one source evaluation with two
+    global identities) and an operator fixing one should not discover the other on
+    the next run.
+    """
+    first_seq: dict[int, int] = {}
+    first_key: dict[str, int] = {}
+    found: list[CatalogDefect] = []
+    for line in scanned:
+        entry = line.entry
+        if entry is None:
+            continue
+        prior = first_seq.setdefault(entry.seq, line.lineno)
+        if prior != line.lineno:
+            found.append(
+                CatalogDefect(
+                    kind=DEFECT_DUPLICATE_SEQ,
+                    line=line.lineno,
+                    seq=entry.seq,
+                    report_key=entry.report_key,
+                    detail=(
+                        f"seq {entry.seq} is already cataloged at line {prior}:"
+                        " the feed cursor is ambiguous"
+                    ),
+                    blocks_feed=True,
+                )
+            )
+        prior = first_key.setdefault(entry.report_key, line.lineno)
+        if prior != line.lineno:
+            found.append(
+                CatalogDefect(
+                    kind=DEFECT_DUPLICATE_KEY,
+                    line=line.lineno,
+                    seq=entry.seq,
+                    report_key=entry.report_key,
+                    detail=(
+                        f"report {entry.report_key} is already cataloged at line"
+                        f" {prior}: global identity is not unique"
+                    ),
+                    blocks_feed=True,
+                )
+            )
+    return found
+
+
+def _identity_conflict(scanned: list[_ScannedLine]) -> str | None:
+    """Why the catalog cannot be repaired safely, or ``None`` if it can.
+
+    Asks the only question the repair's admission rule turns on: *once the
+    byte-identical repeats are collapsed, does a ``seq`` or a ``report_key`` still
+    appear twice?* If it does, the two lines are genuinely different entries, and
+    separating them means renumbering or dropping one — either of which moves an
+    identity a consumer may already have stored under the promise that a published
+    ``seq``/``report_key`` never changes. There is no safe automatic answer, so the
+    repair reports the conflicting pair and writes nothing.
+
+    Deliberately evaluated *before* the plan rather than on its result: a refusal
+    must leave the file exactly as ``verify`` described it, line numbers included.
+    """
+    seen_text: set[str] = set()
+    by_seq: dict[int, int] = {}
+    by_key: dict[str, int] = {}
+    for line in scanned:
+        entry = line.entry
+        if entry is None:
+            continue
+        text = (line.text or "").strip()
+        if text in seen_text:
+            continue  # a byte-identical repeat: the plan removes it losslessly
+        seen_text.add(text)
+        prior = by_seq.setdefault(entry.seq, line.lineno)
+        if prior != line.lineno:
+            return (
+                f"{CATALOG_NAME} holds distinct entries at seq {entry.seq}"
+                f" (lines {prior} and {line.lineno}); dropping or renumbering"
+                " either would change an already-published identity, so it must be"
+                " resolved by hand"
+            )
+        prior = by_key.setdefault(entry.report_key, line.lineno)
+        if prior != line.lineno:
+            return (
+                f"{CATALOG_NAME} holds distinct entries for report"
+                f" {entry.report_key} (lines {prior} and {line.lineno}); dropping"
+                " either would change an already-published identity, so it must be"
+                " resolved by hand"
+            )
+    return None
+
+
+def _repair_plan(
+    raw: bytes, scanned: list[_ScannedLine]
+) -> list[CatalogRepairAction]:
+    """The lines a repair may drop, in file order. Every one is identity-preserving.
+
+    Two admissions, and the docstring on :meth:`ReportCatalog.repair` says why they
+    are the only two. A byte-identical repeat leaves the same bytes behind, so no
+    entry's ``seq``, ``report_key``, or content changes — only the ambiguity does.
+    Trailing bytes of an interrupted append parse as no entry at all, so nothing
+    published is in them.
+
+    Interior unparseable lines are deliberately absent: they are already skipped by
+    every read, so removing them buys nothing, and they are the only surviving
+    evidence of whatever damaged the file.
+    """
+    actions: list[CatalogRepairAction] = []
+    first_text: dict[str, int] = {}
+    for line in scanned:
+        if line.entry is None:
+            continue
+        prior = first_text.setdefault((line.text or "").strip(), line.lineno)
+        if prior != line.lineno:
+            actions.append(
+                CatalogRepairAction(
+                    kind=REPAIR_DROP_DUPLICATE_LINE,
+                    line=line.lineno,
+                    detail=f"byte-identical repeat of line {prior}",
+                )
+            )
+    torn = _torn_lineno(raw)
+    if torn is not None and any(
+        line.lineno == torn and line.fault == DEFECT_UNPARSEABLE_LINE
+        for line in scanned
+    ):
+        actions.append(
+            CatalogRepairAction(
+                kind=REPAIR_DROP_TORN_TAIL,
+                line=torn,
+                detail=(
+                    "trailing bytes of an interrupted append; no read has ever"
+                    " parsed an entry here"
+                ),
+            )
+        )
+    actions.sort(key=lambda action: action.line)
+    return actions
+
+
+def _torn_lineno(raw: bytes) -> int | None:
+    """The line number of an unterminated final line, or ``None`` if there is none.
+
+    The same condition :func:`_has_torn_tail` checks before an append fences it off,
+    asked for *which* line rather than whether. A final line that parses as an
+    entry is not reported: it is a complete record that merely lacks its newline,
+    and the next append's heal keeps it readable.
+    """
+    if not raw or raw.endswith(b"\n"):
+        return None
+    chunks = raw.split(b"\n")
+    return len(chunks) if chunks[-1].strip() else None
+
+
+def _repaired_bytes(raw: bytes, actions: tuple[CatalogRepairAction, ...]) -> bytes:
+    """The catalog's bytes with the planned lines removed, and nothing else touched.
+
+    Every surviving line is copied verbatim, including blank ones and any interior
+    line that would not parse: the repair is a deletion of named lines, never a
+    re-serialization of the entries. That is what makes "every published ``seq`` and
+    ``report_key`` is preserved" a property of the bytes rather than of a round-trip
+    through this hub's current record shape — a line written by an older or newer
+    writer survives a repair unchanged.
+
+    The result ends with a newline unless it is empty, so the file the repair leaves
+    is never itself torn.
+    """
+    drop = {action.line for action in actions}
+    kept = [
+        chunk
+        for lineno, chunk in enumerate(raw.split(b"\n"), start=1)
+        if lineno not in drop
+    ]
+    repaired = b"\n".join(kept)
+    if repaired and not repaired.endswith(b"\n"):
+        repaired += b"\n"
+    return repaired
+
+
+def _write_catalog(path: Path, data: bytes) -> None:
+    """Write ``data`` to ``path`` durably: same-dir temp, fsync, rename, fsync dir.
+
+    The repair's write, and the reason it is not a plain ``write_bytes``: it
+    replaces the durable record of every global publication identity, so a crash
+    part-way through must leave either the original or the repaired file and never
+    a truncated one. The rename is the commit point; the directory fsync is what
+    makes the rename itself survive, since an entry that is fsynced but not linked
+    durably is still a file that can disappear.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    with tmp.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(tmp, path)
+    dir_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _unaddressable(entry: ReportCatalogEntry) -> str | None:

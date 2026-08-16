@@ -2046,6 +2046,171 @@ class ReportArtifactRead:
 
 
 @dataclass(frozen=True)
+class CatalogDefect:
+    """One thing wrong with the global report catalog, located precisely enough to fix.
+
+    The unit an operator verify run reports (:mod:`orch_hub.report_catalog`). The
+    catalog is append-only and never rewritten, so the write path cannot produce
+    any of these: a defect means the file was hand-edited, merged, restored over a
+    live one, or left with a torn tail by a crashed append — or that the artifact
+    tree an entry names has been damaged since. Naming *where* is the whole point,
+    since the operator's alternative is reading a ``500`` and guessing: ``line`` is
+    the 1-based line of ``catalog.jsonl``, and ``seq``/``report_key`` are the
+    offending identities when the defect is about an entry rather than about bytes
+    that would not parse.
+
+    ``path`` is the other half of "located precisely enough to fix", for the
+    findings whose repair is not in the catalog file at all: a damaged, incomplete,
+    or unreadable artifact set is cleared in the evaluations tree, and an operator
+    told only which report is affected would still have to reconstruct
+    ``<data_dir>/evaluations/<repo-slug>/<task-id>/<evaluation-id>/`` by hand. It is
+    unset for findings the catalog line itself carries, where ``line`` is the
+    address.
+
+    ``blocks_feed`` separates the two severities that matter, and separates them by
+    *consequence* rather than by tidiness. A repeated ``seq`` or ``report_key``
+    makes the cursor ambiguous, so every read path fails closed and the feed serves
+    nothing until it is repaired; a skipped unparseable line, an entry whose
+    artifacts retention pruned or a link damaged, and an entry whose stored identity
+    cannot address its artifacts all leave the traversal intact and answer for
+    themselves at fetch time. Only the first kind is what a verify run's non-zero
+    exit means.
+    """
+
+    kind: str
+    detail: str
+    line: int | None = None
+    seq: int | None = None
+    report_key: str | None = None
+    path: Path | None = None
+    blocks_feed: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "kind": self.kind,
+            "detail": self.detail,
+            "line": self.line,
+            "seq": self.seq,
+            "report_key": self.report_key,
+            "path": str(self.path) if self.path else None,
+            "blocks_feed": self.blocks_feed,
+        }
+
+
+@dataclass(frozen=True)
+class CatalogAudit:
+    """The global report catalog's integrity, as one read-only diagnostic.
+
+    What ``orch-hub eval catalog verify`` prints (:mod:`orch_hub.report_catalog`).
+    It answers two questions an operator otherwise has to infer from a ``500``:
+    *can the feed be traversed at all* (``serves_feed``, the fail-closed condition
+    every read path shares), and *what exactly is wrong and where* (``defects``).
+
+    The artifact census counts entries, not lines, and keeps states apart that a
+    coarser count would fold together. ``pruned`` is the designed end state of an
+    entry outliving the artifacts it indexes and is **not** a defect; ``damaged``
+    is a symbolic link standing where the hub wrote a regular artifact or a tree
+    directory, which the hub never writes, cannot reclaim (a prune refuses the
+    linked hop and keeps the id), and only an operator can clear. Reporting the
+    second as the first would hide the one state that accumulates until someone
+    acts. ``incomplete`` is a partially removed set, ``unreadable`` an IO fault, and
+    ``unaddressable`` a stored identity that cannot be trusted to name its own
+    artifacts.
+    """
+
+    catalog_path: Path
+    present: bool = False
+    lines: int = 0
+    entries: int = 0
+    serves_feed: bool = True
+    retained: int = 0
+    pruned: int = 0
+    incomplete: int = 0
+    damaged: int = 0
+    unreadable: int = 0
+    unaddressable: int = 0
+    defects: tuple[CatalogDefect, ...] = ()
+
+    def to_dict(self) -> dict:
+        return {
+            "catalog_path": str(self.catalog_path),
+            "present": self.present,
+            "lines": self.lines,
+            "entries": self.entries,
+            "serves_feed": self.serves_feed,
+            "artifacts": {
+                "retained": self.retained,
+                "pruned": self.pruned,
+                "incomplete": self.incomplete,
+                "damaged": self.damaged,
+                "unreadable": self.unreadable,
+                "unaddressable": self.unaddressable,
+            },
+            "defects": [defect.to_dict() for defect in self.defects],
+        }
+
+
+@dataclass(frozen=True)
+class CatalogRepairAction:
+    """One line the repair would drop, and why dropping it changes nothing.
+
+    Every action is identity-preserving by construction
+    (:meth:`orch_hub.report_catalog.ReportCatalog.repair`): the line is either a
+    byte-identical repeat of an earlier one, so the surviving copy carries the same
+    published ``seq`` and ``report_key``, or a trailing partial line no reader has
+    ever parsed. Nothing here renumbers, rewrites, or removes a distinct entry —
+    those are the operator's decision, and the repair refuses rather than making it.
+    """
+
+    kind: str
+    line: int
+    detail: str
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "line": self.line, "detail": self.detail}
+
+
+@dataclass(frozen=True)
+class CatalogRepair:
+    """The outcome of a repair attempt on the append-only catalog: plan, or refusal.
+
+    Three states, and they are exclusive. A **plan** (``actions`` non-empty,
+    ``refused`` unset) is the identity-preserving drop set, applied only when the
+    operator confirmed it (``applied``) and reported as a dry run otherwise — the
+    file is durable publication state, so the default is to describe rather than
+    rewrite. A **refusal** (``refused`` set, ``actions`` empty) is a conflict no
+    rule can resolve safely: two distinct entries sharing a ``seq`` or a
+    ``report_key``, where dropping or renumbering either moves an identity a
+    consumer may already have stored. Nothing at all is written in that case, not
+    even the safe part, so an operator's ``verify`` line numbers stay valid while
+    they resolve it by hand. **Nothing to do** is both empty.
+
+    ``serves_feed`` describes the catalog *as it now stands on disk* — after the
+    rewrite when one happened, and unchanged otherwise — so a caller reads one
+    field to decide whether the feed is working rather than replaying the plan.
+    ``backup_path`` is the pre-repair copy written beside the catalog before the
+    replacement, present only on an applied repair.
+    """
+
+    catalog_path: Path
+    actions: tuple[CatalogRepairAction, ...] = ()
+    applied: bool = False
+    refused: str | None = None
+    backup_path: Path | None = None
+    serves_feed: bool = True
+
+    def to_dict(self) -> dict:
+        return {
+            "catalog_path": str(self.catalog_path),
+            "actions": [action.to_dict() for action in self.actions],
+            "applied": self.applied,
+            "refused": self.refused,
+            "backup_path": str(self.backup_path) if self.backup_path else None,
+            "serves_feed": self.serves_feed,
+        }
+
+
+@dataclass(frozen=True)
 class SemanticJob:
     """One async Layer-2 semantic-evaluation attempt for a ``(repo, task_id)``.
 

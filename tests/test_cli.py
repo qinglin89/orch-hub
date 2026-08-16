@@ -17,6 +17,7 @@ import pytest
 from orch_hub import cli
 from orch_hub.config import (
     BARK_URL_ENV,
+    DATA_DIR_ENV,
     DEFAULT_DATA_DIR,
     EVAL_ENABLED_ENV,
     EVAL_RETENTION_ENV,
@@ -26,6 +27,7 @@ from orch_hub.config import (
 from orch_hub.launchd import LaunchdError, PLIST_NAME
 from orch_hub.models import CommitInfo, ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.registry import RegistryError
+from orch_hub.report_catalog import report_key
 
 
 def make_repo() -> ManagedRepo:
@@ -464,6 +466,194 @@ def test_eval_doctor_reports_config_error(monkeypatch, capsys):
     monkeypatch.setenv(EVAL_RETENTION_ENV, "lots")
 
     rc = cli.main(["eval", "doctor"])
+
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err
+
+
+# -- eval catalog verify/repair (the global report catalog's operator surface) --
+#
+# Driven against a real hub data dir rather than a stubbed catalog: the verbs are
+# worth having only if the exit code and the located defects match what the feed
+# routes actually do with the same file, and a mock would assert neither.
+
+
+def catalog_env(monkeypatch, tmp_path: Path) -> Path:
+    """Point the CLI at an empty hub data dir and return its catalog path."""
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    monkeypatch.delenv(EVAL_RETENTION_ENV, raising=False)
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
+    path = tmp_path / "report-catalog" / "catalog.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def catalog_line(seq: int, *, evaluation_id: str = "20260730T100000Z") -> str:
+    """One published line, in the exact shape the catalog writer emits."""
+    task_id = "2026-07-30-alpha-task"
+    return json.dumps(
+        {
+            "seq": seq,
+            "report_key": report_key(
+                repo_slug="alpha", task_id=task_id, evaluation_id=evaluation_id
+            ),
+            "cataloged_ts": "2026-07-31T08:00:00+00:00",
+            "repo_name": "alpha",
+            "repo_slug": "alpha",
+            "repo_path": None,
+            "task_id": task_id,
+            "evaluation_id": evaluation_id,
+            "generated_ts": None,
+            "target_source": "archived",
+            "archived": True,
+        },
+        sort_keys=True,
+    )
+
+
+def test_eval_catalog_verify_clean_exits_zero_and_changes_nothing(
+    monkeypatch, capsys, tmp_path
+):
+    path = catalog_env(monkeypatch, tmp_path)
+    path.write_text(catalog_line(1) + "\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    rc = cli.main(["eval", "catalog", "verify"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "serves feed: yes" in out
+    assert "defects: none" in out
+    # The artifacts were pruned long ago, which is the feed's designed end state
+    # and not a defect — so it is censused, not reported.
+    assert "1 pruned" in out
+    assert path.read_bytes() == before
+
+
+def test_eval_catalog_verify_locates_a_duplicate_and_exits_nonzero(
+    monkeypatch, capsys, tmp_path
+):
+    # The exact state that makes the feed routes answer 500. The operator's
+    # previous answer was that status code; this is the line number.
+    path = catalog_env(monkeypatch, tmp_path)
+    path.write_text(
+        catalog_line(1)
+        + "\n"
+        + catalog_line(1, evaluation_id="20260730T110000Z")
+        + "\n",
+        encoding="utf-8",
+    )
+
+    rc = cli.main(["eval", "catalog", "verify"])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "serves feed: no" in out
+    assert "line 2 seq 1" in out
+    assert "already cataloged at line 1" in out
+
+
+def test_eval_catalog_verify_json_carries_the_census_and_machine_codes(
+    monkeypatch, capsys, tmp_path
+):
+    path = catalog_env(monkeypatch, tmp_path)
+    path.write_text(catalog_line(1) + "\n{not json\n", encoding="utf-8")
+
+    rc = cli.main(["eval", "catalog", "verify", "--json"])
+
+    assert rc == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["catalog_path"] == str(path)
+    assert (data["present"], data["lines"], data["entries"]) == (True, 2, 1)
+    assert data["serves_feed"] is True
+    assert data["artifacts"]["pruned"] == 1
+    assert data["defects"] == [
+        {
+            "kind": "unparseable_line",
+            "detail": "line does not parse as JSON and is skipped by every read",
+            "line": 2,
+            "seq": None,
+            "report_key": None,
+            "path": None,
+            "blocks_feed": False,
+        }
+    ]
+
+
+def test_eval_catalog_repair_plans_without_writing(monkeypatch, capsys, tmp_path):
+    path = catalog_env(monkeypatch, tmp_path)
+    line = catalog_line(1)
+    path.write_text(line + "\n" + line + "\n", encoding="utf-8")
+    before = path.read_bytes()
+
+    rc = cli.main(["eval", "catalog", "repair"])
+
+    # Non-zero: the plan has not run, so the catalog on disk still serves nothing.
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "drop line 2: byte-identical repeat of line 1" in out
+    assert "--confirm" in out
+    assert path.read_bytes() == before
+
+
+def test_eval_catalog_repair_confirm_applies_and_backs_up(
+    monkeypatch, capsys, tmp_path
+):
+    path = catalog_env(monkeypatch, tmp_path)
+    line = catalog_line(1)
+    path.write_text(line + "\n" + line + "\n", encoding="utf-8")
+
+    rc = cli.main(["eval", "catalog", "repair", "--confirm"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "repaired: dropped 1 line(s)" in out
+    assert "serves feed: yes" in out
+    assert path.read_text(encoding="utf-8") == line + "\n"
+    backups = sorted(path.parent.glob("catalog.jsonl.*.bak"))
+    assert len(backups) == 1
+    assert backups[0].read_text(encoding="utf-8") == line + "\n" + line + "\n"
+
+
+def test_eval_catalog_repair_refuses_a_conflict_and_writes_nothing(
+    monkeypatch, capsys, tmp_path
+):
+    path = catalog_env(monkeypatch, tmp_path)
+    path.write_text(
+        catalog_line(1)
+        + "\n"
+        + catalog_line(1, evaluation_id="20260730T110000Z")
+        + "\n",
+        encoding="utf-8",
+    )
+    before = path.read_bytes()
+
+    rc = cli.main(["eval", "catalog", "repair", "--confirm"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "repair refused" in captured.err
+    assert "resolved by hand" in captured.err
+    assert "nothing was changed" in captured.out
+    assert path.read_bytes() == before
+    assert list(path.parent.glob("*.bak")) == []
+
+
+def test_eval_catalog_verify_disabled_exits_nonzero(monkeypatch, capsys, tmp_path):
+    catalog_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "0")
+
+    rc = cli.main(["eval", "catalog", "verify"])
+
+    assert rc == 1
+    assert "disabled" in capsys.readouterr().err
+
+
+def test_eval_catalog_verify_reports_config_error(monkeypatch, capsys, tmp_path):
+    catalog_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(EVAL_RETENTION_ENV, "lots")
+
+    rc = cli.main(["eval", "catalog", "verify"])
 
     assert rc == 1
     assert "error:" in capsys.readouterr().err
