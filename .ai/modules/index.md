@@ -58,7 +58,8 @@ Full responsibilities live in the detail files below.
 | runtime.md | Repo admission, run manager, orchestrator launch config, run monitor |
 | runtime-io.md | History, control-dir, logs, sessions, session-entry task snapshots, notifications |
 | service.md | API app, launchd operations |
-| web.md | Web UI |
+| web.md | Web UI shell, theme, accessibility/route infrastructure, Overview |
+| web-views.md | Web UI routed views: repo/task, run controls, run history, report feed, evaluation, intake |
 
 ## Boundary Rules
 

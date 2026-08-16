@@ -1,12 +1,12 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
 # Modules: Service Surface
 
 FastAPI app adapter and launchd service operations. Dashboard SPA assets:
-`web.md`.
+`web.md` + `web-views.md`.
 
 ## API
 

@@ -7,7 +7,8 @@ verified-against: cad31851334def4258d4004c2e62516807aaff85
 
 Foundation modules. Evaluation layers: `evaluation.md`; report catalog:
 `report-catalog.md`; usage/statusline: `usage.md`. Intake: `intake.md`.
-Run control: `runtime.md`. API/web/launchd: `web.md`.
+Run control: `runtime.md`. API/launchd: `service.md`. Web UI: `web.md` +
+`web-views.md`.
 
 ## CLI
 

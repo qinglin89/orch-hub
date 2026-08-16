@@ -92,7 +92,7 @@ behavior and rationale stay in the owning doc.
 | task_snapshots | post-claim task-file capture; `task_snapshots.json` |
 | api | app factory; bearer middleware; route wiring; uvicorn entry |
 | notifications | notifier interface; Bark backend; formatters |
-| web | mobile-first dashboard SPA assets; see modules/web.md |
+| web | mobile-first dashboard SPA assets; see modules/web.md + web-views.md |
 | docs | operator docs |
 | deploy | launchd plist + deployment templates |
 
