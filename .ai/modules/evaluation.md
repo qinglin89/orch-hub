@@ -1,13 +1,12 @@
 ---
 last-updated: 2026-08-16
-verified-against: de96dfad26bf128e6dae055897d00fb4f9f72fe0
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
-# Modules: Sidecar Analysis and Usage
+# Modules: Task Evaluation Layers
 
-Task-evaluation layers (evidence, static metrics, semantic, jobs) and
-the global report catalog, plus display-only subscription usage. Foundation
-modules: `core.md`.
+Evidence, static metrics, semantic evaluation, and semantic jobs. Publication:
+`report-catalog.md`. Usage display: `usage.md`. Foundation modules: `core.md`.
 
 ## Evaluation
 
@@ -138,94 +137,7 @@ API exposes generation through `SemanticJobManager` at protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, detail readback, and
 a gated `GET /api/evaluation/doctor` readiness route.
 
-## Global Report Catalog
-
-Location: `orch_hub/report_catalog.py`
-
-Responsibility: publish archived tasks' coherent, complete L1+L2 artifact sets
-through one hub-owned append-only catalog at
-`<data_dir>/report-catalog/catalog.jsonl`. `ReportCatalog` assigns an immutable
-monotonic `seq` (global order/cursor) and a stable opaque `report_key` derived
-from the source evaluation identity. Its semantic-finalization hook is
-best-effort promptness; the deterministic startup `reconcile()` sweep is the
-correctness path and makes backfill/restart idempotent. Reports evaluated while
-active remain candidates and publish after a contained archive probe succeeds.
-
-The read/check/allocate/append transaction uses a process-wide `flock`; appends
-are fsynced single lines with torn-tail fencing. `page()` provides forward-only
-strictly-greater integer-watermark traversal; `read_bundle()` resolves a global
-key to the complete contained artifact set and reports digest verification. The
-catalog re-opens every scanned candidate and every bundle/raw read through the
-evaluation module's descriptor walk: the repo/task/evaluation hops and each
-fixed artifact are no-follow, and artifacts are validated and consumed through
-the opened descriptors. A linked interior hop is damaged (distinct from
-retention-pruned/incomplete), is never published or hashed through, and is not
-publication debt; non-canonical repo directory names are not swept.
-Catalog/source identity ambiguity fails closed. Published entries outlive
-retention-pruned artifacts, which remain auditable but bundle-unavailable.
-
-`audit()` is the read-only operator diagnosis: it shares catalog scanning with
-feed reads, locates every parse/duplicate/identity defect, and classifies each
-distinct source/key identity through the bundle path's contained directory
-census and artifact opens (`retained`, absent-dir `pruned`, `incomplete`,
-`damaged`, `unreadable`, `unaddressable`). `repair()` is the only physical
-rewrite of the append-only file: dry-run unless explicitly confirmed, limited to
-byte-identical repeated lines and an unparseable torn tail, and refusing distinct
-identity conflicts. It holds the append lock through planning and replacement,
-writes a durable collision-safe non-overwriting backup first, and preserves all
-published `seq`/`report_key` identities.
-
-Protocol provenance is copied only from the persisted evidence pack's
-fail-closed aggregate into the atomic `provenance.protocol.effective_revision`
-plus `deploy_lock_hash` pair. The catalog never reads current target state or
-invents/completes an identity for legacy revision-only, unverified, or mixed
-runs; append-only legacy lines demote at readback.
-
-`unpublished_ids()` is injected as `EvaluationService.retention_guard` so a
-prune cannot destroy recoverable publication debt. The guard and publisher read
-the same artifact-derived candidate and publishability predicate; uncertainty
-defers publication but protects retention. The catalog owns publication and
-provenance only—it never evaluates, ranks, decides protocol evolution, or
-creates protocol-improvement tasks.
-
-## Usage
-
-Location: `orch_hub/usage.py`
-
-Responsibility: produce provider-normalized, read-only Claude/Codex
-subscription usage for display. Codex usage is read from the newest local
-`rate_limits` snapshots in `<codex_home>/sessions/**/rollout-*.jsonl`, bounded
-by file count and size, with optional primary/secondary windows and aggregate
-credits sanitized by whitelist. Claude's primary carrier is the CLI's
-`~/.claude.json.cachedUsageUtilization`: `parse_claude_usage_cache` retains only
-`fetchedAtMs`, the two window reset instants, and `limits[].percent` figures
-paired by kind and equal normalized reset; ambiguous window-map
-`utilization`, account ids, credentials, projects, and machine fields are
-ignored. `ClaudeUsageCollector` reads that cache and refreshes it through
-`claude -p "/usage"` from an empty cwd. Its non-blocking lock, five-minute
-freshness/attempt floors, 60s timeout, and mandatory zero-turn/zero-cost JSON
-envelope make refresh bounded, single-flight, and model-free; failures return
-the old observation with its original timestamp.
-
-`UsageService` ingests this cache first and the optional
-`<data_dir>/usage/claude-statusline.json` fallback second, merging both into
-`<data_dir>/usage/claude.json` per window. `merge_observations` keys each figure
-by store-internal `UsageWindow.figure_instant`; known reset instants within five
-minutes are one jitter-tolerant identity whose stored instant converges forward,
-while farther-apart instants retain genuine-rollover ordering. Same-window
-figures take `max(used_percent)`, legacy stores self-heal, and partial merges
-floor provider freshness to the older source. Stale/empty reads dispatch a
-background collector refresh for the next read; the app also gives `RunManager`
-this request callable for each observed terminal transition. No verified
-stream-json version carries a percentage;
-2.1.220's percentage-less event may advance only a stored reset boundary.
-`ClaudeUsageStore.record()` writes via per-writer temp files plus `os.replace`
-so concurrent observations cannot collide; `UsageService` serializes Claude
-store read-modify-write paths. It aggregates Claude then Codex behind a 30s
-cache and returns fail-soft
-`ProviderUsage.unavailable(...)` snapshots on missing/failed sources. It never
-starts a model turn, directly calls provider endpoints, opens credential files,
-spends Codex reset credits, or participates in operational gates.
+## Semantic Jobs
 
 `SemanticJobManager` in `orch_hub/semantic_jobs.py` persists one current
 `job.json` per `(repo, task)` under
@@ -237,19 +149,3 @@ jobs to failed on startup, and links completed jobs to the fresh
 metadata-only notification through isolated manager-owned dispatch; startup
 orphan reconciliation stays silent. The old synchronous `POST /semantic` route
 is retired.
-
-## StatusLine Writer
-
-Location: `orch_hub/statusline.py`
-
-Responsibility: retain legacy console script `orch-hub-statusline` for an
-operator-owned Claude Code `statusLine.command` installation. It reads stdin,
-persists only the `rate_limits` container plus `subscription_type` to
-`<data_dir>/usage/claude-statusline.json`, then runs everything after `--` as
-the operator's wrapped statusline argv with the same stdin and inherited
-stdout/stderr/exit code. It deliberately avoids `Config.from_env()` validation,
-never edits `~/.claude/**`, never starts Claude or calls provider endpoints, and
-drops session id, transcript path, cwd, model, workspace, and cost fields before
-writing the sink. It owns no setup detection or guidance; deploy/update do not
-inspect Claude settings, and the wrapper is optional because the cache carrier
-is primary.

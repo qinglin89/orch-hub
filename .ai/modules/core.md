@@ -5,8 +5,9 @@ verified-against: cad31851334def4258d4004c2e62516807aaff85
 
 # Modules: Core
 
-Foundation modules. Evaluation/usage/statusline: `sidecar.md`. Intake:
-`intake.md`. Run control: `runtime.md`. API/web/launchd: `web.md`.
+Foundation modules. Evaluation layers: `evaluation.md`; report catalog:
+`report-catalog.md`; usage/statusline: `usage.md`. Intake: `intake.md`.
+Run control: `runtime.md`. API/web/launchd: `web.md`.
 
 ## CLI
 

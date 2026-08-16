@@ -51,7 +51,9 @@ Full responsibilities live in the detail files below.
 | File | Contains |
 |---|---|
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
-| sidecar.md | Evaluation, AI snapshot evidence, static metrics, semantic evaluator, semantic jobs, usage, statusLine writer |
+| evaluation.md | Evaluation foundation, AI snapshot evidence, static metrics, semantic evaluator, semantic jobs |
+| report-catalog.md | Global report catalog publication |
+| usage.md | Subscription usage collection, statusLine writer |
 | intake.md | Intake manager, intake agent |
 | runtime.md | Repo admission, run manager, orchestrator launch config, run monitor |
 | runtime-io.md | History, control-dir, logs, sessions, session-entry task snapshots, notifications |
