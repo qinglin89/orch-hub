@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-11
-verified-against: 47bc951e59ce6283b1e1595e009abca13a8618fa
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
 # AI Knowledge Router

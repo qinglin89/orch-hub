@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 40d3725f9c85ad2fc9dbcaa60a68f3a1c00f1e93
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
 # Features: Core
