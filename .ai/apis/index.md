@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-12
-verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
 # APIs and Interfaces
@@ -12,5 +12,6 @@ verified-against: 4d3c177440ca1e87091d10a510836d86783c7578
 | http-runs.md | Run lifecycle, history, session/effective-config, log, and escalation routes |
 | http-evaluation.md | Evaluation availability, doctor, global report feed/bundle/raw-artifact export, per-task evidence/metrics, and semantic-job routes |
 | http-intake.md | Remote intake lifecycle routes |
-| internal-core.md | Registry/readiness/task-store/evaluation/static/semantic/report-catalog/usage interfaces, API conventions |
+| internal-core.md | Registry/readiness/task-store/usage interfaces, API conventions |
+| internal-evaluation.md | Evaluation-service, static-metrics, semantic-evaluator, and report-catalog internal interfaces |
 | internal-runtime.md | Repo-admission, intake, run, control-dir, log, history, notifier, launchd-template interfaces |

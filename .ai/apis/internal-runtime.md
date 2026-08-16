@@ -1,12 +1,13 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
 ---
 
 # APIs: Internal — Runtime
 
 Repo-admission, intake, run, control-dir, log, history, notifier, and launchd-template
-interfaces. Core/sidecar interfaces and API conventions: `internal-core.md`.
+interfaces. Core/usage interfaces and API conventions: `internal-core.md`;
+evaluation-chain interfaces: `internal-evaluation.md`.
 
 ## Repo Admission
 
