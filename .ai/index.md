@@ -12,7 +12,7 @@ Load only what the current task needs.
 | Document | File | Use when |
 |---|---|---|
 | Overview | overview.md | what orch-hub is, users, scope, non-goals, tech stack |
-| Architecture | architecture.md | service shape, boundaries, data ownership, core flows, external dependencies, deployment |
+| Architecture | architecture/index.md | service shape, boundaries, data ownership, core flows, external dependencies, deployment |
 | Design | design/index.md | principles, tradeoffs, patterns, anti-patterns |
 | Modules | modules/index.md | planned module ownership, responsibilities, dependencies, boundaries |
 | APIs | apis/index.md | CLI, HTTP routes, internal interfaces, API conventions |
@@ -26,12 +26,12 @@ Load only what the current task needs.
 | Task Type | Load Order |
 |---|---|
 | New feature | map -> features/index.md -> modules/index.md -> apis/index.md |
-| API change | map -> apis/index.md -> modules/index.md -> architecture.md |
+| API change | map -> apis/index.md -> modules/index.md -> architecture/index.md |
 | Bug / debugging | map -> modules/index.md -> code |
-| Architecture change | architecture.md -> design/index.md -> modules/index.md |
+| Architecture change | architecture/index.md -> design/index.md -> modules/index.md |
 | Code review | map -> relevant docs -> code/tests |
 | Conventions question | conventions.md |
-| Onboarding | overview -> architecture.md -> map |
-| Orchestrator integration | architecture.md -> apis/index.md -> modules/index.md -> features/index.md |
-| Dashboard/UI work | features/index.md -> architecture.md -> design/index.md -> modules/index.md |
-| Deployment packaging | features/index.md -> architecture.md -> modules/index.md -> conventions |
+| Onboarding | overview -> architecture/index.md -> map |
+| Orchestrator integration | architecture/index.md -> apis/index.md -> modules/index.md -> features/index.md |
+| Dashboard/UI work | features/index.md -> architecture/index.md -> design/index.md -> modules/index.md |
+| Deployment packaging | features/index.md -> architecture/index.md -> modules/index.md -> conventions |

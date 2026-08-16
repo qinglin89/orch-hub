@@ -1,0 +1,138 @@
+---
+last-updated: 2026-08-16
+verified-against: cad31851334def4258d4004c2e62516807aaff85
+---
+
+# Architecture: Core Flows
+
+End-to-end runtime flows of the hub. Shape, layers, trust boundaries, and
+invariants: `index.md`. Data ownership and component seams: `boundaries.md`.
+
+## Core Flows
+
+Discovery reads the registry, then overlays per-repo readiness; ordinary
+readiness failures stay payload data, not route errors.
+
+Run launch: operator-selected repo/task → shared repo admission (no
+non-terminal remote intake), per-repo live-run serialization, task
+existence/status validation via the task store, readiness verification,
+external run dir creation, validated `.ai-deploy-lock.json` capture into the
+run dir, then deployed-orchestrator launch with a control dir inside it. Launch
+readiness has compared actual target files with the deploy manifest; an observed
+end rechecks the lock and bounded complete lock/manifest target set against the
+actual files. Only the unchanged identity pair with a matching end payload is
+publishable. These are two point observations, not continuous monitoring;
+capture/check failure degrades provenance without creating cohort admission
+policy. Cross-repo runs may overlap.
+
+Human input flows through the control dir: the orchestrator writes question
+files; the hub lists them, can notify, writes answer files atomically, and
+records metadata-only audit events — answer text never enters history.
+
+Stop/completion are observed from run state and file evidence: graceful stop
+writes `stop.flag`; end classification combines task-completion, stop, and
+process-exit evidence. History is append-only per run; read failures surface
+as history data.
+
+Log access resolves a known run record first, then locates recent/streamed
+logs from its task/timestamp context; browser streaming uses
+bearer-authenticated fetch streams, never query tokens.
+
+Remote intake: shared repo admission first refuses a start while any readable,
+repo-attributed persisted unended run holds the repo; otherwise a
+natural-language request for a ready repo creates hub-owned intake state.
+`/intake-task` runs read-only draft/revise
+turns showing the full proposed task file plus index row, and only explicit
+confirm runs the write turn. A non-terminal intake blocks run start until it
+settles. A legacy/recovered overlap fails closed for revise/confirm while
+lifecycle-legal Cancel remains available. `confirmed` requires the created
+task to round-trip through frontmatter-authoritative inventory as
+`pending`/`blocked`; every other outcome stays outside inventory and rolls back
+the paths it was authorized to touch while the process is alive.
+`awaiting_review` settlement emits one metadata-only intake-ready notification
+off the state-critical path when Bark is configured.
+
+Task evaluation: exact active/archive id → read-only aggregation of every
+`(repo_path, task_id)` run with bounded history/session/log/spawn diagnostics,
+a producer-bounded best-effort git window, bounded per-session entry task files,
+and a producer-bounded `.ai/` eager/prefetch snapshot plus same-window `.ai/`
+patches, plus bounded ordered session read behavior from persisted ids and the
+configured Claude transcript store, plus each run's persisted deployed-protocol
+snapshot → schema-v18 `evidence.json` under the hub data dir. The pack publishes
+one effective protocol identity only when every contributing run verified the
+same `(source_git_commit, canonical_payload_sha256)` pair; legacy, malformed,
+unverified, revision-mixed, or payload-mixed provenance is explicitly
+unavailable and never backfilled from current target state. Entry files come from existing log
+brackets, live in the run dir, and carry exact/partial/reconstructed fidelity;
+snapshot-derived prefetch declarations
+supersede accumulated task state only when their frontmatter is complete.
+Static metrics adds deterministic run/session, taskfile/session-log, six-axis
+score (including prefetch-set read completeness), confidence, and warning
+rollups as static-schema-v4 `static_metrics.json` beside it. The
+semantic layer builds a model prompt from the persisted evidence/static chain,
+including the bounded `.ai/` copy, independently available patch stream, and
+ordered read trace; semantic-schema-v2 retrieval effectiveness is distinct and
+grounds rediscovery risk. Missing/partial/unobserved parts and raw logs are
+recorded as omission or confidence degradation, never poor behavior. It persists
+`semantic_report.json` + `report.md` in the same dir and stamps the evidence
+schema cohort plus entry fidelity on the report. The default Claude CLI backend runs from an empty
+non-repo cwd with tools disabled, safe mode, no session persistence, and
+plan-mode writes blocked — the model cannot read live target-repo state outside
+the prompt. Protected routes expose availability, generation, async
+semantic job start/status, doctor readiness, history, and artifact readback.
+The evaluations base may be reached through links for relocated storage, but
+creation, listing, artifact reads/writes, cleanup, and retention all open every
+repo/task/evaluation segment beneath it no-follow and act relative to contained
+descriptors; linked interior state is damage, never a source/target of bytes or
+an alias for ordinary pruning.
+`SemanticJobManager` stores one current job per `(repo, task)` under
+`<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job
+instead of starting a duplicate model call, and reconciles restart-orphaned
+transient jobs to failed. A fresh completed/failed settlement emits one
+metadata-only notification through isolated dispatch after persistence;
+startup reconciliation stays silent. The dashboard doctor-gates the semantic
+trigger, polls persisted job state, and keeps raw artifacts behind
+Copy/Download.
+
+Global report publication: a coherent durable L1+L2 evaluation whose task is
+archived → semantic-completion hook or deterministic startup reconciliation →
+one append-only catalog entry with global `seq`, stable opaque `report_key`,
+artifact hashes, evaluator identity, and explicit provenance availability,
+including the atomic `provenance.protocol.effective_revision` plus
+`deploy_lock_hash` copied from the persisted evidence aggregate when available;
+older revision-only packs/catalog lines read back unavailable rather than being
+completed from later state.
+Reconciliation retries missed/newly eligible reports without a model call; a
+shared retention guard protects publishable or undecidable unpublished
+artifacts until cataloged. Candidate publication, by-key bundles, and byte-exact
+per-artifact reads share the evaluation tree's descriptor walk and refuse every
+interior linked directory/file hop. Protected forward-cursor list and artifact
+routes are read-only. Published entries
+remain auditable after retention prunes their artifacts; the hub exposes
+integrity/unavailability and leaves interpretation or protocol-evolution
+decisions to external consumers.
+The local operator CLI audits catalog parsing/identity ambiguity and each
+entry's contained artifact state without evaluating or writing. Its only repair
+rewrites provably redundant duplicate lines or an unparseable torn tail after
+explicit confirmation, under the publication lock and after preserving the
+original bytes in a collision-safe backup; distinct identity conflicts refuse.
+
+Subscription usage is a sidecar display flow: `UsageService` reads Claude
+Code's whitelisted structured utilization cache first, then merges the optional
+statusLine sink, serves the hub-owned observation store, and reads Codex from
+recent local rollout `rate_limits`. A stale/empty Claude read dispatches a
+background collector; the same request is made once when `RunManager` observes
+a live-to-ended transition. The collector is single-flight, freshness/backoff/
+timeout bounded, runs `claude -p "/usage"` from an empty cwd, and accepts the
+turn only when its JSON envelope reports zero model turns and zero cost. Cache
+figures retain the CLI's real `fetchedAtMs` and come only from
+`limits[].percent` entries paired to window-map resets by kind and instant.
+Claude figures are keyed by store-internal `figure_instant`; reset instants
+within five minutes share one jitter-tolerant identity that converges forward,
+so fallback writers cannot lower same-window usage while genuine rollovers still
+replace old figures. Legacy stores self-heal, and partial merges do not overstate
+freshness. The stream-json observer remains a boundary-only fallback on verified
+versions. Protected `GET /api/usage` returns both providers fail-soft;
+missing/stale/failed sources never feed attention, readiness, run state, or
+launch/intake gates.
+
