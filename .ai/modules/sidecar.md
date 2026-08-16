@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-14
-verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
+last-updated: 2026-08-16
+verified-against: de96dfad26bf128e6dae055897d00fb4f9f72fe0
 ---
 
 # Modules: Sidecar Analysis and Usage
@@ -163,6 +163,17 @@ retention-pruned/incomplete), is never published or hashed through, and is not
 publication debt; non-canonical repo directory names are not swept.
 Catalog/source identity ambiguity fails closed. Published entries outlive
 retention-pruned artifacts, which remain auditable but bundle-unavailable.
+
+`audit()` is the read-only operator diagnosis: it shares catalog scanning with
+feed reads, locates every parse/duplicate/identity defect, and classifies each
+distinct source/key identity through the bundle path's contained directory
+census and artifact opens (`retained`, absent-dir `pruned`, `incomplete`,
+`damaged`, `unreadable`, `unaddressable`). `repair()` is the only physical
+rewrite of the append-only file: dry-run unless explicitly confirmed, limited to
+byte-identical repeated lines and an unparseable torn tail, and refusing distinct
+identity conflicts. It holds the append lock through planning and replacement,
+writes a durable collision-safe non-overwriting backup first, and preserves all
+published `seq`/`report_key` identities.
 
 Protocol provenance is copied only from the persisted evidence pack's
 fail-closed aggregate into the atomic `provenance.protocol.effective_revision`

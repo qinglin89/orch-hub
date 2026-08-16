@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-14
-verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
+last-updated: 2026-08-16
+verified-against: de96dfad26bf128e6dae055897d00fb4f9f72fe0
 ---
 
 # Features: Task Evaluation
@@ -229,10 +229,11 @@ durable, globally ordered feed without walking every repo/task evaluation tree.
 The hub publishes cohortable artifacts; it does not rank reports, decide
 protocol evolution, or create protocol-improvement tasks.
 
-Modules: report_catalog, evaluation, semantic, task_store, models, api, web.
+Modules: report_catalog, evaluation, semantic, task_store, models, api, cli, web.
 
 APIs: internal `ReportCatalog.record_evaluation`, `reconcile`, `page`,
-`read_bundle`, `read_artifact_bytes`, and `unpublished_ids`; protected
+`read_bundle`, `read_artifact_bytes`, `unpublished_ids`, `audit`, and `repair`;
+CLI `orch-hub eval catalog verify|repair`; protected
 `GET /api/evaluation/reports[?after=<seq>&limit=<n>]` and
 `GET /api/evaluation/reports/{report_key}` plus
 `GET /api/evaluation/reports/{report_key}/artifacts/{name}`; dashboard
@@ -257,6 +258,19 @@ Implemented behavior:
   is flushed/fsynced and torn tails are fenced. Duplicate durable sequences or
   keys make all reads/publication fail closed instead of silently skipping a
   report.
+- `audit()` shares the feed's per-line scanner and reports every located parse,
+  duplicate-identity, stored-identity, and artifact defect. Its artifact census
+  walks each full source/key identity once through the contained descriptor,
+  distinguishes absent/pruned dirs from standing incomplete or linked/damaged
+  trees, and opens every required artifact so `retained` means fetchable at the
+  open boundary. `verify [--json]` is read-only/model-free and exits non-zero
+  exactly when catalog ambiguity or unreadability makes the feed fail closed.
+- `repair()` is dry-run by default and writes only with `--confirm`. It may drop
+  byte-identical repeated lines and an unparseable torn tail; distinct `seq` or
+  `report_key` conflicts refuse without a partial rewrite. A confirmed repair
+  holds the append lock for plan/write, preserves every published identity,
+  commits a non-overwriting timestamped backup first, and replaces the catalog
+  by staged fsync + rename; operational failures are concise CLI errors.
 - Retention asks the catalog for unpublished debt before pruning. Publication
   and retention share one artifact-derived publishability predicate; uncertain
   candidates are retried by publication and protected from deletion. Published

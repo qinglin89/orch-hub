@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-14
-verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
+last-updated: 2026-08-16
+verified-against: de96dfad26bf128e6dae055897d00fb4f9f72fe0
 ---
 
 # Architecture
@@ -85,7 +85,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
-| Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; consumers decide protocol evolution |
+| Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; confirmed repair may remove only identity-preserving redundant/torn bytes after a durable non-overwriting backup; consumers decide protocol evolution |
 | Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback; never gates |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
 | Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
@@ -197,6 +197,11 @@ routes are read-only. Published entries
 remain auditable after retention prunes their artifacts; the hub exposes
 integrity/unavailability and leaves interpretation or protocol-evolution
 decisions to external consumers.
+The local operator CLI audits catalog parsing/identity ambiguity and each
+entry's contained artifact state without evaluating or writing. Its only repair
+rewrites provably redundant duplicate lines or an unparseable torn tail after
+explicit confirmation, under the publication lock and after preserving the
+original bytes in a collision-safe backup; distinct identity conflicts refuse.
 
 Subscription usage is a sidecar display flow: `UsageService` reads Claude
 Code's whitelisted structured utilization cache first, then merges the optional
@@ -242,8 +247,9 @@ launch/intake gates.
   evaluation evidence or target state.
 - Report catalog owns cross-repo publication identity/order, reconciliation,
   provenance/hash manifests, bundle containment, byte-exact artifact
-  verification reads, and publication-debt retention protection—not evaluation
-  judgment or protocol-evolution policy.
+  verification reads, publication-debt retention protection, and explicit local
+  audit/identity-preserving repair—not evaluation judgment or protocol-evolution
+  policy.
 - Evaluation API/dashboard presentation owns sidecar routing, readback, doctor
   gating, job polling, history comparison; never gates run control or inlines
   raw logs.

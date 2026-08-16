@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-16
+verified-against: de96dfad26bf128e6dae055897d00fb4f9f72fe0
 ---
 
 # APIs: CLI
@@ -119,6 +119,33 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   available; disabled, unavailable, or malformed config exits non-zero.
 - Non-goal: does not generate evaluation artifacts, call the model, inspect
   repos, start/stop runs, or gate run-control flows.
+
+## `orch-hub eval catalog verify [--json]`
+
+- Purpose: diagnose `<data-dir>/report-catalog/catalog.jsonl` and the artifact
+  sets its entries address without changing either.
+- Output: catalog line/entry counts, located parse/duplicate/identity defects,
+  and retained/pruned/incomplete/damaged/unreadable/unaddressable artifact
+  counts; human output includes repair paths and `--json` emits the stable model
+  shape.
+- Exit code: `0` iff the catalog can serve a feed; duplicate `seq`/`report_key`
+  or an unreadable catalog exits non-zero, while per-entry artifact defects stay
+  visible without claiming traversal is down.
+- Non-goal: performs no evaluation or model call and never repairs automatically.
+
+## `orch-hub eval catalog repair [--json] [--confirm]`
+
+- Purpose: plan or explicitly apply the only safe catalog rewrite.
+- Behavior: without `--confirm`, reports a dry-run plan. A confirmed repair may
+  remove only byte-identical repeated lines and an unparseable torn tail; it
+  refuses distinct identity conflicts, preserves every published `seq` and
+  `report_key`, and writes a collision-safe timestamped backup before atomic
+  replacement under the catalog append lock.
+- Exit code: follows whether the on-disk catalog serves the feed after the
+  attempt; refusal, an unapplied plan against ambiguity, disabled evaluation,
+  malformed config, or a reported catalog-domain failure returns `1`. Such
+  failures print one `error:` line on stderr and no partial JSON result.
+- Non-goal: does not alter evaluation artifacts or run at service startup.
 
 ## `orch-hub-statusline`
 
