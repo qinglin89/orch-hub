@@ -8,9 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 DEFAULT_AI_NATIVE_PATH = Path(
-    "/Users/linqing/workplace/github.com/qinglin89/ai-native-development"
+    "/Users/linqing/workplace/github.com/qinglin89/mandrel"
 )
-"""Default ai-native-development checkout that owns the managed-repo registry."""
+"""Default mandrel checkout that owns the managed-repo registry."""
 
 DEFAULT_HOST = "127.0.0.1"
 """Default HTTP bind address: loopback only; see the deployment docs."""
@@ -389,12 +389,15 @@ class Config:
 
     @property
     def aii2_bin(self) -> Path:
-        """Absolute path to the aii-2 executable inside ai-native-development.
+        """Absolute path to the mandrel executable inside its checkout.
 
-        orch-hub invokes aii-2 by absolute path rather than relying on it being
-        on PATH, since it ships as a repo-local script, not a system install.
+        orch-hub invokes it by absolute path rather than relying on it being on
+        PATH, since it ships as a repo-local script, not a system install. The
+        script moved to `bin/mandrel` when the canonical repository took the
+        `mandrel` name; this property keeps its old name until the rest of the
+        rename lands here.
         """
-        return self.ai_native_path / "aii-2"
+        return self.ai_native_path / "bin" / "mandrel"
 
     @property
     def claude_transcripts_dir(self) -> Path:

@@ -72,7 +72,7 @@ def test_ai_native_path_empty_or_whitespace_counts_as_unset():
 
 def test_derived_paths():
     cfg = Config(ai_native_path=Path("/root/ai-native"))
-    assert cfg.aii2_bin == Path("/root/ai-native/aii-2")
+    assert cfg.aii2_bin == Path("/root/ai-native/bin/mandrel")
     assert cfg.registry_file == Path("/root/ai-native/.registry/repos.local.json")
 
 

@@ -102,7 +102,7 @@ def _aii_status_check(
         result = runner([config.aii2_bin, "status", repo.path])
     except CommandNotFoundError:
         return ReadinessCheck(
-            "aii_status", False, f"aii-2 not found: {config.aii2_bin}"
+            "aii_status", False, f"mandrel not found: {config.aii2_bin}"
         )
     if result.ok:
         return ReadinessCheck("aii_status", True, "aii-2 status ok")
