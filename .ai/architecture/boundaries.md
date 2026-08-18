@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Architecture: Ownership and Boundaries
@@ -12,8 +12,8 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 
 | Data | Source Of Truth | Architecture Rule |
 |---|---|---|
-| Managed repos | ai-native-development registry / `aii-2` | hub reads/normalizes; never invents membership |
-| Launch readiness | computed from repo files, git state, `aii-2 status` | fails closed; gates run launch |
+| Managed repos | mandrel registry / `mandrel` | hub reads/normalizes; never invents membership |
+| Launch readiness | computed from repo files, git state, `mandrel status` | fails closed; gates run launch |
 | Task ids, summaries, status, blockers | target repo `.ai-tasks/index.md` + task frontmatter | read-only inventory; runtime overlays never replace task status |
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
@@ -75,7 +75,7 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 
 ## External Dependencies
 
-- ai-native-development repository and its `aii-2` CLI.
+- Mandrel repository and its repo-local `bin/mandrel` CLI.
 - Managed target repos with deployed `.cursor/orchestrator/` payloads.
 - Git CLI for repo state, display metadata, and evaluation commit windows.
 - `/usr/bin/caffeinate` on macOS for long-running orchestrator subprocesses.
@@ -90,4 +90,3 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 - Codex local session rollouts for read-only rate-limit display; Codex is
   never invoked for usage.
 - Tailscale or an equivalent private network.
-

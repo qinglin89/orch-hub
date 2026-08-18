@@ -1,13 +1,13 @@
 ---
-last-updated: 2026-08-16
-verified-against: de96dfad26bf128e6dae055897d00fb4f9f72fe0
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # APIs: CLI
 
 ## `python -m orch_hub.cli repos`
 
-- Purpose: list managed repos discovered from ai-native-development with readiness.
+- Purpose: list managed repos discovered from mandrel with readiness.
 - Output: human-readable status lines, followed by failed readiness reasons for non-ready repos.
 - Source: registry adapter plus readiness checker.
 - Non-goal: does not start orchestrators.

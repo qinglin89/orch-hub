@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-14
-verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Project Overview
@@ -18,7 +18,7 @@ notifications, remote intake-task, the task-evaluation foundation,
 deterministic static task metrics, the optional semantic task evaluator, and
 the global evaluation-report feed:
 read the
-ai-native-development local registry, list
+mandrel local registry, list
 managed repos, report launch
 readiness, parse each repo's `.ai-tasks/` index plus task frontmatter, expose
 those payloads through HTTP, require `ORCH_HUB_TOKEN` on every non-health HTTP
@@ -73,7 +73,8 @@ and links back to existing per-task detail.
 
 ## Scope
 
-- Discover managed repos from ai-native-development, not from GitHub and not from a separate orch-hub registry.
+- Discover managed repos from mandrel, not from GitHub and not from a separate
+  orch-hub registry.
 - Inspect each managed repo for orchestrator launch readiness.
 - List active, waiting, pending, and blocked tasks per repo.
 - Launch and supervise one orchestrator run per repo at a time, each run attached to one `.ai-tasks/<task-id>.md` task.
@@ -139,7 +140,8 @@ and links back to existing per-task detail.
 - Do not run more than one orchestrator at a time in the same target repo.
 - Do not treat unconfirmed intake drafts as active tasks or expose them through
   task inventory.
-- Do not hand-edit deployed protocol/orchestrator copies in target repos; canonical changes belong in ai-native-development.
+- Do not hand-edit deployed protocol/orchestrator copies in target repos;
+  canonical changes belong in mandrel.
 - Do not treat subscription usage as repo health or launch readiness, and do
   not start model turns solely to refresh quota data.
 - Do not rank global evaluation reports, decide protocol evolution, or create
@@ -155,7 +157,7 @@ and links back to existing per-task detail.
 - Local deployment: launchd user-agent template and docs on macOS.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
 - Notifications: Bark is the implemented v1 push path; IM bots are later.
-- External command/data sources: `aii-2` from ai-native-development; Claude CLI
+- External command/data sources: `mandrel` from the mandrel checkout; Claude CLI
   for remote intake, semantic evaluation, and model-free local `/usage`
   refreshes; Claude's local utilization cache; local Codex session rollout
   files for read-only rate-limit display.
@@ -211,7 +213,10 @@ docs/
 
 ## External Project Facts
 
-- ai-native-development root: `/Users/linqing/workplace/github.com/qinglin89/ai-native-development`.
-- Default registry source should be `aii-2 registry list --json`; fallback is `<ai-native-development>/.registry/repos.local.json`.
-- The canonical orchestrator lives at `ai-native-development/canonical/orchestrator/orchestrator.py` and is deployed into target repos at `.cursor/orchestrator/orchestrator.py`.
+- Mandrel root: `/Users/linqing/workplace/github.com/qinglin89/mandrel`.
+- Default registry source is `<mandrel>/bin/mandrel registry list --json`;
+  fallback is `<mandrel>/.registry/repos.local.json`.
+- The canonical orchestrator lives at
+  `mandrel/canonical/orchestrator/orchestrator.py` and is deployed into target
+  repos at `.cursor/orchestrator/orchestrator.py`.
 - The inspected orchestrator is a local CLI scheduler. It runs a dev/review loop over one `.ai-tasks/` task, selects dev or review turns from task file status and session log, pauses for human input through `ask_human`, and uses stdin unless launched with `--control-dir`.

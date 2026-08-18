@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Modules
@@ -13,7 +13,7 @@ Full responsibilities live in the detail files below.
 | Config | `orch_hub/config.py` | env defaults/overrides; token/Bark/eval/Claude/Codex settings; derived paths |
 | Launchd operations | `orch_hub/launchd.py` | deploy/update/lifecycle/status; Bark URL surfacing |
 | Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
-| Registry | `orch_hub/registry.py` | managed repo discovery from `aii-2` or registry file |
+| Registry | `orch_hub/registry.py` | managed repo discovery from `mandrel` or registry file |
 | Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch readiness checks |
 | Git metadata | `orch_hub/git_meta.py` | best-effort producer-capped commit reads and caller-capped path-patch streams for display/evidence |
 | Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |

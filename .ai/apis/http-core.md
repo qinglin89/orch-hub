@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-31
-verified-against: 6e2e4a1f5d12a42cfb5e52bd95dbe9a9fb06f090
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # APIs: HTTP — Core
@@ -142,12 +142,14 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   `app.state.run_monitor`, starts it only during FastAPI lifespan startup, and
   stops it during shutdown; app construction alone starts no worker thread.
 - `Config` is loaded from environment by default. Current variables are
-  `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
+  `ORCH_HUB_MANDREL_PATH`, `ORCH_HUB_TOKEN`, `ORCH_HUB_HOST`,
   `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
   `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
   `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
-  `ORCH_HUB_EVAL_RETENTION`, and `ORCH_HUB_CODEX_HOME`; surrounding whitespace
-  is stripped and empty/whitespace-only values count as unset.
+  `ORCH_HUB_EVAL_RETENTION`, and `ORCH_HUB_CODEX_HOME`; the legacy
+  `ORCH_HUB_AI_NATIVE_DEPLOYMENT` remains a one-release fallback for the
+  mandrel path; surrounding whitespace is stripped and empty/whitespace-only
+  values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;

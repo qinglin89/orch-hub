@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Modules: Service Surface
@@ -124,7 +124,7 @@ Location: `orch_hub/launchd.py`
 
 Responsibility: manage the singleton macOS launchd user agent
 `com.qinglin89.orch-hub`. `deploy_service` / `update` resolve the checkout,
-ai-native-development path, token, host/port/data dir, plist path, log dir,
+mandrel path, token, host/port/data dir, plist path, log dir,
 `PATH`, and optional Bark URL; render the installed plist from
 `deploy/launchd/com.qinglin89.orch-hub.plist`; install/update the checkout
 `.venv` package; validate with `plutil`; boot out any loaded service; and

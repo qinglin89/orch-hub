@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Modules: Core
@@ -58,16 +58,17 @@ notifications, semantic.
 
 Location: `orch_hub/config.py`
 
-Responsibility: define `ORCH_HUB_AI_NATIVE_DEPLOYMENT` override, default
-ai-native-development path, `ORCH_HUB_TOKEN` bearer-token loading,
+Responsibility: define `ORCH_HUB_MANDREL_PATH` override (with
+`ORCH_HUB_AI_NATIVE_DEPLOYMENT` as a one-release legacy fallback), default
+mandrel path, `ORCH_HUB_TOKEN` bearer-token loading,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
 `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
 `ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CLAUDE_HOME`, `ORCH_HUB_CODEX_HOME`, and
-derived Claude transcript, `aii-2`, and registry file paths:
+derived Claude transcript, mandrel executable, and registry file paths:
 
 ```text
-/Users/linqing/workplace/github.com/qinglin89/ai-native-development
+/Users/linqing/workplace/github.com/qinglin89/mandrel
 ```
 
 All current environment variables strip surrounding whitespace. Empty or
@@ -145,13 +146,18 @@ models/logs import cycle.
 
 Location: `orch_hub/registry.py`
 
-Responsibility: prefer `<ai-native-development>/aii-2 registry list --json`; if unavailable or failing, fallback to `<ai-native-development>/.registry/repos.local.json`. Validate and normalize JSON-array entries into `ManagedRepo`.
+Responsibility: prefer `<mandrel>/bin/mandrel registry list --json`; if
+unavailable or failing, fallback to `<mandrel>/.registry/repos.local.json`.
+Validate and normalize JSON-array entries into `ManagedRepo`.
 
 ## Readiness
 
 Location: `orch_hub/readiness.py`
 
-Responsibility: check repo filesystem, deployed manifest, orchestrator script, venv Python, task index, clean git tree, and `aii-2 status <repo>`. Reports keep all seven checks internally and fail closed when paths or tools are missing.
+Responsibility: check repo filesystem, deployed manifest, orchestrator script,
+venv Python, task index, clean git tree, and `mandrel status <repo>`. Reports
+keep all seven checks internally and fail closed when paths or tools are
+missing; the public check key remains `aii_status` for API compatibility.
 
 ## Git Metadata
 

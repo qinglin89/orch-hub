@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Project Map
@@ -61,7 +61,7 @@ behavior and rationale stay in the owning doc.
 |---|---|
 | config | env overrides; tokens/URLs; eval/usage settings; derived paths |
 | models | shared data shapes; run-record repo reconstruction |
-| registry | managed-repo discovery from `aii-2` or registry file |
+| registry | managed-repo discovery from `mandrel` or registry file |
 | readiness | fail-closed launch readiness checks |
 | git_meta | best-effort commit/patch metadata; display/evidence only |
 | housekeeping | display-only `.ai/.housekeeping-pending` state |

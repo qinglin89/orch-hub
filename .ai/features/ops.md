@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Features: Operations Surfaces
@@ -102,7 +102,7 @@ Implemented behavior:
   push is enabled because the URL embeds a device-key secret.
 - `deploy/launchd/com.qinglin89.orch-hub.plist` is the plist-structure source
   of truth. Placeholders cover the checkout, token, host/port,
-  ai-native-development checkout, data dir, optional Bark URL, log dir, and
+  mandrel checkout, data dir, optional Bark URL, log dir, and
   `PATH`. Required placeholders fail loudly before writing/loading; unknown
   optional `REPLACE-...` placeholders from a newer template render as `""` so
   an older installed CLI can update a newer checkout when empty means disabled.

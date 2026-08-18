@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Features: Core
@@ -12,7 +12,9 @@ evaluation layers: `evaluation.md` + `evaluation-reporting.md`.
 
 Status: implemented
 
-Description: Load managed repos from ai-native-development and report whether each is ready for orchestration. This validates the registry and target-repo deployment assumptions before service/UI work.
+Description: Load managed repos from mandrel and report whether each is ready
+for orchestration. This validates the registry and target-repo deployment
+assumptions before service/UI work.
 
 Modules: config, registry, readiness, git_meta, housekeeping, models,
 subprocess_utils, cli.
@@ -22,9 +24,14 @@ APIs: `python -m orch_hub.cli repos`, `python -m orch_hub.cli repos --json`,
 
 Implemented behavior:
 
-- Discovery invokes `<ai-native-development>/aii-2 registry list --json` by absolute path, then falls back to `<ai-native-development>/.registry/repos.local.json` when the command is unavailable or exits non-zero.
+- Discovery invokes `<mandrel>/bin/mandrel registry list --json` by absolute
+  path, then falls back to `<mandrel>/.registry/repos.local.json` when the
+  command is unavailable or exits non-zero.
 - Registry data is a JSON array of `{name, path, manifest}`. Missing fallback file means no repos; invalid JSON or malformed entries raise an operational error.
-- Readiness runs seven checks in stable order: repo path, manifest, deployed orchestrator script, orchestrator venv Python, `.ai-tasks/index.md`, clean `git status --porcelain`, and passing `aii-2 status <repo>`.
+- Readiness runs seven checks in stable order: repo path, manifest, deployed
+  orchestrator script, orchestrator venv Python, `.ai-tasks/index.md`, clean
+  `git status --porcelain`, and passing `mandrel status <repo>`; the public
+  check key remains `aii_status` for compatibility.
 - Public readiness JSON serializes `ready` and only failed checks as `{name, message}` reasons; ready repos have `checks: []`.
 - `git_meta` reads display-only commit history separately from readiness:
   `latest_commit(repo)` returns `CommitInfo | None`, and `read_commits(repo,
@@ -40,7 +47,9 @@ Implemented behavior:
 - `GET /api/repos/{repo_id}/commits` returns recent commits for repo detail;
   unknown repos are 404, but commit lookup failure is HTTP 200 with
   `available: false` and an empty list.
-- Tests cover registry parsing/fallbacks, every requested missing-piece readiness failure, dirty git state, `aii-2 status` failure, config, and CLI output.
+- Tests cover registry parsing/fallbacks, every requested missing-piece
+  readiness failure, dirty git state, `mandrel status` failure, config, and CLI
+  output.
 
 ## Task Inventory
 

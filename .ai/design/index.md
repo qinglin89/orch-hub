@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-08
-verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Design Principles and Decisions
@@ -8,7 +8,7 @@ verified-against: 5e1702b264129f93fc0b05ac157649aaf558af77
 ## Core Principles
 
 - Local-first control plane: orch-hub coordinates local repos and local processes on the Mac.
-- Single registry source: managed repos come from ai-native-development registry data.
+- Single registry source: managed repos come from mandrel registry data.
 - Orchestrator isolation: launch the deployed orchestrator as a subprocess; never import it.
 - Non-invasive orchestrator integration: `--control-dir` adds a file channel while preserving stdin behavior when unset.
 - File-channel boundary: questions, answers, and stop requests cross through run-dir files, not through network code inside the orchestrator.

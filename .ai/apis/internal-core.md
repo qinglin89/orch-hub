@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # APIs: Internal — Core and Usage
@@ -12,7 +12,7 @@ conventions. Evaluation/static/semantic/report-catalog contracts:
 
 ## Registry Provider
 
-Input: config with ai-native-development path.
+Input: config with mandrel path.
 
 Output: list of managed repo models.
 

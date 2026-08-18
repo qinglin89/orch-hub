@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Design: Patterns
@@ -8,7 +8,7 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 - Prefer small, reusable application functions behind both CLI and API routes.
 - Represent repo, readiness, task, run, and escalation data with typed Python models.
 - Use `pathlib.Path` for filesystem paths.
-- Use subprocess wrappers for blocking `aii-2` and `git` checks; detached
+- Use subprocess wrappers for blocking `mandrel` and `git` checks; detached
   orchestrator runs use direct `subprocess.Popen` with argument lists so the
   hub can keep a process handle and redirect output.
 - Return stable JSON from CLI commands and API endpoints from the same payload

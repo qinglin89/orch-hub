@@ -1,15 +1,16 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Design: Tradeoffs
 
-## Tradeoff: ai-native-development registry vs orch-hub registry
+## Tradeoff: mandrel registry vs orch-hub registry
 
-- Chose: ai-native-development registry.
+- Chose: mandrel registry.
 - Reason: deployment tooling already tracks managed repos locally, and duplicate registries would drift.
-- Consequence: orch-hub startup depends on ai-native-development path or `aii-2` availability.
+- Consequence: orch-hub startup depends on the mandrel path or executable
+  availability.
 
 ## Tradeoff: subprocess boundary vs importing orchestrator code
 

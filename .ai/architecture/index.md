@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Architecture
@@ -10,7 +10,7 @@ runs, answer human prompts, read run state, show display-only subscription
 capacity, draft tasks via confirmed intake, and build/view read-only
 task-evaluation artifacts plus publish complete archived-task reports through a
 global feed. It coordinates existing
-systems rather than replacing them: ai-native-development remains the
+systems rather than replacing them: mandrel remains the
 registry, target repos own their task files and deployed orchestrator
 payloads, and orch-hub owns only its service surface plus external run state.
 
@@ -25,7 +25,7 @@ orch-hub service on the user's Mac
         |
         | discovers repos and checks readiness
         v
-ai-native-development / aii-2 registry
+mandrel registry / `bin/mandrel`
         |
         | points at
         v
@@ -53,7 +53,7 @@ UI / API / CLI
   call
 Application services: discovery, readiness, task inventory, run control, history
   call
-Adapters: aii-2 command, registry file, git subprocess, orchestrator subprocess,
+Adapters: mandrel command, registry file, git subprocess, orchestrator subprocess,
           control-dir files, launchd, notification backend
   operate on
 Managed repos, local service state, and external operator tools
@@ -84,7 +84,7 @@ tokens, Bark endpoints) must not be logged or displayed.
 
 ## Invariants
 
-- ai-native-development registry is the source of managed repo truth.
+- Mandrel's registry is the source of managed repo truth.
 - orch-hub never imports orchestrator code.
 - The orchestrator remains usable manually when `--control-dir` is unset.
 - Control-dir adapter code stays file-channel only.

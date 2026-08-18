@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-27
-verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
+last-updated: 2026-08-18
+verified-against: 29e4c53412a0960cba31118549551de691b1af70
 ---
 
 # Conventions
@@ -13,7 +13,7 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 - Keep subprocess invocations argument-list based; avoid shell strings unless there is a specific reason.
 - Use direct `subprocess.Popen` for detached long-running orchestrator runs;
   the shared blocking subprocess wrapper is for command checks such as `git`
-  and `aii-2`.
+  and `mandrel`.
 - Keep CLI output human-readable by default and stable JSON with `--json`.
 - Keep functions small enough to reuse from both CLI and FastAPI routes.
 
@@ -36,12 +36,13 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
   unrecognized task status, unacknowledged `blocked` task, or readiness failure
   should prevent subprocess launch.
 - Return structured reasons for readiness failures.
-- Include concise command output for failed `aii-2 status` checks.
+- Include concise command output for failed `mandrel status` checks.
 - Registry loading should tolerate a missing registry file as an empty repo list, but invalid JSON should be an explicit error.
 - CLI should return non-zero for operational errors.
 - CLI config parsing errors should be reported as `error: ...` with non-zero
   exit, not as uncaught tracebacks.
-- Invoke `aii-2` through the configured absolute path (`Config.aii2_bin`), not by relying on PATH.
+- Invoke mandrel through the configured absolute path (`Config.mandrel_bin`),
+  not by relying on PATH.
 - Empty or whitespace-only environment config values count as unset; malformed
   explicit values such as an invalid `ORCH_HUB_PORT` should fail loudly.
 - Evaluation disabled mode should fail closed at service/API boundaries and
@@ -77,13 +78,14 @@ verified-against: 2bc59e6a5e02c101b912b35b561835b8a65f9d0d
 ## Testing Conventions
 
 - Use pytest.
-- Tests must not depend on real user repos or the real ai-native-development registry.
+- Tests must not depend on real user repos or the real mandrel registry.
 - Use `tmp_path` for fake repos and registry files.
-- Mock subprocess for dirty git trees and `aii-2 status` failures.
+- Mock subprocess for dirty git trees and `mandrel status` failures.
 - Inject fake spawners, clocks, and pid probes for run-manager tests instead
   of starting real orchestrator subprocesses.
 - Prefer testing structured return values before testing text formatting.
-- Inject fake subprocess runners in tests instead of calling real managed repos or the real ai-native-development registry.
+- Inject fake subprocess runners in tests instead of calling real managed repos
+  or the real mandrel registry.
 - Inject fake record loaders, git runners, and clocks for task-evaluation tests
   instead of reading real run history or invoking real git.
 - Inject fake semantic backends/runners for Layer 2 evaluation tests; do not
