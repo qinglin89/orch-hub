@@ -261,9 +261,17 @@ the selected profiles and **Backend** — orch-hub never hardcodes model policy.
 offer them), and **Custom** (explicit overrides for that role). Backend is
 shared — one run has one backend — and can be inherited only while both roles
 are Default. Preset roles are read-only; only the role set to Custom exposes
-editable fields, and the `--dev-agent` choice is offered only for the cc-codex
-backend, where a Custom DEV must send its complete agent/model/effort tuple. The
-plan-gate toggle is orthogonal and stays available in every mode. The dialog
+editable fields. On the cc-codex backend each Custom role also picks its own CLI
+agent and sends its complete agent/model/effort tuple, because an omitted agent
+would resolve from profile/env/config and pair with the shown model behind your
+back. A Custom role's model and effort choices come from the option catalog the
+same query publishes, filtered by the backend, role, and agent selected, so
+switching a role's agent re-filters its effort vocabulary instead of leaving a
+value the other agent refuses at startup. Where the payload publishes no catalog
+— for that agent, or at all — the fields stay free text and say why; orch-hub
+never substitutes a list of its own. A model outside the catalog stays reachable
+through the model select's **Other** choice, since the CLI still launches one.
+The plan-gate toggle is orthogonal and stays available in every mode. The dialog
 POSTs a structured `launch` selection carrying `dev_mode`/`review_mode` to
 `POST /api/runs` and the hub builds the orchestrator arguments from it (the
 legacy run-wide `mode` and raw `extra_args` callers stay supported). If the
