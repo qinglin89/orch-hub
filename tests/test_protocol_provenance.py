@@ -69,11 +69,11 @@ def write_lock(
     *,
     commit: object = COMMIT,
     payload: object = PAYLOAD,
-    source_repo: object = "ai-native-deployment",
+    source_repo: object = "mandrel",
     schema_version: object = 1,
     targets: object | None = None,
 ) -> None:
-    """Write a deployment lock shaped like the real ``aii-2`` output.
+    """Write a deployment lock shaped like the real ``mandrel`` output.
 
     ``deployed_files`` names the whole payload, as the real lock does (117 entries
     against the manifest's 117): it is the lock that says which files the identity
@@ -132,7 +132,7 @@ def deploy_payload(
         "files": records if manifest_files is None else manifest_files,
         "schema_version": 1,
         "source_git_commit": commit,
-        "source_repo_path": "/src/ai-native-development",
+        "source_repo_path": "/src/mandrel",
         "target_repo_path": str(repo_path),
     }
     (repo_path / DEPLOY_MANIFEST_NAME).write_text(
@@ -172,7 +172,7 @@ def test_read_deploy_lock_validates_and_normalizes(tmp_path: Path) -> None:
     # normalized once here rather than at every consumer.
     assert snapshot.source_git_commit == COMMIT
     assert snapshot.canonical_payload_sha256 == PAYLOAD
-    assert snapshot.source_repo == "ai-native-deployment"
+    assert snapshot.source_repo == "mandrel"
     assert snapshot.lock_schema_version == 1
     assert snapshot.detail is None
     assert snapshot.stability == STABILITY_UNVERIFIED
@@ -747,7 +747,7 @@ def test_settle_ignores_non_identity_lock_fields(tmp_path: Path) -> None:
     assert settled.stability == STABILITY_STABLE
     # The capture's own identity fields are frozen; the end check writes only the
     # verdict.
-    assert settled.source_repo == "ai-native-deployment"
+    assert settled.source_repo == "mandrel"
     assert settled.lock_schema_version == 1
 
 
@@ -1003,7 +1003,7 @@ def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
         available=True,
         source_git_commit=COMMIT,
         canonical_payload_sha256=PAYLOAD,
-        source_repo="ai-native-deployment",
+        source_repo="mandrel",
         lock_schema_version=1,
         captured_ts=CAPTURED_AT.isoformat(),
         stability=STABILITY_DRIFTED,

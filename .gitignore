@@ -1,17 +1,3 @@
-# BEGIN ai-native-deployment
-/.ai-deploy-manifest.json
-/.ai-protocol/
-/.cursor/
-/.codex/
-/.claude/
-/CLAUDE.md
-/ai-coding*.md
-/.ai-tasks/
-__pycache__/
-*.py[cod]
-!/.ai-deploy-lock.json
-# END ai-native-deployment
-
 # orch-hub Python dev environment
 /.venv/
 /.pytest_cache/

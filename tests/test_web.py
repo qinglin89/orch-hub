@@ -17,8 +17,8 @@ from orch_hub import api
 from orch_hub.config import Config
 
 TOKEN = "test-token"
-FAKE_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"), token=TOKEN)
-NO_TOKEN_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"))
+FAKE_CONFIG = Config(mandrel_path=Path("/fake/mandrel"), token=TOKEN)
+NO_TOKEN_CONFIG = Config(mandrel_path=Path("/fake/mandrel"))
 SHELL_PATHS = ("/", "/app.js", "/styles.css")
 
 

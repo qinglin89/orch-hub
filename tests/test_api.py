@@ -2,7 +2,7 @@
 
 Monkeypatches the shared application functions (exactly as the CLI tests do) so
 the HTTP wiring, error responses, and JSON serialization are exercised without
-touching real repos, subprocesses, or the ai-native-development registry.
+touching real repos, subprocesses, or the mandrel registry.
 """
 
 from __future__ import annotations
@@ -76,8 +76,8 @@ from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_store import STATUS_MISSING
 
 TOKEN = "test-token"
-FAKE_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"), token=TOKEN)
-NO_TOKEN_CONFIG = Config(ai_native_path=Path("/fake/ai-native-development"))
+FAKE_CONFIG = Config(mandrel_path=Path("/fake/mandrel"), token=TOKEN)
+NO_TOKEN_CONFIG = Config(mandrel_path=Path("/fake/mandrel"))
 
 
 def make_repo(name: str = "r") -> ManagedRepo:
@@ -256,7 +256,7 @@ def test_repos_reports_only_failed_checks(monkeypatch):
 
 def test_repos_registry_error_returns_500(monkeypatch):
     def boom(config):
-        raise RegistryError("invalid registry JSON from aii-2")
+        raise RegistryError("invalid registry JSON from mandrel")
 
     monkeypatch.setattr(api, "discover_repos", boom)
     resp = build_client().get("/api/repos")
@@ -681,7 +681,7 @@ def make_run_repo(
 
 def run_config(tmp_path: Path) -> Config:
     return Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         token=TOKEN,
         data_dir=tmp_path / "hub-data",
     )
@@ -3092,7 +3092,7 @@ EVAL_CLOCK = dt.datetime(2026, 7, 22, 9, 0, 0, tzinfo=dt.timezone.utc)
 
 def eval_config(tmp_path: Path, *, enabled: bool = True) -> Config:
     return Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         token=TOKEN,
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=enabled,
@@ -3935,7 +3935,7 @@ def test_report_feed_serializes_global_identity_hashes_and_provenance(
 
 def test_report_feed_serializes_the_effective_protocol_identity(tmp_path, monkeypatch):
     # The cohort key the feed exists to hand an external consumer: the deployed
-    # ai-native-development commit this report's runs verifiably ran under, with
+    # mandrel commit this report's runs verifiably ran under, with
     # the deploy lock's digest of the payload that commit deployed, taken from the
     # durable evidence pack and never from the repo's current deployment.
     revision = "6b62754694c289fc8822562cec22ab774e071b2c"
@@ -4639,7 +4639,7 @@ def test_disabling_evaluation_leaves_core_run_control_intact(tmp_path, monkeypat
     repo = make_run_repo(tmp_path)
     manager, _spawner = make_run_manager(tmp_path)
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         token=TOKEN,
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=False,

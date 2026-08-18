@@ -871,7 +871,7 @@ def create_app(
         """Minimal public liveness probe.
 
         Deliberately free of configuration detail (it used to report
-        ``ai_native_path``): this is the one unauthenticated route, so it
+        ``mandrel_path``): this is the one unauthenticated route, so it
         must not disclose anything about the deployment.
         """
         return {"status": "ok"}

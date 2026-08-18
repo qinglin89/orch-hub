@@ -1,9 +1,9 @@
 """Per-run protocol provenance: the deployed protocol identity a run ran under.
 
-``aii-2`` deploys the canonical protocol payload from ai-native-development into
+``mandrel`` deploys the canonical protocol payload from its own repository into
 each managed repo and writes two receipts at its root. ``.ai-deploy-lock.json``
-names the payload: ``source_git_commit`` (the ai-native-development commit whose
-canonical tree those bytes correspond to) and ``canonical_payload_sha256`` (a
+names the payload: ``source_git_commit`` (the mandrel commit whose canonical
+tree those bytes correspond to) and ``canonical_payload_sha256`` (a
 digest over the payload's file list). Both are branch-independent — a branch name
 moves, and two repos on the same branch can hold different payloads — which is
 what makes the commit usable as the cohort key a downstream consumer groups
@@ -35,7 +35,7 @@ comparison against the *actual* deployed files at a boundary the hub can trust.
 
 There are two such boundaries, checked by different mechanisms:
 
-- **Launch** — the readiness gate. ``aii-2 status`` compares every deployed file
+- **Launch** — the readiness gate. ``mandrel status`` compares every deployed file
   against the manifest (and the manifest against the current canonical tree) and
   exits nonzero on any drift, so a run exists at all only because its repo's
   files matched their receipt immediately before the capture
@@ -54,12 +54,12 @@ throughout — which is the strongest claim two point observations support.
 
 The end check reads the *manifest*, not the lock, because only the manifest
 vouches for the deployed bytes: the lock hashes each file's canonical source, and
-``aii-2`` renders a few of them into their target (this repo's ``CLAUDE.md``
+``mandrel`` renders a few of them into their target (this repo's ``CLAUDE.md``
 among them), so a target-versus-lock comparison would report drift on every
 deploy. The two receipts are joined by their shared ``source_git_commit``; a
 receipt naming a different one describes a different deploy and is refused
 rather than used. The lock's aggregate digest is deliberately *not* recomputed
-from its own file list: that formula is ``aii-2``'s internal contract, and
+from its own file list: that formula is ``mandrel``'s internal contract, and
 re-deriving it here would make the next lock-schema change read as a damaged
 deployment.
 
@@ -115,7 +115,7 @@ Because the two writes never overlap, this artifact needs no cross-writer lock
 atomic rename is enough to keep readers from seeing a partial file.
 
 Capture does **not** gate launch. Readiness already fails closed on deployment
-integrity (``manifest_exists``, ``aii-2 status``), and provenance is evidence,
+integrity (``manifest_exists``, ``mandrel status``), and provenance is evidence,
 like commit metadata: a missing or malformed lock makes a run publish *no*
 revision, with an operator-readable reason, rather than refusing the run. Cohort
 admission policy belongs to the consumer of the report feed, not to the hub.
@@ -230,7 +230,7 @@ class ProtocolIdentity:
     The unit of publication. A consumer cohorting reports asks two questions of
     the same deployment — which canonical revision produced it, and which bytes
     that revision produced — and the answers are only jointly meaningful: the
-    commit alone does not pin the payload (``aii-2`` refuses to state a commit for
+    commit alone does not pin the payload (``mandrel`` refuses to state a commit for
     a payload that does not match that tree, but the hub reads a receipt, not the
     tree), and the digest alone names bytes with no place in any history. Carrying
     them as one value is what keeps a caller from publishing half a fact.
@@ -691,7 +691,7 @@ def verify_payload(repo_path: Path, expected_commit: str) -> PayloadCheck:
     The payload's file set comes from the lock and the manifest must match it
     exactly (see the module header): a comparison over the manifest's rows alone
     verifies whatever subset the manifest happens to list. Paths are compared as
-    the receipts spell them — ``aii-2`` writes the same string in both — so a
+    the receipts spell them — ``mandrel`` writes the same string in both — so a
     receipt that respelled one fails closed rather than being normalized into an
     agreement it does not state.
 
@@ -842,7 +842,7 @@ def _deployed_targets(lock: dict) -> tuple[frozenset[str] | None, str | None]:
     one the hub can hold the tree to.
 
     Only ``target_relative_path`` is read. The canonical digests beside it hash the
-    payload's *sources*, which ``aii-2`` renders per target for a few files, so
+    payload's *sources*, which ``mandrel`` renders per target for a few files, so
     they say nothing about the deployed bytes (that is the manifest's job).
     """
     deployed = lock.get("deployed_files")
@@ -877,7 +877,7 @@ def _payload_record(key: object, record: object) -> tuple[str, str, int] | None:
     that the payload could not be verified — not a hash of a file outside the tree.
 
     ``target_relative_path`` wins over the dict key when both are present, matching
-    what ``aii-2``'s own status check does with the same records.
+    what ``mandrel``'s own status check does with the same records.
     """
     if not isinstance(record, dict):
         return None
@@ -977,7 +977,7 @@ def capture_protocol(
 
     Called after the readiness gates and before the orchestrator is spawned, so
     the captured identity is the one the run's first session actually loads —
-    and, because those gates include ``aii-2 status``, one whose deployed files
+    and, because those gates include ``mandrel status``, one whose deployed files
     were compared against their receipt moments earlier. That gate is the launch
     boundary; nothing is re-hashed here.
 

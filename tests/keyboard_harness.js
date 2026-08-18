@@ -2781,7 +2781,7 @@ async function scenarioStaleRoute() {
   );
 
   // Starting an intake routes to the new review view on success, and its POST
-  // runs the readiness checks (git / aii-2 subprocesses), so it can easily
+  // runs the readiness checks (git / mandrel subprocesses), so it can easily
   // outlive the repo page it was submitted from.
   route("POST", "/api/intakes", { intake_id: "i1" });
   await navigate("#/repos/" + REPO);
@@ -3653,7 +3653,7 @@ async function scenarioLiveRunReadiness() {
     ready: false,
     checks: [
       { name: "git_clean", message: "working tree has uncommitted changes" },
-      { name: "aii_status", message: "aii-2 status failed: drift detected" },
+      { name: "aii_status", message: "mandrel status failed: drift detected" },
     ],
   };
   var reposWith = function (readiness) {

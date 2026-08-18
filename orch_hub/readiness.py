@@ -1,7 +1,7 @@
 """Launch-readiness checks for a managed repo.
 
 Readiness fails closed: any missing deploy piece, a dirty working tree, a
-failing ``aii-2 status``, or a missing tool blocks launch. The report always
+failing ``mandrel status``, or a missing tool blocks launch. The report always
 carries the same seven checks in a stable order so callers (CLI today, API and
 dashboard later) can render a consistent shape.
 """
@@ -23,7 +23,7 @@ def check_readiness(
 ) -> ReadinessReport:
     """Run all readiness checks for ``repo`` and aggregate a report.
 
-    Filesystem checks always run. The git-clean and ``aii-2 status`` checks run
+    Filesystem checks always run. The git-clean and ``mandrel status`` checks run
     only when the repo path is a directory; otherwise they are recorded as
     failed (skipped) so the report keeps its seven-check shape and fails closed.
     """
@@ -99,20 +99,20 @@ def _aii_status_check(
     repo: ManagedRepo, config: Config, runner: Runner
 ) -> ReadinessCheck:
     try:
-        result = runner([config.aii2_bin, "status", repo.path])
+        result = runner([config.mandrel_bin, "status", repo.path])
     except CommandNotFoundError:
         return ReadinessCheck(
-            "aii_status", False, f"mandrel not found: {config.aii2_bin}"
+            "aii_status", False, f"mandrel not found: {config.mandrel_bin}"
         )
     if result.ok:
-        return ReadinessCheck("aii_status", True, "aii-2 status ok")
-    # aii-2 prints drift detail to stdout; prefer it for the concise reason.
+        return ReadinessCheck("aii_status", True, "mandrel status ok")
+    # mandrel prints drift detail to stdout; prefer it for the concise reason.
     detail = (
         _first_line(result.stdout)
         or _first_line(result.stderr)
         or f"exit {result.returncode}"
     )
-    return ReadinessCheck("aii_status", False, f"aii-2 status failed: {detail}")
+    return ReadinessCheck("aii_status", False, f"mandrel status failed: {detail}")
 
 
 def _first_line(text: str) -> str:

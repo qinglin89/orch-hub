@@ -573,7 +573,7 @@ class RunManager:
         from a probe). The admission coordinator calls this while holding a
         repo's section, and taking the manager-wide lock would make an intake
         start for one repo queue behind an unrelated repo's launch — the
-        ``aii-2 status`` readiness subprocess runs under that lock. Correctness
+        ``mandrel status`` readiness subprocess runs under that lock. Correctness
         does not need it: the repo section already orders this read against the
         ``run.json`` write it must observe, and each ``run.json`` is written
         atomically (same-dir temp + rename), so a concurrent write yields the old

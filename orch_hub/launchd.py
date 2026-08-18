@@ -23,7 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .config import (
-    AI_NATIVE_PATH_ENV,
     BARK_URL_ENV,
     DATA_DIR_ENV,
     DEFAULT_DATA_DIR,
@@ -73,7 +72,7 @@ class DeployOptions:
     """User-configurable launchd deployment settings."""
 
     checkout: Path | None = None
-    ai_native_path: Path | None = None
+    mandrel_path: Path | None = None
     token: str | None = None
     host: str | None = None
     port: int | None = None
@@ -89,7 +88,7 @@ class Deployment:
     """Fully resolved launchd deployment paths and environment."""
 
     checkout: Path
-    ai_native_path: Path
+    mandrel_path: Path
     token: str
     token_source: str
     host: str
@@ -241,7 +240,7 @@ def resolve_deployment(
         raise LaunchdError(f"{PORT_ENV} must be in 1-65535, got {port}")
     return Deployment(
         checkout=checkout,
-        ai_native_path=(options.ai_native_path or config.ai_native_path)
+        mandrel_path=(options.mandrel_path or config.mandrel_path)
         .expanduser()
         .resolve(),
         token=token,
@@ -424,7 +423,7 @@ def _render_plist_from_template(deployment: Deployment) -> dict:
         "REPLACE-BEARER-TOKEN": deployment.token,
         "REPLACE-ORCH-HUB-HOST": deployment.host,
         "REPLACE-ORCH-HUB-PORT": str(deployment.port),
-        "REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT": str(deployment.ai_native_path),
+        "REPLACE-MANDREL-CHECKOUT": str(deployment.mandrel_path),
         "REPLACE-ORCH-HUB-DATA-DIR": str(deployment.data_dir),
         "REPLACE-ORCH-HUB-LOG-DIR": str(deployment.log_dir),
         "REPLACE-PATH": deployment.path_env,

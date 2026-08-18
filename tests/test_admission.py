@@ -236,7 +236,7 @@ def make_hub(
     intake_readiness=passing_readiness,
 ) -> Hub:
     """Both managers over one data dir and one shared admission coordinator."""
-    config = Config(ai_native_path=root / "ai-native", data_dir=root / "hub-data")
+    config = Config(mandrel_path=root / "mandrel", data_dir=root / "hub-data")
     clock = FakeClock()
     spawner = FakeSpawner()
     agent = FakeIntakeAgent()

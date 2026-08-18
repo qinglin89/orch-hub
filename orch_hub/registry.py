@@ -1,8 +1,8 @@
-"""Discover managed repos from ai-native-development.
+"""Discover managed repos from mandrel.
 
-Preferred source is ``aii-2 registry list --json``; the fallback is
-``<ai-native-development>/.registry/repos.local.json``. Both return the same
-shape: a JSON array of ``{"name", "path", "manifest"}`` objects.
+Preferred source is ``mandrel registry list --json``; the fallback is
+``<mandrel>/.registry/repos.local.json``. Both return the same shape: a JSON
+array of ``{"name", "path", "manifest"}`` objects.
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ class RegistryError(Exception):
 def discover_repos(
     config: Config, *, runner: Runner = run_command
 ) -> list[ManagedRepo]:
-    """Return managed repos, preferring ``aii-2`` and falling back to the file.
+    """Return managed repos, preferring ``mandrel`` and falling back to the file.
 
     Order:
-      1. ``aii-2 registry list --json`` — used when it runs and exits 0.
-      2. ``<ai-native-development>/.registry/repos.local.json`` — used when the
-         command is unavailable (missing executable) or exits non-zero.
+      1. ``mandrel registry list --json`` — used when it runs and exits 0.
+      2. ``<mandrel>/.registry/repos.local.json`` — used when the command is
+         unavailable (missing executable) or exits non-zero.
 
     A missing registry file yields an empty list. Malformed JSON, or an entry
     missing a required key, raises :class:`RegistryError`. An exit-0 command is
@@ -36,7 +36,7 @@ def discover_repos(
     fall-through to the file.
     """
     raw = _load_from_command(config, runner)
-    source = "aii-2 registry list --json"
+    source = "mandrel registry list --json"
     if raw is None:
         raw = _load_from_file(config)
         source = str(config.registry_file)
@@ -44,14 +44,14 @@ def discover_repos(
 
 
 def _load_from_command(config: Config, runner: Runner) -> Any | None:
-    """Run the aii-2 registry command; return parsed JSON, or None to fall back."""
+    """Run the mandrel registry command; return parsed JSON, or None to fall back."""
     try:
-        result = runner([config.aii2_bin, "registry", "list", "--json"])
+        result = runner([config.mandrel_bin, "registry", "list", "--json"])
     except CommandNotFoundError:
         return None
     if not result.ok:
         return None
-    return _decode_json(result.stdout, "aii-2 registry list --json")
+    return _decode_json(result.stdout, "mandrel registry list --json")
 
 
 def _load_from_file(config: Config) -> Any:

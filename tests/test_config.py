@@ -11,16 +11,15 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import (
-    AI_NATIVE_PATH_ENV,
     BARK_URL_ENV,
     CLAUDE_HOME_ENV,
     CODEX_HOME_ENV,
     DATA_DIR_ENV,
-    DEFAULT_AI_NATIVE_PATH,
     DEFAULT_CLAUDE_HOME,
     DEFAULT_CODEX_HOME,
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
+    DEFAULT_MANDREL_PATH,
     DEFAULT_PORT,
     DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
@@ -34,6 +33,8 @@ from orch_hub.config import (
     HOST_ENV,
     INTAKE_EFFORT_ENV,
     INTAKE_MODEL_ENV,
+    LEGACY_MANDREL_PATH_ENV,
+    MANDREL_PATH_ENV,
     PORT_ENV,
     TOKEN_ENV,
     Config,
@@ -42,43 +43,72 @@ from orch_hub.config import (
 
 def test_default_path_when_env_absent():
     cfg = Config.from_env({})
-    assert cfg.ai_native_path == DEFAULT_AI_NATIVE_PATH
+    assert cfg.mandrel_path == DEFAULT_MANDREL_PATH
 
 
 def test_env_override():
-    cfg = Config.from_env({AI_NATIVE_PATH_ENV: "/custom/ai-native"})
-    assert cfg.ai_native_path == Path("/custom/ai-native")
+    cfg = Config.from_env({MANDREL_PATH_ENV: "/custom/mandrel"})
+    assert cfg.mandrel_path == Path("/custom/mandrel")
 
 
 def test_env_override_expands_user():
-    cfg = Config.from_env({AI_NATIVE_PATH_ENV: "~/ai-native"})
-    assert cfg.ai_native_path == Path("~/ai-native").expanduser()
-    assert not str(cfg.ai_native_path).startswith("~")
+    cfg = Config.from_env({MANDREL_PATH_ENV: "~/mandrel"})
+    assert cfg.mandrel_path == Path("~/mandrel").expanduser()
+    assert not str(cfg.mandrel_path).startswith("~")
 
 
-def test_ai_native_path_strips_surrounding_whitespace():
-    cfg = Config.from_env({AI_NATIVE_PATH_ENV: " /custom/ai-native \n"})
-    assert cfg.ai_native_path == Path("/custom/ai-native")
+def test_mandrel_path_strips_surrounding_whitespace():
+    cfg = Config.from_env({MANDREL_PATH_ENV: " /custom/mandrel \n"})
+    assert cfg.mandrel_path == Path("/custom/mandrel")
 
 
-def test_ai_native_path_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({AI_NATIVE_PATH_ENV: ""}).ai_native_path == (
-        DEFAULT_AI_NATIVE_PATH
+def test_mandrel_path_empty_or_whitespace_counts_as_unset():
+    assert Config.from_env({MANDREL_PATH_ENV: ""}).mandrel_path == (
+        DEFAULT_MANDREL_PATH
     )
-    assert Config.from_env({AI_NATIVE_PATH_ENV: "   "}).ai_native_path == (
-        DEFAULT_AI_NATIVE_PATH
+    assert Config.from_env({MANDREL_PATH_ENV: "   "}).mandrel_path == (
+        DEFAULT_MANDREL_PATH
     )
+
+
+def test_legacy_mandrel_path_env_still_resolves():
+    """A launchd plist installed before the rename carries the old key; it must
+    keep pointing the service at its checkout across a package upgrade."""
+    cfg = Config.from_env({LEGACY_MANDREL_PATH_ENV: "/legacy/checkout"})
+    assert cfg.mandrel_path == Path("/legacy/checkout")
+
+
+def test_current_mandrel_path_env_wins_over_legacy():
+    cfg = Config.from_env(
+        {MANDREL_PATH_ENV: "/current", LEGACY_MANDREL_PATH_ENV: "/legacy"}
+    )
+    assert cfg.mandrel_path == Path("/current")
+
+
+def test_blank_current_mandrel_path_env_falls_back_to_legacy():
+    """Blank counts as unset for the current name too, so a plist carrying both
+    an empty new key and a real old one resolves to the old one, not the default."""
+    cfg = Config.from_env(
+        {MANDREL_PATH_ENV: "  ", LEGACY_MANDREL_PATH_ENV: " /legacy "}
+    )
+    assert cfg.mandrel_path == Path("/legacy")
+
+
+def test_blank_legacy_mandrel_path_env_counts_as_unset():
+    assert Config.from_env(
+        {LEGACY_MANDREL_PATH_ENV: "   "}
+    ).mandrel_path == DEFAULT_MANDREL_PATH
 
 
 def test_derived_paths():
-    cfg = Config(ai_native_path=Path("/root/ai-native"))
-    assert cfg.aii2_bin == Path("/root/ai-native/bin/mandrel")
-    assert cfg.registry_file == Path("/root/ai-native/.registry/repos.local.json")
+    cfg = Config(mandrel_path=Path("/root/mandrel"))
+    assert cfg.mandrel_bin == Path("/root/mandrel/bin/mandrel")
+    assert cfg.registry_file == Path("/root/mandrel/.registry/repos.local.json")
 
 
 def test_token_defaults_to_none():
     assert Config.from_env({}).token is None
-    assert Config(ai_native_path=Path("/root/ai-native")).token is None
+    assert Config(mandrel_path=Path("/root/mandrel")).token is None
 
 
 def test_token_from_env():
@@ -183,7 +213,7 @@ def test_claude_transcripts_dir_derives_from_the_home():
 
 def test_bark_url_defaults_to_none():
     assert Config.from_env({}).bark_url is None
-    assert Config(ai_native_path=Path("/root/ai-native")).bark_url is None
+    assert Config(mandrel_path=Path("/root/mandrel")).bark_url is None
 
 
 def test_bark_url_from_env_strips_whitespace():
@@ -200,7 +230,7 @@ def test_intake_model_defaults_and_overrides():
     # Always a concrete string so the intake agent is unconditionally
     # constructible at app startup; overridden by ORCH_HUB_INTAKE_MODEL.
     assert Config.from_env({}).intake_model == DEFAULT_INTAKE_MODEL
-    assert Config(ai_native_path=Path("/root/ai-native")).intake_model == DEFAULT_INTAKE_MODEL
+    assert Config(mandrel_path=Path("/root/mandrel")).intake_model == DEFAULT_INTAKE_MODEL
     assert (
         Config.from_env({INTAKE_MODEL_ENV: "claude-sonnet-5"}).intake_model
         == "claude-sonnet-5"
@@ -213,7 +243,7 @@ def test_intake_model_defaults_and_overrides():
 def test_intake_effort_defaults_and_overrides():
     # The model's companion knob on the same intake turns, same unset rules.
     assert Config.from_env({}).intake_effort == DEFAULT_INTAKE_EFFORT
-    direct = Config(ai_native_path=Path("/root/ai-native"))
+    direct = Config(mandrel_path=Path("/root/mandrel"))
     assert direct.intake_effort == DEFAULT_INTAKE_EFFORT
     assert Config.from_env({INTAKE_EFFORT_ENV: "low"}).intake_effort == "low"
     # Empty/whitespace-only counts as unset and falls back to the default.
@@ -245,7 +275,7 @@ def test_intake_and_eval_tiers_are_independent_knobs():
 def test_evaluation_enabled_defaults_to_true():
     # Enabled by default for local use; a deployment disables it explicitly.
     assert Config.from_env({}).evaluation_enabled is True
-    assert Config(ai_native_path=Path("/root/ai-native")).evaluation_enabled is True
+    assert Config(mandrel_path=Path("/root/mandrel")).evaluation_enabled is True
 
 
 def test_evaluation_enabled_falsy_tokens_disable():
@@ -300,7 +330,7 @@ def test_eval_retention_defaults_to_bounded_cap():
     # A bounded default so evaluation artifacts cannot grow unbounded, without an
     # env var; also the dataclass default when constructed directly.
     assert Config.from_env({}).eval_retention == DEFAULT_EVAL_RETENTION
-    assert Config(ai_native_path=Path("/root/ai-native")).eval_retention == (
+    assert Config(mandrel_path=Path("/root/mandrel")).eval_retention == (
         DEFAULT_EVAL_RETENTION
     )
 

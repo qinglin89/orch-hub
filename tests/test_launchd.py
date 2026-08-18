@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import (
-    AI_NATIVE_PATH_ENV,
+    MANDREL_PATH_ENV,
     BARK_URL_ENV,
     DATA_DIR_ENV,
     HOST_ENV,
@@ -118,14 +118,14 @@ def test_deploy_writes_plist_and_bootstraps(tmp_path):
     checkout = make_checkout(tmp_path)
     plist_path = tmp_path / "LaunchAgents" / "com.qinglin89.orch-hub.plist"
     log_dir = tmp_path / "logs"
-    ai_native = tmp_path / "ai-native-development"
+    mandrel = tmp_path / "mandrel"
     data_dir = tmp_path / "data"
     runner = FakeRunner()
 
     result = deploy_service(
         DeployOptions(
             checkout=checkout,
-            ai_native_path=ai_native,
+            mandrel_path=mandrel,
             host="127.0.0.1",
             port=9876,
             data_dir=data_dir,
@@ -146,7 +146,7 @@ def test_deploy_writes_plist_and_bootstraps(tmp_path):
     assert plist["EnvironmentVariables"][TOKEN_ENV] == "generated-token"
     assert plist["EnvironmentVariables"][HOST_ENV] == "127.0.0.1"
     assert plist["EnvironmentVariables"][PORT_ENV] == "9876"
-    assert plist["EnvironmentVariables"][AI_NATIVE_PATH_ENV] == str(ai_native)
+    assert plist["EnvironmentVariables"][MANDREL_PATH_ENV] == str(mandrel)
     assert plist["EnvironmentVariables"][DATA_DIR_ENV] == str(data_dir)
     assert plist["RunAtLoad"] is True
     assert plist["KeepAlive"] is True

@@ -104,13 +104,13 @@ def test_bark_notifier_propagates_transport_failure():
 
 
 def test_build_notifier_returns_bark_backend_when_configured():
-    cfg = Config(ai_native_path=Path("/x"), bark_url=BARK_URL)
+    cfg = Config(mandrel_path=Path("/x"), bark_url=BARK_URL)
     notifier = build_notifier(cfg)
     assert isinstance(notifier, BarkNotifier)
 
 
 def test_build_notifier_returns_none_when_unconfigured():
-    assert build_notifier(Config(ai_native_path=Path("/x"))) is None
+    assert build_notifier(Config(mandrel_path=Path("/x"))) is None
 
 
 # -- run_end_notification formatting -------------------------------------------

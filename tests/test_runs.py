@@ -112,7 +112,7 @@ def failing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport(
         (
             ReadinessCheck("git_clean", False, "working tree has uncommitted changes"),
-            ReadinessCheck("aii_status", False, "aii-2 status failed: drift"),
+            ReadinessCheck("aii_status", False, "mandrel status failed: drift"),
         )
     )
 
@@ -168,7 +168,7 @@ def make_manager(
 ) -> tuple[RunManager, FakeSpawner, FakeClock]:
     spawner = spawner if spawner is not None else FakeSpawner()
     clock = clock if clock is not None else FakeClock()
-    config = Config(ai_native_path=root / "ai-native", data_dir=root / "hub-data")
+    config = Config(mandrel_path=root / "mandrel", data_dir=root / "hub-data")
     manager = RunManager(
         config,
         readiness_checker=readiness,
@@ -498,7 +498,7 @@ def test_launch_refused_when_readiness_fails(tmp_path):
 
     assert excinfo.value.reasons == (
         "git_clean: working tree has uncommitted changes",
-        "aii_status: aii-2 status failed: drift",
+        "aii_status: mandrel status failed: drift",
     )
     assert spawner.calls == []
     assert not manager.runs_dir.exists()  # gate fires before any dir is created
@@ -2194,7 +2194,7 @@ def write_deploy_lock(
                 ],
                 "schema_version": 1,
                 "source_git_commit": commit,
-                "source_repo": "ai-native-deployment",
+                "source_repo": "mandrel",
             }
         ),
         encoding="utf-8",
@@ -2298,7 +2298,7 @@ def test_a_redeploy_during_the_run_degrades_the_capture(tmp_path):
     write_deploy_lock(repo)
     manager, spawner, _ = make_manager(tmp_path)
     record = manager.start_run(repo, TASK_ID)
-    write_deploy_lock(repo, commit=OTHER_COMMIT)  # aii-2 deploy mid-run
+    write_deploy_lock(repo, commit=OTHER_COMMIT)  # mandrel deploy mid-run
 
     end_run(spawner, 0)
     manager.list_runs()
@@ -2417,7 +2417,7 @@ def test_load_records_reads_persisted_runs_without_mutating(tmp_path):
     repo = make_repo(tmp_path)
     manager, _, _ = make_manager(tmp_path)  # pid_probe returns False (dead)
     record = manager.start_run(repo, TASK_ID)
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     run_dir = manager.runs_dir / record.run_id
     run_json_before = (run_dir / "run.json").read_text(encoding="utf-8")
     events_before = (run_dir / "events.jsonl").read_text(encoding="utf-8")
@@ -2436,12 +2436,12 @@ def test_load_records_reads_persisted_runs_without_mutating(tmp_path):
 
 
 def test_load_records_missing_runs_dir_is_empty(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "nowhere")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "nowhere")
     assert load_records(config) == []
 
 
 def test_load_records_surfaces_broken_dir_as_error_stub(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     broken = config.data_dir / "runs" / "20260708T030000Z-broken"
     broken.mkdir(parents=True)  # no run.json
 

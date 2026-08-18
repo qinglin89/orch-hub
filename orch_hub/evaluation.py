@@ -174,9 +174,9 @@ read section's expected sets with it, so a v15 pack and a v16 one can disagree
 about which docs a session was measured against. ``17`` carries the **deployed
 protocol revision** each run ran under (``runs[].protocol``) and the one the
 task's runs agree on (``protocol``, from
-:func:`orch_hub.protocol_provenance.effective_protocol`) — the ai-native-development
-commit whose protocol text the sessions were actually working under, which no
-earlier pack could state at all. It is the first evidence here that a report is
+:func:`orch_hub.protocol_provenance.effective_protocol`) — the mandrel commit
+whose protocol text the sessions were actually working under, which no earlier
+pack could state at all. It is the first evidence here that a report is
 *cohortable* by: up to v16 two reports written months and several protocol
 revisions apart were indistinguishable to a consumer grouping them, so the
 question "did this change to the protocol help?" had no answer in the artifacts.

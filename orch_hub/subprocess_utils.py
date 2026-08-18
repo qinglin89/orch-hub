@@ -72,7 +72,7 @@ def run_command(
     remainder is drained and counted, and the result carries the true output
     size plus a truncation flag. Use it whenever the output size is attacker- or
     drift-controlled; the unbounded default stays for the small, fixed-shape
-    probes (``git status``, ``aii-2 status``) whose stderr callers report.
+    probes (``git status``, ``mandrel status``) whose stderr callers report.
 
     ``timeout`` means the same thing in both modes: it bounds the whole call and
     raises :class:`subprocess.TimeoutExpired` when it expires. Callers can

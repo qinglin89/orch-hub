@@ -1,7 +1,7 @@
 """Tests for managed-repo discovery.
 
 Uses temporary directories and an injected fake runner; never touches the real
-ai-native-development registry or the real ``aii-2`` command.
+mandrel registry or the real ``mandrel`` command.
 """
 
 from __future__ import annotations
@@ -30,16 +30,16 @@ SAMPLE = [
 
 
 def make_config(tmp_path: Path) -> Config:
-    return Config(ai_native_path=tmp_path)
+    return Config(mandrel_path=tmp_path)
 
 
 def ok_result(stdout: str) -> CommandResult:
-    return CommandResult(args=("aii-2",), returncode=0, stdout=stdout, stderr="")
+    return CommandResult(args=("mandrel",), returncode=0, stdout=stdout, stderr="")
 
 
 def fail_result(returncode: int = 1, stderr: str = "boom") -> CommandResult:
     return CommandResult(
-        args=("aii-2",), returncode=returncode, stdout="", stderr=stderr
+        args=("mandrel",), returncode=returncode, stdout="", stderr=stderr
     )
 
 
@@ -71,7 +71,7 @@ def test_command_unavailable_falls_back_to_file(tmp_path):
     write_registry_file(tmp_path, SAMPLE)
 
     def runner(args, **kwargs):
-        raise CommandNotFoundError("aii-2")
+        raise CommandNotFoundError("mandrel")
 
     repos = discover_repos(make_config(tmp_path), runner=runner)
     assert [r.name for r in repos] == ["repo-a", "repo-b"]
@@ -89,7 +89,7 @@ def test_command_failure_falls_back_to_file(tmp_path):
 
 def test_missing_registry_file_is_empty_list(tmp_path):
     def runner(args, **kwargs):
-        raise CommandNotFoundError("aii-2")
+        raise CommandNotFoundError("mandrel")
 
     repos = discover_repos(make_config(tmp_path), runner=runner)
     assert repos == []

@@ -1,7 +1,7 @@
 """Tests for local task inventory parsing.
 
 Builds fake managed repos in ``tmp_path`` with real ``.ai-tasks`` files; never
-touches the real registry, ``aii-2``, readiness checks, or orchestrator code.
+touches the real registry, ``mandrel``, readiness checks, or orchestrator code.
 """
 
 from __future__ import annotations

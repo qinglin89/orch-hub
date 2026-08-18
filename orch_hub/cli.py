@@ -179,10 +179,10 @@ def _add_launchd_deploy_args(parser: argparse.ArgumentParser) -> None:
         help="orch-hub checkout to deploy (default: nearest checkout above cwd)",
     )
     parser.add_argument(
-        "--ai-native",
+        "--mandrel",
         type=Path,
         default=None,
-        help="ai-native-development checkout (default: ORCH_HUB_AI_NATIVE_DEPLOYMENT or built-in default)",
+        help="mandrel checkout (default: ORCH_HUB_MANDREL_PATH or built-in default)",
     )
     parser.add_argument(
         "--token",
@@ -268,7 +268,7 @@ def _cmd_launchd_deploy(args: argparse.Namespace) -> int:
         result = deploy_service(
             DeployOptions(
                 checkout=args.checkout,
-                ai_native_path=args.ai_native,
+                mandrel_path=args.mandrel,
                 token=args.token,
                 host=args.host,
                 port=args.port,

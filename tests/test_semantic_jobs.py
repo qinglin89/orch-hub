@@ -168,7 +168,7 @@ def sync_dispatch(deliver) -> None:
 
 def config(tmp_path: Path, *, enabled: bool = True) -> Config:
     return Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=enabled,
     )

@@ -101,7 +101,7 @@ _OMIT = object()
 
 def cfg(tmp_path: Path, *, enabled: bool = True, retention: int = 20) -> Config:
     return Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=enabled,
         eval_retention=retention,
@@ -702,7 +702,7 @@ def test_entry_publishes_the_protocol_identity_its_runs_verified(tmp_path):
     entry = catalog(config).reconcile()[0]
 
     # The cohort key an external consumer groups reports by: the deployed
-    # ai-native-development commit both runs verifiably ran under *and* the
+    # mandrel commit both runs verifiably ran under *and* the
     # payload digest that commit deployed, read from the pack's durable per-run
     # captures rather than from the repo (whose deployment has usually moved on by
     # publication time).

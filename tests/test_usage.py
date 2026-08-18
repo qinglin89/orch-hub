@@ -1312,7 +1312,7 @@ def test_statusline_sink_never_gates_anything(tmp_path: Path) -> None:
 
 def make_config(tmp_path: Path) -> Config:
     return Config(
-        ai_native_path=Path("/fake/ai-native-development"),
+        mandrel_path=Path("/fake/mandrel"),
         token=TOKEN,
         data_dir=tmp_path / "data",
         codex_home=tmp_path / "codex",

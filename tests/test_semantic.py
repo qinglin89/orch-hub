@@ -278,7 +278,7 @@ def semantic_evaluator(
     catalog=None, config: Config | None = None,
 ) -> SemanticEvaluator:
     cfg = config or Config(
-        ai_native_path=Path("/ai-native"),
+        mandrel_path=Path("/mandrel"),
         data_dir=Path("/hub-data"),
         evaluation_enabled=enabled,
     )
@@ -1147,7 +1147,7 @@ def test_disabled_evaluator_refuses_build_evidence():
 
 def test_disabled_evaluator_refuses_evaluate(tmp_path):
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=False,
     )
@@ -1205,7 +1205,7 @@ def _snapshot_tree(root: Path) -> dict[str, bytes]:
 
 
 def test_evaluate_persists_semantic_report_beside_evidence_and_static(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     backend = FakeBackend(envelope())
@@ -1233,7 +1233,7 @@ def test_evaluate_persists_semantic_report_beside_evidence_and_static(tmp_path):
 
 
 def test_evaluate_does_not_mutate_target_repo_or_run_state(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=False)
     runs_dir = config.data_dir / "runs"
@@ -1252,7 +1252,7 @@ def test_evaluate_does_not_mutate_target_repo_or_run_state(tmp_path):
 
 
 def test_evaluate_cleans_up_dir_on_backend_failure(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     ev = semantic_evaluator(config=config, service=_service(config), backend=RaisingBackend())
@@ -1267,7 +1267,7 @@ def test_evaluate_cleans_up_dir_on_backend_failure(tmp_path):
 
 
 def test_evaluate_cleans_up_dir_on_schema_violation(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     bad = envelope({"scores": [], "findings": []})  # missing required top-level confidence
@@ -1280,7 +1280,7 @@ def test_evaluate_cleans_up_dir_on_schema_violation(tmp_path):
 
 
 def test_default_backend_is_unavailable_and_fails_cleanly(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     # No backend injected: the default _UnavailableSemanticBackend fails the turn.
@@ -1301,7 +1301,7 @@ def test_unavailable_backend_info_has_no_model():
 def test_evaluate_over_absent_task_still_persists_low_confidence_report(tmp_path):
     # A task id with no file (evaluable for run history only) must not crash: it
     # degrades confidence and still produces a persisted report.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     other = "2026-07-22-nonexistent-task"
@@ -1318,7 +1318,7 @@ def test_rerun_with_different_model_preserves_both_reports(tmp_path):
     # The scope's rerun/version history: re-evaluating (here with a different
     # evaluator model) mints a fresh dir rather than overwriting, so prior reports
     # survive for comparison — the per-evaluation-dir layout gives this for free.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
 
@@ -1353,7 +1353,7 @@ def test_evaluate_failure_preserves_existing_retained_history(tmp_path):
     # already pruned older evaluations for that same (about-to-fail) attempt, a
     # task with retention=1 and one prior evaluation would be left with ZERO. The
     # pre-existing evaluation must survive the failed second attempt.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True, eval_retention=1)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
 
@@ -1381,7 +1381,7 @@ def test_evaluate_success_still_auto_prunes_to_cap(tmp_path):
     # The fix moved retention out of generate_evidence but must NOT drop it: a
     # successful semantic evaluation still bounds history. With retention=1, a
     # second successful evaluation prunes the older one, leaving exactly the newest.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True, eval_retention=1)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
 
@@ -1416,7 +1416,7 @@ class RaisingCatalog:
 
 
 def test_evaluate_publishes_the_completed_report_to_the_catalog(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
@@ -1442,7 +1442,7 @@ def test_evaluate_publishes_the_completed_report_to_the_catalog(tmp_path):
 
 
 def test_evaluate_publishes_one_entry_per_rerun(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
@@ -1459,7 +1459,7 @@ def test_evaluate_publishes_one_entry_per_rerun(tmp_path):
 
 
 def test_failed_evaluation_publishes_nothing(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
@@ -1475,7 +1475,7 @@ def test_failed_evaluation_publishes_nothing(tmp_path):
 
 
 def test_catalog_failure_never_fails_an_otherwise_complete_evaluation(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     catalog = RaisingCatalog()
@@ -1496,7 +1496,7 @@ def test_catalog_failure_never_fails_an_otherwise_complete_evaluation(tmp_path):
 
 
 def test_evaluator_without_a_catalog_publishes_nothing_and_still_works(tmp_path):
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
 
@@ -1513,7 +1513,7 @@ def test_retention_cannot_delete_a_report_whose_publication_failed(tmp_path):
     # A failed append leaves a complete report the feed has not indexed; if the
     # next evaluation's retention pass then deletes it, reconciliation has nothing
     # left to heal from and the report is gone from the feed permanently.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True, eval_retention=1)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
@@ -1548,7 +1548,7 @@ def test_evaluate_prompt_carries_the_repos_ai_snapshot_from_the_persisted_pack(t
     # End to end over a real fixture repo: `.ai/overview.md` reaches the model,
     # and it reaches it *through the persisted evidence pack* — the backend has no
     # repo access, so a prompt/pack mismatch would mean a live read crept in.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     backend = FakeBackend(envelope())
@@ -1891,7 +1891,7 @@ def test_semantic_usage_observer_fires_even_when_turn_errors(tmp_path):
 def test_claude_backend_drives_evaluate_end_to_end(tmp_path):
     # The real backend class over a fake runner drives the whole service: bounded
     # prompt in, envelope out, full artifact chain persisted — no claude launched.
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data",
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)
     repo = _write_repo_and_run(config, tmp_path, archived=True)
     runner = ScriptRunner(stream(envelope()))

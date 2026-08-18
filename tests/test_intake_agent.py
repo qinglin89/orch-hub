@@ -546,7 +546,7 @@ def test_manager_end_to_end_is_read_only_until_confirm(tmp_path):
     before = snapshot(repo)
     runner = ClaudeLikeRunner()
     agent = ClaudeIntakeAgent(runner=runner, new_session_id=lambda: "sid-e2e")
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     manager = IntakeManager(
         config,
         agent=agent,
@@ -602,7 +602,7 @@ def test_manager_confirm_fails_when_backend_writes_nothing(tmp_path):
     repo = make_repo(tmp_path)
     before = snapshot(repo)
     agent = ClaudeIntakeAgent(runner=WriteNothingRunner(), new_session_id=lambda: "sid")
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     manager = IntakeManager(
         config,
         agent=agent,

@@ -35,9 +35,9 @@
     <key>ORCH_HUB_PORT</key>
     <string>REPLACE-ORCH-HUB-PORT</string>
 
-    <!-- ai-native-development checkout that owns the managed-repo registry. -->
-    <key>ORCH_HUB_AI_NATIVE_DEPLOYMENT</key>
-    <string>REPLACE-AI-NATIVE-DEVELOPMENT-CHECKOUT</string>
+    <!-- mandrel checkout that owns the managed-repo registry. -->
+    <key>ORCH_HUB_MANDREL_PATH</key>
+    <string>REPLACE-MANDREL-CHECKOUT</string>
 
     <!-- Hub-owned run dirs and audit history. -->
     <key>ORCH_HUB_DATA_DIR</key>
@@ -52,7 +52,7 @@
     <string>REPLACE-ORCH-HUB-BARK-URL</string>
 
     <!-- launchd agents get a minimal PATH. Readiness checks invoke `git`,
-         and aii-2 may need Homebrew-installed tooling. -->
+         and mandrel may need Homebrew-installed tooling. -->
     <key>PATH</key>
     <string>REPLACE-PATH</string>
   </dict>

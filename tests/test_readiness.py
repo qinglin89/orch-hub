@@ -1,7 +1,7 @@
 """Tests for launch-readiness checks.
 
 Builds fake target repos in ``tmp_path`` and injects a fake runner for the git
-and ``aii-2 status`` checks; never touches real repos or subprocesses.
+and ``mandrel status`` checks; never touches real repos or subprocesses.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def build_ready_repo(tmp_path: Path) -> ManagedRepo:
 
 
 def make_runner(*, git_out="", git_rc=0, aii_rc=0, aii_out="", aii_err=""):
-    """A fake runner that distinguishes the git and aii-2 subprocess calls."""
+    """A fake runner that distinguishes the git and mandrel subprocess calls."""
 
     def runner(args, **kwargs):
         argv = [str(a) for a in args]
@@ -41,7 +41,7 @@ def make_runner(*, git_out="", git_rc=0, aii_rc=0, aii_out="", aii_err=""):
 
 
 def config(tmp_path: Path) -> Config:
-    return Config(ai_native_path=tmp_path)
+    return Config(mandrel_path=tmp_path)
 
 
 def failure_names(report) -> list[str]:
@@ -143,7 +143,7 @@ def test_aii_executable_missing(tmp_path):
         argv = [str(a) for a in args]
         if argv[0] == "git":
             return CommandResult(tuple(argv), 0, "", "")
-        raise CommandNotFoundError("aii-2")
+        raise CommandNotFoundError("mandrel")
 
     report = check_readiness(repo, config(tmp_path), runner=runner)
     assert "aii_status" in failure_names(report)

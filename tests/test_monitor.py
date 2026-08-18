@@ -188,7 +188,7 @@ def make_real_manager(tmp_path: Path):
     spawner = FakeSpawner()
     notifier = RecordingNotifier()
     manager = RunManager(
-        Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data"),
+        Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data"),
         readiness_checker=lambda r, c: ReadinessReport(
             (ReadinessCheck("all", True, "ok"),)
         ),

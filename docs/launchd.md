@@ -43,13 +43,20 @@ the `orch-hub-api` service console script takes no arguments, so the plist's
 | `ORCH_HUB_TOKEN` | unset → protected routes answer 503 | Bearer token required by every route except `GET /api/health`. Generate with `openssl rand -hex 32`. |
 | `ORCH_HUB_HOST` | `127.0.0.1` | Bind address. Loopback or a Tailscale IP only. |
 | `ORCH_HUB_PORT` | `8765` | Bind port. A malformed value fails startup instead of binding a default silently. |
-| `ORCH_HUB_AI_NATIVE_DEPLOYMENT` | `/Users/linqing/workplace/github.com/qinglin89/ai-native-development` | ai-native-development checkout that owns the managed-repo registry. |
+| `ORCH_HUB_MANDREL_PATH` | `/Users/linqing/workplace/github.com/qinglin89/mandrel` | mandrel checkout that owns the managed-repo registry. |
 | `ORCH_HUB_DATA_DIR` | `~/.orch-hub` | Hub-owned run dirs and audit history. |
 | `ORCH_HUB_BARK_URL` | unset → push disabled | Optional [Bark](https://github.com/Finb/Bark) push endpoint (server + device key, e.g. `https://api.day.app/<device-key>`) for run-lifecycle, pending-question, intake-ready, and semantic-evaluation-outcome notifications. Embeds a device-key secret — keep the plist `chmod 600`. |
-| `PATH` | launchd's minimal default | Readiness checks invoke `git`; `aii-2` may need Homebrew tooling. The template sets a sane explicit PATH. |
+| `PATH` | launchd's minimal default | Readiness checks invoke `git`; `mandrel` may need Homebrew tooling. The template sets a sane explicit PATH. |
 
 Empty or whitespace-only values count as unset. In the plist, write absolute
 paths — launchd does not expand `~`.
+
+`ORCH_HUB_MANDREL_PATH` was called `ORCH_HUB_AI_NATIVE_DEPLOYMENT` before the
+canonical repository was renamed to mandrel. The old name is still read when
+the new one is unset, so a plist installed before the rename keeps working
+across a package upgrade; `orch-hub launchd update` rewrites the plist with the
+new name. Set only the new name in anything written from now on — the fallback
+goes away in a future release.
 
 ## 1. Install the CLI into a venv
 
@@ -93,7 +100,7 @@ After code changes, run the same flow again, or use the explicit alias:
 |---|---|
 | Checkout | nearest orch-hub checkout above the current directory, or `--checkout` |
 | Token | `--token`, then `ORCH_HUB_TOKEN`, then existing installed plist token, then a generated token printed once |
-| ai-native checkout | `--ai-native`, then `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then built-in default |
+| mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then built-in default |
 | Host/port/data dir | corresponding flags, then environment, then defaults |
 | Plist/log paths | `--plist-path` / `--log-dir`, then `~/Library/...` defaults |
 | Bark push URL | `ORCH_HUB_BARK_URL`, then the value already in the installed plist (optional; unset = push disabled). No flag — the secret is supplied through the environment. |
@@ -246,8 +253,8 @@ tail -f ~/Library/Logs/orch-hub/orch-hub.err.log   # startup + errors
 - **No log files appear** — the log directory is missing; launchd does not
   create directories (`mkdir -p ~/Library/Logs/orch-hub`).
 - **Empty repo list / readiness errors** — verify
-  `ORCH_HUB_AI_NATIVE_DEPLOYMENT` points at a real checkout and that `git` is
-  reachable through the plist's `PATH`.
+  `ORCH_HUB_MANDREL_PATH` points at a real checkout and that `git` is reachable
+  through the plist's `PATH`.
 - **No push notifications** — confirm `ORCH_HUB_BARK_URL` is present and
   non-blank in the installed plist's `EnvironmentVariables` (`orch-hub launchd
   deploy` prints `bark push: enabled` when a URL is *configured* — it does not

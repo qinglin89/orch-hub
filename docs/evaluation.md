@@ -241,8 +241,8 @@ nowhere.
 `provenance.protocol` is the cohort key for asking whether a protocol change
 helped, and it is a **pair**:
 
-- `effective_revision` — the ai-native-development commit whose canonical
-  protocol produced the deployed payload.
+- `effective_revision` — the mandrel commit whose canonical protocol produced
+  the deployed payload.
 - `deploy_lock_hash` — `.ai-deploy-lock.json`'s digest of that payload.
 
 Neither is published without the other. The commit alone names a source tree the
@@ -261,7 +261,7 @@ when reading a `detail`:
 2. **Validating the actual files (per run, at two boundaries).** A receipt is not
    the tree: hand-editing a deployed protocol file — which the protocol forbids,
    and which is therefore the case worth catching — leaves both receipts
-   untouched. At **launch**, readiness has already run `aii-2 status`, which
+   untouched. At **launch**, readiness has already run `mandrel status`, which
    compares every deployed file against `.ai-deploy-manifest.json`; the run exists
    only because that passed. At the **end** of a run whose exit the hub observed
    itself, the hub re-reads the lock and then hashes every deployed file the lock

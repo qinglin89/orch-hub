@@ -155,7 +155,7 @@ def evaluator(*, enabled: bool = True, service=None, clock=None) -> StaticEvalua
     # fine; a fixed clock keeps a report's generated_ts deterministic.
     return StaticEvaluator(
         Config(
-            ai_native_path=Path("/ai-native"),
+            mandrel_path=Path("/mandrel"),
             data_dir=Path("/hub-data"),
             evaluation_enabled=enabled,
         ),
@@ -563,7 +563,7 @@ def _write_repo_and_run(config: Config, tmp_path: Path) -> ManagedRepo:
 
 def test_run_metrics_over_built_pack(tmp_path):
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=True,
     )
@@ -1580,7 +1580,7 @@ def test_disabled_evaluator_refuses_build_report():
 
 def test_disabled_evaluator_refuses_generate_metrics(tmp_path):
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=False,
     )
@@ -1644,7 +1644,7 @@ def _failing_metrics_write(service):
 
 def test_generate_metrics_persists_report_beside_evidence(tmp_path):
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=True,
     )
@@ -1680,7 +1680,7 @@ def test_generate_metrics_persists_report_beside_evidence(tmp_path):
 
 def test_generate_metrics_cleans_up_dir_on_write_failure(tmp_path, monkeypatch):
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=True,
     )
@@ -1706,7 +1706,7 @@ def test_generate_metrics_failure_preserves_existing_retained_history(tmp_path, 
     # that existing evaluation intact — pruning it for the about-to-fail generation
     # and then rolling back the new dir would leave the task with ZERO evaluations.
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=True,
         eval_retention=1,
@@ -1735,7 +1735,7 @@ def test_generate_metrics_success_still_auto_prunes_to_cap(tmp_path):
     # successful metrics generation still bounds history. With retention=1, a second
     # successful generation prunes the older evaluation, leaving exactly the newest.
     config = Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=True,
         eval_retention=1,

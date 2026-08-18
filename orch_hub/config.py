@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_AI_NATIVE_PATH = Path(
+DEFAULT_MANDREL_PATH = Path(
     "/Users/linqing/workplace/github.com/qinglin89/mandrel"
 )
 """Default mandrel checkout that owns the managed-repo registry."""
@@ -34,8 +34,18 @@ a bounded read-behavior rollup — read-only, and the transcript itself never
 enters an artifact. Overridable so a relocated Claude home (or a test fixture
 dir) can be pointed at instead."""
 
-AI_NATIVE_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
-"""Environment variable overriding the ai-native-development path."""
+MANDREL_PATH_ENV = "ORCH_HUB_MANDREL_PATH"
+"""Environment variable overriding the mandrel checkout path."""
+
+LEGACY_MANDREL_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
+"""Pre-rename spelling of :data:`MANDREL_PATH_ENV`, still read as a fallback.
+
+The launchd plist installed before the rename carries the old key, and only
+``orch-hub launchd update`` rewrites it — so dropping the name outright would
+silently move a resident service to the built-in default checkout on the first
+package upgrade. :data:`MANDREL_PATH_ENV` wins when both are set (a blank value
+counts as unset either way). Remove once every install has been updated.
+"""
 
 TOKEN_ENV = "ORCH_HUB_TOKEN"
 """Environment variable holding the v1 bearer token for the HTTP service."""
@@ -227,7 +237,7 @@ def _parse_port(raw: str | None) -> int:
 class Config:
     """Resolved orch-hub settings shared by the CLI and API routes."""
 
-    ai_native_path: Path
+    mandrel_path: Path
     token: str | None = None
     """Bearer token required by the HTTP service.
 
@@ -344,11 +354,14 @@ class Config:
         so a stray ``export ORCH_HUB_TOKEN=""`` cannot make the empty string a
         valid credential; surrounding whitespace is stripped for the same
         reason. A malformed ``ORCH_HUB_PORT`` raises instead of silently
-        falling back to the default port.
+        falling back to the default port. The mandrel checkout additionally
+        honors :data:`LEGACY_MANDREL_PATH_ENV` when the current name is unset.
         """
         env = os.environ if environ is None else environ
-        raw_path = (env.get(AI_NATIVE_PATH_ENV) or "").strip()
-        path = Path(raw_path).expanduser() if raw_path else DEFAULT_AI_NATIVE_PATH
+        raw_path = (env.get(MANDREL_PATH_ENV) or "").strip() or (
+            env.get(LEGACY_MANDREL_PATH_ENV) or ""
+        ).strip()
+        path = Path(raw_path).expanduser() if raw_path else DEFAULT_MANDREL_PATH
         raw_token = env.get(TOKEN_ENV)
         token = raw_token.strip() if raw_token else None
         raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()
@@ -357,7 +370,7 @@ class Config:
         raw_bark_url = env.get(BARK_URL_ENV)
         bark_url = raw_bark_url.strip() if raw_bark_url else None
         return cls(
-            ai_native_path=path,
+            mandrel_path=path,
             token=token or None,
             host=(env.get(HOST_ENV) or "").strip() or DEFAULT_HOST,
             port=_parse_port(env.get(PORT_ENV)),
@@ -388,16 +401,13 @@ class Config:
         )
 
     @property
-    def aii2_bin(self) -> Path:
+    def mandrel_bin(self) -> Path:
         """Absolute path to the mandrel executable inside its checkout.
 
         orch-hub invokes it by absolute path rather than relying on it being on
-        PATH, since it ships as a repo-local script, not a system install. The
-        script moved to `bin/mandrel` when the canonical repository took the
-        `mandrel` name; this property keeps its old name until the rest of the
-        rename lands here.
+        PATH, since it ships as a repo-local script, not a system install.
         """
-        return self.ai_native_path / "bin" / "mandrel"
+        return self.mandrel_path / "bin" / "mandrel"
 
     @property
     def claude_transcripts_dir(self) -> Path:
@@ -412,5 +422,5 @@ class Config:
 
     @property
     def registry_file(self) -> Path:
-        """Fallback registry file used when the aii-2 command is unavailable."""
-        return self.ai_native_path / ".registry" / "repos.local.json"
+        """Fallback registry file used when the mandrel command is unavailable."""
+        return self.mandrel_path / ".registry" / "repos.local.json"

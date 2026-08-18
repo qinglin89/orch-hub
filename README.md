@@ -62,18 +62,18 @@ is the durable object.
 
 ## Repo discovery and readiness
 
-- Discovers managed repos from **ai-native-development** — the same registry
-  the deployment tooling already maintains. orch-hub does not keep its own repo
+- Discovers managed repos from **mandrel** — the same registry the deployment
+  tooling already maintains. orch-hub does not keep its own repo
   registry and does not treat GitHub as the source of truth.
 - Reports, per repo, whether it is **ready to launch** its deployed
   orchestrator. Readiness fails closed: any missing piece blocks launch.
 
 ### Discovery source
 
-1. Preferred: `aii-2 registry list --json` (invoked by absolute path inside the
-   ai-native-development checkout).
+1. Preferred: `mandrel registry list --json` (invoked by absolute path inside
+   the mandrel checkout).
 2. Fallback (command unavailable or non-zero exit):
-   `<ai-native-development>/.registry/repos.local.json`.
+   `<mandrel>/.registry/repos.local.json`.
 
 Both sources return the same shape — a JSON array of `{name, path, manifest}`.
 A missing fallback file yields an empty repo list; malformed JSON is a hard
@@ -91,7 +91,7 @@ For each managed repo, in a stable order:
 | `venv_python_exists` | `.cursor/orchestrator/.venv/bin/python` is present |
 | `task_index_exists` | `.ai-tasks/index.md` is present |
 | `git_clean` | `git status --porcelain` is empty |
-| `aii_status` | `aii-2 status <repo>` exits 0 |
+| `aii_status` | `mandrel status <repo>` exits 0 |
 
 A repo is ready only when all checks pass.
 
@@ -99,7 +99,7 @@ A repo is ready only when all checks pass.
 
 | Setting | Default | Override |
 |---|---|---|
-| ai-native-development path | `/Users/linqing/workplace/github.com/qinglin89/ai-native-development` | `ORCH_HUB_AI_NATIVE_DEPLOYMENT` |
+| mandrel path | `/Users/linqing/workplace/github.com/qinglin89/mandrel` | `ORCH_HUB_MANDREL_PATH` |
 | HTTP bearer token | unset (protected routes answer 503) | `ORCH_HUB_TOKEN` |
 | HTTP bind address | `127.0.0.1` | `ORCH_HUB_HOST` |
 | HTTP port | `8765` | `ORCH_HUB_PORT` |
@@ -108,6 +108,11 @@ A repo is ready only when all checks pass.
 An empty or whitespace-only value counts as unset for every variable;
 surrounding whitespace is stripped. A malformed `ORCH_HUB_PORT` fails startup
 instead of silently binding the default port.
+
+`ORCH_HUB_MANDREL_PATH` replaced `ORCH_HUB_AI_NATIVE_DEPLOYMENT` when the
+canonical repository was renamed to mandrel. The old name is still honored as a
+fallback when the new one is unset, so an already-installed launchd plist keeps
+resolving; prefer the new name and expect the fallback to be removed.
 
 ## CLI usage
 
@@ -314,7 +319,7 @@ python3 -m venv .venv
 ```
 
 Tests use temporary directories and injected fake subprocess runners; they
-never touch real repos or the real ai-native-development registry.
+never touch real repos or the real mandrel registry.
 
 ## Not implemented yet (by design)
 

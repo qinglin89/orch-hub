@@ -69,7 +69,7 @@ def make_config(
     if retention is not None:
         kwargs["eval_retention"] = retention
     return Config(
-        ai_native_path=tmp_path / "ai-native",
+        mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         # A fixture Claude home, so the read-behavior section never reaches an
         # operator's real transcript store.
@@ -1719,7 +1719,7 @@ def protocol_artifact(
         "available": available,
         "source_git_commit": commit if available else None,
         "canonical_payload_sha256": payload if available else None,
-        "source_repo": "ai-native-deployment",
+        "source_repo": "mandrel",
         "lock_schema_version": 1,
         "captured_ts": "2026-07-22T09:00:00+00:00",
         "stability": stability,
@@ -1897,7 +1897,7 @@ def test_the_pack_reads_what_a_real_capture_wrote(tmp_path):
                 ],
                 "schema_version": 1,
                 "source_git_commit": COMMIT_A,
-                "source_repo": "ai-native-deployment",
+                "source_repo": "mandrel",
             }
         ),
         encoding="utf-8",

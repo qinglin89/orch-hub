@@ -9,7 +9,7 @@ from pathlib import Path
 
 @dataclass(frozen=True)
 class ManagedRepo:
-    """A managed repository discovered from ai-native-development."""
+    """A managed repository discovered from mandrel."""
 
     name: str
     path: Path
@@ -1747,8 +1747,8 @@ class ReportProvenance:
     ``protocol_revision`` and ``protocol_payload_sha256`` are the deployed
     protocol identity every contributing run verifiably ran under
     (:class:`orch_hub.protocol_provenance.EffectiveProtocol`, taken from the
-    pack's durable per-run captures): the ai-native-development commit that
-    produced the payload, and the deploy lock's digest of the payload itself. They
+    pack's durable per-run captures): the mandrel commit that produced the
+    payload, and the deploy lock's digest of the payload itself. They
     are what a consumer cohorts reports by when asking whether a protocol change
     helped, which is why they are unanimity-gated rather than best-effort — and
     why they are carried as one fact: a revision published without the digest its

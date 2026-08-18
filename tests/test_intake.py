@@ -224,7 +224,7 @@ def failing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport(
         (
             ReadinessCheck("git_clean", False, "working tree has uncommitted changes"),
-            ReadinessCheck("aii_status", False, "aii-2 status failed: drift"),
+            ReadinessCheck("aii_status", False, "mandrel status failed: drift"),
         )
     )
 
@@ -274,7 +274,7 @@ def make_manager(
 ) -> tuple[IntakeManager, FakeIntakeAgent, FakeClock]:
     agent = agent if agent is not None else FakeIntakeAgent()
     clock = clock if clock is not None else FakeClock()
-    config = Config(ai_native_path=root / "ai-native", data_dir=root / "hub-data")
+    config = Config(mandrel_path=root / "mandrel", data_dir=root / "hub-data")
     manager = IntakeManager(
         config,
         agent=agent,
@@ -611,7 +611,7 @@ def test_confirm_rejects_and_rolls_back_non_intake_status(tmp_path, status):
 def test_default_agent_makes_intake_fail_cleanly(tmp_path):
     repo = make_repo(tmp_path)
     before = snapshot(repo)
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     # No agent injected: the default unavailable backend must fail the intake,
     # not crash the manager.
     manager = IntakeManager(
@@ -640,7 +640,7 @@ def test_lost_session_fails_confirm_without_writing(tmp_path):
     # A fresh manager over the same data dir (a hub restart): the in-memory
     # conversational handle is gone, so confirmation must fail closed.
     fresh_agent = FakeIntakeAgent()
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     manager2 = IntakeManager(
         config, agent=fresh_agent, readiness_checker=passing_readiness, clock=clock
     )
@@ -660,7 +660,7 @@ def test_lost_session_fails_revise_without_writing(tmp_path):
     record = manager1.start_intake(repo, REQUEST)
 
     fresh_agent = FakeIntakeAgent()
-    config = Config(ai_native_path=tmp_path / "ai-native", data_dir=tmp_path / "hub-data")
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     manager2 = IntakeManager(
         config, agent=fresh_agent, readiness_checker=passing_readiness, clock=clock
     )

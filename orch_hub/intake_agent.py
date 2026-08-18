@@ -2,8 +2,8 @@
 
 This is the real :class:`~orch_hub.intake.IntakeAgent` backend the intake manager
 drives once a caller (the dashboard) exists to exercise it. It mirrors the
-deployed orchestrator's Claude Code session (ai-native-development
-``orchestrator.py`` ``ClaudeSession``): each conversational turn is one
+deployed orchestrator's Claude Code session (mandrel's ``orchestrator.py``
+``ClaudeSession``): each conversational turn is one
 ``claude -p --output-format stream-json`` process, the caller picks the session
 id (``--session-id``) on the first turn and ``--resume``\\s it afterward, and the
 JSONL stream is parsed for the assistant's final text.

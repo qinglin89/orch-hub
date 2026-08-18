@@ -4521,7 +4521,7 @@
         method: "POST",
         body: { repo_id: form.dataset.repo, request },
       });
-      // Readiness checks shell out to git/aii-2, so this POST can outlive the
+      // Readiness checks shell out to git/mandrel, so this POST can outlive the
       // view. Routing after the user moved on would drag them off the page they
       // chose; the intake is not lost — repo detail surfaces the repo's
       // in-flight intake, and the draft still pushes when it is ready.
