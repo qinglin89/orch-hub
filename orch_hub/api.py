@@ -265,10 +265,12 @@ class LaunchRequest(BaseModel):
     - ``dev_mode``/``review_mode`` — independent per-role selection (the split
       Start dialog). An omitted role is ``default``. Named roles become
       ``--dev-profile``/``--review-profile``; only a ``custom`` role sends
-      explicit values, and a custom cc-codex DEV must send its complete
-      ``dev_agent``/``dev_model``/``dev_effort`` tuple.
+      explicit values, and a custom cc-codex role must send its complete
+      ``<role>_agent``/``<role>_model``/``<role>_effort`` tuple — both roles
+      alike, since each names its own CLI agent with its own effort vocabulary.
     - ``mode`` — the legacy run-wide selection, preserved verbatim for pre-split
-      callers: it maps one selection to both roles through ``--profile``.
+      callers: it maps one selection to both roles through ``--profile``. It
+      predates ``review_agent`` and refuses it rather than dropping it silently.
 
     ``backend`` is shared: ``null`` inherits the orchestrator's configured backend
     (legal only when every role is ``default``) or is an explicit
@@ -286,6 +288,7 @@ class LaunchRequest(BaseModel):
     dev_agent: Literal["claude", "codex"] | None = None
     dev_model: str | None = None
     dev_effort: str | None = None
+    review_agent: Literal["claude", "codex"] | None = None
     review_model: str | None = None
     review_effort: str | None = None
     plan_gate: bool = False
@@ -301,6 +304,7 @@ class LaunchRequest(BaseModel):
             dev_agent=self.dev_agent,
             dev_model=self.dev_model,
             dev_effort=self.dev_effort,
+            review_agent=self.review_agent,
             review_model=self.review_model,
             review_effort=self.review_effort,
             plan_gate=self.plan_gate,

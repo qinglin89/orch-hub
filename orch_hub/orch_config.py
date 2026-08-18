@@ -70,8 +70,9 @@ DEFAULT_QUERY_TIMEOUT = 30.0
 BACKENDS = ("cursor", "cc-codex")
 """The orchestrator's two backends (``--backend`` choices)."""
 
-DEV_AGENTS = ("claude", "codex")
-"""cc-codex dev-role CLI agents (``--dev-agent`` choices); never valid for Cursor."""
+CLI_AGENTS = ("claude", "codex")
+"""cc-codex CLI agents, offered to both roles (``--dev-agent``/``--review-agent``
+choices); never valid for Cursor, which runs both roles on the one SDK."""
 
 MODE_DEFAULT = "default"
 MODE_STANDARD = "standard"
@@ -203,6 +204,15 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     null/default values instead of disabling launch (the acceptance requires the
     config query to fail closed on malformed responses).
 
+    ``options`` is the one field parsed *tolerantly* rather than fail-closed, and
+    for a reason the strict fields do not share: it is advisory. Every strict
+    field above is a value some launch resolves to, so a wrong one launches the
+    wrong run; the catalog only says what a caller MAY offer, and the
+    orchestrator still launches an uncatalogued model. Failing the whole query
+    on a malformed catalog would therefore disable launching over a control that
+    is allowed to be absent. Absent, unusable, or unparseable is ``None`` —
+    "offer no list", never "offer the hub's list" (:func:`parse_option_catalog`).
+
     The ``profiles`` object is *additive*: absent means an older deployment that
     predates split role profiles, and both role selections are derived from the
     run-wide ``profile`` with ``split_profiles=False`` so legacy configs and old
@@ -247,6 +257,7 @@ def parse_effective_config(data: object) -> EffectiveConfig:
         context_budget=_req_int(data, "context_budget"),
         codex_sandbox=_opt_str(data.get("codex_sandbox")),
         sources=_req_str_map(data, "sources"),
+        options=parse_option_catalog(data.get("options")),
         task_id=_opt_str(data.get("task_id")),
         once=_req_bool(data, "once"),
         plan_gate=_req_bool(data, "plan_gate"),
@@ -284,6 +295,101 @@ def _role(value: object, name: str) -> RoleConfig:
         model=_req_str(value, "model", label=f"{name}.model"),
         effort=_req_str(value, "effort", label=f"{name}.effort"),
     )
+
+
+def parse_option_catalog(value: object) -> dict | None:
+    """Normalize the orchestrator's ``options`` catalog, or ``None`` if it has none.
+
+    The orchestrator publishes, selection-independently, every launch value a
+    caller MAY offer, keyed so it can be filtered by backend, role, and agent
+    without restating the orchestrator's own axis knowledge (effort vocabularies
+    differ per agent: a value that is legal for one is a startup refusal for the
+    other). This keeps the subset a caller renders::
+
+        {"agents": {<backend>: {<role>: {<agent>: {
+            "effort_axis": str|None,   # the agent's fixed axis, if it fixes one
+            "efforts": [str]|None,     # that axis' values, ascending
+            "models": [{"id": str, "effort_axis": str|None, "efforts": [str]|None}],
+        }}}}}
+
+    Normalization only ever *drops*: a malformed level is skipped, never
+    replaced. That direction is the whole contract — a hub-invented model or
+    effort list would be orch-hub asserting policy it does not own, and a wrong
+    one is a startup refusal the operator cannot see coming. So a payload that
+    publishes nothing usable yields ``None``, which callers must render as
+    free-text entry, not as an empty or substituted list.
+
+    Tolerant by design (see :func:`parse_effective_config`): the catalog is
+    advisory, so its absence or malformation degrades one control instead of
+    failing the query that gates launching.
+    """
+    if not isinstance(value, dict):
+        return None
+    agents = value.get("agents")
+    if not isinstance(agents, dict):
+        return None
+    catalog: dict[str, dict[str, dict[str, dict]]] = {}
+    for backend, roles in agents.items():
+        if not isinstance(backend, str) or not isinstance(roles, dict):
+            continue
+        by_role: dict[str, dict[str, dict]] = {}
+        for role, by_agent in roles.items():
+            if not isinstance(role, str) or not isinstance(by_agent, dict):
+                continue
+            entries = {
+                agent: _agent_options(options)
+                for agent, options in by_agent.items()
+                if isinstance(agent, str) and isinstance(options, dict)
+            }
+            if entries:
+                by_role[role] = entries
+        if by_role:
+            catalog[backend] = by_role
+    return {"agents": catalog} if catalog else None
+
+
+def _agent_options(value: dict) -> dict:
+    """One agent's offerable choices, keeping only well-formed entries.
+
+    An agent whose models all drop out keeps its entry with an empty list: the
+    agent still publishes its effort axis, and "this agent lists no models" is
+    the same free-text degradation as an absent catalog, handled once by the
+    caller rather than by a second shape here.
+    """
+    raw = value.get("models")
+    models: list[dict] = []
+    seen: set[str] = set()
+    for item in raw if isinstance(raw, list) else ():
+        if not isinstance(item, dict):
+            continue
+        model_id = item.get("id")
+        # A repeated id would render a duplicate choice; the orchestrator rejects
+        # duplicates in its own config, so this only catches a hand-edited payload.
+        if not isinstance(model_id, str) or not model_id.strip() or model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append(
+            {
+                "id": model_id,
+                "effort_axis": _opt_str(item.get("effort_axis")),
+                "efforts": _effort_values(item.get("efforts")),
+            }
+        )
+    return {
+        "effort_axis": _opt_str(value.get("effort_axis")),
+        "efforts": _effort_values(value.get("efforts")),
+        "models": models,
+    }
+
+
+def _effort_values(value: object) -> list[str] | None:
+    """A published effort list in the orchestrator's own (ascending) order, or
+    ``None`` when nothing usable was published — an empty list would render as an
+    effort control offering no choice at all."""
+    if not isinstance(value, list):
+        return None
+    values = [item for item in value if isinstance(item, str) and item.strip()]
+    return values or None
 
 
 def _first_nonempty(*texts: str) -> str:
@@ -422,11 +528,13 @@ def _split_role_args(spec: LaunchSpec, backend: str | None) -> list[str]:
     an explicit ``--dev-profile default``), ``standard``/``excellent`` emit that
     role's profile flag, and ``custom`` emits that role's explicit values.
 
-    A custom cc-codex DEV must carry its complete ``agent``/``model``/``effort``
-    tuple: the orchestrator resolves an omitted ``--dev-agent`` from
+    A custom cc-codex role must carry its complete ``agent``/``model``/``effort``
+    tuple — both roles, symmetrically, since each names its own CLI agent: the
+    orchestrator resolves an omitted ``--dev-agent``/``--review-agent`` from
     profile/env/config, which would silently pair the operator's model and effort
-    with a *different* agent than the preview showed. Cursor has no separate dev
-    agent and rejects the flag outright. A custom REVIEW is model/effort only.
+    with a *different* agent than the preview showed, on an effort axis that
+    agent may not even accept. Cursor runs both roles on the one SDK and rejects
+    either flag outright.
     """
     dev_mode = spec.dev_mode or MODE_DEFAULT
     review_mode = spec.review_mode or MODE_DEFAULT
@@ -445,24 +553,35 @@ def _split_role_args(spec: LaunchSpec, backend: str | None) -> list[str]:
     if dev_mode in NAMED_PROFILE_MODES:
         args += ["--dev-profile", dev_mode]
     elif dev_mode == MODE_CUSTOM:
-        dev_agent = _clean(spec.dev_agent)
-        if backend == "cc-codex":
-            args += ["--dev-agent", _dev_agent(_require(dev_agent, "dev agent"))]
-        elif dev_agent is not None:
-            raise LaunchError("--dev-agent applies only to the cc-codex backend")
-        args += [
-            "--dev-model", _require(spec.dev_model, "dev model"),
-            "--dev-effort", _require(spec.dev_effort, "dev effort"),
-        ]
+        args += _custom_role_args("dev", spec.dev_agent, spec.dev_model, spec.dev_effort, backend)
 
     if review_mode in NAMED_PROFILE_MODES:
         args += ["--review-profile", review_mode]
     elif review_mode == MODE_CUSTOM:
-        args += [
-            "--review-model", _require(spec.review_model, "review model"),
-            "--review-effort", _require(spec.review_effort, "review effort"),
-        ]
+        args += _custom_role_args(
+            "review", spec.review_agent, spec.review_model, spec.review_effort, backend
+        )
     return args
+
+
+def _custom_role_args(
+    role: str,
+    agent: str | None,
+    model: str | None,
+    effort: str | None,
+    backend: str | None,
+) -> list[str]:
+    """One custom role's explicit flags, identical in shape for both roles."""
+    args: list[str] = []
+    cleaned_agent = _clean(agent)
+    if backend == "cc-codex":
+        args += [f"--{role}-agent", _agent(role, _require(cleaned_agent, f"{role} agent"))]
+    elif cleaned_agent is not None:
+        raise LaunchError(f"--{role}-agent applies only to the cc-codex backend")
+    return args + [
+        f"--{role}-model", _require(model, f"{role} model"),
+        f"--{role}-effort", _require(effort, f"{role} effort"),
+    ]
 
 
 def _legacy_mode_args(spec: LaunchSpec, backend: str | None) -> list[str]:
@@ -473,10 +592,21 @@ def _legacy_mode_args(spec: LaunchSpec, backend: str | None) -> list[str]:
     both roles), and ``custom`` keeps its optional ``--dev-agent`` — the stricter
     complete-tuple rule applies only to the new split shape, which is the one the
     dialog previews per role.
+
+    ``review_agent`` postdates this shape and is refused here rather than
+    dropped: silently ignoring it would run the review role on whichever agent
+    profile/env/config resolves, pairing the caller's model with an agent it
+    never asked for — the exact failure the split shape's complete-tuple rule
+    exists to prevent.
     """
     mode = spec.mode
     if mode not in LAUNCH_MODES:
         raise LaunchError(f"unknown launch mode {mode!r}")
+    if _clean(spec.review_agent) is not None:
+        raise LaunchError(
+            "'review_agent' requires the 'dev_mode'/'review_mode' selection;"
+            " the legacy run-wide 'mode' has no --review-agent"
+        )
 
     args: list[str] = []
     if mode == MODE_DEFAULT:
@@ -495,7 +625,7 @@ def _legacy_mode_args(spec: LaunchSpec, backend: str | None) -> list[str]:
     if dev_agent is not None:
         if backend != "cc-codex":
             raise LaunchError("--dev-agent applies only to the cc-codex backend")
-        args += ["--dev-agent", _dev_agent(dev_agent)]
+        args += ["--dev-agent", _agent("dev", dev_agent)]
     args += [
         "--dev-model", _require(spec.dev_model, "dev model"),
         "--dev-effort", _require(spec.dev_effort, "dev effort"),
@@ -505,10 +635,10 @@ def _legacy_mode_args(spec: LaunchSpec, backend: str | None) -> list[str]:
     return args
 
 
-def _dev_agent(value: str) -> str:
-    if value not in DEV_AGENTS:
+def _agent(role: str, value: str) -> str:
+    if value not in CLI_AGENTS:
         raise LaunchError(
-            f"unknown dev agent {value!r} (expected one of {', '.join(DEV_AGENTS)})"
+            f"unknown {role} agent {value!r} (expected one of {', '.join(CLI_AGENTS)})"
         )
     return value
 

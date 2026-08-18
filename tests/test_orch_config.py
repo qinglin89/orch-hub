@@ -29,6 +29,64 @@ from orch_hub.orch_config import (
 )
 from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
 
+# The orchestrator's published effort vocabularies, per parameter axis: a claude
+# agent and a codex agent do NOT accept the same words, which is the whole reason
+# the catalog is keyed by agent.
+CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+CODEX_EFFORTS = ["none", "minimal", "low", "medium", "high", "xhigh"]
+
+
+def _model(model_id: str, axis: str, efforts: list[str]) -> dict:
+    return {"id": model_id, "effort_axis": axis, "efforts": list(efforts)}
+
+
+# cc-codex fixes the axis per agent, so the agent entry states it once and every
+# model repeats it.
+CC_AGENTS = {
+    "claude": {
+        "effort_axis": "effort",
+        "efforts": CLAUDE_EFFORTS,
+        "models": [
+            _model("claude-opus-4-8", "effort", CLAUDE_EFFORTS),
+            _model("claude-opus-5", "effort", CLAUDE_EFFORTS),
+        ],
+    },
+    "codex": {
+        "effort_axis": "reasoning",
+        "efforts": CODEX_EFFORTS,
+        "models": [_model("gpt-5.5", "reasoning", CODEX_EFFORTS)],
+    },
+}
+# Cursor runs both roles on the one SDK and takes either model family, so the
+# agent fixes no axis (null) and each model states its own.
+CURSOR_AGENTS = {
+    "cursor": {
+        "effort_axis": None,
+        "efforts": None,
+        "models": [
+            _model("claude-opus-4-8", "effort", CLAUDE_EFFORTS),
+            _model("gpt-5.5", "reasoning", CODEX_EFFORTS),
+        ],
+    }
+}
+# The full `options` object as the orchestrator publishes it, including the
+# top-level keys the hub does not render — so the parse's projection is
+# exercised rather than assumed.
+CATALOG = {
+    "backends": ["cc-codex", "cursor"],
+    "run_profiles": ["excellent", "standard"],
+    "role_profiles": ["default", "excellent", "standard"],
+    "codex_sandbox": ["danger-full-access", "read-only", "workspace-write"],
+    "efforts": {"effort": CLAUDE_EFFORTS, "reasoning": CODEX_EFFORTS},
+    "effort_aliases": {"effort": {}, "reasoning": {"extra-high": "xhigh"}},
+    "agents": {
+        "cc-codex": {"dev": CC_AGENTS, "review": CC_AGENTS},
+        "cursor": {"dev": CURSOR_AGENTS, "review": CURSOR_AGENTS},
+    },
+}
+# What the hub keeps: the per-backend/role/agent axis, verbatim.
+CATALOG_PROJECTION = {"agents": CATALOG["agents"]}
+
 # A representative --print-config object (the handoff sample), used across tests.
 SAMPLE = {
     "schema_version": 3,
@@ -48,6 +106,7 @@ SAMPLE = {
     "plan_gate": False,
     "control_dir": None,
     "sources": {"backend": "config", "dev.model": "config"},
+    "options": CATALOG,
 }
 
 
@@ -177,8 +236,14 @@ def test_query_round_trips_the_effective_config_shape(tmp_path):
     config = query_effective_config(repo, runner=runner)
 
     # to_dict reproduces the orchestrator's known fields (typed, hub-owned shape)
-    # plus the hub-owned capability marker the UI gates split selection on.
-    assert config.to_dict() == {**SAMPLE, "split_profiles": True}
+    # plus the hub-owned capability marker the UI gates split selection on. The
+    # option catalog is the one projected field: what a caller renders, not the
+    # whole published object.
+    assert config.to_dict() == {
+        **SAMPLE,
+        "split_profiles": True,
+        "options": CATALOG_PROJECTION,
+    }
 
 
 # -- query: fail-closed paths --------------------------------------------------
@@ -423,6 +488,119 @@ def test_legacy_response_round_trips_derived_profiles():
     assert payload["split_profiles"] is False
 
 
+# -- parse: the launch option catalog ------------------------------------------
+
+
+def test_parse_keeps_the_catalog_keyed_by_backend_role_and_agent():
+    """The dialog filters by all three at once: the SAME model list is legal for
+    one agent and refused by the other, so a flattened catalog could not answer
+    'what may this role offer now'."""
+    config = parse_effective_config(SAMPLE)
+
+    agents = config.options["agents"]
+    assert sorted(agents) == ["cc-codex", "cursor"]
+    assert sorted(agents["cc-codex"]) == ["dev", "review"]
+    claude = agents["cc-codex"]["review"]["claude"]
+    codex = agents["cc-codex"]["review"]["codex"]
+    assert [m["id"] for m in claude["models"]] == ["claude-opus-4-8", "claude-opus-5"]
+    assert claude["efforts"] == CLAUDE_EFFORTS
+    assert codex["efforts"] == CODEX_EFFORTS  # a different axis for the same role
+
+
+def test_parse_keeps_a_cursor_agent_that_fixes_no_axis():
+    """Cursor takes either model family, so the agent publishes no axis and each
+    model carries its own — a caller that read only the agent level would show
+    the wrong effort words for half the models."""
+    cursor = parse_effective_config(SAMPLE).options["agents"]["cursor"]["dev"]["cursor"]
+
+    assert cursor["effort_axis"] is None and cursor["efforts"] is None
+    assert [(m["id"], m["efforts"]) for m in cursor["models"]] == [
+        ("claude-opus-4-8", CLAUDE_EFFORTS),
+        ("gpt-5.5", CODEX_EFFORTS),
+    ]
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        pytest.param(_OMIT, id="absent"),
+        pytest.param(None, id="null"),
+        pytest.param("claude-opus-5", id="not-an-object"),
+        pytest.param({"backends": ["cursor"]}, id="no-agents-key"),
+        pytest.param({"agents": ["cursor"]}, id="agents-not-an-object"),
+        pytest.param({"agents": {}}, id="agents-empty"),
+        pytest.param({"agents": {"cc-codex": "claude"}}, id="backend-not-an-object"),
+        pytest.param({"agents": {"cc-codex": {"dev": []}}}, id="role-not-an-object"),
+        pytest.param({"agents": {"cc-codex": {"dev": {"claude": "opus"}}}}, id="agent-not-an-object"),
+    ],
+)
+def test_parse_reports_no_catalog_rather_than_inventing_one(options):
+    """A payload that publishes nothing usable yields None — the caller must then
+    keep free-text entry. Substituting the hub's own idea of the valid models is
+    the failure this parse exists to prevent: orch-hub owns no model policy, and
+    a wrong list is a startup refusal the operator cannot see coming."""
+    config = parse_effective_config(_malformed(options=options))
+
+    assert config.options is None
+    assert config.to_dict()["options"] is None
+
+
+def test_parse_drops_only_the_malformed_part_of_a_catalog():
+    """Normalization only ever drops. A junk model entry must not take the rest of
+    its agent — nor the other backend — down with it, and must not survive as a
+    half-built choice either."""
+    catalog = copy.deepcopy(CATALOG)
+    catalog["agents"]["cc-codex"]["dev"] = {
+        "claude": {
+            "effort_axis": "effort",
+            "efforts": CLAUDE_EFFORTS,
+            "models": [
+                _model("claude-opus-5", "effort", CLAUDE_EFFORTS),
+                {"effort_axis": "effort"},  # no id at all
+                {"id": "", "efforts": CLAUDE_EFFORTS},  # blank id
+                {"id": "claude-opus-5"},  # a repeat of the first
+                "claude-opus-4-8",  # not even an object
+            ],
+        },
+        "codex": {"effort_axis": "reasoning", "models": "gpt-5.5"},
+    }
+
+    agents = parse_effective_config(_malformed(options=catalog)).options["agents"]
+    dev = agents["cc-codex"]["dev"]
+
+    assert [m["id"] for m in dev["claude"]["models"]] == ["claude-opus-5"]
+    # An agent whose models are unusable keeps its entry: it still publishes an
+    # axis, and "no models listed" is the same free-text degradation as no
+    # catalog at all, decided once by the caller.
+    assert dev["codex"]["models"] == [] and dev["codex"]["effort_axis"] == "reasoning"
+    # The untouched backend is unaffected.
+    assert agents["cursor"] == CATALOG["agents"]["cursor"]
+
+
+def test_parse_treats_an_empty_effort_list_as_no_list():
+    """An effort control offering zero choices is worse than a text box: it makes
+    a legal launch unreachable. Publishing nothing usable degrades to free text."""
+    catalog = copy.deepcopy(CATALOG)
+    catalog["agents"]["cc-codex"]["dev"]["claude"]["efforts"] = []
+    catalog["agents"]["cc-codex"]["dev"]["claude"]["models"][0]["efforts"] = [" ", 7]
+
+    claude = parse_effective_config(_malformed(options=catalog)).options["agents"]["cc-codex"]["dev"]["claude"]
+
+    assert claude["efforts"] is None
+    assert claude["models"][0]["efforts"] is None
+
+
+def test_parse_never_fails_the_query_over_the_advisory_catalog():
+    """Every other field is fail-closed because a wrong value launches the wrong
+    run. The catalog only says what a caller MAY offer — the orchestrator still
+    launches an uncatalogued model — so a malformed one must not disable
+    launching."""
+    config = parse_effective_config(_malformed(options={"agents": 7}))
+
+    assert config.options is None
+    assert config.dev.model == "claude-opus-4-8"  # the launch config still resolved
+
+
 # -- build_launch_args: the four modes x backends ------------------------------
 
 
@@ -647,6 +825,7 @@ def test_split_named_dev_with_custom_review():
             dev_mode="standard",
             review_mode="custom",
             backend="cc-codex",
+            review_agent="codex",
             review_model="gpt-5.5",
             review_effort="xhigh",
         )
@@ -654,6 +833,7 @@ def test_split_named_dev_with_custom_review():
     assert args == (
         "--backend", "cc-codex",
         "--dev-profile", "standard",
+        "--review-agent", "codex",
         "--review-model", "gpt-5.5",
         "--review-effort", "xhigh",
     )
@@ -669,6 +849,7 @@ def test_split_custom_both_roles():
             dev_agent="claude",
             dev_model="claude-opus-4-8",
             dev_effort="max",
+            review_agent="codex",
             review_model="gpt-5.5",
             review_effort="xhigh",
         )
@@ -678,9 +859,94 @@ def test_split_custom_both_roles():
         "--dev-agent", "claude",
         "--dev-model", "claude-opus-4-8",
         "--dev-effort", "max",
+        "--review-agent", "codex",
         "--review-model", "gpt-5.5",
         "--review-effort", "xhigh",
     )
+
+
+def test_split_custom_cc_codex_review_requires_the_complete_agent_tuple():
+    """The review role names its own CLI agent now, so the dev rule applies to it
+    unchanged: an omitted `--review-agent` resolves from profile/env/config and
+    would pair the operator's model and effort with an agent the preview never
+    showed — on an effort axis that agent may not even accept."""
+    with pytest.raises(LaunchError) as exc:
+        build_launch_args(
+            LaunchSpec(
+                dev_mode="default",
+                review_mode="custom",
+                backend="cc-codex",
+                review_model="gpt-5.5",
+                review_effort="xhigh",
+            )
+        )
+    assert "review agent" in str(exc.value)
+
+
+def test_split_custom_cursor_review_omits_review_agent():
+    """Cursor runs both roles on the one SDK: no review agent to send."""
+    args = build_launch_args(
+        LaunchSpec(
+            dev_mode="default",
+            review_mode="custom",
+            backend="cursor",
+            review_model="gpt-5.5",
+            review_effort="xhigh",
+        )
+    )
+    assert args == (
+        "--backend", "cursor",
+        "--review-model", "gpt-5.5",
+        "--review-effort", "xhigh",
+    )
+
+
+def test_split_custom_cursor_review_agent_is_launch_error():
+    with pytest.raises(LaunchError) as exc:
+        build_launch_args(
+            LaunchSpec(
+                dev_mode="default",
+                review_mode="custom",
+                backend="cursor",
+                review_agent="codex",
+                review_model="m",
+                review_effort="e",
+            )
+        )
+    assert "review-agent" in str(exc.value)
+
+
+def test_split_custom_unknown_review_agent_is_launch_error():
+    with pytest.raises(LaunchError):
+        build_launch_args(
+            LaunchSpec(
+                dev_mode="default",
+                review_mode="custom",
+                backend="cc-codex",
+                review_agent="gemini",
+                review_model="m",
+                review_effort="e",
+            )
+        )
+
+
+def test_legacy_mode_refuses_a_review_agent_rather_than_dropping_it():
+    """The legacy run-wide shape has no --review-agent. Ignoring the field would
+    run review on whatever profile/env/config resolves while the caller believes
+    it selected an agent — refuse instead."""
+    with pytest.raises(LaunchError) as exc:
+        build_launch_args(
+            LaunchSpec(
+                mode="custom",
+                backend="cc-codex",
+                dev_model="claude-opus-4-8",
+                dev_effort="max",
+                review_agent="codex",
+                review_model="gpt-5.5",
+                review_effort="xhigh",
+            )
+        )
+    assert "review_agent" in str(exc.value)
 
 
 def test_split_custom_cc_codex_dev_requires_the_complete_agent_tuple():

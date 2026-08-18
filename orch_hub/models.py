@@ -743,6 +743,17 @@ class EffectiveConfig:
     independent role selection on ``split_profiles`` — deriving a value is not
     evidence that the deployment understands ``--dev-profile``/
     ``--review-profile``.
+
+    ``options`` is the orchestrator's selection-independent launch catalog — what
+    any launch MAY select, beside the values this one DID select — normalized by
+    :func:`orch_hub.orch_config.parse_option_catalog` to the subset a caller
+    renders: ``{"agents": {backend: {role: {agent: {effort_axis, efforts,
+    models: [{id, effort_axis, efforts}]}}}}}``. ``None`` means the payload
+    published no usable catalog, and a caller must then keep free-text entry
+    rather than offering a list of its own — orch-hub owns no model, effort, or
+    agent policy. The catalog is advisory even when present: the orchestrator
+    deliberately still launches an uncatalogued model, so a caller must keep that
+    reachable too.
     """
 
     schema_version: int
@@ -760,6 +771,7 @@ class EffectiveConfig:
     context_budget: int | None
     codex_sandbox: str | None
     sources: dict[str, str]
+    options: dict | None = None
     task_id: str | None = None
     once: bool = False
     plan_gate: bool = False
@@ -781,6 +793,7 @@ class EffectiveConfig:
             "context_budget": self.context_budget,
             "codex_sandbox": self.codex_sandbox,
             "sources": dict(self.sources),
+            "options": self.options,
             "task_id": self.task_id,
             "once": self.once,
             "plan_gate": self.plan_gate,
@@ -812,9 +825,12 @@ class LaunchSpec:
     omits ``--backend``) or an explicit ``cursor``/``cc-codex``. The
     ``dev_*``/``review_*`` value fields are used only by a ``custom`` role (a
     preset takes those values from the orchestrator, never from the user), and
-    ``dev_agent`` applies only to cc-codex — it is never sent to Cursor. The
-    orthogonal launch flags ``plan_gate``/``once``/``max_sessions`` keep their
-    existing per-flag UI semantics and are honored in every mode.
+    ``dev_agent``/``review_agent`` apply only to cc-codex — neither is ever sent
+    to Cursor, which runs both roles on the one SDK. ``review_agent`` belongs to
+    the split shape alone; the legacy run-wide ``mode`` predates the flag and
+    refuses it rather than dropping it silently. The orthogonal launch flags
+    ``plan_gate``/``once``/``max_sessions`` keep their existing per-flag UI
+    semantics and are honored in every mode.
     """
 
     mode: str | None = None
@@ -824,6 +840,7 @@ class LaunchSpec:
     dev_agent: str | None = None
     dev_model: str | None = None
     dev_effort: str | None = None
+    review_agent: str | None = None
     review_model: str | None = None
     review_effort: str | None = None
     plan_gate: bool = False

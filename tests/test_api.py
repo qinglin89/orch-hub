@@ -1046,6 +1046,67 @@ def test_launch_split_custom_dev_without_agent_is_400(tmp_path, monkeypatch):
     assert spawner.calls == []  # never launched
 
 
+def test_launch_split_custom_review_sends_its_own_agent(tmp_path, monkeypatch):
+    """REVIEW names its own CLI agent, symmetric with DEV: the whole tuple reaches
+    the orchestrator, so the agent that runs is the one the operator previewed."""
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "dev_mode": "standard",
+            "review_mode": "custom",
+            "backend": "cc-codex",
+            "review_agent": "claude",
+            "review_model": "claude-opus-5",
+            "review_effort": "xhigh",
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    assert launch_args_of(spawner) == (
+        "--backend", "cc-codex",
+        "--dev-profile", "standard",
+        "--review-agent", "claude",
+        "--review-model", "claude-opus-5",
+        "--review-effort", "xhigh",
+    )
+
+
+def test_launch_split_custom_review_without_agent_is_400(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "dev_mode": "default",
+            "review_mode": "custom",
+            "backend": "cc-codex",
+            "review_model": "gpt-5.5",
+            "review_effort": "xhigh",
+        },
+    )
+    assert resp.status_code == 400
+    assert spawner.calls == []  # never launched
+
+
+def test_launch_bad_review_agent_is_422(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    resp = start_with_launch(
+        client,
+        repo,
+        {
+            "dev_mode": "default",
+            "review_mode": "custom",
+            "backend": "cc-codex",
+            "review_agent": "gemini",
+            "review_model": "m",
+            "review_effort": "e",
+        },
+    )
+    assert resp.status_code == 422
+    assert spawner.calls == []
+
+
 def test_launch_mixing_mode_and_role_modes_is_400(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     resp = start_with_launch(
@@ -1093,7 +1154,45 @@ SAMPLE_CONFIG = {
     "plan_gate": False,
     "control_dir": None,
     "sources": {"backend": "config"},
+    # The orchestrator's selection-independent catalog of what a launch MAY
+    # select, keyed by backend/role/agent (trimmed to one model per agent).
+    "options": {
+        "backends": ["cc-codex", "cursor"],
+        "efforts": {"effort": ["low", "max"], "reasoning": ["none", "xhigh"]},
+        "agents": {
+            "cc-codex": {
+                role: {
+                    "claude": {
+                        "effort_axis": "effort",
+                        "efforts": ["low", "max"],
+                        "models": [
+                            {
+                                "id": "claude-opus-4-8",
+                                "effort_axis": "effort",
+                                "efforts": ["low", "max"],
+                            }
+                        ],
+                    },
+                    "codex": {
+                        "effort_axis": "reasoning",
+                        "efforts": ["none", "xhigh"],
+                        "models": [
+                            {
+                                "id": "gpt-5.5",
+                                "effort_axis": "reasoning",
+                                "efforts": ["none", "xhigh"],
+                            }
+                        ],
+                    },
+                }
+                for role in ("dev", "review")
+            }
+        },
+    },
 }
+
+# What the route serves: the catalog projected to the part a caller renders.
+SAMPLE_CONFIG_OPTIONS = {"agents": SAMPLE_CONFIG["options"]["agents"]}
 
 
 def capture_config_query(monkeypatch, config: dict = SAMPLE_CONFIG) -> dict:
@@ -1121,8 +1220,17 @@ def test_orchestrator_config_returns_effective_config(tmp_path, monkeypatch):
         f"/api/repos/{repo.name}/orchestrator-config?backend=cc-codex&profile=standard"
     )
     assert resp.status_code == 200
-    # The hub-owned capability marker rides along with the orchestrator's fields.
-    assert resp.json() == {**SAMPLE_CONFIG, "split_profiles": True}
+    # The hub-owned capability marker rides along with the orchestrator's fields,
+    # and the option catalog reaches the caller keyed by backend/role/agent.
+    assert resp.json() == {
+        **SAMPLE_CONFIG,
+        "split_profiles": True,
+        "options": SAMPLE_CONFIG_OPTIONS,
+    }
+    assert resp.json()["options"]["agents"]["cc-codex"]["review"]["codex"]["efforts"] == [
+        "none",
+        "xhigh",
+    ]
     assert captured["repo"] == repo.name
     assert captured["backend"] == "cc-codex"
     assert captured["profile"] == "standard"
