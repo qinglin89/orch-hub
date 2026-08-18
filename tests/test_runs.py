@@ -2010,7 +2010,7 @@ def test_task_snapshot_failure_does_not_fail_a_scan(tmp_path, monkeypatch):
 
 
 EFFECTIVE_CONFIG = {
-    "schema_version": 1,
+    "schema_version": 3,
     "config_revision": "cfg-sha",
     "effective_revision": "eff-sha",
     # A split launch leaves the run-wide `profile` at its default and reports the
@@ -2192,7 +2192,7 @@ def write_deploy_lock(
                         "target_relative_path": DEPLOYED_FILE,
                     }
                 ],
-                "schema_version": 1,
+                "schema_version": 3,
                 "source_git_commit": commit,
                 "source_repo": "mandrel",
             }
@@ -2212,7 +2212,7 @@ def write_deploy_lock(
                         "target_relative_path": DEPLOYED_FILE,
                     }
                 },
-                "schema_version": 1,
+                "schema_version": 3,
                 "source_git_commit": commit,
             }
         ),

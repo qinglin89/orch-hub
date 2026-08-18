@@ -31,7 +31,7 @@ from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
 
 # A representative --print-config object (the handoff sample), used across tests.
 SAMPLE = {
-    "schema_version": 1,
+    "schema_version": 3,
     "config_revision": "cfg-sha",
     "effective_revision": "eff-sha",
     "profile": "default",
@@ -227,6 +227,34 @@ def test_query_unsupported_schema_raises(tmp_path):
     with pytest.raises(OrchestratorConfigError) as exc:
         query_effective_config(repo, runner=runner)
     assert "schema_version" in str(exc.value)
+
+
+def test_a_target_ahead_of_the_hub_is_told_to_update_the_hub(tmp_path):
+    """The remedy has to follow the direction of the mismatch.
+
+    A target above this hub's version means the canonical suite moved and the hub
+    has not caught up. Redeploying that target — the advice for the other
+    direction — pushes it further away, so the message must not give it.
+    """
+    repo = make_repo(tmp_path)
+    runner = FakeRunner(stdout=_json({**SAMPLE, "schema_version": 99}))
+
+    with pytest.raises(OrchestratorConfigError) as exc:
+        query_effective_config(repo, runner=runner)
+    message = str(exc.value)
+    assert "update orch-hub" in message
+    assert "redeploy" not in message
+
+
+def test_a_target_behind_the_hub_is_told_to_redeploy_it(tmp_path):
+    repo = make_repo(tmp_path)
+    runner = FakeRunner(stdout=_json({**SAMPLE, "schema_version": 1}))
+
+    with pytest.raises(OrchestratorConfigError) as exc:
+        query_effective_config(repo, runner=runner)
+    message = str(exc.value)
+    assert "redeploy the orchestrator payload" in message
+    assert "update orch-hub" not in message
 
 
 def test_parse_missing_backend_raises():

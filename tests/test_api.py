@@ -1076,7 +1076,7 @@ def test_launch_bad_role_mode_is_422(tmp_path, monkeypatch):
 
 
 SAMPLE_CONFIG = {
-    "schema_version": 1,
+    "schema_version": 3,
     "config_revision": "cfg-sha",
     "effective_revision": "eff-sha",
     "profile": "standard",

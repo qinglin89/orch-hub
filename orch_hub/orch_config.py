@@ -49,9 +49,20 @@ ORCHESTRATOR_PYTHON = Path(".cursor") / "orchestrator" / ".venv" / "bin" / "pyth
 
 PRINT_CONFIG_FLAG = "--print-config"
 
-SUPPORTED_SCHEMA_VERSION = 1
+SUPPORTED_SCHEMA_VERSION = 3
 """The ``--print-config`` schema this hub understands. A different value fails
-closed (redeploy the orchestrator payload) rather than being parsed on guesswork."""
+closed rather than being parsed on guesswork.
+
+Exactly one version, not a supported range. A range only buys something when the
+other side is out of reach, and it is not: every managed repository is deployed
+from one canonical checkout, so the remedy for a mismatch is always to bring the
+lagging side forward. Pinning keeps a stale target loud instead of quietly
+half-understood.
+
+Which side lags decides the remedy, and the two are not the same action. A target
+below this version needs its payload redeployed. A target *above* it means the
+canonical suite moved and this hub has not caught up yet — redeploying then pushes
+the target further away, so the fix is here, not there."""
 
 DEFAULT_QUERY_TIMEOUT = 30.0
 """Bound the config query so a hung orchestrator cannot stall the HTTP request."""
@@ -205,10 +216,16 @@ def parse_effective_config(data: object) -> EffectiveConfig:
         )
     version = data.get("schema_version")
     if version != SUPPORTED_SCHEMA_VERSION:
+        # Name the remedy for the direction the mismatch actually runs in.
+        # Telling an operator to redeploy a target that is already ahead sends
+        # them further from a working pair.
+        if isinstance(version, int) and version > SUPPORTED_SCHEMA_VERSION:
+            remedy = "update orch-hub; the canonical suite has moved ahead of it"
+        else:
+            remedy = "redeploy the orchestrator payload to this target"
         raise OrchestratorConfigError(
             f"unsupported orchestrator config schema_version {version!r}"
-            f" (this hub supports {SUPPORTED_SCHEMA_VERSION}); redeploy the"
-            " orchestrator payload"
+            f" (this hub supports {SUPPORTED_SCHEMA_VERSION}); {remedy}"
         )
     profile = _req_str(data, "profile")
     dev_profile, review_profile, split_profiles = _role_profiles(
