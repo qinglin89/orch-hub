@@ -2086,6 +2086,160 @@
     syncModeAvailability();
   }
 
+  // -- the orchestrator's launch option catalog --------------------------------
+  //
+  // `config.options.agents[backend][role][agent]` is the deployed orchestrator's
+  // own statement of what a launch MAY select. All three keys matter: the effort
+  // vocabularies genuinely differ per agent — one agent's tiers are words the
+  // other refuses at startup — and the operator should not have to remember
+  // which vocabulary belongs to which agent. This file names none of them.
+  //
+  // The dialog offers exactly what it finds there and NOTHING when it finds
+  // nothing. A hub-invented list would be orch-hub asserting policy it does not
+  // own, and the operator would learn the guess was wrong only when the run
+  // refused to start. So a payload with no catalog keeps free-text entry with a
+  // visible reason — which is also the escape hatch the CLI deliberately keeps:
+  // an uncatalogued model still launches, and a dialog that cannot express one
+  // would make a supported launch unreachable from the web.
+
+  // The escape-hatch choice in a model select; never a submitted value.
+  const OTHER_MODEL = "__other__";
+
+  // The cc-codex CLI agents (orch_config.CLI_AGENTS): the fixed flag vocabulary
+  // the server validates --dev-agent/--review-agent against, and the whole agent
+  // selector on that backend. The catalog says which MODELS an agent has, never
+  // whether the agent is launchable — narrowing this to the agents a catalog
+  // happens to list would make a supported launch unreachable from the web. An
+  // agent the catalog says nothing about degrades to free text, with a reason.
+  const CLI_AGENTS = ["claude", "codex"];
+
+  // The backend the panel currently describes: the explicit selection, else the
+  // one the inherit query resolved.
+  function currentBackend() {
+    return (launchCfg && (launchCfg.backend || launchCfg.resolved)) || "";
+  }
+
+  function catalogRole(backend, key) {
+    const cfg = launchCfg && launchCfg.config;
+    const agents = cfg && cfg.options && cfg.options.agents;
+    const roles = agents && agents[backend];
+    const byAgent = roles && roles[key];
+    return byAgent && typeof byAgent === "object" ? byAgent : null;
+  }
+
+  // The agent names the catalog publishes for one backend + role, or [].
+  function catalogAgentNames(backend, key) {
+    const byAgent = catalogRole(backend, key);
+    return byAgent ? Object.keys(byAgent) : [];
+  }
+
+  // Which catalog entry a role reads right now. On cc-codex the operator picks
+  // the agent; a backend that publishes exactly one for the role has nothing to
+  // pick, and the catalog itself says which one it is rather than the hub
+  // naming it.
+  function catalogAgent(key, values) {
+    const backend = currentBackend();
+    if (backend === "cc-codex") return values.agent || "";
+    const names = catalogAgentNames(backend, key);
+    return names.length === 1 ? names[0] : "";
+  }
+
+  function catalogEntry(key, values) {
+    const byAgent = catalogRole(currentBackend(), key);
+    const agent = catalogAgent(key, values);
+    const entry = byAgent && agent ? byAgent[agent] : null;
+    return entry && typeof entry === "object" ? entry : null;
+  }
+
+  function catalogModels(entry) {
+    return entry && Array.isArray(entry.models) ? entry.models : [];
+  }
+
+  // The effort values published for one model: the model's own list when the
+  // catalog lists that model, else the agent's own (cc-codex fixes one axis per
+  // agent). A model outside the catalog on a backend that fixes no axis leaves
+  // the axis genuinely unknown — free text, not a guess about the model family.
+  function catalogEfforts(entry, model) {
+    if (!entry) return null;
+    const found = catalogModels(entry).filter((m) => m && m.id === model)[0];
+    const list = found ? found.efforts : entry.efforts;
+    return Array.isArray(list) && list.length ? list : null;
+  }
+
+  // Drop a Custom role value the catalog no longer offers, by writing an empty
+  // edit over the query's seeded value (absent edits fall back to the query, so
+  // a stale seed would otherwise reappear on the next repaint). This is what
+  // makes an agent switch re-filter rather than carry a value that was legal for
+  // the agent just deselected: the orchestrator would refuse it at startup, and
+  // a hub that submitted it anyway would have shown one thing and launched
+  // another. Run at paint time, so every path that changes the selection is
+  // covered by one rule instead of each handler clearing its own fields.
+  function pruneRoleEdits(key, role) {
+    const st = launchCfg;
+    if (!st) return;
+    role = role || {};
+    const edits = st.custom[key] || (st.custom[key] = {});
+    const backend = currentBackend();
+    let values = customRoleValues(key, role);
+    // The agent axis first: it decides which catalog entry the rest is measured
+    // against, so a stale agent would prune the model and effort against the
+    // wrong list entirely.
+    if (backend === "cc-codex") {
+      if (values.agent && CLI_AGENTS.indexOf(values.agent) === -1) edits.agent = "";
+    } else if (values.agent) {
+      edits.agent = ""; // this backend has no agent axis at all
+    }
+    // The query resolved this role's model and effort FOR THE AGENT it reports.
+    // Once the operator selects a different one, those seeded values belong to
+    // the agent just deselected, so they must not keep showing through as if the
+    // orchestrator had resolved them for the new one. This is the only guard
+    // when no catalog is published — and an untouched agent still shows its
+    // coherent seed, exactly as before the catalog existed.
+    values = customRoleValues(key, role);
+    if (backend === "cc-codex" && role.agent && values.agent && values.agent !== role.agent) {
+      if (edits.model === undefined) edits.model = "";
+      if (edits.effort === undefined) edits.effort = "";
+    }
+    values = customRoleValues(key, role);
+    const entry = catalogEntry(key, values);
+    const models = catalogModels(entry);
+    const listed = models.some((m) => m && m.id === values.model);
+    if (models.length && !listed && !values.other) edits.model = "";
+    // A free-typed model is measured against the agent's own axis, not its own
+    // (uncatalogued) entry; catalogEfforts falls back for exactly that reason.
+    const efforts = catalogEfforts(entry, values.other ? "" : values.model);
+    if (efforts && values.effort && efforts.indexOf(values.effort) === -1)
+      edits.effort = "";
+  }
+
+  // Why a Custom role still shows a free-text box, in the role's own words. The
+  // reason is part of the contract: the operator must be able to tell "this
+  // deployment published nothing" from "the hub chose not to offer anything".
+  function catalogNote(key, values, entry) {
+    const cfg = (launchCfg && launchCfg.config) || {};
+    if (!cfg.options)
+      return (
+        "This orchestrator publishes no launch option catalog, so model and" +
+        " effort stay free text; redeploy it to pick from published values."
+      );
+    if (currentBackend() === "cc-codex" && !values.agent)
+      return "Select an agent: its models and effort values come from the catalog.";
+    if (!entry || !catalogModels(entry).length) {
+      const agent = catalogAgent(key, values);
+      return (
+        "The catalog lists no models for " +
+        (agent ? agent + " on " : "") +
+        (currentBackend() || "this backend") +
+        ", so model and effort stay free text."
+      );
+    }
+    if (!catalogEfforts(entry, values.other ? "" : values.model))
+      return values.model || values.other
+        ? "This model is outside the catalog, so its effort stays free text."
+        : "Select a model: its effort values come from the catalog.";
+    return "";
+  }
+
   // A read-only role value in orchestrator notation: `agent:model @ effort`, with
   // the `agent:` prefix only for a cc-codex role (a Cursor role's agent is absent
   // or the bare "cursor", which the orchestrator's own notation omits).
@@ -2113,13 +2267,58 @@
     if (edits) edits[el.dataset.field] = el.value;
   }
 
+  // A Custom role's agent changed. The model and effort vocabularies under it
+  // changed with it, so repaint that panel: the paint-time prune is what drops a
+  // value the newly selected agent does not offer, instead of letting one that
+  // was legal for the agent just deselected ride into the launch. Still no
+  // re-query — the orchestrator resolves profiles, not explicit overrides.
+  function onCustomAgentChange(ev) {
+    onCustomFieldInput(ev);
+    repaintPanelKeepingFocus(ev.currentTarget.id);
+  }
+
+  // Repaint the panel and put the keyboard back where it was. These selects live
+  // INSIDE the panel, so a change of theirs destroys the very control that fired
+  // it; without this the operator would be dropped out of the row they were
+  // working in — and inside a modal, out of anything reachable at all.
+  function repaintPanelKeepingFocus(id) {
+    renderConfigPanel();
+    const again = id ? document.getElementById(id) : null;
+    if (again && typeof again.focus === "function") again.focus();
+  }
+
+  // A Custom role's model changed. `Other` is a UI choice, never a value: it
+  // records that the model is free-typed and keeps the current id as the
+  // starting point, so the escape hatch opens without losing what was selected.
+  // Repaint either way — on a backend that fixes no axis per agent, the effort
+  // vocabulary follows the MODEL, so the effort control has to re-filter.
+  function onCustomModelChange(ev) {
+    const el = ev.currentTarget;
+    const edits = launchCfg && launchCfg.custom[el.dataset.role];
+    if (!edits) return;
+    if (el.value === OTHER_MODEL) edits.other = true;
+    else {
+      edits.other = false;
+      edits.model = el.value;
+    }
+    repaintPanelKeepingFocus(el.id);
+  }
+
   // One role as a single compact row. A preset role shows static
   // `model @ effort` text; a Custom role shares the row between individually-
-  // labelled model and effort inputs (a dev-agent select leads the row for
+  // labelled model and effort controls (an agent select leads the row for
   // cc-codex), with a decorative `@` between them. The labels are visually
   // hidden but real, so each control is named for assistive tech without
   // stacking the row. Only the role whose own selector says Custom becomes
   // editable — the other role stays read-only in the same panel.
+  //
+  // Model and effort are selects over the orchestrator's published catalog for
+  // the role's current backend/role/agent, and free-text boxes exactly where the
+  // catalog offers nothing (see the catalog helpers above). Both roles carry the
+  // agent select on cc-codex: each names its own CLI agent, so each must send
+  // its complete agent/model/effort tuple — an omitted agent resolves from
+  // profile/env/config and would pair with the shown model behind the operator's
+  // back, on an effort axis it may not even accept.
   function roleRow(name, key, role, custom) {
     role = role || {};
     if (!custom) {
@@ -2129,39 +2328,84 @@
       );
     }
     const values = customRoleValues(key, role);
-    const backend = launchCfg.backend || launchCfg.resolved;
-    // A split-mode custom cc-codex DEV must send its complete agent/model/effort
-    // tuple (build_launch_args requires it), so there is no "inherit" choice
-    // here: an unshown agent resolved from profile/env/config would silently
-    // pair with the typed model. Cursor has no separate dev agent at all.
-    const agentSel =
-      key === "dev" && backend === "cc-codex"
-        ? `<label class="visually-hidden" for="opt-dev-agent">Dev agent</label>` +
-          `<select id="opt-dev-agent" class="opt-dev-agent role-agent role-edit"` +
-          ` data-role="dev" data-field="agent">` +
-          ["claude", "codex"]
-            .map(
-              (a) =>
-                `<option value="${a}"${
-                  values.agent === a ? " selected" : ""
-                }>${a}</option>`
-            )
-            .join("") +
-          `</select>`
-        : "";
-    const field = (suffix, label, value, placeholder) =>
-      `<label class="visually-hidden" for="opt-${key}-${suffix}">${name} ${label}</label>` +
+    const backend = currentBackend();
+    const entry = catalogEntry(key, values);
+    const models = catalogModels(entry);
+    const efforts = catalogEfforts(entry, values.other ? "" : values.model);
+    // The note explains why these controls are what they are, so it is their
+    // accessible description too — a reason only sighted users get is half a
+    // reason.
+    const note = catalogNote(key, values, entry);
+    const described = note ? ` aria-describedby="opt-${key}-note"` : "";
+    const label = (suffix, text) =>
+      `<label class="visually-hidden" for="opt-${key}-${suffix}">${name} ${text}</label>`;
+    // One published option list, with the current value selected. A value the
+    // list does not carry selects the disabled placeholder instead of silently
+    // binding to the first option, which would show one launch and post another.
+    const choices = (suffix, list, value, placeholder, extra) =>
+      label(suffix, suffix) +
+      `<select id="opt-${key}-${suffix}"` +
+      ` class="opt-${key}-${suffix} role-${suffix} role-${suffix}-select"` +
+      ` data-role="${key}" data-field="${suffix}"${described}>` +
+      `<option value="" disabled${value ? "" : " selected"}>${placeholder}</option>` +
+      list
+        .map(
+          (item) =>
+            `<option value="${escapeHtml(item)}"${
+              value === item ? " selected" : ""
+            }>${escapeHtml(item)}</option>`
+        )
+        .join("") +
+      (extra || "") +
+      `</select>`;
+    const field = (suffix, text, value, placeholder, fieldName) =>
+      label(suffix, text) +
       `<input id="opt-${key}-${suffix}" class="opt-${key}-${suffix} role-${suffix} role-edit"` +
-      ` data-role="${key}" data-field="${suffix}" type="text"` +
+      ` data-role="${key}" data-field="${fieldName || suffix}" type="text"${described}` +
       ` autocapitalize="off" autocomplete="off" spellcheck="false"` +
       ` value="${escapeHtml(value || "")}" placeholder="${placeholder}" />`;
+    // Both roles carry the agent select on cc-codex, and neither offers an
+    // inherit choice: an unshown agent resolved from profile/env/config would
+    // pair with the shown model behind the operator's back.
+    const agentCtl =
+      backend === "cc-codex"
+        ? choices("agent", CLI_AGENTS, values.agent, "select an agent")
+        : "";
+    // The catalog is advisory: the CLI still launches a model it does not list,
+    // so the select keeps that reachable through an explicit Other choice that
+    // reveals the free-text box. A catalog that made a supported launch
+    // unreachable from the web would be a regression, not a guardrail.
+    const modelCtl = models.length
+      ? choices(
+          "model",
+          models.map((m) => m.id),
+          values.other ? "" : values.model,
+          "select a model",
+          `<option value="${OTHER_MODEL}"${values.other ? " selected" : ""}>` +
+            `Other (not in the catalog)</option>`
+        )
+      : field("model", "model", values.model, "model id");
+    // The free-text box for an uncatalogued model trails the row on its own
+    // line: it only exists beside a full row of controls, and squeezing a model
+    // id in among them would leave neither readable.
+    const otherCtl =
+      models.length && values.other
+        ? field("model-other", "model outside the catalog", values.model, "model id", "model")
+        : "";
+    const effortCtl = efforts
+      ? choices("effort", efforts, values.effort, "select an effort")
+      : field("effort", "effort", values.effort, "effort");
     return (
       `<div class="role-row role-row-custom"><span class="role-name">${name}</span>` +
-      agentSel +
-      field("model", "model", values.model, "model id") +
+      agentCtl +
+      modelCtl +
       `<span class="at" aria-hidden="true">@</span>` +
-      field("effort", "effort", values.effort, "effort") +
-      `</div>`
+      effortCtl +
+      otherCtl +
+      `</div>` +
+      (note
+        ? `<p class="muted role-note" id="opt-${key}-note">${escapeHtml(note)}</p>`
+        : "")
     );
   }
 
@@ -2220,6 +2464,16 @@
     // but Launch is disabled rather than guessing at unsupported flags.
     const unsupported = st.split === false;
     panel.dataset.state = unsupported ? "unsupported" : "ready";
+    // Prune before painting, not in each handler: every path that can strand a
+    // value — an agent pick, a model pick, a backend re-query — ends here, so one
+    // rule covers them all. A pruned value stays pruned even if a later query
+    // would have re-seeded a valid one; asking for an explicit pick is the safe
+    // direction, and the operator picks from the list that is right in front of
+    // them.
+    if (!unsupported) {
+      if (st.dev === "custom") pruneRoleEdits("dev", cfg.dev);
+      if (st.review === "custom") pruneRoleEdits("review", cfg.review);
+    }
     const budget =
       `<p class="muted cfg-meta">max sessions ${
         cfg.max_sessions == null ? "—" : escapeHtml(String(cfg.max_sessions))
@@ -2246,6 +2500,17 @@
     panel.querySelectorAll(".role-edit").forEach((el) => {
       el.addEventListener("input", onCustomFieldInput);
       el.addEventListener("change", onCustomFieldInput);
+    });
+    // The catalog-driven selects: an effort pick is just a value, while an agent
+    // or model pick also changes which values remain offerable below it.
+    panel.querySelectorAll(".role-effort-select").forEach((el) => {
+      el.addEventListener("change", onCustomFieldInput);
+    });
+    panel.querySelectorAll(".role-agent-select").forEach((el) => {
+      el.addEventListener("change", onCustomAgentChange);
+    });
+    panel.querySelectorAll(".role-model-select").forEach((el) => {
+      el.addEventListener("change", onCustomModelChange);
     });
     setLaunchEnabled(!unsupported);
   }
@@ -2321,31 +2586,28 @@
       }
       return null;
     };
-    const val = (cls) => {
-      const el = form.querySelector("." + cls);
-      return el ? el.value.trim() : "";
-    };
-    if (st.dev === "custom") {
-      // The agent select is rendered only for cc-codex, and it always resolves to
-      // one of its two options — that is how a custom cc-codex DEV carries the
-      // complete tuple build_launch_args requires. Cursor renders no select and
-      // never receives --dev-agent.
-      const devAgent = val("opt-dev-agent");
-      if (devAgent) launch.dev_agent = devAgent;
-      const model = val("opt-dev-model");
-      const effort = val("opt-dev-effort");
+    // Read the role's merged state, not the DOM: a Custom model has two possible
+    // controls (the catalog select and the outside-the-catalog box) and the state
+    // is the one place that says which is in force.
+    const trim = (value) => (typeof value === "string" ? value.trim() : "");
+    for (const [key, label] of [["dev", "DEV"], ["review", "REVIEW"]]) {
+      if (st[key] !== "custom") continue;
+      const values = customRoleValues(key, (st.config || {})[key]);
+      // Both cc-codex roles send their complete agent/model/effort tuple: each
+      // names its own CLI agent, and an omitted one resolves from
+      // profile/env/config into a pairing the operator never previewed. Cursor
+      // runs both roles on the one SDK and rejects the flag outright.
+      if (launch.backend === "cc-codex") {
+        const agent = trim(values.agent);
+        if (!agent) return refuse("Custom " + label + " needs an agent.");
+        launch[key + "_agent"] = agent;
+      }
+      const model = trim(values.model);
+      const effort = trim(values.effort);
       if (!model || !effort)
-        return refuse("Custom DEV needs a model and an effort.");
-      launch.dev_model = model;
-      launch.dev_effort = effort;
-    }
-    if (st.review === "custom") {
-      const model = val("opt-review-model");
-      const effort = val("opt-review-effort");
-      if (!model || !effort)
-        return refuse("Custom REVIEW needs a model and an effort.");
-      launch.review_model = model;
-      launch.review_effort = effort;
+        return refuse("Custom " + label + " needs a model and an effort.");
+      launch[key + "_model"] = model;
+      launch[key + "_effort"] = effort;
     }
     const planGate = form.querySelector(".opt-plan-gate");
     if (planGate && planGate.checked) launch.plan_gate = true;

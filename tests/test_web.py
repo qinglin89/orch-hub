@@ -258,24 +258,93 @@ def test_launch_posts_the_structured_launch_selection():
 
 def test_custom_role_exposes_only_its_own_editable_fields():
     # A role becomes editable only when ITS selector says Custom; the other role
-    # stays a read-only preset in the same panel. The dev-agent select is
-    # cc-codex-only (gated on the backend inside roleRow) and offers no inherit
-    # choice, because a split-mode custom cc-codex DEV must send its complete
-    # agent/model/effort tuple.
+    # stays a read-only preset in the same panel. The agent select is cc-codex-only
+    # (gated on the backend inside roleRow) and offers no inherit choice, because
+    # a split-mode custom cc-codex role must send its complete agent/model/effort
+    # tuple — both roles alike, since each names its own CLI agent.
     body = app_js()
-    assert "opt-dev-agent" in body
+    assert 'backend === "cc-codex"' in body
+    assert 'choices("agent", CLI_AGENTS, values.agent' in body
     assert 'st.dev === "custom"' in body
     assert 'st.review === "custom"' in body
     assert '<option value="">inherit</option>' not in body
-    # The role fields are templated per role and per field, so the four ids and
-    # their styling hooks (.role-model / .role-effort) come from one
-    # `opt-${key}-${suffix}` template rather than four literal blocks.
+    # The role fields are templated per role and per field, so the ids and their
+    # styling hooks (.role-model / .role-effort) come from one `opt-${key}-${suffix}`
+    # template rather than a literal block per role.
     assert 'id="opt-${key}-${suffix}"' in body
     assert 'class="opt-${key}-${suffix} role-${suffix} role-edit"' in body
     # Custom edits are local state: kept in the dialog state so an unrelated
     # re-query's repaint cannot wipe them, and never a reason to re-query.
     assert "onCustomFieldInput" in body
     assert "customRoleValues" in body
+
+
+def test_custom_role_options_come_from_the_published_catalog():
+    # Model and effort choices are read out of the orchestrator's own
+    # `options.agents[backend][role][agent]`, keyed by all three because the
+    # effort vocabularies differ per agent. Nothing in the shell names a model id
+    # or an effort word of its own.
+    body = app_js()
+    assert "cfg.options && cfg.options.agents" in body
+    assert "function catalogAgentNames(backend, key)" in body
+    assert "function catalogEfforts(entry, model)" in body
+    # The per-model list wins over the agent's, so a backend that fixes no axis
+    # per agent (Cursor takes either model family) still offers the right words.
+    assert "const list = found ? found.efforts : entry.efforts;" in body
+    # No hub-owned model or effort vocabulary anywhere in the shell.
+    for invented in ("claude-opus", "gpt-5", "xhigh", "minimal"):
+        assert invented not in body
+
+
+def test_custom_role_agent_change_refilters_and_strands_nothing():
+    # Switching a role's agent re-filters that role's own options, and a value the
+    # new agent does not offer is dropped rather than carried into the launch —
+    # the orchestrator would refuse it at startup, and submitting it would mean
+    # showing one launch and posting another.
+    body = app_js()
+    assert "function onCustomAgentChange(ev)" in body
+    assert "function pruneRoleEdits(key, role)" in body
+    assert 'if (models.length && !listed && !values.other) edits.model = "";' in body
+    assert 'edits.effort = "";' in body
+    assert 'if (st.dev === "custom") pruneRoleEdits("dev", cfg.dev);' in body
+    assert 'if (st.review === "custom") pruneRoleEdits("review", cfg.review);' in body
+
+
+def test_a_payload_without_a_catalog_keeps_free_text_with_a_reason():
+    # The hub renders what the payload supplies and nothing else: no catalog means
+    # today's free-text inputs plus a visible reason, never a substituted list.
+    body = app_js()
+    assert "function catalogNote(key, values, entry)" in body
+    assert "publishes no launch option catalog" in body
+    assert "The catalog lists no models for " in body
+    assert 'class="muted role-note" id="opt-${key}-note"' in body
+    # The reason is the controls' accessible description too, not decoration a
+    # screen reader would never reach.
+    assert '`aria-describedby="opt-${key}-note"`' in body or (
+        ' aria-describedby="opt-${key}-note"' in body
+    )
+    # The free-text control is the same templated input as before the catalog.
+    assert 'field("model", "model", values.model, "model id")' in body
+
+
+def test_a_model_outside_the_catalog_stays_launchable():
+    # The CLI deliberately still launches an uncatalogued model, so the select
+    # keeps an explicit escape hatch that reveals a free-text box. `Other` is a UI
+    # choice and never a submitted value.
+    body = app_js()
+    assert 'const OTHER_MODEL = "__other__";' in body
+    assert "if (el.value === OTHER_MODEL) edits.other = true;" in body
+    assert '"model (outside the catalog)"' in body or "model outside the catalog" in body
+    assert "Other (not in the catalog)" in body
+
+
+def test_launch_sends_each_custom_cc_codex_role_its_own_agent():
+    # Both roles now name their own CLI agent, so both send the complete tuple;
+    # a backend without an agent axis sends neither.
+    body = app_js()
+    assert 'launch[key + "_agent"] = agent;' in body
+    assert 'if (launch.backend === "cc-codex")' in body
+    assert 'launch[key + "_model"] = model;' in body
 
 
 def test_plan_gate_toggle_stays_available_and_orthogonal():
@@ -1545,8 +1614,7 @@ def test_form_controls_carry_accessible_names():
     # verifies every dialog control resolves a label[for]).
     assert '<label for="opt-backend"' in body
     assert '`<label for="opt-${key}-mode">${name} profile`' in body
-    assert 'for="opt-dev-agent">Dev agent</label>' in body
-    assert 'for="opt-${key}-${suffix}">${name} ${label}</label>' in body
+    assert 'for="opt-${key}-${suffix}">${name} ${text}</label>' in body
 
 
 def test_scrollable_regions_are_keyboard_reachable():

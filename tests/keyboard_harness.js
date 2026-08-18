@@ -710,6 +710,14 @@ function type(el, text) {
   dispatch(el, new Event("input"));
 }
 
+// Pick an option in a <select> the way a keyboard/pointer user does: a select
+// reports its choice through `change` alone, never `input`.
+function choose(el, value) {
+  el.focus();
+  el.value = value;
+  dispatch(el, new Event("change"));
+}
+
 function flush() {
   // Drain the microtask queue: every render path is a chain of awaited
   // already-resolved fetch promises, so a bounded number of turns settles it.
@@ -822,8 +830,42 @@ var RUN = "run-1";
 // variation resolves to this same object; the recorded request `url` carries the
 // params the dialog actually asked for. `profiles` + `split_profiles: true` is a
 // deployment that understands --dev-profile/--review-profile.
+// The orchestrator's published option catalog, as the config route projects it:
+// what a launch MAY select, keyed by backend, role and agent. The two cc-codex
+// agents deliberately share no effort word, so a control still showing the other
+// agent's value after a switch is visible in an assertion.
+var CLAUDE_EFFORTS = ["low", "max"];
+var CODEX_EFFORTS = ["none", "xhigh"];
+
+function agentOptions(axis, efforts, ids) {
+  return {
+    effort_axis: axis,
+    efforts: efforts,
+    models: ids.map(function (id) {
+      return { id: id, effort_axis: axis, efforts: efforts };
+    }),
+  };
+}
+
+var CC_AGENTS = {
+  claude: agentOptions("effort", CLAUDE_EFFORTS, ["claude-opus-4-8", "claude-opus-5"]),
+  codex: agentOptions("reasoning", CODEX_EFFORTS, ["gpt-5.5"]),
+};
+// Cursor runs both roles on the one SDK and takes either model family, so the
+// agent fixes no axis and each model carries its own.
+var CURSOR_AGENTS = {
+  cursor: {
+    effort_axis: null,
+    efforts: null,
+    models: [
+      { id: "claude-opus-4-8", effort_axis: "effort", efforts: CLAUDE_EFFORTS },
+      { id: "gpt-5.5", effort_axis: "reasoning", efforts: CODEX_EFFORTS },
+    ],
+  },
+};
+
 var ORCH_CONFIG = {
-  schema_version: 1,
+  schema_version: 3,
   config_revision: "cfg00000000aaaa1111",
   effective_revision: "eff00000000bbbb2222",
   profile: "default",
@@ -841,6 +883,12 @@ var ORCH_CONFIG = {
   once: false,
   plan_gate: false,
   control_dir: null,
+  options: {
+    agents: {
+      "cc-codex": { dev: CC_AGENTS, review: CC_AGENTS },
+      cursor: { dev: CURSOR_AGENTS, review: CURSOR_AGENTS },
+    },
+  },
 };
 
 // The same query answered by an orchestrator deployment that predates split role
@@ -849,6 +897,25 @@ var ORCH_CONFIG = {
 var ORCH_CONFIG_LEGACY = Object.assign({}, ORCH_CONFIG, {
   profiles: { dev: "default", review: "default" },
   split_profiles: false,
+});
+
+// The same query from a deployment that publishes no option catalog at all: the
+// dialog must keep free-text entry with a visible reason rather than offer a
+// list the payload never supplied.
+var ORCH_CONFIG_NO_CATALOG = Object.assign({}, ORCH_CONFIG, { options: null });
+
+// A catalog that publishes cc-codex but omits one of the agents a role can be
+// launched with: the agent selector still offers it (the CLI accepts it), so
+// that agent alone degrades to free text.
+var ORCH_CONFIG_PARTIAL_CATALOG = Object.assign({}, ORCH_CONFIG, {
+  options: {
+    agents: {
+      "cc-codex": {
+        dev: { claude: CC_AGENTS.claude },
+        review: { claude: CC_AGENTS.claude },
+      },
+    },
+  },
 });
 
 var REPOS = {
@@ -1622,17 +1689,18 @@ async function scenarioRunOptions() {
     "claude-opus-4-8"
   );
   check("dialog: Custom controls are labelled", dialogFieldsAreLabelled(dialogC), "a Custom field has no label[for]");
-  type(devModel, "opus");
-  type(doc.getElementById("opt-dev-effort"), "high");
+  choose(devModel, "claude-opus-5");
+  await flush();
+  choose(doc.getElementById("opt-dev-effort"), "low");
   // Editing is local state: changing the OTHER role re-queries and repaints the
-  // panel, and the typed DEV values must survive that repaint.
+  // panel, and the chosen DEV values must survive that repaint.
   reviewModeC.value = "excellent";
   dispatch(reviewModeC, new Event("change"));
   await flush();
   eq(
-    "dialog: typed Custom values survive the other role's re-query",
+    "dialog: chosen Custom values survive the other role's re-query",
     doc.getElementById("opt-dev-model").value,
-    "opus"
+    "claude-opus-5"
   );
   var launchC = dialogC.querySelector('button[type="submit"]');
   pressEnter(launchC);
@@ -1646,8 +1714,8 @@ async function scenarioRunOptions() {
       review_mode: "excellent",
       backend: "cc-codex",
       dev_agent: "claude",
-      dev_model: "opus",
-      dev_effort: "high",
+      dev_model: "claude-opus-5",
+      dev_effort: "low",
     })
   );
 
@@ -1709,6 +1777,208 @@ async function scenarioRunOptions() {
     "still open"
   );
   activeIs("dialog (no showModal): focus still returns to the opener", plainOpen);
+}
+
+// The launch dialog's option catalog: what a Custom role may offer, and what it
+// must refuse to offer when the payload publishes nothing.
+async function scenarioLaunchCatalog() {
+  installRoutes({ waiting: false });
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var dialog = doc.querySelector(".run-options");
+  pressEnter(doc.querySelector(".open-run-options"));
+  await flush();
+
+  // REVIEW gets the agent selector DEV already had: the review role names its
+  // own CLI agent now, and a Custom cc-codex role must send the complete tuple.
+  var reviewMode = doc.getElementById("opt-review-mode");
+  choose(reviewMode, "custom");
+  await flush();
+  var agent = doc.getElementById("opt-review-agent");
+  check("catalog: a Custom REVIEW selects its agent", !!agent, "no #opt-review-agent");
+  eq(
+    "catalog: the agent options come from the catalog",
+    agent.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
+    ",claude,codex" // the leading empty option is the disabled placeholder
+  );
+  eq("catalog: the agent seeds from the resolved query", agent.value, "codex");
+  var model = doc.getElementById("opt-review-model");
+  var effort = doc.getElementById("opt-review-effort");
+  eq("catalog: the model control is a select over published ids", model.tagName, "SELECT");
+  eq("catalog: the effort control is a select over published values", effort.tagName, "SELECT");
+  eq(
+    "catalog: the models are the selected agent's, not every agent's",
+    model.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
+    ",gpt-5.5,__other__"
+  );
+  eq(
+    "catalog: the efforts are the selected agent's axis",
+    effort.querySelectorAll("option").map(function (o) { return o.getAttribute("value"); }).join(","),
+    ",none,xhigh"
+  );
+  check("catalog: every Custom control is labelled", dialogFieldsAreLabelled(dialog), "a Custom control has no label[for]");
+
+  // Switching the agent re-filters that role's axis, and the values that were
+  // legal for the agent just deselected are gone — not left selected, and not
+  // submittable.
+  choose(doc.getElementById("opt-review-agent"), "claude");
+  await flush();
+  eq(
+    "catalog: an agent change re-filters the effort options",
+    doc.getElementById("opt-review-effort")
+      .querySelectorAll("option")
+      .map(function (o) { return o.getAttribute("value"); })
+      .join(","),
+    ",low,max"
+  );
+  activeIs(
+    "catalog: the agent select keeps focus across its own repaint",
+    doc.getElementById("opt-review-agent")
+  );
+  eq(
+    "catalog: the previous agent's model does not survive the switch",
+    doc.getElementById("opt-review-model").value,
+    ""
+  );
+  eq(
+    "catalog: neither does its effort",
+    doc.getElementById("opt-review-effort").value,
+    ""
+  );
+  var launch = dialog.querySelector('button[type="submit"]');
+  var posted = runPosts();
+  pressEnter(launch);
+  await flush();
+  check(
+    "catalog: a stranded role cannot be launched",
+    runPosts() === posted &&
+      dialog.querySelector(".control-status").textContent.indexOf("REVIEW") !== -1,
+    describe(dialog.querySelector(".control-status"))
+  );
+  choose(doc.getElementById("opt-review-model"), "claude-opus-5");
+  await flush();
+  choose(doc.getElementById("opt-review-effort"), "max");
+  pressEnter(launch);
+  await flush();
+  var call = lastCall("POST", "/api/runs");
+  eq(
+    "catalog: a Custom REVIEW posts its own complete tuple",
+    call && JSON.stringify(call.body.launch),
+    JSON.stringify({
+      dev_mode: "default",
+      review_mode: "custom",
+      backend: "cc-codex",
+      review_agent: "claude",
+      review_model: "claude-opus-5",
+      review_effort: "max",
+    })
+  );
+
+  // The escape hatch: the CLI still launches a model the catalog does not list,
+  // so the dialog must be able to express one.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var hatchDialog = doc.querySelector(".run-options");
+  pressEnter(doc.querySelector(".open-run-options"));
+  await flush();
+  choose(doc.getElementById("opt-dev-mode"), "custom");
+  await flush();
+  choose(doc.getElementById("opt-dev-model"), "__other__");
+  await flush();
+  var free = doc.getElementById("opt-dev-model-other");
+  check("catalog: Other reveals a free-text model box", !!free, "no #opt-dev-model-other");
+  type(free, "claude-opus-6-preview");
+  eq(
+    "catalog: the effort still comes from the agent's own axis",
+    doc.getElementById("opt-dev-effort").tagName,
+    "SELECT"
+  );
+  choose(doc.getElementById("opt-dev-effort"), "max");
+  pressEnter(hatchDialog.querySelector('button[type="submit"]'));
+  await flush();
+  call = lastCall("POST", "/api/runs");
+  eq(
+    "catalog: an uncatalogued model still launches",
+    call && call.body.launch.dev_model,
+    "claude-opus-6-preview"
+  );
+
+  // A deployment that publishes no catalog at all keeps today's free-text entry
+  // and says why. The hub never renders a list the payload did not supply.
+  route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG_NO_CATALOG);
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var plain = doc.querySelector(".run-options");
+  pressEnter(doc.querySelector(".open-run-options"));
+  await flush();
+  choose(doc.getElementById("opt-dev-mode"), "custom");
+  await flush();
+  eq(
+    "catalog (none): the model control falls back to free text",
+    doc.getElementById("opt-dev-model").tagName,
+    "INPUT"
+  );
+  eq(
+    "catalog (none): so does the effort control",
+    doc.getElementById("opt-dev-effort").tagName,
+    "INPUT"
+  );
+  eq(
+    "catalog (none): the free-text model still seeds from the query",
+    doc.getElementById("opt-dev-model").value,
+    "claude-opus-4-8"
+  );
+  check(
+    "catalog (none): the reason is visible, not silent",
+    plain.querySelector(".role-note").textContent.indexOf("no launch option catalog") !== -1,
+    describe(plain.querySelector(".role-note"))
+  );
+  pressEnter(plain.querySelector('button[type="submit"]'));
+  await flush();
+  call = lastCall("POST", "/api/runs");
+  eq(
+    "catalog (none): a free-typed launch still posts",
+    call && call.body.launch.dev_model,
+    "claude-opus-4-8"
+  );
+
+  // A catalog that omits the agent the role is on: that agent alone degrades,
+  // and the dialog says which one it could not offer options for.
+  route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG_PARTIAL_CATALOG);
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var partial = doc.querySelector(".run-options");
+  pressEnter(doc.querySelector(".open-run-options"));
+  await flush();
+  choose(doc.getElementById("opt-dev-mode"), "custom");
+  await flush();
+  eq(
+    "catalog (partial): a catalogued agent still selects from the catalog",
+    doc.getElementById("opt-dev-model").tagName,
+    "SELECT"
+  );
+  choose(doc.getElementById("opt-dev-agent"), "codex");
+  await flush();
+  eq(
+    "catalog (partial): an uncatalogued agent degrades to free text",
+    doc.getElementById("opt-dev-model").tagName,
+    "INPUT"
+  );
+  check(
+    "catalog (partial): the note names the agent it has nothing for",
+    partial.querySelector(".role-note").textContent.indexOf("codex") !== -1,
+    describe(partial.querySelector(".role-note"))
+  );
+  eq(
+    "catalog (partial): the other agent's model does not survive into free text",
+    doc.getElementById("opt-dev-model").value,
+    ""
+  );
+  route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG);
+}
+
+// How many runs have been posted so far, so a scenario can assert that a refusal
+// posted nothing without depending on calls earlier scenarios made.
+function runPosts() {
+  return CALLS.filter(function (c) {
+    return c.method === "POST" && c.path === "/api/runs";
+  }).length;
 }
 
 // The url (query string included) of the most recent orchestrator-config GET,
@@ -4502,6 +4772,7 @@ async function scenarioRepoAdmission() {
     await scenarioAppearance();
     await scenarioTaskDetail();
     await scenarioRunOptions();
+    await scenarioLaunchCatalog();
     await scenarioIntakeReview();
     await scenarioHeadingOutline();
     await scenarioViewLayout();

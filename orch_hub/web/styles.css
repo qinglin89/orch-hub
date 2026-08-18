@@ -2409,6 +2409,22 @@ code {
   flex: 0 0 auto;
 }
 
+/* The outside-the-catalog model box trails the row on its own line (app.js
+   emits it last for that reason): it only appears beside a full row of selects,
+   and squeezing a free-typed model id in among them would leave neither
+   readable. */
+.role-row-custom .role-model-other {
+  flex: 1 1 100%;
+}
+
+/* Why a role is still free-typing (no catalog at all, or none for the agent it
+   is on). It sits under its own role's row rather than the panel, because two
+   Custom roles can be degraded for different reasons at once. */
+.config-panel .role-note {
+  margin: 0;
+  font-size: 12px;
+}
+
 .role-row-custom .at {
   color: var(--muted);
   font-family: var(--mono);
