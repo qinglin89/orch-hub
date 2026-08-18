@@ -17,3 +17,17 @@ __pycache__/
 /.pytest_cache/
 /*.egg-info/
 /build/
+
+# BEGIN mandrel
+/.ai-deploy-manifest.json
+/.ai-protocol/
+/.cursor/
+/.codex/
+/.claude/
+/CLAUDE.md
+/ai-coding*.md
+/.ai-tasks/
+__pycache__/
+*.py[cod]
+!/.ai-deploy-lock.json
+# END mandrel

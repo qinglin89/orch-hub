@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "533a87d311bd99d9ae9ba25f1385a3c22396b4e704a8b75a2ad9b9b36614f450",
+  "canonical_payload_sha256": "d6b424f230ed9d637929afb5d01c29196f6ba30c1f2d4de26531296f8f9a314e",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -159,8 +159,8 @@
     },
     {
       "canonical_relative_path": "canonical/codex/hooks/session-start.sh",
-      "canonical_sha256": "c6b099994f3eca7341f6fd0006e5cc9e3c4e4b5023ab423cbd72081d14682157",
-      "canonical_size_bytes": 6675,
+      "canonical_sha256": "b72cff88540dfeaa8a465b00f798fbfec1acdae90074710c1768458c6a0cbaad",
+      "canonical_size_bytes": 6662,
       "target_relative_path": ".codex/hooks/session-start.sh"
     },
     {
@@ -183,8 +183,8 @@
     },
     {
       "canonical_relative_path": "canonical/cursor/hooks/session-start.sh",
-      "canonical_sha256": "6f4420ea20323f6bb349306ded7dc0c509708f16d5e8e5b4cc48e54a768182e8",
-      "canonical_size_bytes": 5126,
+      "canonical_sha256": "2c8ae6dfd4477b29c7aca326466fc1cb0498005cb9eba507d0140304a4b97029",
+      "canonical_size_bytes": 5113,
       "target_relative_path": ".cursor/hooks/session-start.sh"
     },
     {
@@ -201,8 +201,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-config-profiles.md",
-      "canonical_sha256": "48918b54dd82dee8434c2950b53cb7ddb6902b437203db1152e99e52c9063dd3",
-      "canonical_size_bytes": 8214,
+      "canonical_sha256": "8174b2a3cd5534dd0c5481b76e67bdde8f954151d663fe704987197131711146",
+      "canonical_size_bytes": 8201,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub-config-profiles.md"
     },
     {
@@ -213,20 +213,20 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub.md",
-      "canonical_sha256": "2dcad360393e5f1e1f710c525db7adbf9bd942bb76544763880a2b4c0c75a7fe",
-      "canonical_size_bytes": 14943,
+      "canonical_sha256": "2b2f8063140013c50916e101138d276503119c2ef4fd5fd993fd03bc0f39bbb5",
+      "canonical_size_bytes": 14834,
       "target_relative_path": ".cursor/orchestrator/HANDOFF-orch-hub.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "5c7421480c86ff7a9807f1539c828780b44be23192f31b586721d53c9b081a59",
-      "canonical_size_bytes": 36146,
+      "canonical_sha256": "19944fd782af12c50cdde47a01ec13822e2cf1c89ccf931071415f8d582bcb59",
+      "canonical_size_bytes": 36148,
       "target_relative_path": ".cursor/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "e96b604c679417759837a545d2e0561d19bcd7e7bc9b40e697bb2115604b32de",
-      "canonical_size_bytes": 144785,
+      "canonical_sha256": "7bd73abe589a426be4e88725ceb1b96094b99293d117ddae30741f78f92d2264",
+      "canonical_size_bytes": 144795,
       "target_relative_path": ".cursor/orchestrator/orchestrator.py"
     },
     {
@@ -675,14 +675,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/smoke_hooks.py",
-      "canonical_sha256": "b0197953d004e840c7abe1638e286ca9c33d5a996f1122943da23f67b0d1f403",
-      "canonical_size_bytes": 3780,
+      "canonical_sha256": "8c500c5351e95ed5a94fdaa349dca3e97f8d70b1c0c2ed9941be107b4d334dbf",
+      "canonical_size_bytes": 3790,
       "target_relative_path": ".cursor/orchestrator/smoke_hooks.py"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "f5781b5d9ecf337e9727fc2c454375adca3a5c3de9337312f04186f088ef7406",
-      "canonical_size_bytes": 103026,
+      "canonical_sha256": "2040e38bb7aadbf5e6526acc4d6c6cc478f16af2d412c27756f546906914a6a2",
+      "canonical_size_bytes": 103037,
       "target_relative_path": ".cursor/orchestrator/test_loop_mock.py"
     },
     {
@@ -705,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "e63042d2a565d0f1734732894b39951a2f3ff0d1",
-  "source_repo": "ai-native-deployment"
+  "source_git_commit": "0756a94a6423d391289989c51266ca9cb53b1a50",
+  "source_repo": "mandrel"
 }
