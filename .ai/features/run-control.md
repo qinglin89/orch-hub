@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-14
-verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
+last-updated: 2026-08-18
+verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
 ---
 
 # Features: Run Control
@@ -62,15 +62,19 @@ Implemented behavior:
   `profiles.dev`/`profiles.review` values are authoritative; older responses
   derive both roles from top-level `profile` for display but carry
   `split_profiles=false`. Missing deployments, nonzero exits, malformed
-  schema-v1 payloads, or unsupported schema versions fail closed.
+  launch-resolving fields, or unsupported schema versions fail closed. The
+  advisory `options` catalog is normalized by backend/role/agent; absent or
+  unusable catalog content becomes no offered list rather than a query failure
+  or hub-owned fallback.
 - Structured dashboard launches use `LaunchSpec`/`build_launch_args` before
   reaching `RunManager.start_run`: independent `dev_mode`/`review_mode`
   selections emit named `--dev-profile`/`--review-profile` flags or role-local
   Custom overrides. Backend may inherit only for Default/Default; split Custom
-  cc-codex DEV requires agent/model/effort and Cursor rejects `--dev-agent`.
-  Legacy structured `mode` still maps one selection to both roles but cannot be
-  mixed with the split shape; raw `extra_args` remains verbatim and mutually
-  exclusive with structured `launch`.
+  cc-codex roles each require agent/model/effort and Cursor rejects either
+  role-agent flag. Legacy structured `mode` still maps one selection to both
+  roles, rejects the newer `review_agent`, and cannot be mixed with the split
+  shape; raw `extra_args` remains verbatim and mutually exclusive with
+  structured `launch`.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
   it persists the internal `spawn_out` path so reattached runs and pre-field
   records can still surface startup diagnostics. In-memory `Popen` handles only

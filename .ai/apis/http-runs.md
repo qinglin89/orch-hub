@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-30
-verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
+last-updated: 2026-08-18
+verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -16,11 +16,13 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
   gates and subprocess start to the app's single `RunManager`.
 - Dashboard caller: the task-detail Start dialog sends structured `launch`
   selection (`dev_mode`, `review_mode`, optional shared `backend`, role-local
-  Custom fields, and orthogonal flags); the server maps it through
-  `build_launch_args`. Legacy structured `mode` remains a mutually exclusive
-  compatibility shape that applies one selection to both roles. Raw
-  `extra_args` callers remain supported verbatim, but `launch` plus non-empty
-  `extra_args` is 400.
+  Custom `agent`/`model`/`effort` fields, and orthogonal flags); the server maps
+  it through `build_launch_args`. Every Custom cc-codex role requires the
+  complete tuple, while Cursor rejects role-agent fields. Legacy structured
+  `mode` remains a mutually exclusive compatibility shape that applies one
+  selection to both roles and rejects the newer `review_agent`. Raw `extra_args`
+  callers remain supported verbatim, but `launch` plus non-empty `extra_args`
+  is 400.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
 - Admission error: a non-terminal remote intake returns HTTP 409 before any
   run record or subprocess exists:

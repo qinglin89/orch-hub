@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
 ---
 
 # APIs: HTTP — Core
@@ -109,8 +109,11 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
 - Shape: `EffectiveConfig.to_dict()` with schema/revisions/profile list,
   authoritative-or-derived `profiles.dev`/`profiles.review`, hub-owned
   `split_profiles`, backend, resolved role values, budgets, sandbox, provenance
-  `sources`, and preview launch fields. Missing legacy `profiles` derives both
-  roles from top-level `profile` but leaves `split_profiles=false`.
+  `sources`, preview launch fields, and optional normalized
+  `options.agents[backend][role][agent]` model/effort choices. Missing legacy
+  `profiles` derives both roles from top-level `profile` but leaves
+  `split_profiles=false`; absent/unusable advisory `options` becomes `null`
+  without supplying a hub fallback or failing the otherwise valid query.
 - Errors: unknown repo returns 404; unrecognized backend returns 400; missing
   old deployments, nonzero `--print-config`, malformed output, or unsupported
   schema return 502 with the orchestrator/parser reason so launch fails closed.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-09
-verified-against: 79b6b88c586380012edb532809d2318f34131f5a
+last-updated: 2026-08-18
+verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -48,15 +48,21 @@ Implemented behavior:
   for one-tap approval, and guard 400 details appear inline.
 - Task detail Start keeps one shared Backend selector and gives DEV and REVIEW
   independent Default/Standard/Excellent/Custom selectors. Presets are
-  read-only; only a selected Custom role exposes editable fields. The first
-  config query omits role parameters to probe split capability; later coherent
-  queries include each named role profile, cache by backend plus both role
-  selections, and discard stale generations. Custom seeds from an inherited
-  role while retaining the other role's named selection, and its edits stay
-  local across unrelated queries. Query failure or `split_profiles=false`
-  disables Launch; unavailable named profiles remain visibly disabled. Submit
-  posts split `dev_mode`/`review_mode` launch data, while shared backend and
-  plan-gate remain orthogonal. Stop posts to
+  read-only; either selected Custom role gets an agent selector on cc-codex and
+  model/effort controls from `options.agents[backend][role][agent]`. Missing or
+  unusable catalog data degrades only that role to explained free text, never a
+  hub-invented list; Other keeps uncatalogued models reachable. Agent changes
+  clear that role's agent-scoped model/effort/escape-hatch edits before
+  re-filtering. The first config query omits role parameters to probe split
+  capability; later coherent queries include each named role profile, cache by
+  backend plus both role selections, and discard stale generations. Custom
+  seeds from an inherited role while retaining the other role's named selection,
+  and keeps edits across unrelated queries only while its agent is unchanged.
+  Query failure or `split_profiles=false` disables Launch; unavailable named
+  profiles remain visibly disabled. Submit posts split
+  `dev_mode`/`review_mode` launch data, including the complete agent/model/effort
+  tuple for each Custom cc-codex role, while shared backend and plan-gate remain
+  orthogonal. Stop posts to
   `POST /api/runs/{run_id}/stop`. `blocked` tasks require explicit
   acknowledgement; stale/raced starts render the backend 409 response.
 - Start is hidden or replaced with an explanation when the dashboard already

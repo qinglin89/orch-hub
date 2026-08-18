@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
 ---
 
 # Modules: Runtime
@@ -122,15 +122,20 @@ policy. `query_effective_config` runs the repo-local deployed orchestrator
 Python with `orchestrator.py --print-config`, `cwd=<repo>`, and optional shared
 backend, legacy run-wide profile, and independent DEV/REVIEW profile flags. It
 fails closed on missing deployment binaries, timeouts, nonzero exits, non-JSON,
-unsupported schema versions, or malformed schema-v1 fields. An observed
+unsupported schema versions, or malformed launch-resolving fields. The advisory
+`options` catalog is the sole tolerant field: it is normalized to an
+`agents[backend][role][agent]` projection, with absent/unusable content becoming
+`None` rather than disabling launch or supplying hub-owned choices. An observed
 `profiles.dev`/`profiles.review` pair sets the hub-owned split capability
 marker; an older response without `profiles` derives both display selections
 from top-level `profile` but remains incapable of split launch.
 `build_launch_args(LaunchSpec)` owns mutually exclusive split
 `dev_mode`/`review_mode` and legacy `mode` request shapes. Split named modes
 emit only their role-profile flag; any non-Default role requires an explicit
-shared backend; Custom emits only that role's explicit fields, with a complete
-cc-codex DEV agent/model/effort tuple and no Cursor `--dev-agent`. Snapshot
+shared backend; Custom emits only that role's explicit fields. Each Custom
+cc-codex role requires its complete agent/model/effort tuple; Cursor rejects
+either role-agent flag. The legacy run-wide shape rejects `review_agent` rather
+than ignoring it. Snapshot
 helpers parse `effective-config:` log lines, persist/load
 `effective_config.json`, and remain tolerant/raw because snapshots are
 display/history data, not launch-preview validation.
@@ -149,4 +154,3 @@ seconds and intentionally not an environment setting.
 
 The monitor owns no run state, event state, notification formatting, or
 de-duplication; it only schedules the existing run-manager status scan.
-

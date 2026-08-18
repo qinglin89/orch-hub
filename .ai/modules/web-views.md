@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-18
+verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
 ---
 
 # Modules: Web UI Views
@@ -37,14 +37,19 @@ no matches, and has one Clear action for all task filters.
 Run controls stay frontend-only over protected HTTP APIs: Start keeps one shared
 Backend selector and independent DEV/REVIEW Default/Standard/Excellent/Custom
 selectors. Presets render read-only role values; a selected Custom role alone
-renders editable fields, including the cc-codex DEV agent select. The initial
-config query omits role parameters to detect split capability; later queries
-apply both named selections coherently, cache by backend and both roles, and
-drop stale generations. Custom queries that role as inherited while retaining
-the other role's named profile, then keeps edits in local dialog state. Query
+renders editable fields. Both roles get the cc-codex agent selector; model and
+effort choices come only from the config payload's backend/role/agent catalog,
+with Other for an uncatalogued model. Absent/unusable catalog data degrades to
+explained free text, while an agent change clears that role's agent-scoped
+model/effort/escape-hatch edits before repaint. The initial config query omits
+role parameters to detect split capability; later queries apply both named
+selections coherently, cache by backend and both roles, and drop stale
+generations. Custom queries that role as inherited while retaining the other
+role's named profile, then keeps same-agent edits in local dialog state. Query
 failure, `split_profiles=false`, or an unavailable named profile fails closed
 with a visible reason. Submit posts split `dev_mode`/`review_mode` launch data
-inside `{repo_id, task_id, acknowledge_blocked, launch}`; backend and plan-gate
+inside `{repo_id, task_id, acknowledge_blocked, launch}`, including a complete
+agent/model/effort tuple for every Custom cc-codex role; backend and plan-gate
 remain orthogonal.
 Stop posts to `POST /api/runs/{run_id}/stop`; while a live run record carries
 `stop_requested`, the Stop control renders disabled as "Stop requested" from
