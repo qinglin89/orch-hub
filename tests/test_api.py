@@ -1237,6 +1237,45 @@ def test_orchestrator_config_returns_effective_config(tmp_path, monkeypatch):
     assert captured["dev_profile"] is None and captured["review_profile"] is None
 
 
+def test_orchestrator_config_serves_no_catalog_as_null(tmp_path, monkeypatch):
+    """A deployment that publishes no catalog must reach the dialog as an explicit
+    absence. Anything else — an empty object, a hub-filled list — would let the
+    browser render choices the orchestrator never published."""
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    payload = {k: v for k, v in SAMPLE_CONFIG.items() if k != "options"}
+    capture_config_query(monkeypatch, payload)
+
+    resp = client.get(f"/api/repos/{repo.name}/orchestrator-config")
+    assert resp.status_code == 200
+    assert resp.json()["options"] is None
+    # The rest of the launch config still resolves: the catalog is advisory, so
+    # its absence must not disable launching.
+    assert resp.json()["dev"]["model"] == "claude-opus-4-8"
+
+
+def test_orchestrator_config_serves_a_catalog_that_omits_an_agent(tmp_path, monkeypatch):
+    """A catalog listing one agent says nothing about the other — the CLI still
+    launches it. The route passes exactly that through, so the dialog can offer
+    the agent while degrading its model/effort to free text."""
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    agents = SAMPLE_CONFIG["options"]["agents"]["cc-codex"]
+    partial = {
+        **SAMPLE_CONFIG,
+        "options": {
+            "agents": {
+                "cc-codex": {role: {"claude": agents[role]["claude"]} for role in agents}
+            }
+        },
+    }
+    capture_config_query(monkeypatch, partial)
+
+    resp = client.get(f"/api/repos/{repo.name}/orchestrator-config")
+    assert resp.status_code == 200
+    served = resp.json()["options"]["agents"]["cc-codex"]
+    assert sorted(served["review"]) == ["claude"]
+    assert served["review"]["claude"]["models"][0]["id"] == "claude-opus-4-8"
+
+
 def test_orchestrator_config_forwards_both_role_profiles_in_one_query(tmp_path, monkeypatch):
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
     captured = capture_config_query(monkeypatch)
