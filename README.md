@@ -269,7 +269,9 @@ same query publishes, filtered by the backend, role, and agent selected, so
 switching a role's agent re-filters its effort vocabulary instead of leaving a
 value the other agent refuses at startup. Where the payload publishes no catalog
 — for that agent, or at all — the fields stay free text and say why; orch-hub
-never substitutes a list of its own. A model outside the catalog stays reachable
+never substitutes a list of its own. Whatever you had picked or typed for a role
+goes with the agent you chose it for: changing that role's agent clears its
+model and effort, catalog or none. A model outside the catalog stays reachable
 through the model select's **Other** choice, since the CLI still launches one.
 The plan-gate toggle is orthogonal and stays available in every mode. The dialog
 POSTs a structured `launch` selection carrying `dev_mode`/`review_mode` to

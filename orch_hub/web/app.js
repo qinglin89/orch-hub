@@ -2189,13 +2189,30 @@
     } else if (values.agent) {
       edits.agent = ""; // this backend has no agent axis at all
     }
-    // The query resolved this role's model and effort FOR THE AGENT it reports.
-    // Once the operator selects a different one, those seeded values belong to
-    // the agent just deselected, so they must not keep showing through as if the
-    // orchestrator had resolved them for the new one. This is the only guard
-    // when no catalog is published — and an untouched agent still shows its
-    // coherent seed, exactly as before the catalog existed.
+    // An edited model, effort, and escape-hatch flag belong to the agent they
+    // were chosen under — the two agents share no effort word and no model id —
+    // so `agentFor` records which agent this role's edits were made for (pure
+    // bookkeeping beside them, so leaving Custom clears it with the rest, and no
+    // reader of the merged values looks at it). Once the role's agent actually
+    // changes they are the previous agent's values: drop them, rather than blank
+    // them, so what remains is the query's own resolution again, judged below.
+    // The catalog cannot do this job — an edit under an agent it does not list,
+    // or under no catalog at all, is unjudgeable, and carrying it into the launch
+    // is the startup refusal this whole guard exists to prevent.
     values = customRoleValues(key, role);
+    if (edits.agentFor !== values.agent) {
+      delete edits.model;
+      delete edits.effort;
+      delete edits.other;
+      edits.agentFor = values.agent;
+    }
+    // The seed needs the same treatment, the other way around: the query
+    // resolved this role's model and effort FOR THE AGENT it reports, so once a
+    // different one is selected they must not keep showing through as if the
+    // orchestrator had resolved them for it. Blanked, not dropped — an absent
+    // edit falls back to the query. These two rules are the whole guard when no
+    // catalog is published, and an untouched agent still shows its coherent
+    // seed, exactly as before the catalog existed.
     if (backend === "cc-codex" && role.agent && values.agent && values.agent !== role.agent) {
       if (edits.model === undefined) edits.model = "";
       if (edits.effort === undefined) edits.effort = "";

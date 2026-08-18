@@ -308,6 +308,16 @@ def test_custom_role_agent_change_refilters_and_strands_nothing():
     assert 'edits.effort = "";' in body
     assert 'if (st.dev === "custom") pruneRoleEdits("dev", cfg.dev);' in body
     assert 'if (st.review === "custom") pruneRoleEdits("review", cfg.review);' in body
+    # A model, an effort, and the escape-hatch flag belong to the agent they were
+    # chosen under, so an actual agent change drops them outright. This is the
+    # only guard where the catalog cannot help: an explicit edit under an agent
+    # the catalog omits — or under no catalog at all — is unjudgeable, and
+    # carrying it into the launch is exactly the startup refusal being prevented.
+    assert "if (edits.agentFor !== values.agent) {" in body
+    assert "delete edits.model;" in body
+    assert "delete edits.effort;" in body
+    assert "delete edits.other;" in body
+    assert "edits.agentFor = values.agent;" in body
 
 
 def test_a_payload_without_a_catalog_keeps_free_text_with_a_reason():

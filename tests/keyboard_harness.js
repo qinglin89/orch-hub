@@ -1901,6 +1901,26 @@ async function scenarioLaunchCatalog() {
     "claude-opus-6-preview"
   );
 
+  // The escape hatch is the role's own state like the model and effort under it:
+  // a free-typed model must not reopen the box under the next agent, whose
+  // catalog says nothing about it.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  pressEnter(doc.querySelector(".open-run-options"));
+  await flush();
+  choose(doc.getElementById("opt-dev-mode"), "custom");
+  await flush();
+  choose(doc.getElementById("opt-dev-model"), "__other__");
+  await flush();
+  type(doc.getElementById("opt-dev-model-other"), "claude-opus-6-preview");
+  choose(doc.getElementById("opt-dev-agent"), "codex");
+  await flush();
+  check(
+    "catalog: the escape hatch closes with the agent that opened it",
+    doc.getElementById("opt-dev-model-other") === null &&
+      doc.getElementById("opt-dev-model").value === "",
+    describe(doc.getElementById("opt-dev-model"))
+  );
+
   // A deployment that publishes no catalog at all keeps today's free-text entry
   // and says why. The hub never renders a list the payload did not supply.
   route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG_NO_CATALOG);
@@ -1939,6 +1959,75 @@ async function scenarioLaunchCatalog() {
     "claude-opus-4-8"
   );
 
+  // With no catalog there is nothing to prune a stranded value against, so the
+  // agent axis alone has to keep one role's typed model and effort from riding
+  // into a launch under an agent that would refuse them at startup — the two
+  // agents share no effort word. REVIEW resolves to codex here.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var stale = doc.querySelector(".run-options");
+  pressEnter(doc.querySelector(".open-run-options"));
+  await flush();
+  choose(doc.getElementById("opt-review-mode"), "custom");
+  await flush();
+  choose(doc.getElementById("opt-review-agent"), "claude");
+  await flush();
+  type(doc.getElementById("opt-review-model"), "claude-opus-5");
+  type(doc.getElementById("opt-review-effort"), "max");
+  choose(doc.getElementById("opt-review-agent"), "codex");
+  await flush();
+  eq(
+    "catalog (none): a model typed for the other agent goes back with it",
+    doc.getElementById("opt-review-model").value,
+    "gpt-5.5" // the query's own codex values, coherent for this agent again
+  );
+  eq(
+    "catalog (none): so does the effort typed with it",
+    doc.getElementById("opt-review-effort").value,
+    "xhigh"
+  );
+  // The same in the other direction: values typed while the agent still matched
+  // the query are just as stale the moment it no longer does.
+  type(doc.getElementById("opt-review-model"), "gpt-5.5-codex");
+  type(doc.getElementById("opt-review-effort"), "none");
+  choose(doc.getElementById("opt-review-agent"), "claude");
+  await flush();
+  eq(
+    "catalog (none): an edit made under the resolved agent leaves with it",
+    doc.getElementById("opt-review-model").value,
+    ""
+  );
+  eq(
+    "catalog (none): and its effort leaves with it",
+    doc.getElementById("opt-review-effort").value,
+    ""
+  );
+  var stalePosts = runPosts();
+  pressEnter(stale.querySelector('button[type="submit"]'));
+  await flush();
+  check(
+    "catalog (none): a role stranded with no catalog cannot be launched either",
+    runPosts() === stalePosts &&
+      stale.querySelector(".control-status").textContent.indexOf("REVIEW") !== -1,
+    describe(stale.querySelector(".control-status"))
+  );
+  type(doc.getElementById("opt-review-model"), "claude-opus-5");
+  type(doc.getElementById("opt-review-effort"), "max");
+  pressEnter(stale.querySelector('button[type="submit"]'));
+  await flush();
+  call = lastCall("POST", "/api/runs");
+  eq(
+    "catalog (none): the launch carries only the selected agent's own tuple",
+    call && JSON.stringify(call.body.launch),
+    JSON.stringify({
+      dev_mode: "default",
+      review_mode: "custom",
+      backend: "cc-codex",
+      review_agent: "claude",
+      review_model: "claude-opus-5",
+      review_effort: "max",
+    })
+  );
+
   // A catalog that omits the agent the role is on: that agent alone degrades,
   // and the dialog says which one it could not offer options for.
   route("GET", "/api/repos/" + REPO + "/orchestrator-config", ORCH_CONFIG_PARTIAL_CATALOG);
@@ -1967,6 +2056,20 @@ async function scenarioLaunchCatalog() {
   );
   eq(
     "catalog (partial): the other agent's model does not survive into free text",
+    doc.getElementById("opt-dev-model").value,
+    ""
+  );
+  // An explicit pick travels no better than a seed: back on the catalogued
+  // agent, choose from its list, and that choice must not reappear as free text
+  // under the agent the catalog has nothing to judge it against.
+  choose(doc.getElementById("opt-dev-agent"), "claude");
+  await flush();
+  choose(doc.getElementById("opt-dev-model"), "claude-opus-5");
+  await flush();
+  choose(doc.getElementById("opt-dev-agent"), "codex");
+  await flush();
+  eq(
+    "catalog (partial): neither does an explicit pick from its list",
     doc.getElementById("opt-dev-model").value,
     ""
   );
