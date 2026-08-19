@@ -1,7 +1,7 @@
 """Hub-side file channel to a running orchestrator's control dir.
 
 Implements the orch-hub half of the ``--control-dir`` contract
-(``.cursor/orchestrator/README.md`` §5): the orchestrator atomically writes
+(``.mandrel/orchestrator/README.md`` §5): the orchestrator atomically writes
 ``NNN-question.json`` and polls ``NNN-answer.json`` every second; a
 ``stop.flag`` file requests a stop. This module discovers pending questions,
 writes answers, and writes the stop flag. It is file-channel only — no web,

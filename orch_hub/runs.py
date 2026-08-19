@@ -2,7 +2,7 @@
 
 The run manager owns the run-dir layout under ``Config.data_dir`` and the
 subprocess side of the orchestrator contract
-(``.cursor/orchestrator/HANDOFF-orch-hub.md``; ``README.md`` §5-§7):
+(``.mandrel/orchestrator/HANDOFF-orch-hub.md``; ``README.md`` §5-§7):
 
 .. code-block:: text
 
@@ -21,8 +21,8 @@ Each run launches the target repo's own deployed orchestrator:
 
 .. code-block:: text
 
-    /usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python \
-        <repo>/.cursor/orchestrator/orchestrator.py <task-id> \
+    /usr/bin/caffeinate -i <repo>/.mandrel/orchestrator/.venv/bin/python \
+        <repo>/.mandrel/orchestrator/orchestrator.py <task-id> \
         --control-dir <run_dir>/control [extra args]
 
 with ``cwd=<repo>`` and ``start_new_session=True``: hub restarts never kill
@@ -122,9 +122,9 @@ SPAWN_OUT_NAME = "spawn.out"
 CAFFEINATE = ("/usr/bin/caffeinate", "-i")
 """Sleep-inhibiting wrapper (macOS, the v1 deployment target)."""
 
-ORCHESTRATOR_SCRIPT = Path(".cursor") / "orchestrator" / "orchestrator.py"
-ORCHESTRATOR_PYTHON = Path(".cursor") / "orchestrator" / ".venv" / "bin" / "python"
-ORCHESTRATOR_LOG_DIR = Path(".cursor") / "orchestrator" / "logs"
+ORCHESTRATOR_SCRIPT = Path(".mandrel") / "orchestrator" / "orchestrator.py"
+ORCHESTRATOR_PYTHON = Path(".mandrel") / "orchestrator" / ".venv" / "bin" / "python"
+ORCHESTRATOR_LOG_DIR = Path(".mandrel") / "orchestrator" / "logs"
 """Deployed-orchestrator paths relative to a target repo (readiness checks
 the first two; the orchestrator writes ``<log dir>/<utc-ts>-<task-id>.log``)."""
 

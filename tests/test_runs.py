@@ -205,7 +205,7 @@ def test_start_run_builds_the_documented_command(tmp_path):
 
     record = manager.start_run(repo, TASK_ID)
 
-    orch = repo.path / ".cursor" / "orchestrator"
+    orch = repo.path / ".mandrel" / "orchestrator"
     call = spawner.calls[0]
     assert call["argv"] == (
         *CAFFEINATE,
@@ -284,7 +284,7 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
         "task_id": TASK_ID,
         "task_status": "in_progress",
         "control_dir": str(run_dir / "control"),
-        "log_dir": str(repo.path / ".cursor" / "orchestrator" / "logs"),
+        "log_dir": str(repo.path / ".mandrel" / "orchestrator" / "logs"),
         "spawn_out": str(run_dir / "spawn.out"),
         "argv": list(spawner.calls[0]["argv"]),
         "pid": spawner.procs[0].pid,
@@ -335,6 +335,33 @@ def test_load_record_without_spawn_out_field_falls_back_to_fixed_path(tmp_path):
 
     record = manager.get_run(run_dir.name).record
     assert record.spawn_out == run_dir / "spawn.out"
+
+
+def test_persisted_log_dir_survives_a_deployment_path_move(tmp_path):
+    # The deployed orchestrator dir has moved once and may move again. ``log_dir``
+    # is stamped into run.json at launch and loaded back verbatim: the hub never
+    # recomputes it from the current constant, so runs recorded under an older
+    # layout keep reading their own logs and need no migration.
+    manager, _, _ = make_manager(tmp_path)
+    run_dir = manager.runs_dir / "20260708T030000Z-repo-a-old"
+    run_dir.mkdir(parents=True)
+    legacy_log_dir = Path("/repos/repo-a/previous-deploy-dir/orchestrator/logs")
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_id": run_dir.name,
+                "repo_path": "/repos/repo-a",
+                "log_dir": str(legacy_log_dir),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    record = manager.get_run(run_dir.name).record
+    assert record.log_dir == legacy_log_dir
+    assert record.log_dir != record.repo_path / runs_module.ORCHESTRATOR_LOG_DIR
+    # And the read did not rewrite the stored path either.
+    assert read_record(manager, run_dir.name)["log_dir"] == str(legacy_log_dir)
 
 
 def test_stub_record_for_broken_dir_still_points_at_spawn_out(tmp_path):
@@ -1597,7 +1624,7 @@ def write_orch_log(repo: ManagedRepo, lines: list[str], *, stamp: str = "2026070
     attributes it to the run, and the filename shape mirrors the deployed
     orchestrator's ``<utc-ts>-<task-id>.log``.
     """
-    log_dir = repo.path / ".cursor" / "orchestrator" / "logs"
+    log_dir = repo.path / ".mandrel" / "orchestrator" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     path = log_dir / f"{stamp}-{TASK_ID}.log"
     path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")

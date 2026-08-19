@@ -123,7 +123,7 @@ def write_run(
     :func:`orch_hub.logs.locate_log` attributes it to this run."""
     run_dir = config.data_dir / "runs" / run_id
     (run_dir / "control").mkdir(parents=True)
-    log_dir = repo.path / ".cursor" / "orchestrator" / "logs"
+    log_dir = repo.path / ".mandrel" / "orchestrator" / "logs"
     (run_dir / "run.json").write_text(
         json.dumps(
             {

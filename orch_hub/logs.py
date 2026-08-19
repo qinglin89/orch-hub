@@ -4,7 +4,7 @@ A run's log path is *not* stored in its ``run.json``: the deployed orchestrator
 stamps its own filename ``<log_dir>/<utc-ts>-<task-id>.log`` at startup
 (``orchestrator.py``: ``ts = strftime("%Y%m%dT%H%M%SZ")``, then
 ``LOG_DIR / f"{ts}-{task_id}.log"``; ``LOG_DIR`` resolves from the script's
-own dir to ``<repo>/.cursor/orchestrator/logs`` — exactly the ``log_dir`` the
+own dir to ``<repo>/.mandrel/orchestrator/logs`` — exactly the ``log_dir`` the
 run record carries). So the log is *located*, not looked up, from the record's
 ``log_dir``, ``task_id``, and ``started_ts``.
 

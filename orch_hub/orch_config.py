@@ -44,8 +44,8 @@ from .subprocess_utils import CommandNotFoundError, Runner, run_command
 # Deployed-orchestrator paths relative to a target repo. Mirrored from
 # :mod:`orch_hub.runs` (which imports this module, so importing back would cycle);
 # :mod:`orch_hub.readiness` inlines the same fixed deployment paths.
-ORCHESTRATOR_SCRIPT = Path(".cursor") / "orchestrator" / "orchestrator.py"
-ORCHESTRATOR_PYTHON = Path(".cursor") / "orchestrator" / ".venv" / "bin" / "python"
+ORCHESTRATOR_SCRIPT = Path(".mandrel") / "orchestrator" / "orchestrator.py"
+ORCHESTRATOR_PYTHON = Path(".mandrel") / "orchestrator" / ".venv" / "bin" / "python"
 
 PRINT_CONFIG_FLAG = "--print-config"
 
@@ -133,7 +133,7 @@ def query_effective_config(
 ) -> EffectiveConfig:
     """Query the repo's deployed orchestrator for its effective launch config.
 
-    Runs ``<repo>/.cursor/orchestrator/.venv/bin/python orchestrator.py
+    Runs ``<repo>/.mandrel/orchestrator/.venv/bin/python orchestrator.py
     --print-config [--backend B] [--profile P] [--dev-profile P]
     [--review-profile P]`` with ``cwd=<repo>`` — the same resolution a real run
     uses, but no task id, credentials, clean tree, or model-catalog call. Both

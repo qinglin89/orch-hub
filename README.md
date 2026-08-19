@@ -87,8 +87,8 @@ For each managed repo, in a stable order:
 |---|---|
 | `repo_path_exists` | the repo directory exists |
 | `manifest_exists` | `.ai-deploy-manifest.json` is present |
-| `orchestrator_exists` | `.cursor/orchestrator/orchestrator.py` is present |
-| `venv_python_exists` | `.cursor/orchestrator/.venv/bin/python` is present |
+| `orchestrator_exists` | `.mandrel/orchestrator/orchestrator.py` is present |
+| `venv_python_exists` | `.mandrel/orchestrator/.venv/bin/python` is present |
 | `task_index_exists` | `.ai-tasks/index.md` is present |
 | `git_clean` | `git status --porcelain` is empty |
 | `aii_status` | `mandrel status <repo>` exits 0 |

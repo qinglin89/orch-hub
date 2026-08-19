@@ -44,13 +44,13 @@ def check_readiness(
     checks.append(
         _file_check(
             "orchestrator_exists",
-            path / ".cursor" / "orchestrator" / "orchestrator.py",
+            path / ".mandrel" / "orchestrator" / "orchestrator.py",
         )
     )
     checks.append(
         _file_check(
             "venv_python_exists",
-            path / ".cursor" / "orchestrator" / ".venv" / "bin" / "python",
+            path / ".mandrel" / "orchestrator" / ".venv" / "bin" / "python",
         )
     )
     checks.append(_file_check("task_index_exists", path / ".ai-tasks" / "index.md"))

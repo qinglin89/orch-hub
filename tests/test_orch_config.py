@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub import runs as runs_module
 from orch_hub.models import LaunchSpec, ManagedRepo
 from orch_hub.orch_config import (
     ORCHESTRATOR_PYTHON,
@@ -143,6 +144,23 @@ def _json(obj) -> str:
     import json
 
     return json.dumps(obj)
+
+
+# -- deployed paths ------------------------------------------------------------
+
+
+def test_deployed_paths_are_the_mandrel_payload_layout_and_mirror_runs():
+    # These two constants are duplicated in orch_hub.runs (importing back would
+    # cycle) and inlined a third time in orch_hub.readiness. Moving the deployed
+    # payload has to land on every copy at once, so pin the literal layout and
+    # the mirroring: a half-done move leaves readiness and launch disagreeing.
+    assert ORCHESTRATOR_SCRIPT == Path(".mandrel") / "orchestrator" / "orchestrator.py"
+    assert ORCHESTRATOR_PYTHON == Path(".mandrel") / "orchestrator" / ".venv" / "bin" / "python"
+    assert (ORCHESTRATOR_SCRIPT, ORCHESTRATOR_PYTHON) == (
+        runs_module.ORCHESTRATOR_SCRIPT,
+        runs_module.ORCHESTRATOR_PYTHON,
+    )
+    assert runs_module.ORCHESTRATOR_LOG_DIR == Path(".mandrel") / "orchestrator" / "logs"
 
 
 # -- query: success paths ------------------------------------------------------

@@ -517,7 +517,7 @@ def _write_repo_and_run(config: Config, tmp_path: Path) -> ManagedRepo:
     run_id = "20260722T090000Z-alpha-task"
     run_dir = config.data_dir / "runs" / run_id
     (run_dir / "control").mkdir(parents=True)
-    log_dir = repo_path / ".cursor" / "orchestrator" / "logs"
+    log_dir = repo_path / ".mandrel" / "orchestrator" / "logs"
     (run_dir / "run.json").write_text(
         json.dumps(
             {

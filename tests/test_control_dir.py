@@ -1,7 +1,7 @@
 """Tests for the control-dir file channel.
 
 Exercises the hub side of the orchestrator ``--control-dir`` contract
-(``.cursor/orchestrator/README.md`` §5) against fake control dirs in
+(``.mandrel/orchestrator/README.md`` §5) against fake control dirs in
 ``tmp_path``; never imports or runs orchestrator code. Answer files written
 here are asserted against the orchestrator's documented validity rule (a JSON
 object with a non-empty string ``answer``) so both sides stay in lockstep.

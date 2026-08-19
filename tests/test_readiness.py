@@ -17,9 +17,9 @@ from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
 def build_ready_repo(tmp_path: Path) -> ManagedRepo:
     """Create a fake target repo with every deploy piece present."""
     repo = tmp_path / "repo"
-    bin_dir = repo / ".cursor" / "orchestrator" / ".venv" / "bin"
+    bin_dir = repo / ".mandrel" / "orchestrator" / ".venv" / "bin"
     bin_dir.mkdir(parents=True)
-    (repo / ".cursor" / "orchestrator" / "orchestrator.py").write_text("# orch\n")
+    (repo / ".mandrel" / "orchestrator" / "orchestrator.py").write_text("# orch\n")
     (bin_dir / "python").write_text("")
     (repo / ".ai-tasks").mkdir(parents=True)
     (repo / ".ai-tasks" / "index.md").write_text("# tasks\n")
@@ -68,7 +68,7 @@ def test_missing_manifest(tmp_path):
 
 def test_missing_orchestrator(tmp_path):
     repo = build_ready_repo(tmp_path)
-    (repo.path / ".cursor" / "orchestrator" / "orchestrator.py").unlink()
+    (repo.path / ".mandrel" / "orchestrator" / "orchestrator.py").unlink()
     report = check_readiness(repo, config(tmp_path), runner=make_runner())
     assert not report.ready
     assert "orchestrator_exists" in failure_names(report)
@@ -76,7 +76,7 @@ def test_missing_orchestrator(tmp_path):
 
 def test_missing_venv_python(tmp_path):
     repo = build_ready_repo(tmp_path)
-    (repo.path / ".cursor" / "orchestrator" / ".venv" / "bin" / "python").unlink()
+    (repo.path / ".mandrel" / "orchestrator" / ".venv" / "bin" / "python").unlink()
     report = check_readiness(repo, config(tmp_path), runner=make_runner())
     assert not report.ready
     assert "venv_python_exists" in failure_names(report)
