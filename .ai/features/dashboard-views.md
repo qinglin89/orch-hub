@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
+last-updated: 2026-08-19
+verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -22,8 +22,10 @@ Implemented behavior:
   state word exists only in title/aria text. Display-ready cards add latest
   commit time from the shared repo `commit` field plus active task count from
   `/api/tasks` task-inventory rows; not-ready cards keep readiness failure
-  reasons. Cards render a compact yellow "Housekeeping pending" warning when
-  `/api/repos` reports `housekeeping_pending`.
+  reasons. Failed check names are user-visible labels rendered verbatim on repo
+  cards, repo detail, intake refusal, and Overview Attention rows. Cards render
+  a compact yellow "Housekeeping pending" warning when `/api/repos` reports
+  `housekeeping_pending`.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
   `index_present`, and `missing`/`unknown` sentinel semantics. The all-tasks

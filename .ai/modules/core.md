@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
 ---
 
 # Modules: Core
@@ -157,7 +157,7 @@ Location: `orch_hub/readiness.py`
 Responsibility: check repo filesystem, deployed manifest, orchestrator script,
 venv Python, task index, clean git tree, and `mandrel status <repo>`. Reports
 keep all seven checks internally and fail closed when paths or tools are
-missing; the public check key remains `aii_status` for API compatibility.
+missing; the public key for the final check is `mandrel_status`.
 
 ## Git Metadata
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
 ---
 
 # APIs: Internal — Core and Usage
@@ -24,7 +24,7 @@ Input: managed repo model.
 
 Output: readiness report with boolean `ready` and list of failed checks.
 
-Behavior: pure inspection and subprocess checks only; no mutation. Missing repo path skips subprocess execution but records `git_clean` and `aii_status` as failed so launch readiness still fails closed.
+Behavior: pure inspection and subprocess checks only; no mutation. Missing repo path skips subprocess execution but records `git_clean` and `mandrel_status` as failed so launch readiness still fails closed.
 
 ## Housekeeping Marker
 

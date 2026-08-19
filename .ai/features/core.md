@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
 ---
 
 # Features: Core
@@ -31,7 +31,7 @@ Implemented behavior:
 - Readiness runs seven checks in stable order: repo path, manifest, deployed
   orchestrator script, orchestrator venv Python, `.ai-tasks/index.md`, clean
   `git status --porcelain`, and passing `mandrel status <repo>`; the public
-  check key remains `aii_status` for compatibility.
+  key for the final check is `mandrel_status`, with no compatibility alias.
 - Public readiness JSON serializes `ready` and only failed checks as `{name, message}` reasons; ready repos have `checks: []`.
 - `git_meta` reads display-only commit history separately from readiness:
   `latest_commit(repo)` returns `CommitInfo | None`, and `read_commits(repo,
