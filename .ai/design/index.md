@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Design Principles and Decisions
@@ -38,7 +38,7 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 
 ## Anti-Patterns to Avoid
 
-- Importing `.cursor/orchestrator/orchestrator.py`.
+- Importing `.mandrel/orchestrator/orchestrator.py`.
 - Maintaining a second repo registry.
 - Treating GitHub as registry truth.
 - Starting orchestrator subprocesses before task inventory and readiness gates pass.

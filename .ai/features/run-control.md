@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Features: Run Control
@@ -50,8 +50,8 @@ Implemented behavior:
   target set against actual files; only an unchanged pair plus a matching payload
   is stable/publishable. The two boundaries are point observations, no historical
   state is backfilled, and provenance failure never changes run state.
-- Launch command is `/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
-  <repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
+- Launch command is `/usr/bin/caffeinate -i <repo>/.mandrel/orchestrator/.venv/bin/python
+  <repo>/.mandrel/orchestrator/orchestrator.py <task-id> --control-dir
   <run>/control [extra args]`, with `cwd=<repo>`, stdin from devnull,
   stdout/stderr redirected to `spawn.out`, `start_new_session=True`, and an
   explicit `PATH` that includes common user-installed agent CLI directories

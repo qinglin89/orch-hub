@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Architecture
@@ -31,8 +31,8 @@ mandrel registry / `bin/mandrel`
         v
 Target repo N
   .ai-tasks/
-  .cursor/orchestrator/orchestrator.py
-  .cursor/orchestrator/.venv/bin/python
+  .mandrel/orchestrator/orchestrator.py
+  .mandrel/orchestrator/.venv/bin/python
         |
         | detached subprocess with --control-dir
         v

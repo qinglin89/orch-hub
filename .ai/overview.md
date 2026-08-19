@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Project Overview
@@ -133,7 +133,7 @@ and links back to existing per-task detail.
 
 - Do not treat GitHub as the registry source of truth.
 - Do not maintain a separate orch-hub repository registry.
-- Do not import `.cursor/orchestrator/orchestrator.py`; launch it as a subprocess.
+- Do not import `.mandrel/orchestrator/orchestrator.py`; launch it as a subprocess.
 - Do not add web, network, or orch-hub imports into the orchestrator itself.
 - Do not make the service public on the internet.
 - Do not implement watchdogs or hang/log-silence detection.
@@ -218,5 +218,5 @@ docs/
   fallback is `<mandrel>/.registry/repos.local.json`.
 - The canonical orchestrator lives at
   `mandrel/canonical/orchestrator/orchestrator.py` and is deployed into target
-  repos at `.cursor/orchestrator/orchestrator.py`.
+  repos at `.mandrel/orchestrator/orchestrator.py`.
 - The inspected orchestrator is a local CLI scheduler. It runs a dev/review loop over one `.ai-tasks/` task, selects dev or review turns from task file status and session log, pauses for human input through `ask_human`, and uses stdin unless launched with `--control-dir`.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Architecture: Ownership and Boundaries
@@ -76,7 +76,7 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 ## External Dependencies
 
 - Mandrel repository and its repo-local `bin/mandrel` CLI.
-- Managed target repos with deployed `.cursor/orchestrator/` payloads.
+- Managed target repos with deployed `.mandrel/orchestrator/` payloads.
 - Git CLI for repo state, display metadata, and evaluation commit windows.
 - `/usr/bin/caffeinate` on macOS for long-running orchestrator subprocesses.
 - Python venv inside each target repo's deployed orchestrator directory.

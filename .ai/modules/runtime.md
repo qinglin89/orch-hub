@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Modules: Runtime
@@ -48,8 +48,8 @@ intake), existing live run for the repo, task inventory/status from
 Run dirs live under `<data_dir>/runs/<run_id>/` with `run.json`,
 `events.jsonl`, `control/`, and `spawn.out`; each run gets a fresh external
 control dir. Launch uses
-`/usr/bin/caffeinate -i <repo>/.cursor/orchestrator/.venv/bin/python
-<repo>/.cursor/orchestrator/orchestrator.py <task-id> --control-dir
+`/usr/bin/caffeinate -i <repo>/.mandrel/orchestrator/.venv/bin/python
+<repo>/.mandrel/orchestrator/orchestrator.py <task-id> --control-dir
 <run>/control [extra args]`, `cwd=<repo>`, stdin from devnull, stdout/stderr to
 `spawn.out`, `start_new_session=True`, and an explicit environment whose `PATH`
 prepends common user agent-CLI locations (`~/.local/bin`, `~/.claude/local`,

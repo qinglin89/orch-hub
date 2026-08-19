@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-19
+verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 ---
 
 # Glossary
@@ -15,7 +15,7 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 - Managed repo: a target repository registered by mandrel, discovered from
   `mandrel registry list --json` or `.registry/repos.local.json`.
 - Target repo: a managed repo where an orchestrator may be launched.
-- Deployed orchestrator: target repo copy of `.cursor/orchestrator/orchestrator.py`.
+- Deployed orchestrator: target repo copy of `.mandrel/orchestrator/orchestrator.py`.
 
 ## Run Terms
 
