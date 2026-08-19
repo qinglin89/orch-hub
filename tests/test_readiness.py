@@ -28,14 +28,14 @@ def build_ready_repo(tmp_path: Path) -> ManagedRepo:
     return ManagedRepo(name="repo", path=repo, manifest=manifest)
 
 
-def make_runner(*, git_out="", git_rc=0, aii_rc=0, aii_out="", aii_err=""):
+def make_runner(*, git_out="", git_rc=0, mandrel_rc=0, mandrel_out="", mandrel_err=""):
     """A fake runner that distinguishes the git and mandrel subprocess calls."""
 
     def runner(args, **kwargs):
         argv = [str(a) for a in args]
         if argv[0] == "git":
             return CommandResult(tuple(argv), git_rc, git_out, "")
-        return CommandResult(tuple(argv), aii_rc, aii_out, aii_err)
+        return CommandResult(tuple(argv), mandrel_rc, mandrel_out, mandrel_err)
 
     return runner
 
@@ -56,6 +56,41 @@ def test_ready_repo_all_pass(tmp_path):
     assert report.to_dict() == {"ready": True, "checks": []}
     # Stable seven-check shape.
     assert len(report.checks) == 7
+
+
+def test_check_names_are_the_stable_user_visible_labels(tmp_path):
+    """Check names are product language, not internal identifiers.
+
+    The CLI, repo cards, repo detail, the intake refusal block, and the
+    Overview attention rows all print ``name`` verbatim, so both the spelling
+    and the order are a user-visible contract. Pinned here so a rename cannot
+    reach the dashboard unnoticed.
+    """
+    repo = build_ready_repo(tmp_path)
+    calls: list[list[str]] = []
+
+    def runner(args, **kwargs):
+        argv = [str(a) for a in args]
+        calls.append(argv)
+        return CommandResult(tuple(argv), 0, "", "")
+
+    report = check_readiness(repo, config(tmp_path), runner=runner)
+    assert [c.name for c in report.checks] == [
+        "repo_path_exists",
+        "manifest_exists",
+        "orchestrator_exists",
+        "venv_python_exists",
+        "task_index_exists",
+        "git_clean",
+        "mandrel_status",
+    ]
+    # The check is named after the command it runs: `mandrel status <repo>`,
+    # invoked by absolute path inside the mandrel checkout.
+    assert calls[-1] == [
+        str(config(tmp_path).mandrel_bin),
+        "status",
+        str(repo.path),
+    ]
 
 
 def test_missing_manifest(tmp_path):
@@ -122,21 +157,23 @@ def test_git_executable_missing(tmp_path):
     assert "git_clean" in failure_names(report)
 
 
-def test_aii_status_failure(tmp_path):
+def test_mandrel_status_failure(tmp_path):
     repo = build_ready_repo(tmp_path)
     drift = "repo: drift detected (4 issues)\n  target modified:\n    - a.py\n"
     report = check_readiness(
-        repo, config(tmp_path), runner=make_runner(aii_rc=1, aii_out=drift)
+        repo, config(tmp_path), runner=make_runner(mandrel_rc=1, mandrel_out=drift)
     )
     assert not report.ready
     fail = {c.name: c for c in report.failures}
-    assert "aii_status" in fail
+    assert "mandrel_status" in fail
     # Concise: only the first line of drift output is surfaced.
-    assert "drift detected (4 issues)" in fail["aii_status"].message
-    assert "target modified" not in fail["aii_status"].message
+    assert "drift detected (4 issues)" in fail["mandrel_status"].message
+    assert "target modified" not in fail["mandrel_status"].message
+    # The public payload the CLI and dashboard render carries the same key.
+    assert [c["name"] for c in report.to_dict()["checks"]] == ["mandrel_status"]
 
 
-def test_aii_executable_missing(tmp_path):
+def test_mandrel_executable_missing(tmp_path):
     repo = build_ready_repo(tmp_path)
 
     def runner(args, **kwargs):
@@ -146,7 +183,7 @@ def test_aii_executable_missing(tmp_path):
         raise CommandNotFoundError("mandrel")
 
     report = check_readiness(repo, config(tmp_path), runner=runner)
-    assert "aii_status" in failure_names(report)
+    assert "mandrel_status" in failure_names(report)
 
 
 def test_missing_repo_path_skips_subprocess_checks(tmp_path):
@@ -169,5 +206,5 @@ def test_missing_repo_path_skips_subprocess_checks(tmp_path):
     assert "repo_path_exists" in names
     # Subprocess checks are skipped but still recorded as failed (fail closed).
     assert "git_clean" in names
-    assert "aii_status" in names
+    assert "mandrel_status" in names
     assert calls == []  # runner never invoked when the repo path is missing

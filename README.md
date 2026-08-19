@@ -91,7 +91,7 @@ For each managed repo, in a stable order:
 | `venv_python_exists` | `.mandrel/orchestrator/.venv/bin/python` is present |
 | `task_index_exists` | `.ai-tasks/index.md` is present |
 | `git_clean` | `git status --porcelain` is empty |
-| `aii_status` | `mandrel status <repo>` exits 0 |
+| `mandrel_status` | `mandrel status <repo>` exits 0 |
 
 A repo is ready only when all checks pass.
 

@@ -224,7 +224,7 @@ def failing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport(
         (
             ReadinessCheck("git_clean", False, "working tree has uncommitted changes"),
-            ReadinessCheck("aii_status", False, "mandrel status failed: drift"),
+            ReadinessCheck("mandrel_status", False, "mandrel status failed: drift"),
         )
     )
 

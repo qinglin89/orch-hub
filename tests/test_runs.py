@@ -112,7 +112,7 @@ def failing_readiness(repo, config) -> ReadinessReport:
     return ReadinessReport(
         (
             ReadinessCheck("git_clean", False, "working tree has uncommitted changes"),
-            ReadinessCheck("aii_status", False, "mandrel status failed: drift"),
+            ReadinessCheck("mandrel_status", False, "mandrel status failed: drift"),
         )
     )
 
@@ -525,7 +525,7 @@ def test_launch_refused_when_readiness_fails(tmp_path):
 
     assert excinfo.value.reasons == (
         "git_clean: working tree has uncommitted changes",
-        "aii_status: mandrel status failed: drift",
+        "mandrel_status: mandrel status failed: drift",
     )
     assert spawner.calls == []
     assert not manager.runs_dir.exists()  # gate fires before any dir is created

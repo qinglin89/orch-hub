@@ -57,11 +57,11 @@ def check_readiness(
 
     if path_exists:
         checks.append(_git_clean_check(path, runner))
-        checks.append(_aii_status_check(repo, config, runner))
+        checks.append(_mandrel_status_check(repo, config, runner))
     else:
         reason = "skipped: repo path missing"
         checks.append(ReadinessCheck("git_clean", False, reason))
-        checks.append(ReadinessCheck("aii_status", False, reason))
+        checks.append(ReadinessCheck("mandrel_status", False, reason))
 
     return ReadinessReport(tuple(checks))
 
@@ -95,24 +95,24 @@ def _git_clean_check(repo_path: Path, runner: Runner) -> ReadinessCheck:
     )
 
 
-def _aii_status_check(
+def _mandrel_status_check(
     repo: ManagedRepo, config: Config, runner: Runner
 ) -> ReadinessCheck:
     try:
         result = runner([config.mandrel_bin, "status", repo.path])
     except CommandNotFoundError:
         return ReadinessCheck(
-            "aii_status", False, f"mandrel not found: {config.mandrel_bin}"
+            "mandrel_status", False, f"mandrel not found: {config.mandrel_bin}"
         )
     if result.ok:
-        return ReadinessCheck("aii_status", True, "mandrel status ok")
+        return ReadinessCheck("mandrel_status", True, "mandrel status ok")
     # mandrel prints drift detail to stdout; prefer it for the concise reason.
     detail = (
         _first_line(result.stdout)
         or _first_line(result.stderr)
         or f"exit {result.returncode}"
     )
-    return ReadinessCheck("aii_status", False, f"mandrel status failed: {detail}")
+    return ReadinessCheck("mandrel_status", False, f"mandrel status failed: {detail}")
 
 
 def _first_line(text: str) -> str:

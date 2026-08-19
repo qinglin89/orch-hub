@@ -4026,7 +4026,7 @@ async function scenarioLiveRunReadiness() {
     ready: false,
     checks: [
       { name: "git_clean", message: "working tree has uncommitted changes" },
-      { name: "aii_status", message: "mandrel status failed: drift detected" },
+      { name: "mandrel_status", message: "mandrel status failed: drift detected" },
     ],
   };
   var reposWith = function (readiness) {
@@ -4153,12 +4153,41 @@ async function scenarioLiveRunReadiness() {
   await navigate("#/repos");
   eq("readiness: a live repo with a structural failure stays NOT READY", listBadge(), "not ready");
   check("readiness: the structural-failure card keeps its reasons", !!listReasons(), "reasons dropped on a genuinely not-ready repo");
+  // The check key IS the failure label — every readiness surface prints
+  // `name` verbatim — so the backend key is product language, not an internal
+  // identifier. `mandrel_status` is the name of the check the fixture fails.
+  check(
+    "readiness: the list card labels the structural failure `mandrel_status`",
+    (textOf("#view .card.repo .reasons") || "").indexOf("mandrel_status") !== -1,
+    "unexpected readiness label on the list card: " + textOf("#view .card.repo .reasons")
+  );
+  await navigate("#/repos/" + REPO);
+  check(
+    "readiness: repo detail labels the structural failure `mandrel_status`",
+    (textOf("#view .reasons") || "").indexOf("mandrel_status") !== -1,
+    "unexpected readiness label on repo detail: " + textOf("#view .reasons")
+  );
   await navigate("#/overview");
   eq("readiness: the overview does not count a structural-failure repo", reposReadyMetric(), "0/1");
   check(
     "readiness: a structural-failure repo still appears in readiness attention",
     !!doc.querySelector(".attn-not-ready"),
     "the structural-failure repo was wrongly dropped from attention"
+  );
+  check(
+    "readiness: the attention row names the failed check `mandrel_status`",
+    (textOf(".attn-not-ready .attn-detail") || "").indexOf("mandrel_status") !== -1,
+    "unexpected attention detail: " + textOf(".attn-not-ready .attn-detail")
+  );
+
+  // ---- 3b) the same structural failure with no live run → the intake gate
+  // falls through to raw readiness and prints the key as its refusal reason ----
+  route("GET", "/api/runs", runsIn(null));
+  await navigate("#/repos/" + REPO);
+  check(
+    "readiness: the intake refusal names the failed check `mandrel_status`",
+    (textOf(".section.intake") || "").indexOf("mandrel_status") !== -1,
+    "the intake refusal dropped the failed check key: " + textOf(".section.intake")
   );
 
   // ---- 4) ended/idle: dirty tree, no live run (tasks present) → NOT READY ----
