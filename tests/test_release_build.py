@@ -9,7 +9,11 @@ called, and what it treats as forbidden in the payload it produced.
 
 from __future__ import annotations
 
+import errno
+import os
+import shutil
 from pathlib import Path
+from unittest import mock
 
 import pytest
 
@@ -483,24 +487,164 @@ def test_a_payload_that_passes_replaces_the_previous_one(tmp_path: Path, monkeyp
     assert list(payload_dir.parent.iterdir()) == [payload_dir]
 
 
-def test_a_publication_that_fails_puts_the_previous_payload_back(
+UNCOPYABLE = "blob.bin"
+"""Staged member the cross-filesystem move below refuses to copy."""
+
+_REAL_MOVE = shutil.move
+"""Bound before any test patches ``shutil.move``, which is the same module
+object the driver calls through — so the stand-in below can still reach the
+real implementation it is standing in front of."""
+
+
+def staged_payload(tmp_path: Path) -> Path:
+    """A payload as the freezer leaves it, holding the member the move refuses."""
+    staged_dir = tmp_path / "work" / "dist" / "orch-hub"
+    (staged_dir / "_internal").mkdir(parents=True)
+    (staged_dir / "orch-hub").write_text("new payload", encoding="utf-8")
+    (staged_dir / "_internal" / UNCOPYABLE).write_text("library", encoding="utf-8")
+    return staged_dir
+
+
+def _failing_copy(source, destination, *args, **kwargs):
+    """A ``copy2`` that refuses one member, the way a full disk would."""
+    if Path(source).name == UNCOPYABLE:
+        raise OSError(errno.ENOSPC, "no space left on device")
+    return shutil.copy2(source, destination, *args, **kwargs)
+
+
+def cross_filesystem_move(source, destination):
+    """``shutil.move`` on its cross-filesystem branch, failing partway through.
+
+    Within one ``tmp_path`` a move is always a rename, so the rename is refused
+    for the duration of this call — and only for it, since the swap that
+    follows a successful move is a rename too. What runs instead is the
+    standard library's own ``copytree`` fallback, so the half-populated
+    destination these tests are about is the one a build would really be left
+    with: created, partly filled, and abandoned under a ``shutil.Error``.
+    """
+    with mock.patch("os.rename", side_effect=OSError(errno.EXDEV, "cross-device link")):
+        return _REAL_MOVE(source, destination, copy_function=_failing_copy)
+
+
+def test_a_first_publication_that_fails_mid_copy_publishes_nothing(
     tmp_path: Path, monkeypatch
 ):
-    # The swap itself can fail — a full disk, a payload open elsewhere. The
-    # distributable path must not be left empty when it does.
+    # A move that crosses filesystems copies, and a copy that fails has already
+    # created its destination. On a first build there is no previous payload
+    # whose restoration would incidentally clear that debris, so the
+    # distributable path the installer and the smoke test consume must simply
+    # not come into existence.
+    payload_dir = tmp_path / "dist" / f"orch-hub-{TARGET}"
+    staged_dir = staged_payload(tmp_path)
+    monkeypatch.setattr(release_build.shutil, "move", cross_filesystem_move)
+
+    with pytest.raises(BuildError, match="cannot stage the payload"):
+        release_build._place_payload(staged_dir, payload_dir)
+
+    assert not payload_dir.exists()
+    assert list(payload_dir.parent.iterdir()) == []
+
+
+def test_a_replacing_publication_that_fails_mid_copy_keeps_the_previous_payload(
+    tmp_path: Path, monkeypatch
+):
+    # Same partial copy, this time over an existing release: the payload that
+    # passed stays whole and stays selectable.
     payload_dir = previous_payload(tmp_path)
-    staged_dir = tmp_path / "staged"
-    staged_dir.mkdir()
-    (staged_dir / "orch-hub").write_text("new payload", encoding="utf-8")
+    staged_dir = staged_payload(tmp_path)
+    monkeypatch.setattr(release_build.shutil, "move", cross_filesystem_move)
+
+    with pytest.raises(BuildError, match="cannot stage the payload"):
+        release_build._place_payload(staged_dir, payload_dir)
+
+    assert (payload_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+    assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_a_move_that_fails_before_copying_leaves_the_previous_payload_in_place(
+    tmp_path: Path, monkeypatch
+):
+    # The move can also fail outright — a payload open elsewhere, a read-only
+    # output directory — without having created anything.
+    payload_dir = previous_payload(tmp_path)
+    staged_dir = staged_payload(tmp_path)
 
     def refuse(source, destination):
         raise OSError("no space left on device")
 
     monkeypatch.setattr(release_build.shutil, "move", refuse)
+    with pytest.raises(BuildError, match="cannot stage the payload"):
+        release_build._place_payload(staged_dir, payload_dir)
+
+    assert (payload_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+    assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_a_swap_that_fails_puts_the_previous_payload_back(
+    tmp_path: Path, monkeypatch
+):
+    # The staged payload is on the output filesystem and the previous one has
+    # been moved aside; the rename that finishes the swap still fails. The
+    # distributable path must not be left empty.
+    payload_dir = previous_payload(tmp_path)
+    staged_dir = staged_payload(tmp_path)
+    incoming_dir = payload_dir.with_name(payload_dir.name + release_build.INCOMING_SUFFIX)
+    real_rename = os.rename
+
+    def rename(source, destination, *args, **kwargs):
+        if Path(source) == incoming_dir:
+            raise OSError(errno.EIO, "input/output error")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", rename)
     with pytest.raises(BuildError, match="cannot place the payload"):
         release_build._place_payload(staged_dir, payload_dir)
 
     assert (payload_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+    assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_a_swap_that_cannot_be_undone_says_where_the_previous_payload_is(
+    tmp_path: Path, monkeypatch
+):
+    # If putting the previous payload back fails too, the distributable path is
+    # empty and the operator needs to be told what to move where — not handed
+    # the restore's exception in place of the real failure.
+    payload_dir = previous_payload(tmp_path)
+    staged_dir = staged_payload(tmp_path)
+    real_rename = os.rename
+
+    def rename(source, destination, *args, **kwargs):
+        if Path(destination) == payload_dir:
+            raise OSError(errno.EIO, "input/output error")
+        return real_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(os, "rename", rename)
+    with pytest.raises(BuildError, match="the previous payload is left at"):
+        release_build._place_payload(staged_dir, payload_dir)
+
+    previous_dir = payload_dir.with_name(payload_dir.name + release_build.PREVIOUS_SUFFIX)
+    assert (previous_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+
+
+def test_debris_from_an_interrupted_publication_does_not_become_the_payload(
+    tmp_path: Path,
+):
+    # A move whose destination already exists moves *into* it, so a leftover
+    # staging directory would bury the new payload one level down instead of
+    # publishing it. Both sibling names are transient by construction and are
+    # cleared before anything moves.
+    payload_dir = previous_payload(tmp_path)
+    staged_dir = staged_payload(tmp_path)
+    for suffix in (release_build.INCOMING_SUFFIX, release_build.PREVIOUS_SUFFIX):
+        debris = payload_dir.with_name(payload_dir.name + suffix)
+        debris.mkdir()
+        (debris / "stale").write_text("interrupted build", encoding="utf-8")
+
+    release_build._place_payload(staged_dir, payload_dir)
+
+    assert (payload_dir / "orch-hub").read_text(encoding="utf-8") == "new payload"
+    assert not (payload_dir / "stale").exists()
     assert list(payload_dir.parent.iterdir()) == [payload_dir]
 
 

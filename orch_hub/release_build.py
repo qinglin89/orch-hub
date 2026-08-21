@@ -75,6 +75,13 @@ MANIFEST_SCHEMA = "orch-hub-runtime/1"
 BUNDLE_DIR = "_internal"
 """Subdirectory the freezer puts bundled resources and libraries in."""
 
+INCOMING_SUFFIX = ".incoming"
+"""Suffix a passed build is brought onto the output filesystem under.
+
+Publication has exactly one step that can cross filesystems, and it is the one
+step that can therefore leave a half-written tree behind. Giving it a name of
+its own keeps that debris off the distributable path."""
+
 PREVIOUS_SUFFIX = ".previous"
 """Suffix the payload being replaced is held under while it is replaced."""
 
@@ -475,36 +482,75 @@ def _freeze(options: BuildOptions, venv_python: Path) -> Path:
     return produced
 
 
+def _discard(path: Path, *, best_effort: bool = False) -> None:
+    """Remove one of publication's scratch paths, directory or not.
+
+    Both of them are transient by construction: a stale one is debris from an
+    interrupted build and a fresh one belongs to this build, so neither is ever
+    something to keep. Whether it is a directory is not assumed — once a
+    filesystem error is in play, what is on disk is whatever the failure left.
+    """
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        elif path.is_symlink() or path.exists():
+            path.unlink()
+    except OSError as exc:
+        if best_effort:
+            return
+        raise BuildError(f"cannot clear {path}: {exc}") from exc
+
+
 def _place_payload(staged_dir: Path, payload_dir: Path) -> Path:
     """Publish a passed build under its target-keyed name.
 
+    The payload arrives in two steps because only the first one can cross
+    filesystems. ``shutil.move`` renames when it can and copies when it cannot,
+    and a copy that fails partway leaves as much as it managed to write —
+    including half-written files. Landing it under a sibling name first means
+    that debris can only ever appear beside the distributable path, never at
+    it: the canonical name is reached by a rename within one directory, which
+    either happens completely or not at all.
+
     The previous payload is moved aside rather than deleted, and put back if
-    the move fails, so an interrupted publication cannot leave the
-    distributable path empty or half-populated. It is removed only once the new
-    payload is in place.
+    the swap fails, so an interrupted publication cannot leave the
+    distributable path empty, partial, or holding a candidate that did not
+    pass. It is removed only once the new payload is in place.
     """
     payload_dir.parent.mkdir(parents=True, exist_ok=True)
+    incoming_dir = payload_dir.with_name(f"{payload_dir.name}{INCOMING_SUFFIX}")
     previous_dir = payload_dir.with_name(f"{payload_dir.name}{PREVIOUS_SUFFIX}")
-    # Cleared before anything moves, so that finding it below means the swap
-    # started and the payload it holds is the one to put back.
+    # Cleared before anything moves, so that finding either of them below means
+    # this publication put it there.
+    _discard(incoming_dir)
+    _discard(previous_dir)
+
     try:
-        if previous_dir.exists():
-            shutil.rmtree(previous_dir)
+        shutil.move(str(staged_dir), str(incoming_dir))
     except OSError as exc:
-        raise BuildError(f"cannot clear {previous_dir}: {exc}") from exc
+        _discard(incoming_dir, best_effort=True)
+        raise BuildError(f"cannot stage the payload at {incoming_dir}: {exc}") from exc
+
     replaced = payload_dir.exists()
     try:
         if replaced:
             payload_dir.rename(previous_dir)
-        shutil.move(str(staged_dir), str(payload_dir))
+        incoming_dir.rename(payload_dir)
     except OSError as exc:
-        if replaced and previous_dir.is_dir():
-            if payload_dir.exists():
-                shutil.rmtree(payload_dir, ignore_errors=True)
-            previous_dir.rename(payload_dir)
-        raise BuildError(f"cannot place the payload at {payload_dir}: {exc}") from exc
+        _discard(incoming_dir, best_effort=True)
+        stranded = ""
+        # A rename leaves nothing behind, so the old payload is either still in
+        # place or whole under its held name; only the second case needs undoing.
+        if replaced and previous_dir.exists() and not payload_dir.exists():
+            try:
+                previous_dir.rename(payload_dir)
+            except OSError:
+                stranded = f"; the previous payload is left at {previous_dir}"
+        raise BuildError(
+            f"cannot place the payload at {payload_dir}: {exc}{stranded}"
+        ) from exc
     if replaced:
-        shutil.rmtree(previous_dir, ignore_errors=True)
+        _discard(previous_dir, best_effort=True)
     return payload_dir
 
 
