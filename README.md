@@ -27,6 +27,7 @@ and keeps run history outside the repositories themselves.
 | Evaluation | Optional deterministic Layer 1 metrics, Claude-backed Layer 2 evaluation, and a cross-repo report feed |
 | Capacity | Display-only Claude and Codex subscription usage that never gates readiness or launch |
 | Operations | Mobile-first dependency-free dashboard, launchd resident service, and optional Bark notifications |
+| Delivery | One-command compiled install with no Python or checkout, versioned upgrade and rollback, and tag-bound release publication |
 
 The unit of control is a portfolio, not a chat session. Sessions are transient
 executors inside a durable task lifecycle; orch-hub shows the state that still
@@ -34,10 +35,12 @@ matters after any one conversation has ended.
 
 ## Requirements
 
-- macOS for the supported resident-service workflow.
-- Python 3.10+ for orch-hub. Mandrel's end-to-end setup requires Python
-  3.11+; using Python 3.11+ for both is simplest.
-- A local Mandrel checkout.
+- macOS for the supported resident-service workflow. The compiled release
+  targets Apple Silicon (`darwin-arm64`) and declares macOS 11.0 as its floor.
+- Python 3.10+ **only when running from a checkout**. A release install carries
+  its own interpreter and needs no Python, pip, or venv. Mandrel is a separate
+  program either way, and its end-to-end setup requires Python 3.11+.
+- A local Mandrel checkout with an executable `bin/mandrel`.
 - At least one repo registered with Mandrel. Follow the
   [Mandrel Quickstart](https://github.com/qinglin89/mandrel#quickstart); before
   starting runs or remote task intake from orch-hub, initialize the repo and
@@ -52,7 +55,34 @@ published model/effort choices.
 
 ## Quickstart
 
-Install orch-hub from its checkout:
+### From a release: one command, no Python and no checkout
+
+```bash
+curl -fLO <url>/orch-hub-0.1.0-darwin-arm64.run
+curl -fLO <url>/SHA256SUMS
+shasum -a 256 -c SHA256SUMS
+sh orch-hub-0.1.0-darwin-arm64.run --mandrel /absolute/path/to/mandrel
+```
+
+The installer refuses a machine it does not fit, an older macOS than it
+supports, and a corrupted download *before* unpacking anything. It then
+installs a user-local versioned runtime under `~/.local/orch-hub`, links
+`orch-hub` into `~/.local/bin`, configures the launchd service, waits for the
+health endpoint, and prints a generated bearer token once if it had to create
+one.
+
+```bash
+orch-hub launchd status   # label, plist, load state, dashboard URL, health
+orch-hub versions         # what is installed, and which is current
+```
+
+Upgrading is running a newer installer — the token, Mandrel path, bind address,
+data directory, and push endpoint are preserved, and the replaced version stays
+installed so `orch-hub rollback` can return to it. `orch-hub uninstall` removes
+the service and runtime while keeping hub-owned data. Full operator and
+maintainer detail: [installing from a release](docs/release.md).
+
+### From a checkout: development
 
 ```bash
 git clone https://github.com/qinglin89/orch-hub
@@ -205,6 +235,24 @@ launchd deployment currently uses the defaults.
 .venv/bin/orch-hub eval catalog verify
 ```
 
+An installed release is one executable with the same command surface, plus the
+verbs a checkout has no use for:
+
+```bash
+orch-hub setup --mandrel /absolute/path/to/mandrel   # configure and start
+orch-hub upgrade --from /path/to/payload             # or just run a newer .run
+orch-hub rollback                                    # back to the previous version
+orch-hub versions
+orch-hub uninstall
+orch-hub serve                                       # foreground service
+```
+
+`launchd deploy` / `update` install a checkout's package into `<checkout>/.venv`
+and point launchd at it, so they are checkout-only; a release uses `setup` and
+`upgrade`. `serve` is how a runtime with no console scripts starts the HTTP
+service — a compiled release ships one executable, so `orch-hub-api` exists only
+in a source install.
+
 `repos --json` and `GET /api/repos` use the same payload builder. HTTP handlers
 delegate to the owning domain services rather than duplicating registry,
 readiness, or lifecycle logic.
@@ -230,6 +278,7 @@ readiness, or lifecycle logic.
 
 ## Operator documentation
 
+- [Installing from a release, and building one](docs/release.md)
 - [Dashboard behavior](docs/dashboard.md)
 - [HTTP API reference](docs/api.md)
 - [launchd deployment, Tailscale, logs, and recovery](docs/launchd.md)
@@ -246,6 +295,22 @@ python3 -m venv .venv
 
 Tests use temporary directories and injected subprocess runners. They do not
 touch the real Mandrel registry or launch real coding-agent sessions.
+
+Building a release is three commands from the checkout, on a host that is
+already the target (there is no cross-building a compiled runtime):
+
+```bash
+python3 -m orch_hub.release_build     # -> dist/orch-hub-darwin-arm64/
+python3 -m orch_hub.release_package   # -> dist/release/{*.run,release.json,SHA256SUMS}
+python3 -m orch_hub.release_publish --tag v0.1.0 --to ~/Releases/orch-hub
+```
+
+The freezer and the bundled interpreter are pinned, the payload is audited for
+first-party source and maintainer-specific literals, packaging the same payload
+twice is byte-identical, and publication refuses a tag that does not name the
+release, a checkout that is not at that tag, bytes that disagree with their own
+inventory, or a destination already holding the tag. See
+[the release guide](docs/release.md#part-2--producing-a-release).
 
 ## Project status
 

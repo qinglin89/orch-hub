@@ -5,6 +5,15 @@ agent**: it starts at login, restarts if it exits, and logs to
 `~/Library/Logs/orch-hub/`. The template plist lives at
 [`deploy/launchd/com.qinglin89.orch-hub.plist`](../deploy/launchd/com.qinglin89.orch-hub.plist).
 
+> [!NOTE]
+> **This guide is the source-checkout path.** If you installed a compiled
+> release, the launchd service is already configured, and the verb that
+> configures it is `orch-hub setup` — not `launchd deploy`, which installs a
+> checkout's package into `<checkout>/.venv` and points launchd at that. See
+> [installing from a release](release.md). Everything else here — the security
+> model, the environment variables, `launchd start|stop|restart|status`, stop
+> semantics, logs, and troubleshooting — applies to both shapes unchanged.
+
 ## Security model (read first)
 
 orch-hub is a remote code execution control surface — it launches orchestrator
@@ -83,6 +92,11 @@ This installs two primary console scripts:
 
 It also installs the optional `.venv/bin/orch-hub-statusline` wrapper used for
 Codex subscription-usage collection.
+
+A compiled release has none of these console scripts: it ships one executable
+that answers `orch-hub serve` where a source install runs `orch-hub-api`. If
+that is what you have, skip to [installing from a release](release.md) and use
+`orch-hub setup` in place of sections 1 and 2.
 
 The official operational entry point is `orch-hub launchd ...`. The
 `deploy/launchd/` directory holds deployment artifacts, including the plist
@@ -243,6 +257,11 @@ launchctl bootout gui/$UID/com.qinglin89.orch-hub
 rm ~/Library/LaunchAgents/com.qinglin89.orch-hub.plist
 rm -r ~/Library/Logs/orch-hub   # optional
 ```
+
+On a release install, `orch-hub uninstall` does the equivalent and also removes
+the installed runtime and command link, keeping hub-owned data unless
+`--purge-data --yes` is given. Neither path stops orchestrator runs; see
+[stop semantics](#5-stop-semantics).
 
 ## 7. Logs
 

@@ -151,6 +151,11 @@ The wrapper itself is unchanged: it is operator-installed (orch-hub never edits
 `subscription_type` plan name, and it relays your wrapped statusLine command's
 stdin, stdout, stderr, and exit code untouched.
 
+`orch-hub-statusline` is a source-install console script. A compiled release
+ships one executable and does not carry it — which costs nothing, because the
+Claude card is fed by the utilization cache either way. See
+[installing from a release](release.md).
+
 ## It gates nothing
 
 Subscription usage is display-only, everywhere:
