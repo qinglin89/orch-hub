@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from orch_hub import release_package
+from orch_hub import install, release_package
 from orch_hub.release_build import MANIFEST_NAME, MANIFEST_SCHEMA, REQUIRED_MEMBERS
 from orch_hub.release_package import (
     CHECKSUM_NAME,
@@ -64,14 +64,22 @@ def make_payload(
     *,
     version: str = "9.9.9",
     target: str = "darwin-arm64",
-    os_name: str = "darwin",
-    arch: str = "arm64",
+    os_name: str | None = None,
+    arch: str | None = None,
     min_macos: str | None = "11.0",
     name: str = "orch-hub",
     executable: str = "orch-hub",
     manifest_overrides: dict | None = None,
 ) -> Path:
-    """A payload directory shaped like a real one, minus 30 MB of interpreter."""
+    """A payload directory shaped like a real one, minus 30 MB of interpreter.
+
+    ``os_name``/``arch`` default to the halves of ``target``: the packager
+    refuses a manifest whose target key contradicts the os/arch it carries, so
+    a test that is not about that contradiction must not state one by accident.
+    """
+    declared_os, _, declared_arch = target.partition("-")
+    os_name = declared_os if os_name is None else os_name
+    arch = declared_arch if arch is None else arch
     payload = root / f"{name}-{target}"
     (payload / "_internal").mkdir(parents=True, exist_ok=True)
     binary = payload / executable
@@ -122,6 +130,26 @@ def options(tmp_path: Path, *payloads: Path, **overrides) -> PackageOptions:
 def package(tmp_path: Path, *payloads: Path, **overrides) -> Path:
     result = package_release(options(tmp_path, *payloads, **overrides))
     return result.out_dir
+
+
+def tree_state(root: Path) -> dict[str, str]:
+    """Every member of a tree, keyed by relative path and content-addressed.
+
+    Used to prove a refused packaging changed *nothing*. Symlinks are recorded
+    as their target instead of being followed, and modes are part of the state:
+    the payload is a tree of relative links around one executable file, so
+    "unchanged" has to mean unchanged for those too.
+    """
+    state: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        key = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            state[key] = f"link -> {os.readlink(path)}"
+        elif path.is_dir():
+            state[key] = "dir"
+        else:
+            state[key] = f"{sha256_file(path)} {path.stat().st_mode & 0o777:o}"
+    return state
 
 
 # --------------------------------------------------------------------------
@@ -177,6 +205,88 @@ def test_a_payload_without_its_declared_executable_is_refused(tmp_path: Path):
         read_payload_manifest(payload)
 
 
+def test_a_payload_executable_without_its_executable_bit_is_refused(tmp_path: Path):
+    # The archive keeps the mode it finds. Nothing before installation notices:
+    # `--check` proves only host and digest, so the artifact would announce
+    # itself installable and then fail its own post-unpack `-x` test on every
+    # machine that ran it.
+    payload = make_payload(tmp_path)
+    (payload / "orch-hub").chmod(0o644)
+    with pytest.raises(PackageError, match="is not executable"):
+        package(tmp_path, payload)
+    assert not (tmp_path / "release").exists()
+
+
+def test_a_payload_executable_that_is_not_a_regular_file_is_refused(tmp_path: Path):
+    # Symlinks are archived as symlinks, so the declared runtime being a link
+    # means the real binary is some other member under some other name.
+    payload = make_payload(tmp_path)
+    (payload / "orch-hub").rename(payload / "orch-hub.real")
+    (payload / "orch-hub").symlink_to("orch-hub.real")
+    with pytest.raises(PackageError, match="not a regular file"):
+        package(tmp_path, payload)
+    assert not (tmp_path / "release").exists()
+
+
+@pytest.mark.parametrize("version", [".hidden", "a/b", "..", "9.9.9/", "9.9.9\0"])
+def test_a_version_the_runtime_could_not_install_is_refused(tmp_path: Path, version: str):
+    """The packager may not be more permissive than the thing installing its output.
+
+    A release is immutable: an artifact whose version the runtime refuses can
+    only be withdrawn, never corrected. Both readers are run over the same
+    payload so the two rules cannot drift apart unnoticed.
+    """
+    payload = make_payload(tmp_path, version=version)
+    with pytest.raises(install.InstallError, match="single path component"):
+        install.read_payload_manifest(payload)
+    with pytest.raises(PackageError, match="single path component"):
+        read_payload_manifest(payload)
+    with pytest.raises(PackageError):
+        package(tmp_path, payload)
+    assert not (tmp_path / "release").exists()
+
+
+def test_a_target_that_contradicts_the_payload_it_carries_is_refused(tmp_path: Path):
+    # `target` is the release key and the artifact's file name; `os`/`arch` are
+    # what the installer's host gate compares. Letting them disagree publishes
+    # an arm64 runtime under the x86_64 key — and the artifact still answers
+    # `--check` with "installable" on the arm64 Mac it was really built for.
+    payload = make_payload(tmp_path, target="darwin-x86_64", arch="arm64")
+    with pytest.raises(PackageError, match="under another target's key"):
+        read_payload_manifest(payload)
+    with pytest.raises(PackageError):
+        package(tmp_path, payload)
+    assert not (tmp_path / "release").exists()
+
+
+def test_a_target_that_is_not_a_single_path_component_is_refused(tmp_path: Path):
+    # The target names the artifact file and the archive's root directory.
+    payload = make_payload(
+        tmp_path, target="darwin/arm64", os_name="darwin", arch="arm64"
+    )
+    with pytest.raises(PackageError, match="single path component"):
+        read_payload_manifest(payload)
+
+
+@pytest.mark.parametrize("unnormalised", [{"os_name": "Darwin"}, {"arch": "ARM64"}])
+def test_an_os_or_arch_the_installer_cannot_compare_is_refused(
+    tmp_path: Path, unnormalised: dict
+):
+    # The header's gate lowercases `uname -s` but takes `uname -m` verbatim, so
+    # an unnormalised manifest renders an installer that refuses every machine
+    # on earth — while the runtime's own check_target, which lowercases both
+    # sides, would have accepted the very same payload.
+    payload = make_payload(tmp_path, **unnormalised)
+    with pytest.raises(PackageError, match="against the host verbatim"):
+        read_payload_manifest(payload)
+    install.check_target(
+        json.loads((payload / MANIFEST_NAME).read_text(encoding="utf-8")),
+        system="darwin",
+        machine="arm64",
+        macos="26.0",
+    )
+
+
 def test_a_missing_min_macos_is_allowed_and_renders_empty(tmp_path: Path):
     # Absence means "no declared floor", which the installer treats as "do not
     # compare" — not as a floor of zero and not as a reason to refuse.
@@ -224,13 +334,52 @@ def test_the_audit_gate_reports_what_the_real_build_requires(tmp_path: Path):
     assert absent and all(member in message for member in absent)
 
 
+# Layout refusals. A payload is read and audited and must come out unchanged;
+# the scratch directory is emptied and rewritten; the release directory is
+# replaced wholesale. Every pair is refused in both directions, because each
+# direction applies one of those fates to the other's contents.
+
+
 def test_an_output_directory_that_contains_the_payload_is_refused(tmp_path: Path):
     # Publishing replaces the release directory, so `--out dist` (one level too
     # high) would delete the payload the build just produced.
     payload = make_payload(tmp_path / "dist")
+    before = tree_state(payload)
     with pytest.raises(PackageError, match="contains the payload"):
         package(tmp_path, payload, out_dir=tmp_path / "dist")
-    assert (payload / MANIFEST_NAME).is_file()
+    assert tree_state(payload) == before
+
+
+def test_a_payload_that_contains_the_output_directory_is_refused(tmp_path: Path):
+    # The quiet direction: the release lands *inside* the payload, so the
+    # artifact keeps the clean audit it was given a moment earlier while the
+    # audited payload now carries a release, and packaging it again archives
+    # the previous release inside the next one.
+    payload = make_payload(tmp_path)
+    before = tree_state(payload)
+    with pytest.raises(PackageError, match="contains the release directory"):
+        package(tmp_path, payload, out_dir=payload / "release")
+    assert tree_state(payload) == before
+
+
+def test_a_payload_inside_the_scratch_directory_is_refused(tmp_path: Path):
+    # The staging area is deleted and recreated before anything is archived,
+    # which took the payload with it and then failed with the input gone.
+    work = tmp_path / "work"
+    (work / "package-stage").mkdir(parents=True)
+    payload = make_payload(work / "package-stage")
+    before = tree_state(payload)
+    with pytest.raises(PackageError, match="contains the payload"):
+        package(tmp_path, payload, work_dir=work)
+    assert tree_state(payload) == before
+
+
+def test_a_payload_that_contains_the_scratch_directory_is_refused(tmp_path: Path):
+    payload = make_payload(tmp_path)
+    before = tree_state(payload)
+    with pytest.raises(PackageError, match="contains the scratch directory"):
+        package(tmp_path, payload, work_dir=payload / "work")
+    assert tree_state(payload) == before
 
 
 def test_an_output_directory_that_contains_the_scratch_area_is_refused(tmp_path: Path):
@@ -242,6 +391,35 @@ def test_an_output_directory_that_contains_the_scratch_area_is_refused(tmp_path:
             out_dir=tmp_path / "release",
             work_dir=tmp_path / "release" / "work",
         )
+
+
+def test_a_scratch_directory_that_contains_the_output_is_refused(tmp_path: Path):
+    payload = make_payload(tmp_path)
+    with pytest.raises(PackageError, match="disposable scratch"):
+        package(
+            tmp_path,
+            payload,
+            out_dir=tmp_path / "work" / "release",
+            work_dir=tmp_path / "work",
+        )
+
+
+def test_a_refused_layout_changes_neither_the_payload_nor_the_last_release(
+    tmp_path: Path,
+):
+    # The refusal has to come before the audit and before staging: everything
+    # after that point either reads the payload as ground truth or replaces the
+    # release directory, and both are irreversible by the time they run.
+    payload = make_payload(tmp_path / "payload")
+    out = package(tmp_path, payload)
+    payload_before = tree_state(payload)
+    release_before = tree_state(out)
+    with pytest.raises(PackageError):
+        package(tmp_path, payload, out_dir=payload / "release")
+    with pytest.raises(PackageError):
+        package(tmp_path, payload, work_dir=payload / "work")
+    assert tree_state(payload) == payload_before
+    assert tree_state(out) == release_before
 
 
 def test_a_missing_payload_directory_is_an_error(tmp_path: Path):
@@ -535,6 +713,32 @@ def test_the_cli_reports_a_refusal_as_an_error_line(tmp_path: Path, capsys):
     )
     assert code == 1
     assert capsys.readouterr().err.startswith("error: payload directory not found")
+
+
+def test_the_cli_creates_nothing_before_refusing_a_layout(tmp_path: Path, capsys):
+    # The scratch tree is created by the staging step, which runs after the
+    # layout check. Creating it up front left an empty directory inside the
+    # payload the CLI then refused to package — and an empty directory is an
+    # archive member, so the refused run would have changed what that payload
+    # packages to on the next, legal run.
+    payload = make_payload(tmp_path)
+    before = tree_state(payload)
+    code = release_package.main(
+        [
+            "--payload",
+            str(payload),
+            "--out",
+            str(tmp_path / "release"),
+            "--work",
+            str(payload / "work"),
+            "--template",
+            str(TEMPLATE),
+            "--allow-findings",
+        ]
+    )
+    assert code == 1
+    assert "contains the scratch directory" in capsys.readouterr().err
+    assert tree_state(payload) == before
 
 
 # --------------------------------------------------------------------------

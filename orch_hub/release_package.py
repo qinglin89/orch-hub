@@ -42,6 +42,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tarfile
 from collections.abc import Iterator, Sequence
@@ -177,6 +178,11 @@ def read_payload_manifest(payload_dir: Path) -> dict:
     value packaging embeds in the installer header comes from it. It is checked
     here rather than trusted because those values end up inside single-quoted
     shell in a file other people run.
+
+    Every rule the *installed* runtime applies to a manifest is applied here as
+    well. A packager weaker than the thing that installs its output publishes
+    artifacts that are refused on arrival — an immutable release cannot be
+    corrected, so the last moment to notice is before the file exists.
     """
     path = payload_dir / MANIFEST_NAME
     if not path.is_file():
@@ -207,10 +213,17 @@ def read_payload_manifest(payload_dir: Path) -> dict:
                 f"{path} declares {field} {declared!r}, "
                 f"but a release payload is named {EXECUTABLE_NAME!r}"
             )
-    if not (payload_dir / EXECUTABLE_NAME).is_file():
-        raise PackageError(
-            f"payload has no executable at {payload_dir / EXECUTABLE_NAME}"
-        )
+    _check_path_component(
+        manifest,
+        "version",
+        path,
+        because=(
+            "an installed runtime lives in versions/<version>, so a version "
+            "must be a single path component"
+        ),
+    )
+    _check_target_identity(manifest, path)
+    _check_payload_executable(payload_dir / EXECUTABLE_NAME)
     return manifest
 
 
@@ -234,6 +247,86 @@ def _check_embeddable(manifest: dict, field: str, path: Path, *, required: bool)
         )
 
 
+def _check_path_component(manifest: dict, field: str, path: Path, *, because: str) -> str:
+    """Prove one manifest value is safe to use as a single path component.
+
+    Both values this guards become file names in the release, and ``version``
+    becomes a directory name under the installed prefix as well — which is why
+    the runtime's own installer applies exactly this rule before its first
+    write. Applying it here too is what stops the packager emitting an artifact
+    the runtime is then guaranteed to refuse: joining an absolute or
+    ``..``-bearing component silently discards the prefix, and a leading dot
+    names a directory the selection link cannot be read back out of.
+    """
+    value = value_of(manifest, field)
+    if value != Path(value).name or "\0" in value or value.startswith("."):
+        raise PackageError(f"{path} declares {field} {value!r}; {because}")
+    return value
+
+
+def _check_target_identity(manifest: dict, path: Path) -> None:
+    """Prove the target key names the os/arch this payload actually carries.
+
+    ``target`` is the release's key and the artifact's file name; ``os``/``arch``
+    are what the installer's host gate compares. A manifest where they disagree
+    publishes one machine's runtime under another machine's key and still
+    answers ``--check`` with "installable" on the machine it was really built
+    for — the mislabelling survives every check downstream of here.
+
+    They must also be normalised the way the *shell* compares them, which is not
+    the way Python does: the header lowercases ``uname -s`` but takes ``uname -m``
+    verbatim, so a ``Darwin``/``ARM64`` manifest renders an installer that
+    refuses every machine on earth, while the runtime's own ``check_target`` —
+    which lowercases both sides — would have accepted it.
+    """
+    for field in ("os", "arch"):
+        value = value_of(manifest, field)
+        if value != value.lower():
+            raise PackageError(
+                f"{path} declares {field} {value!r}; the installer compares it "
+                f"against the host verbatim, so it must be {value.lower()!r}"
+            )
+    target = _check_path_component(
+        manifest,
+        "target",
+        path,
+        because="it names the release artifact, so it must be a single path component",
+    )
+    carried = f"{value_of(manifest, 'os')}-{value_of(manifest, 'arch')}"
+    if target != carried:
+        raise PackageError(
+            f"{path} declares target {target!r} but carries {carried!r}; "
+            "the release would publish this payload under another target's key"
+        )
+
+
+def _check_payload_executable(path: Path) -> None:
+    """Prove the payload's runtime is the member the installer will find.
+
+    The archive stores what is on disk as it is: symlinks stay symlinks and the
+    mode collapses to executable-or-not. So a payload whose ``orch-hub`` is not
+    a regular executable file produces an installer that passes ``--check`` —
+    which only proves host and digest — and then fails its own post-unpack
+    ``-x`` test on every machine that runs it. Refuse it here, while there is
+    still nothing published to withdraw.
+    """
+    try:
+        status = path.lstat()
+    except OSError:
+        raise PackageError(f"payload has no executable at {path}") from None
+    if not stat.S_ISREG(status.st_mode):
+        raise PackageError(
+            f"payload executable {path} is {stat.filemode(status.st_mode)}, "
+            "not a regular file"
+        )
+    if not status.st_mode & 0o111:
+        raise PackageError(
+            f"payload executable {path} is not executable "
+            f"(mode {stat.filemode(status.st_mode)}); the unpacked runtime "
+            "could not be launched"
+        )
+
+
 def package_release(options: PackageOptions) -> PackageResult:
     """Produce one release's artifact set from one or more built payloads.
 
@@ -243,7 +336,7 @@ def package_release(options: PackageOptions) -> PackageResult:
     """
     if not options.payload_dirs:
         raise PackageError("no payload directory given")
-    _check_output_layout(options)
+    _check_directory_layout(options)
     template = _load_template(options.template_path)
     payloads = [_describe(directory, options) for directory in options.payload_dirs]
     versions = {payload.version for payload in payloads}
@@ -336,26 +429,79 @@ def _describe(directory: Path, options: PackageOptions) -> _Payload:
     return _Payload(directory=payload_dir, manifest=manifest, audit=report)
 
 
-def _check_output_layout(options: PackageOptions) -> None:
-    """Refuse an output directory that swallows its own inputs.
+def _check_directory_layout(options: PackageOptions) -> None:
+    """Refuse a layout in which packaging would consume its own inputs.
 
-    Publishing *replaces* the release directory: the tree already there is
-    moved aside and then removed. Aimed one level too high — ``--out dist``
-    rather than the default ``dist/release`` — that deletes the payload the
-    build just produced, and nothing about the command says so beforehand.
+    Three directories, three different fates. A payload is read and audited and
+    must come out byte-for-byte unchanged — it is the thing whose digest the
+    release attests to. The scratch directory is packaging's to empty and
+    rewrite. The release directory is *replaced*: the tree already there is
+    moved aside and then removed.
+
+    Any nesting between two of them applies one fate to the other's contents,
+    so containment is refused in both directions and for every pair. One
+    direction is the obvious operator slip — ``--out dist`` rather than the
+    default ``dist/release`` deletes the payload the build just produced. The
+    other is quieter and worse: ``--out <payload>/release`` writes a release
+    *into* the payload that was audited a moment earlier, so the artifact keeps
+    its clean audit while the next packaging of that payload silently archives
+    the previous release inside it.
     """
     out = options.out_dir.expanduser().resolve()
-    for payload in options.payload_dirs:
-        if payload.expanduser().resolve().is_relative_to(out):
-            raise PackageError(
-                f"the release directory {out} contains the payload {payload}; "
-                "publishing the release would replace the payload with it"
-            )
-    if options.work_dir.expanduser().resolve().is_relative_to(out):
-        raise PackageError(
-            f"the release directory {out} contains the scratch directory "
-            f"{options.work_dir}; the release would replace its own staging area"
+    work = options.work_dir.expanduser().resolve()
+    for declared in options.payload_dirs:
+        payload = declared.expanduser().resolve()
+        _refuse_nested(
+            out,
+            payload,
+            f"the release directory {out} contains the payload {payload}; "
+            "publishing the release would replace the payload with it",
         )
+        _refuse_nested(
+            payload,
+            out,
+            f"the payload {payload} contains the release directory {out}; "
+            "publishing the release would write it into the payload this "
+            "packaging just audited",
+        )
+        _refuse_nested(
+            work,
+            payload,
+            f"the scratch directory {work} contains the payload {payload}; "
+            "packaging clears its staging area there and would delete the "
+            "payload before archiving it",
+        )
+        _refuse_nested(
+            payload,
+            work,
+            f"the payload {payload} contains the scratch directory {work}; "
+            "packaging would write its archive into the payload this "
+            "packaging just audited",
+        )
+    _refuse_nested(
+        out,
+        work,
+        f"the release directory {out} contains the scratch directory {work}; "
+        "the release would replace its own staging area",
+    )
+    _refuse_nested(
+        work,
+        out,
+        f"the scratch directory {work} contains the release directory {out}; "
+        "packaging clears and rewrites what is under it, so the release would "
+        "be published into disposable scratch",
+    )
+
+
+def _refuse_nested(outer: Path, inner: Path, message: str) -> None:
+    """Raise ``message`` when ``inner`` is ``outer`` or sits beneath it.
+
+    Equality lands on the first caller that names it, which is why the message
+    belongs to the call rather than to this helper: the two directions of one
+    pair have different consequences and deserve different sentences.
+    """
+    if inner.is_relative_to(outer):
+        raise PackageError(message)
 
 
 def _first_duplicate(values: Sequence[str]) -> str | None:
@@ -693,7 +839,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         allow_findings=args.allow_findings,
     )
     try:
-        work_dir.mkdir(parents=True, exist_ok=True)
+        # The scratch tree is created by the staging step and by nothing else.
+        # Creating it here would happen *before* the layout check, so a --work
+        # aimed inside a payload would leave a directory in the payload it then
+        # refuses to package — and an extra empty directory is an extra archive
+        # member, which silently changes what that payload packages to.
         result = package_release(options)
     except (PackageError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)
