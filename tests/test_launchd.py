@@ -15,10 +15,11 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import (
-    MANDREL_PATH_ENV,
     BARK_URL_ENV,
     DATA_DIR_ENV,
     HOST_ENV,
+    LEGACY_MANDREL_PATH_ENV,
+    MANDREL_PATH_ENV,
     PORT_ENV,
     TOKEN_ENV,
 )
@@ -35,6 +36,7 @@ from orch_hub.launchd import (
     _resolve_leftover_placeholders,
     deploy_service,
     installed_bark_url,
+    resolve_deployment,
     restart_service,
     service_domain,
     service_target,
@@ -160,13 +162,107 @@ def test_deploy_writes_plist_and_bootstraps(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    ("explicit_name", "environ_names", "installed_names", "expected_name"),
+    [
+        (
+            "flag-mandrel",
+            {
+                MANDREL_PATH_ENV: "current-env-mandrel",
+                LEGACY_MANDREL_PATH_ENV: "legacy-env-mandrel",
+            },
+            {MANDREL_PATH_ENV: "installed-mandrel"},
+            "flag-mandrel",
+        ),
+        (
+            None,
+            {
+                MANDREL_PATH_ENV: "current-env-mandrel",
+                LEGACY_MANDREL_PATH_ENV: "legacy-env-mandrel",
+            },
+            {MANDREL_PATH_ENV: "installed-mandrel"},
+            "current-env-mandrel",
+        ),
+        (
+            None,
+            {
+                MANDREL_PATH_ENV: "  ",
+                LEGACY_MANDREL_PATH_ENV: "legacy-env-mandrel",
+            },
+            {MANDREL_PATH_ENV: "installed-mandrel"},
+            "legacy-env-mandrel",
+        ),
+        (
+            None,
+            {},
+            {
+                MANDREL_PATH_ENV: "installed-mandrel",
+                LEGACY_MANDREL_PATH_ENV: "installed-legacy-mandrel",
+            },
+            "installed-mandrel",
+        ),
+        (
+            None,
+            {},
+            {LEGACY_MANDREL_PATH_ENV: "installed-legacy-mandrel"},
+            "installed-legacy-mandrel",
+        ),
+    ],
+)
+def test_deploy_mandrel_path_precedence(
+    tmp_path, explicit_name, environ_names, installed_names, expected_name
+):
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / PLIST_NAME
+    installed = {
+        key: str(tmp_path / value) for key, value in installed_names.items()
+    }
+    with plist_path.open("wb") as fh:
+        plistlib.dump({"EnvironmentVariables": installed}, fh, fmt=plistlib.FMT_XML)
+    environ = {
+        key: str(tmp_path / value) if value.strip() else value
+        for key, value in environ_names.items()
+    }
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=checkout,
+            mandrel_path=tmp_path / explicit_name if explicit_name else None,
+            plist_path=plist_path,
+        ),
+        environ=environ,
+        token_generator=lambda: "token",
+    )
+
+    assert deployment.mandrel_path == tmp_path / expected_name
+
+
+def test_first_deploy_requires_explicit_mandrel_path(tmp_path):
+    checkout = make_checkout(tmp_path)
+
+    with pytest.raises(LaunchdError, match="pass --mandrel or set") as error:
+        resolve_deployment(
+            DeployOptions(checkout=checkout, plist_path=tmp_path / PLIST_NAME),
+            environ={},
+            token_generator=lambda: "token",
+        )
+
+    assert MANDREL_PATH_ENV in str(error.value)
+    assert LEGACY_MANDREL_PATH_ENV in str(error.value)
+
+
 def test_deploy_preserves_existing_plist_token(tmp_path):
     checkout = make_checkout(tmp_path)
     plist_path = tmp_path / "com.qinglin89.orch-hub.plist"
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     with plist_path.open("wb") as fh:
         plistlib.dump(
-            {"EnvironmentVariables": {TOKEN_ENV: "old-token"}},
+            {
+                "EnvironmentVariables": {
+                    TOKEN_ENV: "old-token",
+                    MANDREL_PATH_ENV: str(tmp_path / "installed-mandrel"),
+                }
+            },
             fh,
             fmt=plistlib.FMT_XML,
         )
@@ -185,6 +281,7 @@ def test_deploy_preserves_existing_plist_token(tmp_path):
 
     assert result.generated_token is False
     assert result.deployment.token_source == "existing plist"
+    assert result.deployment.mandrel_path == tmp_path / "installed-mandrel"
     assert read_plist(plist_path)["EnvironmentVariables"][TOKEN_ENV] == "old-token"
 
 
@@ -203,7 +300,10 @@ def test_deploy_writes_bark_url_from_environment(tmp_path):
             install_package=False,
         ),
         runner=FakeRunner(),
-        environ={BARK_URL_ENV: BARK_URL},
+        environ={
+            BARK_URL_ENV: BARK_URL,
+            MANDREL_PATH_ENV: str(tmp_path / "mandrel"),
+        },
         token_generator=lambda: "t",
     )
 
@@ -225,7 +325,7 @@ def test_deploy_renders_blank_bark_url_when_unset(tmp_path):
             install_package=False,
         ),
         runner=FakeRunner(),
-        environ={},
+        environ={MANDREL_PATH_ENV: str(tmp_path / "mandrel")},
         token_generator=lambda: "t",
     )
 
@@ -242,7 +342,13 @@ def test_deploy_preserves_existing_plist_bark_url(tmp_path):
     plist_path.parent.mkdir(parents=True, exist_ok=True)
     with plist_path.open("wb") as fh:
         plistlib.dump(
-            {"EnvironmentVariables": {TOKEN_ENV: "tok", BARK_URL_ENV: BARK_URL}},
+            {
+                "EnvironmentVariables": {
+                    TOKEN_ENV: "tok",
+                    BARK_URL_ENV: BARK_URL,
+                    MANDREL_PATH_ENV: str(tmp_path / "mandrel"),
+                }
+            },
             fh,
             fmt=plistlib.FMT_XML,
         )
@@ -380,6 +486,7 @@ def test_deploy_installs_package_when_requested(tmp_path):
     deploy_service(
         DeployOptions(
             checkout=checkout,
+            mandrel_path=tmp_path / "mandrel",
             plist_path=plist_path,
             log_dir=tmp_path / "logs",
         ),
@@ -412,6 +519,7 @@ def test_deploy_requires_checkout_template(tmp_path):
         deploy_service(
             DeployOptions(
                 checkout=checkout,
+                mandrel_path=tmp_path / "mandrel",
                 plist_path=tmp_path / PLIST_NAME,
                 install_package=False,
             ),
@@ -425,6 +533,7 @@ def test_deploy_requires_checkout_template(tmp_path):
 def _deploy_options(checkout: Path, plist_path: Path, tmp_path: Path) -> DeployOptions:
     return DeployOptions(
         checkout=checkout,
+        mandrel_path=tmp_path / "mandrel",
         plist_path=plist_path,
         log_dir=tmp_path / "logs",
         install_package=False,

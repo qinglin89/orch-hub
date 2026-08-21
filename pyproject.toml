@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "orch-hub"
 version = "0.1.0"
-description = "Local control plane for AI coding orchestrators (discovery and readiness slice)."
+description = "Local control plane for a portfolio of Mandrel-managed AI coding workflows."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

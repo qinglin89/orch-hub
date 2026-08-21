@@ -1,26 +1,30 @@
-"""FastAPI service foundation for orch-hub.
+"""FastAPI service for the orch-hub control plane.
 
-A thin HTTP adapter over the same application functions the CLI already uses, so
-discovery, readiness, and task-inventory logic is never duplicated:
+Repo-inventory handlers reuse the registry and readiness functions used by the
+CLI:
 
 - discovery/readiness: :func:`orch_hub.registry.discover_repos`,
   :func:`orch_hub.readiness.check_readiness`, :func:`orch_hub.models.repos_payload`.
-- task inventory: :func:`orch_hub.task_store.list_tasks`,
+
+Task handlers delegate to the task-store functions rather than duplicating
+their parsing and payload rules:
+
+- :func:`orch_hub.task_store.list_tasks`,
   :func:`orch_hub.task_store.list_repo_tasks`,
   :func:`orch_hub.models.tasks_payload`.
 
-Route handlers stay thin: they resolve repos, delegate to the shared functions,
-and return the existing stable payload shapes. ``GET /api/repos`` returns the
-same object as ``python -m orch_hub.cli repos --json``; the task endpoints
-return the ``tasks_payload`` envelope, preserving ``index_present`` and the
-task-store sentinel statuses.
+Run, intake, evaluation, and report handlers likewise resolve boundary values
+and delegate lifecycle behavior to their owning services. ``GET /api/repos``
+returns the same object as ``orch-hub repos --json``; task endpoints preserve
+the ``tasks_payload`` envelope and its explicit missing/unknown states.
 
-Every route except the minimal ``GET /api/health`` liveness probe requires a
-bearer token (``Config.token``, from ``ORCH_HUB_TOKEN``). Enforcement is a
-default-deny middleware rather than per-route dependencies so future surfaces
-(runs, logs, dashboard) are protected the moment they are mounted, not when
-someone remembers to annotate them. With no token configured, protected routes
-fail closed with 503. :func:`run` still binds to localhost by default; the
+Every operational data and action route requires a bearer token
+(``Config.token``, from ``ORCH_HUB_TOKEN``). The only unauthenticated paths are
+the minimal ``GET /api/health`` probe and the three dashboard shell assets
+needed before a browser can attach the token. Enforcement is default-deny
+outside that explicit allowlist, so unknown and future paths are protected
+without per-route annotations. With no token configured, protected routes fail
+closed with 503. :func:`run` still binds to localhost by default; the
 private-network deployment assumptions are documented in the README.
 """
 

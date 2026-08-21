@@ -1,324 +1,240 @@
 # orch-hub
 
-A long-lived local control plane for AI coding orchestrators. It runs on your
-Mac and is driven remotely (iPhone/iPad or another machine) over a private
-network, coordinating the per-repository orchestrator programs that run
-dev/review loops over `.ai-tasks/`.
+A private-network control plane for operating a portfolio of
+[Mandrel](https://github.com/qinglin89/mandrel)-managed AI coding workflows
+from a Mac, phone, tablet, or another computer.
 
-The implemented v1 surface covers the full loop: repo discovery and launch
-readiness, task inventory, orchestrator run lifecycle (start / stop / reattach
-with per-repo serialization), remote question answering, log tailing and
-streaming, run history and audit, a mobile-first dashboard with an operations
-overview, Bark push notifications, remote task intake, fail-closed bearer-token
-auth, and launchd packaging for resident operation. The only planned-but-unbuilt
-surface is IM bot control.
+Mandrel owns the repo-local protocol: task lifecycle, curated project memory,
+fresh-context development and review, and the optional scheduler. orch-hub is
+the optional layer above it. It discovers registered repositories, starts and
+supervises their deployed schedulers, brings human decisions to one dashboard,
+and keeps run history outside the repositories themselves.
 
-## Why: bounded working sets over unbounded project time
+> [!IMPORTANT]
+> orch-hub can remotely launch coding agents that change local files. Treat it
+> as a remote code-execution surface. Run it only on localhost or a private
+> tailnet, require the bearer token, and never expose it to the public internet.
 
-A production-grade project is not one or two agent sessions. From idea to
-launch it is months of work — hundreds of sessions, thousands of decisions —
-and the dominant failure mode of long-running AI-assisted development is not
-model capability but **drift**: context that accumulates without curation until
-neither the human nor the agent can face it.
+## What it provides
 
-orch-hub is the operating surface for a protocol stack (`.ai-tasks/` task
-lifecycle + `.ai/` curated memory) designed around one invariant:
-**the working set stays bounded while the project grows without bound.**
-
-- **Tasks are sized to a context window.** Every task carries a session
-  estimate where one session ≈ one effective context window (~200k tokens);
-  larger work is sliced by an explicit session plan, not absorbed as sprawl.
-  The agent on day 1 and the agent in month 12 face the same shape: a
-  constant eager set of project invariants, one task file, and a routed
-  handful of relevant docs.
-- **Memory is curated, not accumulated.** Completed tasks pass through an
-  absorption gate: findings that survive admission tests (derivation cost,
-  stability, leverage) are distilled into a timeless snapshot (`.ai/`); the
-  rest is archived. The corpus grows, but it stays routable — each session
-  loads a constant-shaped slice, never the whole history.
-- **The human interface converges too.** The operator sees the same
-  operations surface in month 12 as on day 1: which repos are ready, which
-  runs wait on an answer, what the backlog is. Portfolio state, not chat
-  history.
-
-Session-level tooling (remote session control, cloud sessions) bounds a single
-execution in *space* — one conversation, one context. orch-hub and its
-protocol bound the project in *time* — a year of development stays operable as
-a sequence of window-sized, completable tasks. The two compose rather than
-compete: the hub delegates execution downward and owns the layer above.
-
-This invariant is maintained, not free: it rests on intake decomposition
-quality, absorption fidelity at task completion, and staleness discipline in
-the snapshot — enforced by session hooks, admission tests, and housekeeping.
-
-### The unit of control is a portfolio, not a session
-
-The hub's remote surface is not "reattach to a conversation". It is the
-operating state of every managed repo at once: readiness, task backlogs with
-status and blockers, at most one live run per repo, escalations awaiting a
-human answer, run history with est-vs-actual rollups, and confirmed-only task
-intake. Sessions are transient executors inside that lifecycle; the lifecycle
-is the durable object.
-
-## Repo discovery and readiness
-
-- Discovers managed repos from **mandrel** — the same registry the deployment
-  tooling already maintains. orch-hub does not keep its own repo
-  registry and does not treat GitHub as the source of truth.
-- Reports, per repo, whether it is **ready to launch** its deployed
-  orchestrator. Readiness fails closed: any missing piece blocks launch.
-
-### Discovery source
-
-1. Preferred: `mandrel registry list --json` (invoked by absolute path inside
-   the mandrel checkout).
-2. Fallback (command unavailable or non-zero exit):
-   `<mandrel>/.registry/repos.local.json`.
-
-Both sources return the same shape — a JSON array of `{name, path, manifest}`.
-A missing fallback file yields an empty repo list; malformed JSON is a hard
-error.
-
-### Readiness checks
-
-For each managed repo, in a stable order:
-
-| Check | Passes when |
+| Area | Capability |
 |---|---|
-| `repo_path_exists` | the repo directory exists |
-| `manifest_exists` | `.ai-deploy-manifest.json` is present |
-| `orchestrator_exists` | `.mandrel/orchestrator/orchestrator.py` is present |
-| `venv_python_exists` | `.mandrel/orchestrator/.venv/bin/python` is present |
-| `task_index_exists` | `.ai-tasks/index.md` is present |
-| `git_clean` | `git status --porcelain` is empty |
-| `mandrel_status` | `mandrel status <repo>` exits 0 |
+| Portfolio | Repo discovery, deployment readiness, task inventory, live-run state, and attention queues across every Mandrel-managed repo |
+| Run control | Start, gracefully stop, and reattach repo-local orchestrator runs, with at most one live run per repo |
+| Human decisions | Answer agent questions and plan gates remotely without turning the workflow back into a terminal session |
+| Observability | Live log streaming, bounded log tails, per-session context use, effective launch configuration, and durable run history |
+| Task intake | Draft, revise, confirm, or cancel a new task remotely; the target repo is unchanged until confirmation |
+| Evaluation | Optional deterministic Layer 1 metrics, Claude-backed Layer 2 evaluation, and a cross-repo report feed |
+| Capacity | Display-only Claude and Codex subscription usage that never gates readiness or launch |
+| Operations | Mobile-first dependency-free dashboard, launchd resident service, and optional Bark notifications |
 
-A repo is ready only when all checks pass.
+The unit of control is a portfolio, not a chat session. Sessions are transient
+executors inside a durable task lifecycle; orch-hub shows the state that still
+matters after any one conversation has ended.
+
+## Requirements
+
+- macOS for the supported resident-service workflow.
+- Python 3.10+ for orch-hub. Mandrel's end-to-end setup requires Python
+  3.11+; using Python 3.11+ for both is simplest.
+- A local Mandrel checkout.
+- At least one repo registered with Mandrel. Follow the
+  [Mandrel Quickstart](https://github.com/qinglin89/mandrel#quickstart); before
+  starting runs or remote task intake from orch-hub, initialize the repo and
+  [bootstrap its scheduler](https://github.com/qinglin89/mandrel#running-the-loop-unattended).
+- A clean target-repo worktree when starting a run or remote intake.
+- Optional: Tailscale for remote access, Bark for push notifications, and an
+  installed/authenticated Claude CLI for remote intake and Layer 2 evaluation.
+
+orch-hub understands Mandrel's current backend/profile launch schema. The
+deployed orchestrator remains the source of truth for resolved defaults and
+published model/effort choices.
+
+## Quickstart
+
+Install orch-hub from its checkout:
+
+```bash
+git clone https://github.com/qinglin89/orch-hub
+cd orch-hub
+python3 -m venv .venv
+.venv/bin/pip install .
+```
+
+Set the Mandrel checkout explicitly and start in the foreground first:
+
+```bash
+export ORCH_HUB_MANDREL_PATH=/absolute/path/to/mandrel
+export ORCH_HUB_TOKEN="$(openssl rand -hex 32)"
+.venv/bin/orch-hub-api
+```
+
+Open <http://127.0.0.1:8765>, enter the bearer token, and confirm that the
+expected repos appear. The dashboard stores the token in that browser profile's
+`localStorage` and sends it only in the `Authorization` header; it never puts a
+token in a cookie or URL.
+
+Once the foreground check works, install the resident launchd service:
+
+```bash
+.venv/bin/orch-hub launchd deploy \
+  --mandrel "$ORCH_HUB_MANDREL_PATH" \
+  --token "$ORCH_HUB_TOKEN"
+.venv/bin/orch-hub launchd status
+```
+
+For remote access, keep the default loopback bind and publish it only inside a
+tailnet, for example with `tailscale serve`. See the
+[launchd and private-network guide](docs/launchd.md) before enabling remote
+access.
+
+## How it fits together
+
+```text
+Phone / tablet / browser
+        |
+        | authenticated HTTP over a private network
+        v
+orch-hub on the operator's Mac
+        |
+        | Mandrel registry + filesystem/control-dir contracts
+        v
+Managed repo N
+  .ai/                         curated project snapshot
+  .ai-tasks/                   active task state + local archive
+  .mandrel/orchestrator/       repo-local scheduler
+        |
+        | detached dev/review sessions
+        v
+Claude Code / Cursor / Codex
+```
+
+Mandrel remains the source of truth for registered repos and deployed protocol
+state. The target repo owns its task and project-memory files. orch-hub owns
+only its external service state under `ORCH_HUB_DATA_DIR`, including run,
+intake, and evaluation records.
+
+Development slices are bounded to one effective context window. A task that
+needs more than one development session carries an explicit plan and structured
+handoffs. Ordinary task sessions begin from a bounded slice: eager project
+invariants, one task file, and supporting documents routed by that task. At
+completion, admitted durable findings update the curated snapshot and the full
+task record moves to the local archive.
+
+## Repo discovery and launch readiness
+
+orch-hub reads the same local registry Mandrel maintains; it does not maintain
+a second registry or treat GitHub as the source of truth. It prefers
+`<mandrel>/bin/mandrel registry list --json` and falls back to
+`<mandrel>/.registry/repos.local.json` when the command is unavailable or
+fails.
+
+A repo can launch only when all readiness checks pass:
+
+| Check | Pass condition |
+|---|---|
+| `repo_path_exists` | Registered repo directory exists |
+| `manifest_exists` | `.ai-deploy-manifest.json` exists |
+| `orchestrator_exists` | `.mandrel/orchestrator/orchestrator.py` exists |
+| `venv_python_exists` | Deployed orchestrator Python exists |
+| `task_index_exists` | `.ai-tasks/index.md` exists |
+| `git_clean` | `git status --porcelain` is empty |
+| `mandrel_status` | `mandrel status <repo-path>` exits successfully |
+
+Readiness fails closed. Repo admission is a separate gate: one repo cannot
+hold a live run and a non-terminal remote intake at the same time.
+
+## Dashboard and API
+
+The mobile-first dashboard is served by the same FastAPI process. Its stable
+surfaces are:
+
+- operations overview and subscription-capacity display;
+- repo and task inventory, including readiness and blockers;
+- task run controls, questions, session context, and logs;
+- paged run history with recorded launch configuration;
+- confirmed-only remote task intake;
+- per-task evaluation and the global report feed.
+
+The target repo's deployed orchestrator is the authority for launch choices.
+DEV and REVIEW can select profiles independently; Custom model/effort choices
+are filtered from the orchestrator's own option catalog, and Start fails closed
+when that configuration cannot be interpreted safely.
+
+See [Dashboard behavior](docs/dashboard.md) and the
+[HTTP API reference](docs/api.md) for the detailed contracts.
 
 ## Configuration
 
-| Setting | Default | Override |
+Core service configuration:
+
+| Variable | Default | Purpose |
 |---|---|---|
-| mandrel path | `/Users/linqing/workplace/github.com/qinglin89/mandrel` | `ORCH_HUB_MANDREL_PATH` |
-| HTTP bearer token | unset (protected routes answer 503) | `ORCH_HUB_TOKEN` |
-| HTTP bind address | `127.0.0.1` | `ORCH_HUB_HOST` |
-| HTTP port | `8765` | `ORCH_HUB_PORT` |
-| Data directory (run dirs and audit history) | `~/.orch-hub` | `ORCH_HUB_DATA_DIR` |
+| `ORCH_HUB_MANDREL_PATH` | unset; required | Mandrel checkout that owns the registry; first-time launchd deploy may use `--mandrel` instead |
+| `ORCH_HUB_TOKEN` | unset | Required bearer token; protected routes fail closed with 503 when absent |
+| `ORCH_HUB_HOST` | `127.0.0.1` | Loopback or an explicit Tailscale interface only |
+| `ORCH_HUB_PORT` | `8765` | HTTP port |
+| `ORCH_HUB_DATA_DIR` | `~/.orch-hub` | Hub-owned run, intake, history, and evaluation state |
+| `ORCH_HUB_BARK_URL` | unset | Optional Bark endpoint; contains a device-key secret |
 
-An empty or whitespace-only value counts as unset for every variable;
-surrounding whitespace is stripped. A malformed `ORCH_HUB_PORT` fails startup
-instead of silently binding the default port.
+Empty values count as unset. Invalid explicit values such as a malformed port
+fail startup instead of silently selecting a fallback. Feature-specific
+configuration is documented in [Task evaluation](docs/evaluation.md),
+[Claude usage](docs/claude-usage.md), and
+[launchd operation](docs/launchd.md). Remote intake uses Claude and defaults to
+`claude-opus-5` with `max` effort. Foreground runs can override those turns
+with `ORCH_HUB_INTAKE_MODEL` and `ORCH_HUB_INTAKE_EFFORT`; the integrated
+launchd deployment currently uses the defaults.
 
-`ORCH_HUB_MANDREL_PATH` replaced `ORCH_HUB_AI_NATIVE_DEPLOYMENT` when the
-canonical repository was renamed to mandrel. The old name is still honored as a
-fallback when the new one is unset, so an already-installed launchd plist keeps
-resolving; prefer the new name and expect the fallback to be removed.
-
-## CLI usage
-
-```bash
-# Human-readable listing
-python -m orch_hub.cli repos
-
-# Stable JSON (for automation and future HTTP reuse)
-python -m orch_hub.cli repos --json
-```
-
-JSON shape:
-
-```json
-{
-  "repos": [
-    {
-      "name": "example",
-      "path": "/absolute/path/to/example",
-      "manifest": "/absolute/path/to/example/.ai-deploy-manifest.json",
-      "readiness": {
-        "ready": false,
-        "checks": [
-          { "name": "git_clean", "message": "working tree has uncommitted changes" }
-        ]
-      }
-    }
-  ]
-}
-```
-
-`readiness.checks` lists only the **failed** checks (the reasons a repo is not
-ready); it is empty when `ready` is `true`.
-
-## HTTP API
-
-A FastAPI app (`orch_hub.api`) exposes the same discovery, readiness, and
-task-inventory functions over HTTP. Handlers are thin adapters over the core
-functions, so the JSON matches the CLI shapes.
+## CLI
 
 ```bash
-# Serve on localhost (default 127.0.0.1:8765)
-python -m orch_hub.api
+# Managed repos and launch readiness
+.venv/bin/orch-hub repos
+.venv/bin/orch-hub repos --json
 
-# or via the installed console script
-orch-hub-api
+# Resident service lifecycle
+.venv/bin/orch-hub launchd deploy --mandrel /absolute/path/to/mandrel
+.venv/bin/orch-hub launchd status
+.venv/bin/orch-hub launchd restart
+.venv/bin/orch-hub launchd stop
 
-# host/port come from the environment (ORCH_HUB_HOST / ORCH_HUB_PORT)
-ORCH_HUB_PORT=9000 orch-hub-api
-
-# or with uvicorn directly
-uvicorn orch_hub.api:app --host 127.0.0.1 --port 8765
+# Optional subsystems
+.venv/bin/orch-hub notify test
+.venv/bin/orch-hub eval doctor
+.venv/bin/orch-hub eval catalog verify
 ```
 
-| Endpoint | Returns |
-|---|---|
-| `GET /api/health` | `{"status": "ok"}` — public, minimal liveness probe |
-| `GET /api/repos` | the same object as `repos --json` (repos with readiness) |
-| `GET /api/tasks` | task inventory across all repos |
-| `GET /api/repos/{repo_id}/tasks` | task inventory for one repo (`repo_id` is the repo name) |
-| `GET /api/repos/{repo_id}/tasks/{task_id}` | one task's inventory fields plus its raw `.ai-tasks/<task_id>.md` body (`present`/`content`); read-only, scoped inside the repo |
+`repos --json` and `GET /api/repos` use the same payload builder. HTTP handlers
+delegate to the owning domain services rather than duplicating registry,
+readiness, or lifecycle logic.
 
-`GET /api/repos` and the task endpoints reuse the CLI's `repos_payload` /
-`tasks_payload` shapes unchanged; task responses preserve `index_present` and
-the `missing`/`unknown` sentinel statuses. A malformed registry returns HTTP
-500; an unknown `repo_id` returns HTTP 404.
+## Security boundary
 
-### Authentication
+- Never bind to `0.0.0.0`, port-forward the service, or place it behind a
+  public reverse proxy.
+- The bearer token is required even on a tailnet. Tailnet membership is the
+  primary network boundary; the token is defense in depth.
+- The only public HTTP paths are the minimal `GET /api/health` probe and the
+  dashboard shell assets `/`, `/app.js`, and `/styles.css`. Every operational
+  data and action route is bearer-protected, and paths outside that explicit
+  allowlist fail closed.
+- The shell contains no secrets. A browser keeps the token in `localStorage`,
+  so use a trusted device and browser profile.
+- Starting a run launches the target repo's Mandrel scheduler. That scheduler
+  is not a sandbox and may run coding agents with filesystem permission prompts
+  disabled. Read Mandrel's
+  [Safety](https://github.com/qinglin89/mandrel#safety) section first.
+- launchd stop unloads only the hub service. Detached orchestrator runs continue
+  until they finish or receive a graceful run-level stop request.
 
-Every route except `GET /api/health` requires a bearer token, sourced from the
-`ORCH_HUB_TOKEN` environment variable at service start:
+## Operator documentation
 
-```bash
-export ORCH_HUB_TOKEN="$(openssl rand -hex 32)"
-orch-hub-api
-
-curl -H "Authorization: Bearer $ORCH_HUB_TOKEN" http://127.0.0.1:8765/api/repos
-```
-
-- There is no unauthenticated mode. If no token is configured, every protected
-  route fails closed with HTTP 503 (`bearer token not configured`); only the
-  health probe stays reachable.
-- Requests with a missing or invalid token get HTTP 401 with a
-  `WWW-Authenticate: Bearer` header. Token comparison is constant-time, and
-  responses/logs never contain the presented token.
-- Enforcement is a default-deny middleware: any path outside the public health
-  probe — including OpenAPI docs and future run/log/dashboard routes — is
-  protected the moment it exists.
-- `GET /api/health` is deliberately public and minimal (`{"status": "ok"}`) so
-  liveness probes need no secret; it no longer reports configuration details.
-
-### Dashboard
-
-A mobile-first web dashboard is served by the same app (open `/` in a browser).
-It is a dependency-free, build-stepless single-page app; the token is presented
-as follows:
-
-- The **shell** (`/`, `/app.js`, `/styles.css`) is served **publicly** — it is
-  client code with no secrets. A browser cannot attach an `Authorization`
-  header on plain navigation, so the bootstrap page must load unauthenticated.
-- The SPA prompts for the bearer token once and keeps it **only in the
-  browser's `localStorage`**, attaching `Authorization: Bearer <token>` to every
-  data `fetch` — including the SSE log stream, which is read with `fetch` + a
-  `ReadableStream` reader rather than `EventSource` (which cannot set the
-  header). No cookies and no query-string tokens: the API stays on a single
-  credential path and secrets stay out of URLs and server logs. A `401` clears
-  the stored token and returns to the login gate.
-- Every data route stays protected; only the three shell assets are on the auth
-  allowlist (alongside `GET /api/health`).
-
-Current views:
-
-- **Repo list** — readiness reasons from `/api/repos` plus live run badges;
-  tap through to a repo.
-- **All-task list** — `/api/tasks`, filterable by repo and frontmatter status,
-  with `missing`/`unknown` sentinels and missing-index states shown as data
-  problems; tap through to a task.
-- **Repo detail** — the repo's tasks with a status filter, live run badges, and
-  the missing-index (`index_present == false`) state made explicit.
-- **Task detail** — the task's frontmatter status/summary/blockers, its current
-  run status (with a **View logs** link), the raw task-file body (from
-  `GET /api/repos/{repo_id}/tasks/{task_id}`), and — when the run is `waiting` —
-  an inline answer box that writes the answer via
-  `POST /api/runs/{run_id}/escalations/{seq}/answer` (`"stop"` ends the run).
-- **Run history** — recent runs newest-first from `GET /api/history/runs`,
-  grouped per task with est-vs-actual rollups and a compact evaluation light
-  beside `Evaluation →` (grey = not evaluated, amber = L1, green = L1 + L2,
-  derived from the newest evaluation; the exact state remains available on
-  hover and to assistive technology). The states arrive batched in the history
-  response rather than through one request per task. Each run carries its lifecycle state,
-  timestamps, and the authoritative `effective-config:` launch snapshot (each
-  role's profile, backend, resolved models/efforts, config/effective revisions,
-  provenance). Tap through to its log tail.
-- **Log tail** — one run's orchestrator log. A finished run shows a bounded
-  recent tail (`GET /api/runs/{run_id}/logs`); a live run follows the
-  bearer-authenticated SSE stream (`GET /api/runs/{run_id}/logs/stream`) via
-  `fetch` + a `ReadableStream` reader, with Pause/Reload controls.
-
-Starting a run opens a launch dialog driven by the target repo's **own deployed
-orchestrator**: it calls `GET /api/repos/{repo_id}/orchestrator-config`
-(`orchestrator.py --print-config`) and shows the resolved model/effort values for
-the selected profiles and **Backend** — orch-hub never hardcodes model policy.
-**DEV** and **REVIEW** choose independently from the same four options:
-**Default** (inherit the orchestrator's configuration), **Standard** /
-**Excellent** (its named profiles, disabled with a reason when a repo does not
-offer them), and **Custom** (explicit overrides for that role). Backend is
-shared — one run has one backend — and can be inherited only while both roles
-are Default. Preset roles are read-only; only the role set to Custom exposes
-editable fields. On the cc-codex backend each Custom role also picks its own CLI
-agent and sends its complete agent/model/effort tuple, because an omitted agent
-would resolve from profile/env/config and pair with the shown model behind your
-back. A Custom role's model and effort choices come from the option catalog the
-same query publishes, filtered by the backend, role, and agent selected, so
-switching a role's agent re-filters its effort vocabulary instead of leaving a
-value the other agent refuses at startup. Where the payload publishes no catalog
-— for that agent, or at all — the fields stay free text and say why; orch-hub
-never substitutes a list of its own. Whatever you had picked or typed for a role
-goes with the agent you chose it for: changing that role's agent clears its
-model and effort, catalog or none. A model outside the catalog stays reachable
-through the model select's **Other** choice, since the CLI still launches one.
-The plan-gate toggle is orthogonal and stays available in every mode. The dialog
-POSTs a structured `launch` selection carrying `dev_mode`/`review_mode` to
-`POST /api/runs` and the hub builds the orchestrator arguments from it (the
-legacy run-wide `mode` and raw `extra_args` callers stay supported). If the
-config query fails — for example an older deployment predating `--print-config` —
-Start is disabled and the orchestrator's own error is shown rather than a hub
-default. An orchestrator that answers but reports no per-role `profiles` cannot
-take the role flags at all: the dialog keeps showing that repo's configuration
-but disables role selection and Launch until the payload is redeployed.
-
-### Deployment assumptions (private network only)
-
-orch-hub controls local code execution, so treat the HTTP service as a remote
-code execution surface:
-
-- Reachable only over a private network: localhost, or a Tailscale tailnet.
-  Never expose it to the public internet.
-- Binding defaults to `127.0.0.1:8765`. For tailnet access, either bind the
-  Tailscale interface explicitly (`ORCH_HUB_HOST=<tailscale-ip> orch-hub-api`)
-  or keep the localhost bind behind `tailscale serve`.
-- The bearer token is required even on the tailnet: tailnet membership is the
-  primary boundary, the token is defense in depth.
-
-## Run as a launchd service
-
-To keep the hub resident on the Mac (start at login, restart on exit), install
-it as a launchd user agent:
-
-```bash
-.venv/bin/orch-hub launchd deploy   # install/update package, write plist, bootstrap
-.venv/bin/orch-hub launchd start    # bootstrap the installed plist only
-.venv/bin/orch-hub launchd stop     # unload hub service only
-.venv/bin/orch-hub launchd restart  # stop + start without reinstalling
-.venv/bin/orch-hub launchd update   # same flow as deploy after code changes
-.venv/bin/orch-hub launchd status   # launchd state + /api/health probe
-```
-
-The launchd label is a singleton (`com.qinglin89.orch-hub`) in the user's
-`gui/$UID` domain. `launchd stop` unloads only that hub service; it does not
-write run `stop.flag` files or signal detached orchestrator subprocesses.
-Detailed install, update, stop, and log inspection guidance is in
-[docs/launchd.md](docs/launchd.md). The plist must set `ORCH_HUB_TOKEN` —
-`deploy` preserves an existing plist token, uses `ORCH_HUB_TOKEN` when set, or
-generates and prints a new token. The checked-in plist template under
-`deploy/launchd/` is the plist-structure source of truth; the CLI reads it and
-fills deployment values.
+- [Dashboard behavior](docs/dashboard.md)
+- [HTTP API reference](docs/api.md)
+- [launchd deployment, Tailscale, logs, and recovery](docs/launchd.md)
+- [Task evaluation and the report feed](docs/evaluation.md)
+- [Claude subscription-usage collection](docs/claude-usage.md)
 
 ## Development
 
@@ -328,12 +244,12 @@ python3 -m venv .venv
 .venv/bin/pytest
 ```
 
-Tests use temporary directories and injected fake subprocess runners; they
-never touch real repos or the real mandrel registry.
+Tests use temporary directories and injected subprocess runners. They do not
+touch the real Mandrel registry or launch real coding-agent sessions.
 
-## Not implemented yet (by design)
+## Project status
 
-- IM bot control.
-
-The core application services are written to be reused unchanged by that
-future surface.
+orch-hub is currently developed as a personal, local operator surface. It is
+not a hosted service, a multi-user control plane, or a replacement for Mandrel.
+The web dashboard is the primary control surface; IM bot control is not
+implemented.

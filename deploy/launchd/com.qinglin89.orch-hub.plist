@@ -22,7 +22,8 @@
   <key>EnvironmentVariables</key>
   <dict>
     <!-- Required. With it unset the service fails closed: every protected
-         route answers 503 and only GET /api/health serves.
+         route answers 503; only GET /api/health and the secret-free dashboard
+         shell assets serve.
          Generate one: openssl rand -hex 32 -->
     <key>ORCH_HUB_TOKEN</key>
     <string>REPLACE-BEARER-TOKEN</string>

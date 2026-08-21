@@ -223,7 +223,7 @@ def test_default_tier_reaches_argv(tmp_path):
     # tier its dev sessions run at, and nothing between Config and the CLI call
     # quietly substitutes a cheaper one.
     repo = make_repo(tmp_path)
-    config = Config.from_env({})
+    config = Config.from_env({"ORCH_HUB_MANDREL_PATH": "/test/mandrel"})
     runner = ScriptRunner(stream(draft_envelope()))
     agent = ClaudeIntakeAgent(
         model=config.intake_model,

@@ -1,27 +1,30 @@
 """Command-line entry point for orch-hub.
 
-The CLI is a thin adapter over the same application functions a future FastAPI
-service will call: :func:`orch_hub.registry.discover_repos` and
-:func:`orch_hub.readiness.check_readiness`.
+The CLI exposes registry/readiness inspection, resident-service management,
+notification probes, and task-evaluation operations. Shared domain services
+keep its inventory payloads and operational behavior aligned with the HTTP
+surface.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import Config
+from .config import LEGACY_MANDREL_PATH_ENV, MANDREL_PATH_ENV, Config
 from .launchd import (
     DeployOptions,
     LABEL,
     LaunchdError,
     deploy_service,
     installed_bark_url,
+    installed_mandrel_path,
     restart_service,
     start_service,
     status_service,
@@ -56,8 +59,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="orch_hub.cli",
-        description="orch-hub: discover managed repos and report launch readiness.",
+        prog="orch-hub",
+        description=(
+            "Local control plane for a portfolio of Mandrel-managed "
+            "AI coding workflows."
+        ),
     )
     sub = parser.add_subparsers(dest="command", required=True)
     repos_p = sub.add_parser("repos", help="list managed repos with readiness")
@@ -182,7 +188,11 @@ def _add_launchd_deploy_args(parser: argparse.ArgumentParser) -> None:
         "--mandrel",
         type=Path,
         default=None,
-        help="mandrel checkout (default: ORCH_HUB_MANDREL_PATH or built-in default)",
+        help=(
+            "mandrel checkout (required on first deploy unless "
+            "ORCH_HUB_MANDREL_PATH or legacy ORCH_HUB_AI_NATIVE_DEPLOYMENT "
+            "is set; updates reuse the installed plist)"
+        ),
     )
     parser.add_argument(
         "--token",
@@ -373,8 +383,16 @@ def _cmd_notify_test(args: argparse.Namespace) -> int:
     is configured" from "push delivery actually works". Delivery is direct (not
     through the run manager), so it touches no run/history/control-dir state.
     """
+    environ = dict(os.environ)
+    configured_mandrel = (environ.get(MANDREL_PATH_ENV) or "").strip() or (
+        environ.get(LEGACY_MANDREL_PATH_ENV) or ""
+    ).strip()
+    if not configured_mandrel:
+        mandrel_path = installed_mandrel_path(plist_path=args.plist_path)
+        if mandrel_path is not None:
+            environ[MANDREL_PATH_ENV] = str(mandrel_path)
     try:
-        config = Config.from_env()
+        config = Config.from_env(environ)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

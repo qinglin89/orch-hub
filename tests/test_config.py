@@ -19,7 +19,6 @@ from orch_hub.config import (
     DEFAULT_CODEX_HOME,
     DEFAULT_DATA_DIR,
     DEFAULT_HOST,
-    DEFAULT_MANDREL_PATH,
     DEFAULT_PORT,
     DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
@@ -41,9 +40,27 @@ from orch_hub.config import (
 )
 
 
-def test_default_path_when_env_absent():
-    cfg = Config.from_env({})
-    assert cfg.mandrel_path == DEFAULT_MANDREL_PATH
+def _configured_from_env(environ: dict[str, str] | None = None) -> Config:
+    """Resolve non-path settings against a synthetic configured checkout."""
+    env = {MANDREL_PATH_ENV: "/test/mandrel"}
+    env.update(environ or {})
+    return Config.from_env(env)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {},
+        {MANDREL_PATH_ENV: ""},
+        {MANDREL_PATH_ENV: "   "},
+        {LEGACY_MANDREL_PATH_ENV: "   "},
+        {MANDREL_PATH_ENV: " ", LEGACY_MANDREL_PATH_ENV: "\n"},
+    ],
+)
+def test_mandrel_path_is_required_when_env_absent_or_blank(env):
+    with pytest.raises(ValueError, match=MANDREL_PATH_ENV) as error:
+        Config.from_env(env)
+    assert LEGACY_MANDREL_PATH_ENV in str(error.value)
 
 
 def test_env_override():
@@ -60,15 +77,6 @@ def test_env_override_expands_user():
 def test_mandrel_path_strips_surrounding_whitespace():
     cfg = Config.from_env({MANDREL_PATH_ENV: " /custom/mandrel \n"})
     assert cfg.mandrel_path == Path("/custom/mandrel")
-
-
-def test_mandrel_path_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({MANDREL_PATH_ENV: ""}).mandrel_path == (
-        DEFAULT_MANDREL_PATH
-    )
-    assert Config.from_env({MANDREL_PATH_ENV: "   "}).mandrel_path == (
-        DEFAULT_MANDREL_PATH
-    )
 
 
 def test_legacy_mandrel_path_env_still_resolves():
@@ -94,12 +102,6 @@ def test_blank_current_mandrel_path_env_falls_back_to_legacy():
     assert cfg.mandrel_path == Path("/legacy")
 
 
-def test_blank_legacy_mandrel_path_env_counts_as_unset():
-    assert Config.from_env(
-        {LEGACY_MANDREL_PATH_ENV: "   "}
-    ).mandrel_path == DEFAULT_MANDREL_PATH
-
-
 def test_derived_paths():
     cfg = Config(mandrel_path=Path("/root/mandrel"))
     assert cfg.mandrel_bin == Path("/root/mandrel/bin/mandrel")
@@ -107,149 +109,149 @@ def test_derived_paths():
 
 
 def test_token_defaults_to_none():
-    assert Config.from_env({}).token is None
+    assert _configured_from_env().token is None
     assert Config(mandrel_path=Path("/root/mandrel")).token is None
 
 
 def test_token_from_env():
-    cfg = Config.from_env({TOKEN_ENV: "s3cret-token"})
+    cfg = _configured_from_env({TOKEN_ENV: "s3cret-token"})
     assert cfg.token == "s3cret-token"
 
 
 def test_token_strips_surrounding_whitespace():
-    cfg = Config.from_env({TOKEN_ENV: " s3cret-token\n"})
+    cfg = _configured_from_env({TOKEN_ENV: " s3cret-token\n"})
     assert cfg.token == "s3cret-token"
 
 
 def test_token_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({TOKEN_ENV: ""}).token is None
-    assert Config.from_env({TOKEN_ENV: "   "}).token is None
+    assert _configured_from_env({TOKEN_ENV: ""}).token is None
+    assert _configured_from_env({TOKEN_ENV: "   "}).token is None
 
 
 def test_service_settings_default_to_loopback():
-    cfg = Config.from_env({})
+    cfg = _configured_from_env()
     assert cfg.host == DEFAULT_HOST == "127.0.0.1"
     assert cfg.port == DEFAULT_PORT == 8765
     assert cfg.data_dir == DEFAULT_DATA_DIR
 
 
 def test_host_from_env_strips_whitespace():
-    assert Config.from_env({HOST_ENV: " 100.64.0.7 "}).host == "100.64.0.7"
+    assert _configured_from_env({HOST_ENV: " 100.64.0.7 "}).host == "100.64.0.7"
 
 
 def test_host_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({HOST_ENV: ""}).host == DEFAULT_HOST
-    assert Config.from_env({HOST_ENV: "   "}).host == DEFAULT_HOST
+    assert _configured_from_env({HOST_ENV: ""}).host == DEFAULT_HOST
+    assert _configured_from_env({HOST_ENV: "   "}).host == DEFAULT_HOST
 
 
 def test_port_from_env():
-    assert Config.from_env({PORT_ENV: "9000"}).port == 9000
-    assert Config.from_env({PORT_ENV: " 9000 "}).port == 9000
+    assert _configured_from_env({PORT_ENV: "9000"}).port == 9000
+    assert _configured_from_env({PORT_ENV: " 9000 "}).port == 9000
 
 
 def test_port_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({PORT_ENV: ""}).port == DEFAULT_PORT
-    assert Config.from_env({PORT_ENV: "   "}).port == DEFAULT_PORT
+    assert _configured_from_env({PORT_ENV: ""}).port == DEFAULT_PORT
+    assert _configured_from_env({PORT_ENV: "   "}).port == DEFAULT_PORT
 
 
 def test_port_malformed_is_explicit_error():
     # A typo'd port must fail at startup, not silently bind the default.
     with pytest.raises(ValueError, match=PORT_ENV):
-        Config.from_env({PORT_ENV: "eight"})
+        _configured_from_env({PORT_ENV: "eight"})
 
 
 def test_port_out_of_range_is_explicit_error():
     with pytest.raises(ValueError, match=PORT_ENV):
-        Config.from_env({PORT_ENV: "0"})
+        _configured_from_env({PORT_ENV: "0"})
     with pytest.raises(ValueError, match=PORT_ENV):
-        Config.from_env({PORT_ENV: "65536"})
+        _configured_from_env({PORT_ENV: "65536"})
 
 
 def test_data_dir_from_env_expands_user():
-    cfg = Config.from_env({DATA_DIR_ENV: "~/orch-data"})
+    cfg = _configured_from_env({DATA_DIR_ENV: "~/orch-data"})
     assert cfg.data_dir == Path("~/orch-data").expanduser()
     assert not str(cfg.data_dir).startswith("~")
 
 
 def test_data_dir_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({DATA_DIR_ENV: ""}).data_dir == DEFAULT_DATA_DIR
-    assert Config.from_env({DATA_DIR_ENV: "   "}).data_dir == DEFAULT_DATA_DIR
+    assert _configured_from_env({DATA_DIR_ENV: ""}).data_dir == DEFAULT_DATA_DIR
+    assert _configured_from_env({DATA_DIR_ENV: "   "}).data_dir == DEFAULT_DATA_DIR
 
 
 def test_codex_home_defaults_when_env_absent():
-    assert Config.from_env({}).codex_home == DEFAULT_CODEX_HOME
+    assert _configured_from_env().codex_home == DEFAULT_CODEX_HOME
 
 
 def test_codex_home_from_env_expands_user():
-    cfg = Config.from_env({CODEX_HOME_ENV: "~/alt-codex"})
+    cfg = _configured_from_env({CODEX_HOME_ENV: "~/alt-codex"})
     assert cfg.codex_home == Path("~/alt-codex").expanduser()
     assert not str(cfg.codex_home).startswith("~")
 
 
 def test_codex_home_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({CODEX_HOME_ENV: ""}).codex_home == DEFAULT_CODEX_HOME
-    assert Config.from_env({CODEX_HOME_ENV: "   "}).codex_home == DEFAULT_CODEX_HOME
+    assert _configured_from_env({CODEX_HOME_ENV: ""}).codex_home == DEFAULT_CODEX_HOME
+    assert _configured_from_env({CODEX_HOME_ENV: "   "}).codex_home == DEFAULT_CODEX_HOME
 
 
 def test_claude_home_defaults_when_env_absent():
-    assert Config.from_env({}).claude_home == DEFAULT_CLAUDE_HOME
+    assert _configured_from_env().claude_home == DEFAULT_CLAUDE_HOME
 
 
 def test_claude_home_from_env_expands_user():
-    cfg = Config.from_env({CLAUDE_HOME_ENV: "~/alt-claude"})
+    cfg = _configured_from_env({CLAUDE_HOME_ENV: "~/alt-claude"})
     assert cfg.claude_home == Path("~/alt-claude").expanduser()
     assert not str(cfg.claude_home).startswith("~")
 
 
 def test_claude_home_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({CLAUDE_HOME_ENV: ""}).claude_home == DEFAULT_CLAUDE_HOME
-    assert Config.from_env({CLAUDE_HOME_ENV: "   "}).claude_home == DEFAULT_CLAUDE_HOME
+    assert _configured_from_env({CLAUDE_HOME_ENV: ""}).claude_home == DEFAULT_CLAUDE_HOME
+    assert _configured_from_env({CLAUDE_HOME_ENV: "   "}).claude_home == DEFAULT_CLAUDE_HOME
 
 
 def test_claude_transcripts_dir_derives_from_the_home():
-    cfg = Config.from_env({CLAUDE_HOME_ENV: "/tmp/claude"})
+    cfg = _configured_from_env({CLAUDE_HOME_ENV: "/tmp/claude"})
     assert cfg.claude_transcripts_dir == Path("/tmp/claude/projects")
 
 
 def test_bark_url_defaults_to_none():
-    assert Config.from_env({}).bark_url is None
+    assert _configured_from_env().bark_url is None
     assert Config(mandrel_path=Path("/root/mandrel")).bark_url is None
 
 
 def test_bark_url_from_env_strips_whitespace():
-    cfg = Config.from_env({BARK_URL_ENV: " https://bark.example/KEY \n"})
+    cfg = _configured_from_env({BARK_URL_ENV: " https://bark.example/KEY \n"})
     assert cfg.bark_url == "https://bark.example/KEY"
 
 
 def test_bark_url_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({BARK_URL_ENV: ""}).bark_url is None
-    assert Config.from_env({BARK_URL_ENV: "   "}).bark_url is None
+    assert _configured_from_env({BARK_URL_ENV: ""}).bark_url is None
+    assert _configured_from_env({BARK_URL_ENV: "   "}).bark_url is None
 
 
 def test_intake_model_defaults_and_overrides():
     # Always a concrete string so the intake agent is unconditionally
     # constructible at app startup; overridden by ORCH_HUB_INTAKE_MODEL.
-    assert Config.from_env({}).intake_model == DEFAULT_INTAKE_MODEL
+    assert _configured_from_env().intake_model == DEFAULT_INTAKE_MODEL
     assert Config(mandrel_path=Path("/root/mandrel")).intake_model == DEFAULT_INTAKE_MODEL
     assert (
-        Config.from_env({INTAKE_MODEL_ENV: "claude-sonnet-5"}).intake_model
+        _configured_from_env({INTAKE_MODEL_ENV: "claude-sonnet-5"}).intake_model
         == "claude-sonnet-5"
     )
     # Empty/whitespace-only counts as unset and falls back to the default.
-    assert Config.from_env({INTAKE_MODEL_ENV: "  "}).intake_model == DEFAULT_INTAKE_MODEL
-    assert Config.from_env({INTAKE_MODEL_ENV: " claude-x "}).intake_model == "claude-x"
+    assert _configured_from_env({INTAKE_MODEL_ENV: "  "}).intake_model == DEFAULT_INTAKE_MODEL
+    assert _configured_from_env({INTAKE_MODEL_ENV: " claude-x "}).intake_model == "claude-x"
 
 
 def test_intake_effort_defaults_and_overrides():
     # The model's companion knob on the same intake turns, same unset rules.
-    assert Config.from_env({}).intake_effort == DEFAULT_INTAKE_EFFORT
+    assert _configured_from_env().intake_effort == DEFAULT_INTAKE_EFFORT
     direct = Config(mandrel_path=Path("/root/mandrel"))
     assert direct.intake_effort == DEFAULT_INTAKE_EFFORT
-    assert Config.from_env({INTAKE_EFFORT_ENV: "low"}).intake_effort == "low"
+    assert _configured_from_env({INTAKE_EFFORT_ENV: "low"}).intake_effort == "low"
     # Empty/whitespace-only counts as unset and falls back to the default.
-    assert Config.from_env({INTAKE_EFFORT_ENV: ""}).intake_effort == DEFAULT_INTAKE_EFFORT
-    assert Config.from_env({INTAKE_EFFORT_ENV: "   "}).intake_effort == DEFAULT_INTAKE_EFFORT
-    assert Config.from_env({INTAKE_EFFORT_ENV: " high "}).intake_effort == "high"
+    assert _configured_from_env({INTAKE_EFFORT_ENV: ""}).intake_effort == DEFAULT_INTAKE_EFFORT
+    assert _configured_from_env({INTAKE_EFFORT_ENV: "   "}).intake_effort == DEFAULT_INTAKE_EFFORT
+    assert _configured_from_env({INTAKE_EFFORT_ENV: " high "}).intake_effort == "high"
 
 
 def test_intake_default_tier_matches_dev_session_tier():
@@ -263,9 +265,9 @@ def test_intake_default_tier_matches_dev_session_tier():
 def test_intake_and_eval_tiers_are_independent_knobs():
     # Two subsystems, two turn kinds: an operator downgrading one must not move the
     # other (and intake is not behind the evaluation gate).
-    cfg = Config.from_env({INTAKE_MODEL_ENV: "claude-x", INTAKE_EFFORT_ENV: "low"})
+    cfg = _configured_from_env({INTAKE_MODEL_ENV: "claude-x", INTAKE_EFFORT_ENV: "low"})
     assert (cfg.eval_model, cfg.eval_effort) == (DEFAULT_EVAL_MODEL, DEFAULT_EVAL_EFFORT)
-    cfg = Config.from_env({EVAL_MODEL_ENV: "claude-y", EVAL_EFFORT_ENV: "low"})
+    cfg = _configured_from_env({EVAL_MODEL_ENV: "claude-y", EVAL_EFFORT_ENV: "low"})
     assert (cfg.intake_model, cfg.intake_effort) == (
         DEFAULT_INTAKE_MODEL,
         DEFAULT_INTAKE_EFFORT,
@@ -274,49 +276,49 @@ def test_intake_and_eval_tiers_are_independent_knobs():
 
 def test_evaluation_enabled_defaults_to_true():
     # Enabled by default for local use; a deployment disables it explicitly.
-    assert Config.from_env({}).evaluation_enabled is True
+    assert _configured_from_env().evaluation_enabled is True
     assert Config(mandrel_path=Path("/root/mandrel")).evaluation_enabled is True
 
 
 def test_evaluation_enabled_falsy_tokens_disable():
     for token in ("0", "false", "no", "off", "FALSE", " Off ", "No\n"):
-        assert Config.from_env({EVAL_ENABLED_ENV: token}).evaluation_enabled is False
+        assert _configured_from_env({EVAL_ENABLED_ENV: token}).evaluation_enabled is False
 
 
 def test_evaluation_enabled_truthy_tokens_enable():
     for token in ("1", "true", "yes", "on", "TRUE", " On ", "Yes\n"):
-        assert Config.from_env({EVAL_ENABLED_ENV: token}).evaluation_enabled is True
+        assert _configured_from_env({EVAL_ENABLED_ENV: token}).evaluation_enabled is True
 
 
 def test_evaluation_enabled_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({EVAL_ENABLED_ENV: ""}).evaluation_enabled is True
-    assert Config.from_env({EVAL_ENABLED_ENV: "   "}).evaluation_enabled is True
+    assert _configured_from_env({EVAL_ENABLED_ENV: ""}).evaluation_enabled is True
+    assert _configured_from_env({EVAL_ENABLED_ENV: "   "}).evaluation_enabled is True
 
 
 def test_evaluation_enabled_malformed_is_explicit_error():
     # A typo'd gate must fail at startup, not silently guess on/off.
     with pytest.raises(ValueError, match=EVAL_ENABLED_ENV):
-        Config.from_env({EVAL_ENABLED_ENV: "maybe"})
+        _configured_from_env({EVAL_ENABLED_ENV: "maybe"})
 
 
 def test_eval_model_defaults_and_overrides():
     # Always a concrete string so the semantic backend is unconditionally
     # constructible; overridden by ORCH_HUB_EVAL_MODEL.
-    assert Config.from_env({}).eval_model == DEFAULT_EVAL_MODEL
-    assert Config.from_env({EVAL_MODEL_ENV: "claude-sonnet-5"}).eval_model == "claude-sonnet-5"
+    assert _configured_from_env().eval_model == DEFAULT_EVAL_MODEL
+    assert _configured_from_env({EVAL_MODEL_ENV: "claude-sonnet-5"}).eval_model == "claude-sonnet-5"
     # Empty/whitespace-only counts as unset and falls back to the default.
-    assert Config.from_env({EVAL_MODEL_ENV: "  "}).eval_model == DEFAULT_EVAL_MODEL
-    assert Config.from_env({EVAL_MODEL_ENV: " claude-x "}).eval_model == "claude-x"
+    assert _configured_from_env({EVAL_MODEL_ENV: "  "}).eval_model == DEFAULT_EVAL_MODEL
+    assert _configured_from_env({EVAL_MODEL_ENV: " claude-x "}).eval_model == "claude-x"
 
 
 def test_eval_effort_defaults_and_overrides():
     # The model's companion knob on the same Layer 2 turn, same unset rules.
-    assert Config.from_env({}).eval_effort == DEFAULT_EVAL_EFFORT
-    assert Config.from_env({EVAL_EFFORT_ENV: "low"}).eval_effort == "low"
+    assert _configured_from_env().eval_effort == DEFAULT_EVAL_EFFORT
+    assert _configured_from_env({EVAL_EFFORT_ENV: "low"}).eval_effort == "low"
     # Empty/whitespace-only counts as unset and falls back to the default.
-    assert Config.from_env({EVAL_EFFORT_ENV: ""}).eval_effort == DEFAULT_EVAL_EFFORT
-    assert Config.from_env({EVAL_EFFORT_ENV: "   "}).eval_effort == DEFAULT_EVAL_EFFORT
-    assert Config.from_env({EVAL_EFFORT_ENV: " high "}).eval_effort == "high"
+    assert _configured_from_env({EVAL_EFFORT_ENV: ""}).eval_effort == DEFAULT_EVAL_EFFORT
+    assert _configured_from_env({EVAL_EFFORT_ENV: "   "}).eval_effort == DEFAULT_EVAL_EFFORT
+    assert _configured_from_env({EVAL_EFFORT_ENV: " high "}).eval_effort == "high"
 
 
 def test_eval_default_tier_matches_dev_session_tier():
@@ -329,7 +331,7 @@ def test_eval_default_tier_matches_dev_session_tier():
 def test_eval_retention_defaults_to_bounded_cap():
     # A bounded default so evaluation artifacts cannot grow unbounded, without an
     # env var; also the dataclass default when constructed directly.
-    assert Config.from_env({}).eval_retention == DEFAULT_EVAL_RETENTION
+    assert _configured_from_env().eval_retention == DEFAULT_EVAL_RETENTION
     assert Config(mandrel_path=Path("/root/mandrel")).eval_retention == (
         DEFAULT_EVAL_RETENTION
     )
@@ -337,16 +339,16 @@ def test_eval_retention_defaults_to_bounded_cap():
 
 def test_eval_retention_override_and_disable():
     # A positive integer is the per-task cap; 0 disables retention (keep all).
-    assert Config.from_env({EVAL_RETENTION_ENV: "5"}).eval_retention == 5
-    assert Config.from_env({EVAL_RETENTION_ENV: " 42 "}).eval_retention == 42
-    assert Config.from_env({EVAL_RETENTION_ENV: "0"}).eval_retention == 0
+    assert _configured_from_env({EVAL_RETENTION_ENV: "5"}).eval_retention == 5
+    assert _configured_from_env({EVAL_RETENTION_ENV: " 42 "}).eval_retention == 42
+    assert _configured_from_env({EVAL_RETENTION_ENV: "0"}).eval_retention == 0
 
 
 def test_eval_retention_empty_or_whitespace_counts_as_unset():
-    assert Config.from_env({EVAL_RETENTION_ENV: ""}).eval_retention == (
+    assert _configured_from_env({EVAL_RETENTION_ENV: ""}).eval_retention == (
         DEFAULT_EVAL_RETENTION
     )
-    assert Config.from_env({EVAL_RETENTION_ENV: "   "}).eval_retention == (
+    assert _configured_from_env({EVAL_RETENTION_ENV: "   "}).eval_retention == (
         DEFAULT_EVAL_RETENTION
     )
 
@@ -354,6 +356,6 @@ def test_eval_retention_empty_or_whitespace_counts_as_unset():
 def test_eval_retention_malformed_or_negative_is_explicit_error():
     # A typo must surface at startup rather than silently unbounding or capping.
     with pytest.raises(ValueError, match=EVAL_RETENTION_ENV):
-        Config.from_env({EVAL_RETENTION_ENV: "lots"})
+        _configured_from_env({EVAL_RETENTION_ENV: "lots"})
     with pytest.raises(ValueError, match=EVAL_RETENTION_ENV):
-        Config.from_env({EVAL_RETENTION_ENV: "-1"})
+        _configured_from_env({EVAL_RETENTION_ENV: "-1"})

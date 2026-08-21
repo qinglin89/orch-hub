@@ -1815,7 +1815,7 @@ def test_claude_backend_default_tier_reaches_argv(tmp_path):
     # End of the config→argv chain: an unconfigured hub judges tasks at the same
     # tier its dev sessions run at, and nothing between Config and the CLI call
     # quietly substitutes a cheaper one.
-    config = Config.from_env({})
+    config = Config.from_env({"ORCH_HUB_MANDREL_PATH": "/test/mandrel"})
     runner = ScriptRunner(stream(envelope()))
     backend = ClaudeSemanticBackend(
         model=config.eval_model, effort=config.eval_effort, runner=runner

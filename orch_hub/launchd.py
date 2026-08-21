@@ -29,6 +29,8 @@ from .config import (
     DEFAULT_HOST,
     DEFAULT_PORT,
     HOST_ENV,
+    LEGACY_MANDREL_PATH_ENV,
+    MANDREL_PATH_ENV,
     PORT_ENV,
     TOKEN_ENV,
     Config,
@@ -186,6 +188,23 @@ def installed_bark_url(*, plist_path: Path | None = None) -> str | None:
     return value.strip() or None
 
 
+def installed_mandrel_path(*, plist_path: Path | None = None) -> Path | None:
+    """Return the Mandrel checkout configured in an installed launchd plist.
+
+    The current environment key wins over the legacy pre-rename key when both
+    are present. Missing, unreadable, and blank-only plists resolve to ``None``.
+    This supports plain-shell operator commands without reintroducing a
+    maintainer-specific checkout default.
+    """
+    resolved = (plist_path or default_plist_path()).expanduser()
+    return _resolve_mandrel_path(
+        explicit=None,
+        current_env=None,
+        legacy_env=None,
+        existing=_read_plist(resolved),
+    )
+
+
 def default_log_dir() -> Path:
     return Path.home() / "Library" / "Logs" / "orch-hub"
 
@@ -217,15 +236,29 @@ def resolve_deployment(
     environ: Mapping[str, str] | None = None,
     token_generator: Callable[[], str] | None = None,
 ) -> Deployment:
-    """Resolve deploy options, environment defaults, and existing plist token."""
+    """Resolve deploy options, environment defaults, and installed settings."""
     env = os.environ if environ is None else environ
-    try:
-        config = Config.from_env(env)
-    except ValueError as exc:
-        raise LaunchdError(str(exc)) from exc
     checkout = find_checkout(options.checkout or Path.cwd())
     plist_path = (options.plist_path or default_plist_path()).expanduser()
     existing = _read_plist(plist_path)
+    mandrel_path = _resolve_mandrel_path(
+        explicit=options.mandrel_path,
+        current_env=env.get(MANDREL_PATH_ENV),
+        legacy_env=env.get(LEGACY_MANDREL_PATH_ENV),
+        existing=existing,
+    )
+    if mandrel_path is None:
+        raise LaunchdError(
+            "Mandrel checkout is not configured; pass --mandrel or set "
+            f"{MANDREL_PATH_ENV}"
+            f" ({LEGACY_MANDREL_PATH_ENV} is also accepted for legacy installs)"
+        )
+    config_env = dict(env)
+    config_env[MANDREL_PATH_ENV] = str(mandrel_path)
+    try:
+        config = Config.from_env(config_env)
+    except ValueError as exc:
+        raise LaunchdError(str(exc)) from exc
     token, source = _resolve_token(
         explicit=options.token,
         env_token=env.get(TOKEN_ENV),
@@ -240,9 +273,7 @@ def resolve_deployment(
         raise LaunchdError(f"{PORT_ENV} must be in 1-65535, got {port}")
     return Deployment(
         checkout=checkout,
-        mandrel_path=(options.mandrel_path or config.mandrel_path)
-        .expanduser()
-        .resolve(),
+        mandrel_path=config.mandrel_path.expanduser().resolve(),
         token=token,
         token_source=source,
         host=(options.host or config.host or DEFAULT_HOST).strip() or DEFAULT_HOST,
@@ -562,6 +593,34 @@ def _resolve_token(
         if token:
             return token, source
     return token_generator(), "generated"
+
+
+def _resolve_mandrel_path(
+    *,
+    explicit: Path | None,
+    current_env: str | None,
+    legacy_env: str | None,
+    existing: dict | None,
+) -> Path | None:
+    """Resolve the Mandrel checkout without a maintainer-specific default.
+
+    A deploy/update flag is most explicit, then the current and legacy shell
+    variables win in that order. An installed plist is last so updating an
+    existing service remains idempotent even when the interactive shell does
+    not export its resident configuration.
+    """
+    installed = _plist_env(existing)
+    for raw in (
+        explicit,
+        current_env,
+        legacy_env,
+        installed.get(MANDREL_PATH_ENV),
+        installed.get(LEGACY_MANDREL_PATH_ENV),
+    ):
+        value = str(raw).strip() if raw is not None else ""
+        if value:
+            return Path(value).expanduser()
+    return None
 
 
 def _resolve_bark_url(env_value: str | None, existing: str | None) -> str | None:

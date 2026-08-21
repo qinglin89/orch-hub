@@ -7,11 +7,6 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-DEFAULT_MANDREL_PATH = Path(
-    "/Users/linqing/workplace/github.com/qinglin89/mandrel"
-)
-"""Default mandrel checkout that owns the managed-repo registry."""
-
 DEFAULT_HOST = "127.0.0.1"
 """Default HTTP bind address: loopback only; see the deployment docs."""
 
@@ -35,16 +30,16 @@ enters an artifact. Overridable so a relocated Claude home (or a test fixture
 dir) can be pointed at instead."""
 
 MANDREL_PATH_ENV = "ORCH_HUB_MANDREL_PATH"
-"""Environment variable overriding the mandrel checkout path."""
+"""Environment variable naming the Mandrel checkout path."""
 
 LEGACY_MANDREL_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
 """Pre-rename spelling of :data:`MANDREL_PATH_ENV`, still read as a fallback.
 
 The launchd plist installed before the rename carries the old key, and only
 ``orch-hub launchd update`` rewrites it — so dropping the name outright would
-silently move a resident service to the built-in default checkout on the first
-package upgrade. :data:`MANDREL_PATH_ENV` wins when both are set (a blank value
-counts as unset either way). Remove once every install has been updated.
+make a resident service lose its checkout configuration on the first package
+upgrade. :data:`MANDREL_PATH_ENV` wins when both are set (a blank value counts
+as unset either way). Remove once every install has been updated.
 """
 
 TOKEN_ENV = "ORCH_HUB_TOKEN"
@@ -354,14 +349,21 @@ class Config:
         so a stray ``export ORCH_HUB_TOKEN=""`` cannot make the empty string a
         valid credential; surrounding whitespace is stripped for the same
         reason. A malformed ``ORCH_HUB_PORT`` raises instead of silently
-        falling back to the default port. The mandrel checkout additionally
-        honors :data:`LEGACY_MANDREL_PATH_ENV` when the current name is unset.
+        falling back to the default port. The mandrel checkout has no portable
+        default: :data:`MANDREL_PATH_ENV` must name it, with
+        :data:`LEGACY_MANDREL_PATH_ENV` still accepted as a fallback.
         """
         env = os.environ if environ is None else environ
         raw_path = (env.get(MANDREL_PATH_ENV) or "").strip() or (
             env.get(LEGACY_MANDREL_PATH_ENV) or ""
         ).strip()
-        path = Path(raw_path).expanduser() if raw_path else DEFAULT_MANDREL_PATH
+        if not raw_path:
+            raise ValueError(
+                "Mandrel checkout is not configured; set "
+                f"{MANDREL_PATH_ENV} to its path"
+                f" ({LEGACY_MANDREL_PATH_ENV} is also accepted for legacy installs)"
+            )
+        path = Path(raw_path).expanduser()
         raw_token = env.get(TOKEN_ENV)
         token = raw_token.strip() if raw_token else None
         raw_data_dir = (env.get(DATA_DIR_ENV) or "").strip()

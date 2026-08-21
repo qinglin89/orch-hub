@@ -7,8 +7,8 @@ agent**: it starts at login, restarts if it exits, and logs to
 
 ## Security model (read first)
 
-orch-hub is a remote code execution control surface — it is being built to
-launch orchestrator subprocesses in your repos. The deployment assumptions are
+orch-hub is a remote code execution control surface — it launches orchestrator
+subprocesses in your repos. The deployment assumptions are
 non-negotiable:
 
 - **Never expose the service to the public internet.** No port forwarding, no
@@ -18,8 +18,9 @@ non-negotiable:
 - **The bearer token is required even on the tailnet.** Tailnet membership is
   the primary boundary; the token is defense in depth.
 - **The service fails closed without a token.** If `ORCH_HUB_TOKEN` is unset
-  or blank, every protected route answers `503`; only `GET /api/health`
-  serves. There is no unauthenticated mode, so the plist must set the token.
+  or blank, every protected route answers `503`; only `GET /api/health` and
+  the public dashboard shell assets serve. The shell contains no repo data and
+  cannot call protected APIs without the token, so the plist must set one.
 
 Two supported network shapes:
 
@@ -34,16 +35,16 @@ Two supported network shapes:
 
 ## Environment variables
 
-The resident service is configured entirely through environment variables —
-the `orch-hub-api` service console script takes no arguments, so the plist's
-`EnvironmentVariables` dict is the service configuration surface.
+The resident service reads environment variables — the `orch-hub-api` service
+console script takes no arguments. The integrated deploy command renders the
+following operational settings into the plist's `EnvironmentVariables` dict.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ORCH_HUB_TOKEN` | unset → protected routes answer 503 | Bearer token required by every route except `GET /api/health`. Generate with `openssl rand -hex 32`. |
+| `ORCH_HUB_TOKEN` | unset → protected routes answer 503 | Bearer token required by every operational data/action route. Generate with `openssl rand -hex 32`. |
 | `ORCH_HUB_HOST` | `127.0.0.1` | Bind address. Loopback or a Tailscale IP only. |
 | `ORCH_HUB_PORT` | `8765` | Bind port. A malformed value fails startup instead of binding a default silently. |
-| `ORCH_HUB_MANDREL_PATH` | `/Users/linqing/workplace/github.com/qinglin89/mandrel` | mandrel checkout that owns the managed-repo registry. |
+| `ORCH_HUB_MANDREL_PATH` | unset; required | Mandrel checkout that owns the managed-repo registry; first-time deploy may use `--mandrel` instead. |
 | `ORCH_HUB_DATA_DIR` | `~/.orch-hub` | Hub-owned run dirs and audit history. |
 | `ORCH_HUB_BARK_URL` | unset → push disabled | Optional [Bark](https://github.com/Finb/Bark) push endpoint (server + device key, e.g. `https://api.day.app/<device-key>`) for run-lifecycle, pending-question, intake-ready, and semantic-evaluation-outcome notifications. Embeds a device-key secret — keep the plist `chmod 600`. |
 | `PATH` | launchd's minimal default | Readiness checks invoke `git`; `mandrel` may need Homebrew tooling. The template sets a sane explicit PATH. |
@@ -51,12 +52,20 @@ the `orch-hub-api` service console script takes no arguments, so the plist's
 Empty or whitespace-only values count as unset. In the plist, write absolute
 paths — launchd does not expand `~`.
 
+The Python configuration also has feature-specific defaults for usage,
+intake, and evaluation. The integrated launchd template currently relies on
+those defaults rather than rendering every advanced override; see
+[Claude usage](claude-usage.md) and [task evaluation](evaluation.md).
+Remote intake defaults to `claude-opus-5` with `max` effort; override those
+turns in a foreground service with `ORCH_HUB_INTAKE_MODEL` and
+`ORCH_HUB_INTAKE_EFFORT`. The integrated launchd deployment currently uses the
+defaults rather than persisting those two overrides.
+
 `ORCH_HUB_MANDREL_PATH` was called `ORCH_HUB_AI_NATIVE_DEPLOYMENT` before the
 canonical repository was renamed to mandrel. The old name is still read when
 the new one is unset, so a plist installed before the rename keeps working
 across a package upgrade; `orch-hub launchd update` rewrites the plist with the
-new name. Set only the new name in anything written from now on — the fallback
-goes away in a future release.
+new name. Set only the new name in anything written from now on.
 
 ## 1. Install the CLI into a venv
 
@@ -67,10 +76,13 @@ python3 -m venv .venv
 .venv/bin/pip install .
 ```
 
-This installs two console scripts:
+This installs two primary console scripts:
 
 - `.venv/bin/orch-hub` — operational CLI, including launchd management.
 - `.venv/bin/orch-hub-api` — the resident HTTP service launchd runs.
+
+It also installs the optional `.venv/bin/orch-hub-statusline` wrapper used for
+Codex subscription-usage collection.
 
 The official operational entry point is `orch-hub launchd ...`. The
 `deploy/launchd/` directory holds deployment artifacts, including the plist
@@ -85,10 +97,11 @@ machine-generated plist, validates it, unloads any currently loaded
 `com.qinglin89.orch-hub` user agent, and bootstraps the new one:
 
 ```bash
-.venv/bin/orch-hub launchd deploy
+.venv/bin/orch-hub launchd deploy --mandrel /absolute/path/to/mandrel
 ```
 
-After code changes, run the same flow again, or use the explicit alias:
+Later deploys reuse the Mandrel path in the installed plist. After code
+changes, run the same flow again, or use the explicit alias:
 
 ```bash
 .venv/bin/orch-hub launchd update
@@ -100,7 +113,7 @@ After code changes, run the same flow again, or use the explicit alias:
 |---|---|
 | Checkout | nearest orch-hub checkout above the current directory, or `--checkout` |
 | Token | `--token`, then `ORCH_HUB_TOKEN`, then existing installed plist token, then a generated token printed once |
-| mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then built-in default |
+| Mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then the legacy environment name, then the value in an existing installed plist; first deployment fails with guidance if none is available |
 | Host/port/data dir | corresponding flags, then environment, then defaults |
 | Plist/log paths | `--plist-path` / `--log-dir`, then `~/Library/...` defaults |
 | Bark push URL | `ORCH_HUB_BARK_URL`, then the value already in the installed plist (optional; unset = push disabled). No flag — the secret is supplied through the environment. |
@@ -109,7 +122,7 @@ Common examples:
 
 ```bash
 # First deployment; prints a generated token if none exists.
-.venv/bin/orch-hub launchd deploy
+.venv/bin/orch-hub launchd deploy --mandrel /absolute/path/to/mandrel
 
 # Use an explicit token or rotate it.
 .venv/bin/orch-hub launchd deploy --token "$(openssl rand -hex 32)"
@@ -242,8 +255,9 @@ tail -f ~/Library/Logs/orch-hub/orch-hub.err.log   # startup + errors
 
 ## Troubleshooting
 
-- **Every route except `/api/health` answers 503** — `ORCH_HUB_TOKEN` is
-  missing or blank in the plist's `EnvironmentVariables`.
+- **Every protected data/action request answers 503** — `ORCH_HUB_TOKEN` is
+  missing or blank in the plist's `EnvironmentVariables`. The health probe and
+  dashboard shell still load, but the shell cannot fetch operational data.
 - **Service exits immediately** — check
   `~/Library/Logs/orch-hub/orch-hub.err.log` and the `last exit code` in
   `launchctl print`. A malformed `ORCH_HUB_PORT` fails startup by design; a

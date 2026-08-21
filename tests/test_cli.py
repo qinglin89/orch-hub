@@ -21,6 +21,8 @@ from orch_hub.config import (
     DEFAULT_DATA_DIR,
     EVAL_ENABLED_ENV,
     EVAL_RETENTION_ENV,
+    LEGACY_MANDREL_PATH_ENV,
+    MANDREL_PATH_ENV,
     PORT_ENV,
     TOKEN_ENV,
 )
@@ -277,6 +279,20 @@ def test_launchd_deploy_cli(monkeypatch, capsys):
     assert "bark push: disabled" in out
 
 
+def test_launchd_deploy_help_explains_required_mandrel_path(capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main(["launchd", "deploy", "--help"])
+
+    assert error.value.code == 0
+    out = capsys.readouterr().out
+    normalized = " ".join(out.split())
+    assert "required on first deploy" in normalized
+    assert "ORCH_HUB_MANDREL_PATH" in normalized
+    assert "ORCH_HUB_AI_NATIVE_DEPLOYMENT" in normalized
+    assert "updates reuse the installed plist" in normalized
+    assert "built-in default" not in normalized
+
+
 @pytest.mark.parametrize("action", ["deploy", "update"])
 def test_launchd_deploy_asks_for_no_claude_usage_setup(monkeypatch, capsys, tmp_path, action):
     """Deploy/update no longer nag about the statusLine wrapper.
@@ -382,17 +398,23 @@ def test_notify_test_reports_delivery_failure_without_leaking_url(
     assert url not in err
 
 
-def test_notify_test_falls_back_to_installed_plist(tmp_path, monkeypatch, capsys):
-    # No ORCH_HUB_BARK_URL in the shell, but the installed launchd plist carries
-    # it; the delivery check must resolve the plist value.
+def test_notify_test_falls_back_to_installed_plist_config(
+    tmp_path, monkeypatch, capsys
+):
+    # A plain shell has neither resident setting, but the selected installed
+    # plist carries both; the delivery check must recover the whole config.
     monkeypatch.delenv(BARK_URL_ENV, raising=False)
+    monkeypatch.delenv(MANDREL_PATH_ENV, raising=False)
+    monkeypatch.delenv(LEGACY_MANDREL_PATH_ENV, raising=False)
     plist_path = tmp_path / PLIST_NAME
+    mandrel_path = tmp_path / "mandrel"
     with plist_path.open("wb") as fh:
         plistlib.dump(
             {
                 "EnvironmentVariables": {
                     TOKEN_ENV: "tok",
                     BARK_URL_ENV: "https://bark.example/PLISTKEY",
+                    MANDREL_PATH_ENV: str(mandrel_path),
                 }
             },
             fh,
@@ -403,6 +425,7 @@ def test_notify_test_falls_back_to_installed_plist(tmp_path, monkeypatch, capsys
 
     def fake_build(config):
         seen["bark_url"] = config.bark_url
+        seen["mandrel_path"] = config.mandrel_path
         return notifier
 
     monkeypatch.setattr(cli, "build_notifier", fake_build)
@@ -411,6 +434,7 @@ def test_notify_test_falls_back_to_installed_plist(tmp_path, monkeypatch, capsys
 
     assert rc == 0
     assert seen["bark_url"] == "https://bark.example/PLISTKEY"
+    assert seen["mandrel_path"] == mandrel_path
     assert len(notifier.sent) == 1
 
 
