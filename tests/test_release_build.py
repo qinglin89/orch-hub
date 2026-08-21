@@ -155,6 +155,7 @@ def test_build_only_modules_are_kept_out_of_the_payload():
     # audit's list of forbidden material should not ship inside the artifact.
     assert set(release_build.BUILD_ONLY_MODULES) == {
         "orch_hub.release_build",
+        "orch_hub.release_package",
         "orch_hub.release_audit",
         "orch_hub.macho",
     }

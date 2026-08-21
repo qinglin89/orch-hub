@@ -36,7 +36,10 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub import release_package
 from orch_hub.release_audit import ForbiddenLiteral, audit_payload
+from orch_hub.release_build import default_literals
+from orch_hub.release_package import PackageOptions, package_release
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD_ENV = "ORCH_HUB_RUNTIME_PAYLOAD"
@@ -560,3 +563,170 @@ def test_install_refuses_a_payload_for_another_machine(tmp_path: Path):
     assert result.returncode == 1
     assert "darwin-x86_64" in result.stderr
     assert not prefix.exists()
+
+
+# --------------------------------------------------------------------------
+# the release artifact set, built from the payload that actually ships
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def release(tmp_path_factory) -> Path:
+    """Package the built payload once and yield the release directory.
+
+    tests/test_release_package.py pins the packager's decisions against a
+    synthetic payload it can shape freely. This ties the same code to the
+    artifact the freezer really emits: 30 MB, a bundled framework of relative
+    symlinks, and a Mach-O executable — the three things a synthetic fixture
+    cannot honestly stand in for.
+    """
+    payload = payload_dir()
+    executable()  # skip here, not mid-test, when nothing is built
+    out = tmp_path_factory.mktemp("release")
+    result = package_release(
+        PackageOptions(
+            payload_dirs=(payload,),
+            out_dir=out / "artifacts",
+            work_dir=out / "work",
+            template_path=REPO_ROOT / release_package.TEMPLATE_RELATIVE_PATH,
+            literals=default_literals(REPO_ROOT, dict(os.environ)),
+        )
+    )
+    return result.out_dir
+
+
+def run_installer(installer: Path, tmp_path: Path, *args: str, **extra: str):
+    """Run a released ``.run`` the way an engineer would: `sh ./installer.run`."""
+    return subprocess.run(
+        ["sh", str(installer), *args],
+        cwd=str(tmp_path),
+        env=install_env(tmp_path, **extra),
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+
+
+def test_the_real_payload_packages_into_a_verifiable_artifact_set(
+    release: Path, manifest: dict
+):
+    installer = release / f"orch-hub-{manifest['version']}-{manifest['target']}.run"
+    assert installer.is_file() and os.access(installer, os.X_OK)
+    metadata = json.loads((release / "release.json").read_text(encoding="utf-8"))
+    entry = metadata["targets"][manifest["target"]]
+    # The release describes the payload it was made from, not a restatement of
+    # it: a mismatch here means the two drifted.
+    assert entry["runtime"] == manifest
+    assert entry["min_macos"] == manifest["min_macos"]
+    assert entry["artifacts"][0]["size"] == installer.stat().st_size
+    verified = subprocess.run(
+        ["shasum", "-a", "256", "-c", "SHA256SUMS"],
+        cwd=str(release),
+        capture_output=True,
+        text=True,
+    )
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+
+
+def test_the_real_installer_verifies_itself_and_the_host(
+    release: Path, tmp_path: Path, manifest: dict
+):
+    installer = next(release.glob("*.run"))
+    checked = run_installer(installer, tmp_path, "--check")
+    assert checked.returncode == 0, checked.stderr
+    assert "is installable on this machine" in checked.stdout
+
+    corrupt = tmp_path / "corrupt.run"
+    data = bytearray(installer.read_bytes())
+    data[-64] ^= 0xFF
+    corrupt.write_bytes(bytes(data))
+    damaged = run_installer(corrupt, tmp_path, "--check")
+    assert damaged.returncode == 1
+    assert "truncated or corrupt" in damaged.stderr
+
+
+def test_the_real_installer_unpacks_the_payload_it_was_built_from(
+    release: Path, tmp_path: Path, manifest: dict
+):
+    """Extraction has to reproduce the payload, symlinked framework included."""
+    installer = next(release.glob("*.run"))
+    result = run_installer(installer, tmp_path, "--extract", str(tmp_path / "unpacked"))
+    assert result.returncode == 0, result.stderr
+    unpacked = tmp_path / "unpacked" / f"orch-hub-{manifest['target']}"
+    original = payload_dir()
+
+    def members(root: Path) -> dict[str, tuple[bool, bool]]:
+        found = {}
+        for path in sorted(root.rglob("*")):
+            relative = path.relative_to(root).as_posix()
+            found[relative] = (path.is_symlink(), os.access(path, os.X_OK))
+        return found
+
+    assert members(unpacked) == members(original)
+    assert (unpacked / "orch-hub").read_bytes() == (original / "orch-hub").read_bytes()
+
+
+def test_the_real_installer_installs_and_starts_the_service(
+    release: Path, tmp_path: Path, served: str, manifest: dict
+):
+    """The whole delivery path, from one file to a service reporting health.
+
+    launchd is stubbed and the health probe is pointed at the runtime the
+    `served` fixture already runs, so this exercises the installer's own steps —
+    gate, unpack, install, configure, verify — without booting out the
+    operator's resident service or waiting out a timeout.
+    """
+    installer = next(release.glob("*.run"))
+    prefix = tmp_path / "prefix"
+    bin_dir = tmp_path / "bin"
+    mandrel = tmp_path / "mandrel"
+    (mandrel / "bin").mkdir(parents=True)
+    entry = mandrel / "bin" / "mandrel"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o755)
+    host, port = served.rsplit("/", 1)[-1].split(":")
+
+    result = run_installer(
+        installer,
+        tmp_path,
+        "--prefix", str(prefix),
+        "--bin-dir", str(bin_dir),
+        "--mandrel", str(mandrel),
+        "--host", host,
+        "--port", port,
+        "--token", "frozen-installer-token",
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "health: ok" in result.stdout
+    installed_binary = prefix / "versions" / manifest["version"] / "orch-hub"
+    assert installed_binary.is_file()
+    assert (prefix / "current").resolve() == installed_binary.parent
+    assert (bin_dir / "orch-hub").is_symlink()
+    # The plist names the selection link, never the scratch directory the
+    # installer unpacked into and then deleted.
+    plist_path = tmp_path / "Library" / "LaunchAgents" / "com.qinglin89.orch-hub.plist"
+    with plist_path.open("rb") as fh:
+        plist = plistlib.load(fh)
+    assert plist["ProgramArguments"] == [str(prefix / "current" / "orch-hub"), "serve"]
+    assert plist["EnvironmentVariables"]["ORCH_HUB_TOKEN"] == "frozen-installer-token"
+    version = run_installed(bin_dir / "orch-hub", tmp_path, "version")
+    assert version.returncode == 0, version.stderr
+    assert manifest["version"] in version.stdout
+
+
+def test_the_real_installer_leaves_no_scratch_directory_behind(
+    release: Path, tmp_path: Path
+):
+    installer = next(release.glob("*.run"))
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    result = run_installer(
+        installer,
+        tmp_path,
+        "--prefix", str(tmp_path / "prefix"),
+        "--no-service",
+        TMPDIR=str(scratch),
+    )
+    assert result.returncode == 0, result.stderr
+    assert list(scratch.iterdir()) == []
