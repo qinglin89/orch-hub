@@ -35,6 +35,7 @@ from .config import (
     TOKEN_ENV,
     Config,
 )
+from .resources import bundled_resource
 from .subprocess_utils import (
     CommandNotFoundError,
     CommandResult,
@@ -120,7 +121,17 @@ class Deployment:
 
     @property
     def template_path(self) -> Path:
-        return self.checkout / TEMPLATE_RELATIVE_PATH
+        """Plist template this deployment renders from.
+
+        The template ships with the checkout, so a source runtime reads it
+        there. A compiled release has no checkout: the build copies the
+        template into the bundle under the same relative path, and that copy
+        wins whenever it is present. Preferring the bundled copy also keeps a
+        frozen runtime from rendering against an unrelated checkout that
+        happens to be named as ``checkout``.
+        """
+        bundled = bundled_resource(TEMPLATE_RELATIVE_PATH)
+        return bundled if bundled is not None else self.checkout / TEMPLATE_RELATIVE_PATH
 
 
 @dataclass(frozen=True)

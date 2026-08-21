@@ -17,7 +17,15 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .config import LEGACY_MANDREL_PATH_ENV, MANDREL_PATH_ENV, Config
+from .config import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    HOST_ENV,
+    LEGACY_MANDREL_PATH_ENV,
+    MANDREL_PATH_ENV,
+    PORT_ENV,
+    Config,
+)
 from .launchd import (
     DeployOptions,
     LABEL,
@@ -36,6 +44,7 @@ from .models import ManagedRepo, ReadinessReport, repos_payload
 from .notifications import build_notifier, probe_notification
 from .readiness import check_readiness
 from .registry import RegistryError, discover_repos
+from .resources import runtime_info
 
 if TYPE_CHECKING:  # imported lazily in the handlers; see `_open_catalog`
     from .models import CatalogAudit
@@ -53,6 +62,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return args.notify_handler(args)
     if args.command == "eval":
         return args.eval_handler(args)
+    if args.command == "serve":
+        return _cmd_serve(host=args.host, port=args.port)
+    if args.command == "version":
+        return _cmd_version(json_output=args.json)
     parser.error(f"unknown command: {args.command}")  # pragma: no cover
     return 2
 
@@ -68,6 +81,31 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
     repos_p = sub.add_parser("repos", help="list managed repos with readiness")
     _add_json_arg(repos_p)
+
+    # `serve` is how a runtime with no console scripts starts the HTTP service:
+    # a compiled release ships one executable, so the `orch-hub-api` entry point
+    # a source install gets from packaging metadata does not exist there. Both
+    # runtimes therefore agree on one spelling of "serve the API".
+    serve_p = sub.add_parser(
+        "serve", help="serve the HTTP API and dashboard in the foreground"
+    )
+    serve_p.add_argument(
+        "--host",
+        default=None,
+        help=f"bind address (default: {HOST_ENV} or {DEFAULT_HOST})",
+    )
+    serve_p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"bind port (default: {PORT_ENV} or {DEFAULT_PORT})",
+    )
+
+    # `version` identifies the runtime an operator is actually running: a
+    # compiled release has no importable package to inspect and no checkout to
+    # read a version from, so the binary has to be able to say it itself.
+    version_p = sub.add_parser("version", help="show the orch-hub runtime version")
+    _add_json_arg(version_p)
     launchd_p = sub.add_parser(
         "launchd", help="manage the macOS launchd service"
     )
@@ -270,6 +308,43 @@ def _cmd_repos(*, json_output: bool) -> int:
         print(json.dumps(repos_payload(entries), indent=2))
     else:
         _print_human(pairs)
+    return 0
+
+
+def _cmd_serve(*, host: str | None, port: int | None) -> int:
+    """Serve the API/dashboard in the foreground until interrupted.
+
+    The FastAPI stack is imported here rather than at module scope so `repos`,
+    `launchd`, and `notify` keep starting without paying for it.
+    """
+    try:
+        from .api import run as run_api
+
+        run_api(host=host, port=port)
+    except ValueError as exc:
+        # Malformed service settings (e.g. ORCH_HUB_PORT) surface both while
+        # importing the module-level app and while the server resolves its own
+        # configuration; both are the CLI's usual operational error.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:  # pragma: no cover - interactive interrupt
+        return 0
+    except OSError as exc:
+        # A taken port or an unbindable address is an operational error, not a
+        # crash: it is the common way `serve` fails on a machine that already
+        # runs the resident service.
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _cmd_version(*, json_output: bool) -> int:
+    info = runtime_info()
+    if json_output:
+        print(json.dumps(info.to_dict(), indent=2))
+    else:
+        runtime = "frozen" if info.frozen else "source"
+        print(f"orch-hub {info.version} ({runtime}, python {info.python_version})")
     return 0
 
 

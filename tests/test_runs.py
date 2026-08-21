@@ -242,6 +242,27 @@ def test_start_run_passes_agent_cli_paths_to_orchestrator_env(tmp_path, monkeypa
     assert path_parts.count("/usr/bin") == 1
 
 
+def test_start_run_does_not_leak_frozen_bootloader_vars_to_the_orchestrator(
+    tmp_path, monkeypatch
+):
+    # In a compiled release the bootloader exports variables describing *this*
+    # process's bundle. They mean nothing to the deployed orchestrator or to the
+    # agent CLIs it launches, and another frozen program would read them as its
+    # own bootloader state.
+    monkeypatch.setenv("_PYI_ARCHIVE_FILE", "/opt/orch-hub/orch-hub")
+    monkeypatch.setenv("_PYI_PARENT_PROCESS_LEVEL", "1")
+    monkeypatch.setenv("ORCH_HUB_DATA_DIR", str(tmp_path / "data"))
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+
+    manager.start_run(repo, TASK_ID)
+
+    child_env = spawner.calls[0]["env"]
+    assert not [name for name in child_env if name.startswith("_PYI")]
+    # Only the bootloader's own variables are dropped; the rest is inherited.
+    assert child_env["ORCH_HUB_DATA_DIR"] == str(tmp_path / "data")
+
+
 def test_extra_args_are_appended_to_the_orchestrator_argv(tmp_path):
     repo = make_repo(tmp_path)
     manager, spawner, _ = make_manager(tmp_path)

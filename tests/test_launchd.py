@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub import resources
 from orch_hub.config import (
     BARK_URL_ENV,
     DATA_DIR_ENV,
@@ -766,3 +767,49 @@ def test_status_reads_plist_and_health(tmp_path):
     assert result.dashboard_url == "http://127.0.0.1:9001/"
     assert result.health == "ok 127.0.0.1:9001"
     assert runner.calls == [("launchctl", "print", service_target())]
+
+
+def test_template_path_reads_the_checkout_in_a_source_runtime(tmp_path):
+    checkout = make_checkout(tmp_path)
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=checkout,
+            mandrel_path=tmp_path / "mandrel",
+            token="t",
+            plist_path=tmp_path / "agent.plist",
+            log_dir=tmp_path / "logs",
+        ),
+        environ={},
+    )
+
+    assert deployment.template_path == checkout / TEMPLATE_RELATIVE_PATH
+
+
+def test_template_path_prefers_a_bundled_copy_when_frozen(tmp_path, monkeypatch):
+    # A compiled release has no checkout to read the template from; the build
+    # copies it into the bundle under the same relative path. Preferring the
+    # bundled copy also stops a frozen runtime from rendering against whatever
+    # checkout path happens to be recorded, so the checkout here keeps its own
+    # (distinguishable) template and must lose.
+    checkout = make_checkout(tmp_path)
+    bundle = tmp_path / "bundle"
+    bundled_template = bundle / TEMPLATE_RELATIVE_PATH
+    bundled_template.parent.mkdir(parents=True)
+    shutil.copyfile(checkout / TEMPLATE_RELATIVE_PATH, bundled_template)
+    monkeypatch.setattr(resources.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(resources.sys, "_MEIPASS", str(bundle), raising=False)
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=checkout,
+            mandrel_path=tmp_path / "mandrel",
+            token="t",
+            plist_path=tmp_path / "agent.plist",
+            log_dir=tmp_path / "logs",
+        ),
+        environ={},
+    )
+
+    assert deployment.template_path == bundled_template
+    assert deployment.template_path != checkout / TEMPLATE_RELATIVE_PATH

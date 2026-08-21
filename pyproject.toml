@@ -15,6 +15,10 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=7", "httpx>=0.24"]
+# Build toolchain for the compiled standalone release runtime. Pinned exactly:
+# the freezer decides the payload's layout and bootloader, so an unpinned bump
+# would silently change what a release artifact *is*.
+release = ["pyinstaller==6.22.2"]
 
 [project.scripts]
 orch-hub = "orch_hub.cli:main"

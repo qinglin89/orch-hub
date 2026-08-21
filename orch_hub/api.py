@@ -33,7 +33,6 @@ from __future__ import annotations
 import logging
 import secrets
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -90,6 +89,7 @@ from .report_catalog import (
     ReportCatalog,
     ReportCatalogError,
 )
+from .resources import web_dir
 from .runs import (
     BlockedTaskError,
     LaunchBlockedError,
@@ -116,8 +116,14 @@ from .usage import ClaudeUsageCollector, UsageService
 
 _log = logging.getLogger(__name__)
 
-WEB_DIR = Path(__file__).resolve().parent / "web"
-"""Directory holding the dashboard's static shell assets (served by SHELL_ASSETS)."""
+WEB_DIR = web_dir()
+"""Directory holding the dashboard's static shell assets (served by SHELL_ASSETS).
+
+Resolved through :mod:`orch_hub.resources` rather than from ``__file__``: in a
+compiled release the first-party modules have no on-disk source file, so the
+assets are addressed from the bundle root instead of from the package. The
+shell routes are built once per app, so this is read at import time in both
+runtime shapes."""
 
 SHELL_ASSETS = {
     "/": ("index.html", "text/html"),

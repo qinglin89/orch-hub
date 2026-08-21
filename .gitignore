@@ -3,6 +3,8 @@
 /.pytest_cache/
 /*.egg-info/
 /build/
+# Compiled release payloads produced by `python3 -m orch_hub.release_build`.
+/dist/
 
 # BEGIN mandrel
 /.ai-deploy-manifest.json

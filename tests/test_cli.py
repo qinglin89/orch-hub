@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 from urllib.error import URLError
@@ -15,6 +16,7 @@ from urllib.error import URLError
 import pytest
 
 from orch_hub import cli
+from orch_hub import __version__
 from orch_hub.config import (
     BARK_URL_ENV,
     DATA_DIR_ENV,
@@ -702,3 +704,62 @@ def test_eval_catalog_verify_reports_config_error(monkeypatch, capsys, tmp_path)
 
     assert rc == 1
     assert "error:" in capsys.readouterr().err
+
+
+def test_version_reports_the_running_runtime(capsys):
+    rc = cli.main(["version"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert __version__ in out
+    # A source checkout must not claim to be a compiled release.
+    assert "source" in out
+
+
+def test_version_json_is_the_runtime_identity(capsys):
+    rc = cli.main(["version", "--json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "version": __version__,
+        "runtime": "source",
+        "python_version": "%d.%d.%d" % sys.version_info[:3],
+    }
+
+
+def test_serve_passes_explicit_bind_arguments(monkeypatch):
+    # `serve` exists so a runtime with no console scripts can start the service;
+    # it must reach the same entry point `orch-hub-api` uses.
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "orch_hub.api.run", lambda host=None, port=None: calls.append(
+            {"host": host, "port": port}
+        )
+    )
+
+    assert cli.main(["serve", "--host", "0.0.0.0", "--port", "9999"]) == 0
+    assert calls == [{"host": "0.0.0.0", "port": 9999}]
+
+
+def test_serve_defaults_to_environment_configuration(monkeypatch):
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        "orch_hub.api.run", lambda host=None, port=None: calls.append(
+            {"host": host, "port": port}
+        )
+    )
+
+    assert cli.main(["serve"]) == 0
+    # None means "let the service read ORCH_HUB_HOST/ORCH_HUB_PORT" rather than
+    # a CLI default shadowing the deployment's configuration.
+    assert calls == [{"host": None, "port": None}]
+
+
+def test_serve_reports_an_unbindable_address_as_an_operational_error(monkeypatch, capsys):
+    def refuse(host=None, port=None):
+        raise OSError("address already in use")
+
+    monkeypatch.setattr("orch_hub.api.run", refuse)
+
+    assert cli.main(["serve"]) == 1
+    assert capsys.readouterr().err.startswith("error: address already in use")

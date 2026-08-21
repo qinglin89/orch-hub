@@ -2514,3 +2514,14 @@ def test_report_feed_styles_are_present():
         ".report-key .rk",
     ):
         assert selector in css, selector
+
+
+def test_shell_assets_resolve_through_the_runtime_resource_root():
+    # In a compiled release the first-party modules have no on-disk source file,
+    # so `Path(__file__).parent / "web"` would address nothing. The shell assets
+    # must come from the runtime's resource root in both shapes.
+    from orch_hub import resources
+
+    assert api.WEB_DIR == resources.web_dir()
+    for filename, _ in api.SHELL_ASSETS.values():
+        assert (api.WEB_DIR / filename).is_file(), filename

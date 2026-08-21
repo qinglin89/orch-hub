@@ -103,6 +103,7 @@ from .protocol_provenance import (
     settle_protocol,
 )
 from .readiness import check_readiness
+from .resources import strip_bootloader_env
 from .sessions import read_live, read_snapshot, write_snapshot
 from .task_snapshots import capture_entries, settle_snapshots
 from .task_store import (
@@ -267,8 +268,14 @@ def _orchestrator_env(
     commonly installed under the user's home directory. The orchestrator
     launches those CLIs by name, so pass an explicit PATH that keeps the current
     environment but includes the common user and macOS locations.
+
+    This is the one place a child environment is built from the hub's own, so
+    it is also where a compiled release drops the frozen bootloader's private
+    variables (see :func:`orch_hub.resources.strip_bootloader_env`): they
+    describe *this* process's bundle and mean nothing to the orchestrator or
+    the agent CLIs it launches.
     """
-    env = dict(os.environ if environ is None else environ)
+    env = strip_bootloader_env(os.environ if environ is None else environ)
     resolved_home = home or Path.home()
     path_parts = [
         *(str(resolved_home / relative) for relative in USER_CLI_PATHS),
