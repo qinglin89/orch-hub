@@ -30,12 +30,13 @@ from .config import (
     DEFAULT_PORT,
     HOST_ENV,
     LEGACY_MANDREL_PATH_ENV,
+    MANDREL_BIN_RELATIVE_PATH,
     MANDREL_PATH_ENV,
     PORT_ENV,
     TOKEN_ENV,
     Config,
 )
-from .resources import bundled_resource
+from .resources import bundled_resource, is_frozen
 from .subprocess_utils import (
     CommandNotFoundError,
     CommandResult,
@@ -47,6 +48,38 @@ LABEL = "com.qinglin89.orch-hub"
 PLIST_NAME = f"{LABEL}.plist"
 DEFAULT_PATH_ENV = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TEMPLATE_RELATIVE_PATH = Path("deploy") / "launchd" / PLIST_NAME
+PROGRAM_KEY = "ProgramArguments"
+
+CHECKOUT_API_RELATIVE_PATH = Path(".venv") / "bin" / "orch-hub-api"
+"""Console script a source-checkout deployment runs, relative to the checkout.
+
+Created by the package install this same deploy performs, which is why a
+checkout deploy needs no ``serve`` argument: packaging metadata gives it a
+dedicated entry point that a compiled release does not have."""
+
+INHERITED_SERVICE_ENV = (HOST_ENV, PORT_ENV, DATA_DIR_ENV)
+"""Settings an update inherits from the service it is updating.
+
+The resident service's configuration lives in its plist, not in the shell that
+runs the update — an operator upgrading from a fresh terminal has none of it
+exported. Without this, an upgrade would silently move a service off its
+configured bind address and away from the data directory holding its run
+history, which is the opposite of what re-running an installer should do.
+
+The token, Mandrel checkout, and Bark URL are preserved by their own
+resolutions; these three go through the environment mapping instead, so the
+same fail-closed parsing applies whether a value came from the shell or from the
+installed plist."""
+
+SERVE_ARGV = ("serve",)
+"""Argument the installed runtime is launched with.
+
+A compiled release ships one executable and no console scripts, so launchd runs
+``<runtime> serve`` where a source checkout runs the ``orch-hub-api`` entry
+point installed in its virtualenv."""
+
+HEALTH_TIMEOUT = 20.0
+HEALTH_POLL_INTERVAL = 0.5
 
 # Template placeholders look like ``REPLACE-ORCH-HUB-BARK-URL``: the ``REPLACE-``
 # marker followed by an uppercase, hyphen-separated token. Matching one token at
@@ -75,6 +108,13 @@ class DeployOptions:
     """User-configurable launchd deployment settings."""
 
     checkout: Path | None = None
+    program: Path | None = None
+    """Installed runtime executable launchd should run.
+
+    Set by the installed-release path (``orch-hub setup``), which has no
+    checkout and no virtualenv. When it is set, the deployment never looks for
+    a checkout and never installs a package: the program is already built."""
+
     mandrel_path: Path | None = None
     token: str | None = None
     host: str | None = None
@@ -84,13 +124,33 @@ class DeployOptions:
     log_dir: Path | None = None
     path_env: str = DEFAULT_PATH_ENV
     install_package: bool = True
+    verify_mandrel: bool = False
+    """Whether the resolved Mandrel checkout must actually exist.
+
+    Set by first-time setup, where a mistyped path is the likely failure and its
+    only symptom would be a hub that serves an empty repo list. A checkout
+    deploy leaves it off: the maintainer running it supplies the path they
+    already work in, and a machine-local mandrel that is temporarily elsewhere
+    should not block rewriting the plist."""
 
 
 @dataclass(frozen=True)
 class Deployment:
     """Fully resolved launchd deployment paths and environment."""
 
-    checkout: Path
+    program_argv: tuple[str, ...]
+    """Exactly what launchd runs, program first.
+
+    The two runtime shapes differ only here: a source checkout runs the
+    ``orch-hub-api`` console script from its virtualenv, an installed release
+    runs its own executable with ``serve``. Everything downstream — the plist,
+    the CLI summary, the status probe — reads this instead of reconstructing a
+    path from a checkout that an installed runtime does not have."""
+
+    checkout: Path | None
+    """Source checkout this deployment installs from, or ``None`` when the
+    program is an already-built installed runtime."""
+
     mandrel_path: Path
     token: str
     token_source: str
@@ -105,15 +165,23 @@ class Deployment:
 
     @property
     def venv_dir(self) -> Path:
-        return self.checkout / ".venv"
+        return self._checkout_required() / ".venv"
 
     @property
     def venv_python(self) -> Path:
         return self.venv_dir / "bin" / "python"
 
     @property
-    def api_bin(self) -> Path:
-        return self.venv_dir / "bin" / "orch-hub-api"
+    def program(self) -> str:
+        return self.program_argv[0]
+
+    def _checkout_required(self) -> Path:
+        if self.checkout is None:
+            raise LaunchdError(
+                "this deployment runs an installed runtime, not a checkout "
+                "virtualenv"
+            )
+        return self.checkout
 
     @property
     def dashboard_url(self) -> str:
@@ -131,7 +199,14 @@ class Deployment:
         happens to be named as ``checkout``.
         """
         bundled = bundled_resource(TEMPLATE_RELATIVE_PATH)
-        return bundled if bundled is not None else self.checkout / TEMPLATE_RELATIVE_PATH
+        if bundled is not None:
+            return bundled
+        if self.checkout is None:
+            raise LaunchdError(
+                "no launchd template available: this runtime carries no bundled "
+                "copy and the deployment has no checkout"
+            )
+        return self.checkout / TEMPLATE_RELATIVE_PATH
 
 
 @dataclass(frozen=True)
@@ -216,6 +291,46 @@ def installed_mandrel_path(*, plist_path: Path | None = None) -> Path | None:
     )
 
 
+def installed_data_dir(*, plist_path: Path | None = None) -> Path:
+    """Return the hub data dir the installed service is configured with.
+
+    The resident service carries its data dir in the plist, so an operator
+    command that has to name it — uninstall's optional purge — reads the value
+    the service actually uses instead of re-deriving a default that may not be
+    the one holding their run history.
+    """
+    resolved = (plist_path or default_plist_path()).expanduser()
+    raw = _plist_env(_read_plist(resolved)).get(DATA_DIR_ENV, "").strip()
+    return Path(raw).expanduser() if raw else DEFAULT_DATA_DIR
+
+
+def installed_bind(*, plist_path: Path | None = None) -> tuple[str, int]:
+    """Return the host/port the installed service is configured to serve on."""
+    resolved = (plist_path or default_plist_path()).expanduser()
+    env = _plist_env(_read_plist(resolved))
+    host = env.get(HOST_ENV, DEFAULT_HOST) or DEFAULT_HOST
+    return host, _status_port(env.get(PORT_ENV))
+
+
+def verify_mandrel_checkout(path: Path) -> None:
+    """Fail unless ``path`` really is a mandrel checkout.
+
+    The registry — and therefore every managed repo the hub can see — comes from
+    ``<mandrel>/bin/mandrel``. A path that does not carry it produces a hub that
+    starts, serves, and reports zero repos, which reads as "nothing to do"
+    rather than as "misconfigured". Checking the executable's presence when the
+    value is supplied turns that into one clear error at the right moment.
+    """
+    resolved = path.expanduser()
+    if not resolved.is_dir():
+        raise LaunchdError(f"mandrel checkout not found: {resolved}")
+    binary = resolved / MANDREL_BIN_RELATIVE_PATH
+    if not binary.is_file():
+        raise LaunchdError(
+            f"{resolved} does not look like a mandrel checkout: no {binary}"
+        )
+
+
 def default_log_dir() -> Path:
     return Path.home() / "Library" / "Logs" / "orch-hub"
 
@@ -236,6 +351,14 @@ def find_checkout(start: Path) -> Path:
             candidate / "orch_hub"
         ).is_dir():
             return candidate
+    if is_frozen():
+        # An installed release has no checkout by construction, so pointing the
+        # operator at --checkout would send them looking for something that
+        # deliberately does not exist on their machine.
+        raise LaunchdError(
+            "a compiled orch-hub release has no source checkout; configure the "
+            "service with `orch-hub setup` instead of `orch-hub launchd deploy`"
+        )
     raise LaunchdError(
         f"could not find an orch-hub checkout from {start}; pass --checkout"
     )
@@ -249,7 +372,7 @@ def resolve_deployment(
 ) -> Deployment:
     """Resolve deploy options, environment defaults, and installed settings."""
     env = os.environ if environ is None else environ
-    checkout = find_checkout(options.checkout or Path.cwd())
+    checkout, program_argv = _resolve_program(options)
     plist_path = (options.plist_path or default_plist_path()).expanduser()
     existing = _read_plist(plist_path)
     mandrel_path = _resolve_mandrel_path(
@@ -264,7 +387,9 @@ def resolve_deployment(
             f"{MANDREL_PATH_ENV}"
             f" ({LEGACY_MANDREL_PATH_ENV} is also accepted for legacy installs)"
         )
-    config_env = dict(env)
+    if options.verify_mandrel:
+        verify_mandrel_checkout(mandrel_path)
+    config_env = {**dict(env), **_inherited_service_env(env, existing)}
     config_env[MANDREL_PATH_ENV] = str(mandrel_path)
     try:
         config = Config.from_env(config_env)
@@ -283,6 +408,7 @@ def resolve_deployment(
     if not 1 <= port <= 65535:
         raise LaunchdError(f"{PORT_ENV} must be in 1-65535, got {port}")
     return Deployment(
+        program_argv=program_argv,
         checkout=checkout,
         mandrel_path=config.mandrel_path.expanduser().resolve(),
         token=token,
@@ -297,6 +423,23 @@ def resolve_deployment(
         path_env=options.path_env,
         bark_url=bark_url,
     )
+
+
+def _resolve_program(options: DeployOptions) -> tuple[Path | None, tuple[str, ...]]:
+    """Resolve what launchd runs and which checkout (if any) backs it.
+
+    An explicit program is an installed runtime: it is already built, so there
+    is nothing to find above the working directory and nothing to install. Only
+    the checkout path searches, which keeps ``orch-hub setup`` on a machine
+    without a checkout from failing on a search it has no reason to run.
+    """
+    if options.program is not None:
+        program = options.program.expanduser()
+        if not program.is_file():
+            raise LaunchdError(f"installed runtime not found: {program}")
+        return None, (str(program), *SERVE_ARGV)
+    checkout = find_checkout(options.checkout or Path.cwd())
+    return checkout, (str(checkout / CHECKOUT_API_RELATIVE_PATH),)
 
 
 def deploy_service(
@@ -321,7 +464,7 @@ def deploy_service(
     )
     plist_data = _render_plist_from_template(deployment)
     commands: list[CommandResult] = []
-    if options.install_package:
+    if options.install_package and deployment.checkout is not None:
         commands.extend(_install_package(deployment, runner))
     deployment.log_dir.mkdir(parents=True, exist_ok=True)
     deployment.plist_path.parent.mkdir(parents=True, exist_ok=True)
@@ -461,7 +604,6 @@ def _render_plist_from_template(deployment: Deployment) -> dict:
     # a template/version integrity error — the plist would carry an invalid or
     # empty required field — so it fails loudly before anything is written.
     required = {
-        "REPLACE-ORCH-HUB-CHECKOUT": str(deployment.checkout),
         "REPLACE-BEARER-TOKEN": deployment.token,
         "REPLACE-ORCH-HUB-HOST": deployment.host,
         "REPLACE-ORCH-HUB-PORT": str(deployment.port),
@@ -477,7 +619,28 @@ def _render_plist_from_template(deployment: Deployment) -> dict:
         "REPLACE-ORCH-HUB-BARK-URL": deployment.bark_url or "",
     }
     data = _replace_placeholders(template, {**required, **optional})
+    data = _with_program_arguments(data, deployment.program_argv)
     return _resolve_leftover_placeholders(data, required=frozenset(required))
+
+
+def _with_program_arguments(data: dict, program_argv: tuple[str, ...]) -> dict:
+    """Replace the template's program array with what this deployment runs.
+
+    ``ProgramArguments`` is rendered rather than placeholder-substituted because
+    it is a *list* whose length depends on the runtime shape: one element for a
+    checkout's console script, two for an installed release's ``serve``. A
+    string placeholder can only produce a fixed-length array, and the template
+    is the structure's source of truth — so the template documents the shape
+    with a placeholder for manual recovery, and rendering supplies the real
+    argv. A template that lost the key entirely fails here rather than
+    producing a plist launchd cannot start.
+    """
+    argv = data.get(PROGRAM_KEY)
+    if not isinstance(argv, list) or not argv:
+        raise LaunchdError(
+            f"launchd template has no {PROGRAM_KEY} array to render"
+        )
+    return {**data, PROGRAM_KEY: list(program_argv)}
 
 
 def _write_plist(path: Path, data: dict) -> None:
@@ -634,6 +797,25 @@ def _resolve_mandrel_path(
     return None
 
 
+def _inherited_service_env(
+    env: Mapping[str, str], existing: dict | None
+) -> dict[str, str]:
+    """Installed-plist values for settings the current environment leaves unset.
+
+    Blank counts as unset, matching the configuration contract: exporting an
+    empty ``ORCH_HUB_PORT`` does not silently reset a configured service.
+    """
+    installed = _plist_env(existing)
+    inherited: dict[str, str] = {}
+    for key in INHERITED_SERVICE_ENV:
+        if (env.get(key) or "").strip():
+            continue
+        value = installed.get(key, "").strip()
+        if value:
+            inherited[key] = value
+    return inherited
+
+
 def _resolve_bark_url(env_value: str | None, existing: str | None) -> str | None:
     """Resolve the optional Bark push URL: environment first, then existing plist.
 
@@ -771,6 +953,43 @@ def _status_port(raw: str | None) -> int:
     except ValueError:
         return DEFAULT_PORT
     return port if 1 <= port <= 65535 else DEFAULT_PORT
+
+
+def wait_for_health(
+    host: str,
+    port: int,
+    *,
+    timeout: float = HEALTH_TIMEOUT,
+    interval: float = HEALTH_POLL_INTERVAL,
+    checker: Callable[[str, int], str] | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> str:
+    """Probe the public health route until it answers, then report what it said.
+
+    ``launchctl bootstrap`` returns as soon as launchd accepts the job, not when
+    the service is listening, so a single probe right after it reports a
+    connection refusal on a service that is starting normally. Polling turns
+    "did the thing I just configured actually come up" into an answer instead of
+    a race, which is the whole point of verifying at all.
+
+    The last probe result is returned rather than raised: a service that does
+    not answer is worth reporting alongside the configuration that was written,
+    and the caller decides whether that is fatal.
+    """
+    probe = checker or _check_health
+    deadline = clock() + timeout
+    # Bounded twice on purpose: by wall clock, because each probe can itself
+    # block on its own connect timeout, and by attempts, because a caller that
+    # injects a probe and a sleeper (every test here) advances no clock at all
+    # and would otherwise spin until the deadline passes in real time.
+    result = ""
+    for _ in range(max(1, int(timeout / interval))):
+        result = probe(host, port)
+        if result == "ok" or clock() >= deadline:
+            return result
+        sleeper(interval)
+    return result
 
 
 def _check_health(host: str, port: int) -> str:

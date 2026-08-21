@@ -28,6 +28,7 @@ from orch_hub.config import (
     PORT_ENV,
     TOKEN_ENV,
 )
+from orch_hub.install import InstallError
 from orch_hub.launchd import LaunchdError, PLIST_NAME
 from orch_hub.models import CommitInfo, ManagedRepo, ReadinessCheck, ReadinessReport
 from orch_hub.registry import RegistryError
@@ -253,7 +254,8 @@ def test_launchd_status_cli_error(monkeypatch, capsys):
 def _fake_deployment() -> SimpleNamespace:
     return SimpleNamespace(
         plist_path=Path("/tmp/com.qinglin89.orch-hub.plist"),
-        api_bin=Path("/tmp/.venv/bin/orch-hub-api"),
+        program="/tmp/.venv/bin/orch-hub-api",
+        mandrel_path=Path("/p/mandrel"),
         data_dir=DEFAULT_DATA_DIR,
         dashboard_url="http://127.0.0.1:8765/",
         token="generated",
@@ -763,3 +765,298 @@ def test_serve_reports_an_unbindable_address_as_an_operational_error(monkeypatch
 
     assert cli.main(["serve"]) == 1
     assert capsys.readouterr().err.startswith("error: address already in use")
+
+
+# --------------------------------------------------------------------------
+# installed-runtime commands
+# --------------------------------------------------------------------------
+
+
+def _fake_installation(**overrides) -> SimpleNamespace:
+    values = {
+        "prefix": Path("/home/u/.local/orch-hub"),
+        "versions": ("0.1.0", "0.2.0"),
+        "current": "0.2.0",
+        "previous": "0.1.0",
+    }
+    values.update(overrides)
+    return SimpleNamespace(
+        **values,
+        to_dict=lambda: {
+            "prefix": str(values["prefix"]),
+            "versions": list(values["versions"]),
+            "current": values["current"],
+            "previous": values["previous"],
+        },
+    )
+
+
+def _fake_setup_result(health: str = "ok") -> SimpleNamespace:
+    return SimpleNamespace(
+        installation=_fake_installation(),
+        deployment=_fake_deployment(),
+        generated_token=True,
+        health=health,
+    )
+
+
+def test_install_cli_reports_the_command_and_path_hint(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "install_version",
+        lambda payload, prefix=None, bin_dir=None, link=True: SimpleNamespace(
+            installation=_fake_installation(current="0.2.0"),
+            version="0.2.0",
+            replaced=False,
+            link_path=Path("/home/u/.local/bin/orch-hub"),
+            link_on_path=False,
+            to_dict=lambda: {"version": "0.2.0"},
+        ),
+    )
+
+    rc = cli.main(["install", "--from", "/tmp/payload"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "installed orch-hub 0.2.0" in out
+    assert "command: /home/u/.local/bin/orch-hub" in out
+    assert 'export PATH="/home/u/.local/bin:$PATH"' in out
+    assert "orch-hub setup --mandrel" in out
+
+
+def test_install_cli_json(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "install_version",
+        lambda payload, prefix=None, bin_dir=None, link=True: SimpleNamespace(
+            to_dict=lambda: {"version": "0.2.0", "replaced": True}
+        ),
+    )
+
+    rc = cli.main(["install", "--from", "/tmp/payload", "--json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out) == {"version": "0.2.0", "replaced": True}
+
+
+def test_install_cli_error(monkeypatch, capsys):
+    def boom(payload, prefix=None, bin_dir=None, link=True):
+        raise cli.InstallError("payload directory not found: /tmp/payload")
+
+    monkeypatch.setattr(cli, "install_version", boom)
+
+    rc = cli.main(["install", "--from", "/tmp/payload"])
+
+    assert rc == 1
+    assert "error: payload directory not found" in capsys.readouterr().err
+
+
+def test_setup_cli(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "setup_service", lambda options: _fake_setup_result())
+
+    rc = cli.main(["setup", "--mandrel", "/p/mandrel"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "orch-hub setup ok" in out
+    assert "version: 0.2.0" in out
+    assert "program: /tmp/.venv/bin/orch-hub-api" in out
+    assert "generated ORCH_HUB_TOKEN: generated" in out
+    assert "bark push: disabled" in out
+    assert "health: ok" in out
+
+
+def test_setup_cli_fails_when_the_service_does_not_answer(monkeypatch, capsys):
+    """A scripted install must notice a service that never came up."""
+    monkeypatch.setattr(
+        cli, "setup_service", lambda options: _fake_setup_result("unreachable: refused")
+    )
+
+    rc = cli.main(["setup"])
+
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "health: unreachable: refused" in captured.out
+    assert "error: service did not become healthy" in captured.err
+
+
+def test_setup_cli_error(monkeypatch, capsys):
+    def boom(options):
+        raise LaunchdError("mandrel checkout not found: /p/mandrel")
+
+    monkeypatch.setattr(cli, "setup_service", boom)
+
+    rc = cli.main(["setup", "--mandrel", "/p/mandrel"])
+
+    assert rc == 1
+    assert "error: mandrel checkout not found" in capsys.readouterr().err
+
+
+def test_setup_cli_never_prints_the_bark_url(monkeypatch, capsys):
+    secret = "https://api.day.app/DEVICEKEY"
+    result = _fake_setup_result()
+    result.deployment.bark_url = secret
+    monkeypatch.setattr(cli, "setup_service", lambda options: result)
+
+    cli.main(["setup"])
+
+    out = capsys.readouterr().out
+    assert secret not in out
+    assert "bark push: enabled" in out
+
+
+def test_upgrade_cli(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "upgrade",
+        lambda payload, prefix=None, bin_dir=None, plist_path=None: SimpleNamespace(
+            install=SimpleNamespace(version="0.2.0"),
+            setup=_fake_setup_result(),
+            previous_version="0.1.0",
+        ),
+    )
+
+    rc = cli.main(["upgrade", "--from", "/tmp/payload"])
+
+    assert rc == 0
+    assert "upgraded orch-hub 0.1.0 -> 0.2.0" in capsys.readouterr().out
+
+
+def test_upgrade_cli_error_names_the_rollback(monkeypatch, capsys):
+    def boom(payload, prefix=None, bin_dir=None, plist_path=None):
+        raise cli.InstallError(
+            "installed 0.2.0 but could not start it: nope; the previous version "
+            "is still installed — run `orch-hub rollback --to 0.1.0`"
+        )
+
+    monkeypatch.setattr(cli, "upgrade", boom)
+
+    rc = cli.main(["upgrade", "--from", "/tmp/payload"])
+
+    assert rc == 1
+    assert "rollback --to 0.1.0" in capsys.readouterr().err
+
+
+def test_rollback_cli(monkeypatch, capsys):
+    seen = {}
+
+    def fake_rollback(version=None, prefix=None, plist_path=None):
+        seen["version"] = version
+        return SimpleNamespace(from_version="0.2.0", to_version="0.1.0", health="ok")
+
+    monkeypatch.setattr(cli, "rollback", fake_rollback)
+
+    rc = cli.main(["rollback", "--to", "0.1.0"])
+
+    assert rc == 0
+    assert seen["version"] == "0.1.0"
+    assert "rolled back orch-hub 0.2.0 -> 0.1.0" in capsys.readouterr().out
+
+
+def test_rollback_cli_error(monkeypatch, capsys):
+    def boom(version=None, prefix=None, plist_path=None):
+        raise cli.InstallError("no previous version recorded under /p")
+
+    monkeypatch.setattr(cli, "rollback", boom)
+
+    rc = cli.main(["rollback"])
+
+    assert rc == 1
+    assert "error: no previous version recorded" in capsys.readouterr().err
+
+
+def test_versions_cli(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_installation", lambda prefix: _fake_installation())
+
+    rc = cli.main(["versions"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "0.1.0 (previous)" in out
+    assert "0.2.0 (current)" in out
+
+
+def test_versions_cli_json(monkeypatch, capsys):
+    monkeypatch.setattr(cli, "read_installation", lambda prefix: _fake_installation())
+
+    rc = cli.main(["versions", "--json"])
+
+    assert rc == 0
+    assert json.loads(capsys.readouterr().out)["current"] == "0.2.0"
+
+
+def test_versions_cli_with_nothing_installed(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "read_installation",
+        lambda prefix: _fake_installation(versions=(), current=None, previous=None),
+    )
+
+    rc = cli.main(["versions"])
+
+    assert rc == 0
+    assert "no versions installed" in capsys.readouterr().out
+
+
+def test_uninstall_cli_keeps_data_by_default(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "uninstall",
+        lambda prefix=None, bin_dir=None, plist_path=None, purge_data=False: SimpleNamespace(
+            prefix=Path("/p"),
+            prefix_removed=True,
+            plist_path=Path("/pl"),
+            plist_removed=True,
+            link_path=Path("/b/orch-hub"),
+            link_removed=True,
+            service_error=None,
+            data_dir=None,
+            data_removed=False,
+        ),
+    )
+
+    rc = cli.main(["uninstall"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "orch-hub uninstalled" in out
+    assert "data dir: kept" in out
+    assert "orchestrator runs were not stopped" in out
+
+
+def test_uninstall_cli_requires_confirmation_to_purge_data(monkeypatch, capsys):
+    def unreached(**kwargs):  # pragma: no cover - must not be called
+        raise AssertionError("uninstall ran without confirmation")
+
+    monkeypatch.setattr(cli, "uninstall", unreached)
+
+    rc = cli.main(["uninstall", "--purge-data"])
+
+    assert rc == 1
+    assert "pass --yes to confirm" in capsys.readouterr().err
+
+
+def test_uninstall_cli_reports_a_service_stop_failure(monkeypatch, capsys):
+    monkeypatch.setattr(
+        cli,
+        "uninstall",
+        lambda prefix=None, bin_dir=None, plist_path=None, purge_data=False: SimpleNamespace(
+            prefix=Path("/p"),
+            prefix_removed=True,
+            plist_path=Path("/pl"),
+            plist_removed=False,
+            link_path=Path("/b/orch-hub"),
+            link_removed=False,
+            service_error="stop launchd service failed with exit 5",
+            data_dir=Path("/d"),
+            data_removed=True,
+        ),
+    )
+
+    rc = cli.main(["uninstall", "--purge-data", "--yes"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "note: service stop reported:" in out
+    assert "command link: left /b/orch-hub (not ours)" in out
+    assert "data dir: removed /d" in out

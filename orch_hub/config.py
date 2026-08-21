@@ -33,6 +33,13 @@ MANDREL_PATH_ENV = "ORCH_HUB_MANDREL_PATH"
 """Environment variable naming the Mandrel checkout path."""
 
 LEGACY_MANDREL_PATH_ENV = "ORCH_HUB_AI_NATIVE_DEPLOYMENT"
+
+MANDREL_BIN_RELATIVE_PATH = Path("bin") / "mandrel"
+"""Where the mandrel executable sits inside its checkout.
+
+Named once because two callers need it for different reasons: the registry
+adapter runs it, and first-time setup uses its presence to tell a real mandrel
+checkout from a path the operator merely typed."""
 """Pre-rename spelling of :data:`MANDREL_PATH_ENV`, still read as a fallback.
 
 The launchd plist installed before the rename carries the old key, and only
@@ -409,7 +416,7 @@ class Config:
         orch-hub invokes it by absolute path rather than relying on it being on
         PATH, since it ships as a repo-local script, not a system install.
         """
-        return self.mandrel_path / "bin" / "mandrel"
+        return self.mandrel_path / MANDREL_BIN_RELATIVE_PATH
 
     @property
     def claude_transcripts_dir(self) -> Path:

@@ -14,10 +14,13 @@ from pathlib import Path
 
 import pytest
 
-from orch_hub import resources
+from orch_hub import launchd, resources
 from orch_hub.config import (
     BARK_URL_ENV,
     DATA_DIR_ENV,
+    DEFAULT_DATA_DIR,
+    DEFAULT_HOST,
+    DEFAULT_PORT,
     HOST_ENV,
     LEGACY_MANDREL_PATH_ENV,
     MANDREL_PATH_ENV,
@@ -813,3 +816,281 @@ def test_template_path_prefers_a_bundled_copy_when_frozen(tmp_path, monkeypatch)
 
     assert deployment.template_path == bundled_template
     assert deployment.template_path != checkout / TEMPLATE_RELATIVE_PATH
+
+
+# --------------------------------------------------------------------------
+# deploying an installed runtime instead of a checkout
+# --------------------------------------------------------------------------
+
+
+def make_installed_runtime(tmp_path: Path) -> Path:
+    """A stand-in for `<prefix>/current/orch-hub`: just an executable file."""
+    program = tmp_path / "prefix" / "current" / "orch-hub"
+    program.parent.mkdir(parents=True)
+    program.write_text("#!/bin/sh\n", encoding="utf-8")
+    program.chmod(0o755)
+    return program
+
+
+def test_deploy_runs_an_installed_runtime_with_serve(tmp_path, monkeypatch):
+    """A compiled release has one executable and no console scripts."""
+    program = make_installed_runtime(tmp_path)
+    template = Path(__file__).parents[1] / TEMPLATE_RELATIVE_PATH
+    monkeypatch.setattr(launchd, "bundled_resource", lambda relative: template)
+    plist_path = tmp_path / PLIST_NAME
+    runner = FakeRunner()
+
+    result = deploy_service(
+        DeployOptions(
+            program=program,
+            mandrel_path=tmp_path / "mandrel",
+            token="t",
+            plist_path=plist_path,
+            log_dir=tmp_path / "logs",
+        ),
+        runner=runner,
+        environ={},
+    )
+
+    assert result.deployment.checkout is None
+    assert result.deployment.program == str(program)
+    assert read_plist(plist_path)["ProgramArguments"] == [str(program), "serve"]
+    # install_package defaults to True, but there is no package to install.
+    assert not any("pip" in call for call in runner.calls)
+    assert not any("venv" in call for call in runner.calls)
+
+
+def test_deploy_refuses_a_missing_installed_runtime(tmp_path):
+    with pytest.raises(LaunchdError, match="installed runtime not found"):
+        resolve_deployment(
+            DeployOptions(
+                program=tmp_path / "absent" / "orch-hub",
+                mandrel_path=tmp_path / "mandrel",
+                token="t",
+            ),
+            environ={},
+        )
+
+
+def test_installed_deployment_has_no_virtualenv(tmp_path, monkeypatch):
+    program = make_installed_runtime(tmp_path)
+    template = Path(__file__).parents[1] / TEMPLATE_RELATIVE_PATH
+    monkeypatch.setattr(launchd, "bundled_resource", lambda relative: template)
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            program=program,
+            mandrel_path=tmp_path / "mandrel",
+            token="t",
+            plist_path=tmp_path / PLIST_NAME,
+        ),
+        environ={},
+    )
+
+    with pytest.raises(LaunchdError, match="not a checkout virtualenv"):
+        _ = deployment.venv_python
+
+
+def test_template_path_without_a_bundle_or_a_checkout(tmp_path, monkeypatch):
+    program = make_installed_runtime(tmp_path)
+    monkeypatch.setattr(launchd, "bundled_resource", lambda relative: None)
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            program=program,
+            mandrel_path=tmp_path / "mandrel",
+            token="t",
+            plist_path=tmp_path / PLIST_NAME,
+        ),
+        environ={},
+    )
+
+    with pytest.raises(LaunchdError, match="no launchd template available"):
+        _ = deployment.template_path
+
+
+def test_render_requires_a_program_arguments_array():
+    with pytest.raises(LaunchdError, match="no ProgramArguments array"):
+        launchd._with_program_arguments({"Label": LABEL}, ("/bin/true",))
+
+
+def test_find_checkout_points_a_release_at_setup(tmp_path, monkeypatch):
+    monkeypatch.setattr(launchd, "is_frozen", lambda: True)
+
+    with pytest.raises(LaunchdError, match="`orch-hub setup`"):
+        launchd.find_checkout(tmp_path)
+
+
+# --------------------------------------------------------------------------
+# preserving an installed service's configuration
+# --------------------------------------------------------------------------
+
+
+def install_plist(path: Path, env: dict[str, str]) -> None:
+    with path.open("wb") as fh:
+        plistlib.dump(
+            {"Label": LABEL, "ProgramArguments": ["/x"], "EnvironmentVariables": env},
+            fh,
+            fmt=plistlib.FMT_XML,
+        )
+
+
+def test_update_inherits_host_port_and_data_dir_from_the_installed_plist(tmp_path):
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(
+        plist_path,
+        {
+            HOST_ENV: "100.64.0.5",
+            PORT_ENV: "9101",
+            DATA_DIR_ENV: str(tmp_path / "hub-data"),
+            MANDREL_PATH_ENV: str(tmp_path / "mandrel"),
+            TOKEN_ENV: "installed-token",
+        },
+    )
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=checkout, plist_path=plist_path, log_dir=tmp_path / "logs"
+        ),
+        environ={},
+    )
+
+    assert deployment.host == "100.64.0.5"
+    assert deployment.port == 9101
+    assert deployment.data_dir == (tmp_path / "hub-data").resolve()
+    assert deployment.token == "installed-token"
+
+
+def test_environment_wins_over_the_installed_plist(tmp_path):
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(
+        plist_path,
+        {HOST_ENV: "100.64.0.5", PORT_ENV: "9101", MANDREL_PATH_ENV: str(tmp_path)},
+    )
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=checkout, plist_path=plist_path, log_dir=tmp_path / "logs"
+        ),
+        environ={HOST_ENV: "127.0.0.1", PORT_ENV: "9999"},
+    )
+
+    assert (deployment.host, deployment.port) == ("127.0.0.1", 9999)
+
+
+def test_a_blank_environment_value_does_not_reset_a_configured_service(tmp_path):
+    """Blank counts as unset, so an empty export must not silently rebind."""
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(
+        plist_path,
+        {HOST_ENV: "100.64.0.5", PORT_ENV: "9101", MANDREL_PATH_ENV: str(tmp_path)},
+    )
+
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=checkout, plist_path=plist_path, log_dir=tmp_path / "logs"
+        ),
+        environ={HOST_ENV: "  ", PORT_ENV: ""},
+    )
+
+    assert (deployment.host, deployment.port) == ("100.64.0.5", 9101)
+
+
+def test_an_installed_port_is_parsed_fail_closed(tmp_path):
+    checkout = make_checkout(tmp_path)
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(
+        plist_path, {PORT_ENV: "not-a-port", MANDREL_PATH_ENV: str(tmp_path)}
+    )
+
+    with pytest.raises(LaunchdError, match=PORT_ENV):
+        resolve_deployment(
+            DeployOptions(checkout=checkout, plist_path=plist_path), environ={}
+        )
+
+
+def test_installed_data_dir_and_bind(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(
+        plist_path,
+        {HOST_ENV: "100.64.0.5", PORT_ENV: "9101", DATA_DIR_ENV: str(tmp_path / "d")},
+    )
+
+    assert launchd.installed_data_dir(plist_path=plist_path) == tmp_path / "d"
+    assert launchd.installed_bind(plist_path=plist_path) == ("100.64.0.5", 9101)
+
+
+def test_installed_data_dir_and_bind_fall_back_without_a_plist(tmp_path):
+    missing = tmp_path / "absent.plist"
+
+    assert launchd.installed_data_dir(plist_path=missing) == DEFAULT_DATA_DIR
+    assert launchd.installed_bind(plist_path=missing) == (DEFAULT_HOST, DEFAULT_PORT)
+
+
+# --------------------------------------------------------------------------
+# mandrel verification and health waiting
+# --------------------------------------------------------------------------
+
+
+def test_verify_mandrel_checkout(tmp_path):
+    mandrel = tmp_path / "mandrel"
+    (mandrel / "bin").mkdir(parents=True)
+    (mandrel / "bin" / "mandrel").write_text("#!/bin/sh\n", encoding="utf-8")
+
+    launchd.verify_mandrel_checkout(mandrel)
+
+    with pytest.raises(LaunchdError, match="mandrel checkout not found"):
+        launchd.verify_mandrel_checkout(tmp_path / "absent")
+    (tmp_path / "bare").mkdir()
+    with pytest.raises(LaunchdError, match="does not look like a mandrel checkout"):
+        launchd.verify_mandrel_checkout(tmp_path / "bare")
+
+
+def test_deploy_can_require_a_real_mandrel_checkout(tmp_path):
+    checkout = make_checkout(tmp_path)
+
+    with pytest.raises(LaunchdError, match="does not look like a mandrel checkout"):
+        resolve_deployment(
+            DeployOptions(
+                checkout=checkout,
+                mandrel_path=tmp_path,
+                token="t",
+                plist_path=tmp_path / PLIST_NAME,
+                verify_mandrel=True,
+            ),
+            environ={},
+        )
+
+
+def test_wait_for_health_polls_until_the_service_answers():
+    answers = ["unreachable: refused", "unreachable: refused", "ok"]
+    sleeps: list[float] = []
+
+    result = launchd.wait_for_health(
+        "127.0.0.1",
+        8765,
+        checker=lambda host, port: answers.pop(0),
+        sleeper=sleeps.append,
+    )
+
+    assert result == "ok"
+    assert sleeps == [launchd.HEALTH_POLL_INTERVAL] * 2
+
+
+def test_wait_for_health_reports_the_last_failure():
+    sleeps: list[float] = []
+
+    result = launchd.wait_for_health(
+        "127.0.0.1",
+        8765,
+        timeout=1.0,
+        interval=0.5,
+        checker=lambda host, port: "unreachable: refused",
+        sleeper=sleeps.append,
+    )
+
+    assert result == "unreachable: refused"
+    assert len(sleeps) <= 2

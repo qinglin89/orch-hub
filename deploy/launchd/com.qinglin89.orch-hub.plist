@@ -13,10 +13,15 @@
   <key>Label</key>
   <string>com.qinglin89.orch-hub</string>
 
-  <!-- Console script inside the venv where orch-hub is installed. -->
+  <!-- What launchd runs. deploy/update/setup replace this whole array, because
+       its length depends on the runtime shape: an installed release is
+       `<install-prefix>/current/orch-hub serve` (one executable, no console
+       scripts), a source checkout is `<checkout>/.venv/bin/orch-hub-api`.
+       For manual recovery, write the absolute program and its arguments as one
+       <string> per element. -->
   <key>ProgramArguments</key>
   <array>
-    <string>REPLACE-ORCH-HUB-CHECKOUT/.venv/bin/orch-hub-api</string>
+    <string>REPLACE-ORCH-HUB-PROGRAM</string>
   </array>
 
   <key>EnvironmentVariables</key>

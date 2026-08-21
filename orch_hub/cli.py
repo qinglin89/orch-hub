@@ -38,6 +38,16 @@ from .launchd import (
     status_service,
     stop_service,
 )
+from .install import (
+    InstallError,
+    SetupOptions,
+    install_version,
+    read_installation,
+    rollback,
+    setup_service,
+    uninstall,
+    upgrade,
+)
 from .git_meta import latest_commit
 from .housekeeping import housekeeping_pending
 from .models import ManagedRepo, ReadinessReport, repos_payload
@@ -66,6 +76,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_serve(host=args.host, port=args.port)
     if args.command == "version":
         return _cmd_version(json_output=args.json)
+    if args.command in _INSTALL_COMMANDS:
+        return args.install_handler(args)
     parser.error(f"unknown command: {args.command}")  # pragma: no cover
     return 2
 
@@ -106,6 +118,8 @@ def _build_parser() -> argparse.ArgumentParser:
     # read a version from, so the binary has to be able to say it itself.
     version_p = sub.add_parser("version", help="show the orch-hub runtime version")
     _add_json_arg(version_p)
+    _add_install_commands(sub)
+
     launchd_p = sub.add_parser(
         "launchd", help="manage the macOS launchd service"
     )
@@ -205,6 +219,153 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_json_arg(catalog_repair_p)
     catalog_repair_p.set_defaults(eval_handler=_cmd_eval_catalog_repair)
     return parser
+
+
+# Commands that operate on a user-local installed runtime rather than on a
+# source checkout. Grouped only for dispatch: each is a top-level verb because
+# an engineer running a release types them directly, and a release has no
+# checkout for `launchd deploy` to install from.
+_INSTALL_COMMANDS = frozenset(
+    {"install", "setup", "upgrade", "rollback", "versions", "uninstall"}
+)
+
+
+def _add_install_commands(sub) -> None:
+    install_p = sub.add_parser(
+        "install",
+        help="place a built payload under the install prefix and select it",
+    )
+    _add_payload_arg(install_p)
+    _add_prefix_arg(install_p)
+    _add_bin_dir_arg(install_p)
+    install_p.add_argument(
+        "--no-link",
+        action="store_true",
+        help="do not link the orch-hub command into the bin dir",
+    )
+    _add_json_arg(install_p)
+    install_p.set_defaults(install_handler=_cmd_install)
+
+    setup_p = sub.add_parser(
+        "setup",
+        help="configure and start the resident service from the installed runtime",
+    )
+    _add_prefix_arg(setup_p)
+    setup_p.add_argument(
+        "--mandrel",
+        type=Path,
+        default=None,
+        help=(
+            "mandrel checkout (required on first setup unless "
+            f"{MANDREL_PATH_ENV} is set; later runs reuse the installed plist)"
+        ),
+    )
+    setup_p.add_argument(
+        "--token",
+        default=None,
+        help="bearer token for the service (default: env, existing plist, or generated)",
+    )
+    setup_p.add_argument(
+        "--host", default=None, help=f"bind host (default: {HOST_ENV} or {DEFAULT_HOST})"
+    )
+    setup_p.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help=f"bind port (default: {PORT_ENV} or {DEFAULT_PORT})",
+    )
+    setup_p.add_argument(
+        "--data-dir",
+        type=Path,
+        default=None,
+        help="hub data dir (default: ORCH_HUB_DATA_DIR or ~/.orch-hub)",
+    )
+    setup_p.add_argument(
+        "--log-dir",
+        type=Path,
+        default=None,
+        help="launchd stdout/stderr log dir (default: ~/Library/Logs/orch-hub)",
+    )
+    _add_plist_path_arg(setup_p)
+    setup_p.set_defaults(install_handler=_cmd_setup)
+
+    upgrade_p = sub.add_parser(
+        "upgrade",
+        help="install a newer payload and restart the service onto it",
+    )
+    _add_payload_arg(upgrade_p)
+    _add_prefix_arg(upgrade_p)
+    _add_bin_dir_arg(upgrade_p)
+    _add_plist_path_arg(upgrade_p)
+    upgrade_p.set_defaults(install_handler=_cmd_upgrade)
+
+    rollback_p = sub.add_parser(
+        "rollback",
+        help="select the previously installed version and restart the service",
+    )
+    rollback_p.add_argument(
+        "--to",
+        dest="version",
+        default=None,
+        help="version to select (default: the previously selected one)",
+    )
+    _add_prefix_arg(rollback_p)
+    _add_plist_path_arg(rollback_p)
+    rollback_p.set_defaults(install_handler=_cmd_rollback)
+
+    versions_p = sub.add_parser(
+        "versions", help="list installed runtime versions"
+    )
+    _add_prefix_arg(versions_p)
+    _add_json_arg(versions_p)
+    versions_p.set_defaults(install_handler=_cmd_versions)
+
+    uninstall_p = sub.add_parser(
+        "uninstall", help="stop the service and remove the installed runtime"
+    )
+    _add_prefix_arg(uninstall_p)
+    _add_bin_dir_arg(uninstall_p)
+    _add_plist_path_arg(uninstall_p)
+    uninstall_p.add_argument(
+        "--purge-data",
+        action="store_true",
+        help="also delete the hub data dir (run history, evaluations); needs --yes",
+    )
+    uninstall_p.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm an irreversible --purge-data removal",
+    )
+    uninstall_p.set_defaults(install_handler=_cmd_uninstall)
+
+
+def _add_payload_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--from",
+        dest="payload",
+        type=Path,
+        required=True,
+        metavar="PAYLOAD",
+        help="built payload directory containing the runtime and runtime.json",
+    )
+
+
+def _add_prefix_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--prefix",
+        type=Path,
+        default=None,
+        help="install prefix (default: the running install, else ~/.local/orch-hub)",
+    )
+
+
+def _add_bin_dir_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--bin-dir",
+        type=Path,
+        default=None,
+        help="directory the orch-hub command is linked into (default: ~/.local/bin)",
+    )
 
 
 def _add_json_arg(parser: argparse.ArgumentParser) -> None:
@@ -348,6 +509,178 @@ def _cmd_version(*, json_output: bool) -> int:
     return 0
 
 
+def _cmd_install(args: argparse.Namespace) -> int:
+    try:
+        result = install_version(
+            args.payload,
+            prefix=args.prefix,
+            bin_dir=args.bin_dir,
+            link=not args.no_link,
+        )
+    except InstallError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(result.to_dict(), indent=2))
+        return 0
+    verb = "reinstalled" if result.replaced else "installed"
+    print(f"{verb} orch-hub {result.version}")
+    print(f"prefix: {result.installation.prefix}")
+    print(f"current: {result.installation.current}")
+    if result.link_path:
+        print(f"command: {result.link_path}")
+        if not result.link_on_path:
+            print(f"note: {result.link_path.parent} is not on PATH; add it with")
+            print(f'  export PATH="{result.link_path.parent}:$PATH"')
+    print("next: orch-hub setup --mandrel /absolute/path/to/mandrel")
+    return 0
+
+
+def _cmd_setup(args: argparse.Namespace) -> int:
+    try:
+        result = setup_service(
+            SetupOptions(
+                prefix=args.prefix,
+                mandrel_path=args.mandrel,
+                token=args.token,
+                host=args.host,
+                port=args.port,
+                data_dir=args.data_dir,
+                plist_path=args.plist_path,
+                log_dir=args.log_dir,
+            )
+        )
+    except (InstallError, LaunchdError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print("orch-hub setup ok")
+    print(f"version: {result.installation.current}")
+    _print_service_summary(result.deployment, result.generated_token)
+    print(f"health: {result.health}")
+    return _health_exit(result.health)
+
+
+def _cmd_upgrade(args: argparse.Namespace) -> int:
+    try:
+        result = upgrade(
+            args.payload,
+            prefix=args.prefix,
+            bin_dir=args.bin_dir,
+            plist_path=args.plist_path,
+        )
+    except (InstallError, LaunchdError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    previous = result.previous_version or "none"
+    print(f"upgraded orch-hub {previous} -> {result.install.version}")
+    _print_service_summary(result.setup.deployment, result.setup.generated_token)
+    print(f"health: {result.setup.health}")
+    return _health_exit(result.setup.health)
+
+
+def _cmd_rollback(args: argparse.Namespace) -> int:
+    try:
+        result = rollback(
+            version=args.version, prefix=args.prefix, plist_path=args.plist_path
+        )
+    except (InstallError, LaunchdError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"rolled back orch-hub {result.from_version or 'none'} -> {result.to_version}")
+    print(f"health: {result.health}")
+    return _health_exit(result.health)
+
+
+def _cmd_versions(args: argparse.Namespace) -> int:
+    try:
+        installation = read_installation(args.prefix)
+    except InstallError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(installation.to_dict(), indent=2))
+        return 0
+    print(f"prefix: {installation.prefix}")
+    if not installation.versions:
+        print("no versions installed")
+        return 0
+    for version in installation.versions:
+        marks = []
+        if version == installation.current:
+            marks.append("current")
+        if version == installation.previous:
+            marks.append("previous")
+        suffix = f" ({', '.join(marks)})" if marks else ""
+        print(f"{version}{suffix}")
+    return 0
+
+
+def _cmd_uninstall(args: argparse.Namespace) -> int:
+    if args.purge_data and not args.yes:
+        print(
+            "error: --purge-data deletes run history and evaluation artifacts; "
+            "pass --yes to confirm",
+            file=sys.stderr,
+        )
+        return 1
+    try:
+        result = uninstall(
+            prefix=args.prefix,
+            bin_dir=args.bin_dir,
+            plist_path=args.plist_path,
+            purge_data=args.purge_data,
+        )
+    except (InstallError, LaunchdError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print("orch-hub uninstalled")
+    if result.service_error:
+        print(f"note: service stop reported: {result.service_error}")
+    print(f"plist: {'removed' if result.plist_removed else 'not installed'}")
+    if result.link_removed and result.link_path:
+        print(f"command link: removed {result.link_path}")
+    elif result.link_path:
+        print(f"command link: left {result.link_path} (not ours)")
+    print(f"prefix: {'removed' if result.prefix_removed else 'not present'}")
+    if result.data_removed and result.data_dir:
+        print(f"data dir: removed {result.data_dir}")
+    else:
+        print("data dir: kept (use --purge-data --yes to delete it)")
+    print(
+        "orchestrator runs were not stopped; detached runs keep their own "
+        "process sessions."
+    )
+    return 0
+
+
+def _print_service_summary(deployment, generated_token: bool) -> None:
+    """Shared post-configuration summary for setup and upgrade.
+
+    Secrets are handled the same way the launchd deploy path handles them: a
+    generated token is printed exactly once because it exists nowhere else yet,
+    and the Bark URL is never printed at all because it embeds a device key.
+    """
+    print(f"label: {LABEL}")
+    print(f"plist: {deployment.plist_path}")
+    print(f"program: {deployment.program}")
+    print(f"mandrel: {deployment.mandrel_path}")
+    print(f"data dir: {deployment.data_dir}")
+    print(f"dashboard: {deployment.dashboard_url}")
+    if generated_token:
+        print(f"generated ORCH_HUB_TOKEN: {deployment.token}")
+    else:
+        print(f"token: {deployment.token_source}")
+    print(f"bark push: {'enabled' if deployment.bark_url else 'disabled'}")
+
+
+def _health_exit(health: str) -> int:
+    """Non-zero when the service did not answer, so a scripted install notices."""
+    if health == "ok":
+        return 0
+    print(f"error: service did not become healthy: {health}", file=sys.stderr)
+    return 1
+
+
 def _cmd_launchd_deploy(args: argparse.Namespace) -> int:
     try:
         result = deploy_service(
@@ -371,7 +704,7 @@ def _cmd_launchd_deploy(args: argparse.Namespace) -> int:
     print(f"launchd {action} ok")
     print(f"label: {LABEL}")
     print(f"plist: {deployment.plist_path}")
-    print(f"program: {deployment.api_bin}")
+    print(f"program: {deployment.program}")
     print(f"dashboard: {deployment.dashboard_url}")
     if result.generated_token:
         print(f"generated ORCH_HUB_TOKEN: {deployment.token}")

@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
+import shutil
 import socket
 import subprocess
 import time
@@ -211,7 +213,11 @@ def test_manifest_carries_no_build_machine_paths(manifest: dict):
 def test_cli_help_works_without_python_on_path(tmp_path: Path):
     result = run_runtime(tmp_path, "--help")
     assert result.returncode == 0, result.stderr
-    for command in ("repos", "serve", "launchd", "notify", "eval", "version"):
+    for command in (
+        "repos", "serve", "launchd", "notify", "eval", "version",
+        # The checkout-independent lifecycle: the only surface a release has.
+        "install", "setup", "upgrade", "rollback", "versions", "uninstall",
+    ):
         assert command in result.stdout
 
 
@@ -254,3 +260,201 @@ def test_protected_routes_answer_with_the_token(served: str):
     assert status == 200
     # The synthetic Mandrel checkout has no registry, which reads as no repos.
     assert json.loads(body) == {"repos": []}
+
+
+# --------------------------------------------------------------------------
+# installing, selecting, and removing the compiled runtime
+# --------------------------------------------------------------------------
+
+
+def stub_launchctl(tmp_path: Path) -> Path:
+    """A launchctl that reports an empty domain and does nothing else.
+
+    The service label is a fixed singleton, so a test that ran the real
+    launchctl would boot out the operator's own resident hub. This stands in
+    for it: `print`/`bootout` answer "not loaded" in launchd's own words (the
+    "is it there" check reads the message, not just the exit code), and
+    `bootstrap` succeeds without starting anything.
+    """
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    script = bin_dir / "launchctl"
+    script.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  print|bootout) echo "Could not find service" >&2; exit 113 ;;\n'
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    return bin_dir
+
+
+def install_env(tmp_path: Path, **extra: str) -> dict[str, str]:
+    """Isolated environment that can still reach launchctl (stub) and plutil."""
+    env = isolated_env(tmp_path, **extra)
+    env["PATH"] = os.pathsep.join([str(stub_launchctl(tmp_path)), "/usr/bin", "/bin"])
+    return env
+
+
+def run_installed(binary: Path, tmp_path: Path, *args: str, **extra: str):
+    return subprocess.run(
+        [str(binary), *args],
+        cwd=str(tmp_path),
+        env=install_env(tmp_path, **extra),
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+
+@pytest.fixture
+def installed(tmp_path: Path) -> tuple[Path, Path]:
+    """Install the built payload into a scratch prefix; yield (prefix, command)."""
+    prefix = tmp_path / "prefix"
+    bin_dir = tmp_path / "bin"
+    result = run_installed(
+        executable(),
+        tmp_path,
+        "install",
+        "--from",
+        str(payload_dir()),
+        "--prefix",
+        str(prefix),
+        "--bin-dir",
+        str(bin_dir),
+    )
+    assert result.returncode == 0, result.stderr
+    return prefix, bin_dir / "orch-hub"
+
+
+def test_install_places_a_runnable_versioned_copy(installed, tmp_path: Path, manifest):
+    """The copied payload has to still be a working runtime, symlinks included."""
+    prefix, command = installed
+    version_dir = prefix / "versions" / manifest["version"]
+
+    assert (prefix / "current").is_symlink()
+    assert os.readlink(prefix / "current") == f"versions/{manifest['version']}"
+    assert (version_dir / "_internal" / "Python").is_symlink()
+    assert command.is_symlink()
+
+    # Run it through both indirections: the command link and the current link.
+    for entry in (command, prefix / "current" / "orch-hub"):
+        result = run_installed(entry, tmp_path, "version", "--json")
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout)["version"] == manifest["version"]
+
+
+def test_installed_runtime_finds_its_own_prefix(installed, tmp_path: Path, manifest):
+    """`versions` with no --prefix must answer about the install it runs from."""
+    _, command = installed
+
+    result = run_installed(command, tmp_path, "versions")
+
+    assert result.returncode == 0, result.stderr
+    assert f"{manifest['version']} (current)" in result.stdout
+
+
+def test_setup_renders_the_bundled_plist_template(
+    installed, tmp_path: Path, served: str
+):
+    """Setup must work with no checkout: the template comes from the bundle.
+
+    launchd is stubbed, so nothing is actually started — the health check is
+    pointed at the runtime the `served` fixture already runs, which is what
+    makes this exercise the verification step instead of waiting out its
+    timeout.
+    """
+    prefix, command = installed
+    plist_path = tmp_path / "agent.plist"
+    mandrel = tmp_path / "mandrel"
+    (mandrel / "bin").mkdir(parents=True)
+    (mandrel / "bin" / "mandrel").write_text("#!/bin/sh\n", encoding="utf-8")
+    host, port = served.rsplit("/", 1)[-1].split(":")
+
+    result = run_installed(
+        command,
+        tmp_path,
+        "setup",
+        "--mandrel", str(mandrel),
+        "--plist-path", str(plist_path),
+        "--log-dir", str(tmp_path / "logs"),
+        "--data-dir", str(tmp_path / "hub-data"),
+        "--host", host,
+        "--port", port,
+        ORCH_HUB_TOKEN="frozen-setup-token",
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "health: ok" in result.stdout
+    assert plist_path.stat().st_mode & 0o777 == 0o600
+    with plist_path.open("rb") as fh:
+        plist = plistlib.load(fh)
+    assert plist["ProgramArguments"] == [str(prefix / "current" / "orch-hub"), "serve"]
+    assert plist["EnvironmentVariables"]["ORCH_HUB_TOKEN"] == "frozen-setup-token"
+    assert "REPLACE-" not in plist_path.read_text(encoding="utf-8")
+
+
+def test_setup_refuses_a_path_that_is_not_a_mandrel_checkout(installed, tmp_path: Path):
+    _, command = installed
+    (tmp_path / "not-mandrel").mkdir()
+
+    result = run_installed(
+        command,
+        tmp_path,
+        "setup",
+        "--mandrel", str(tmp_path / "not-mandrel"),
+        "--plist-path", str(tmp_path / "agent.plist"),
+    )
+
+    assert result.returncode == 1
+    assert "does not look like a mandrel checkout" in result.stderr
+    assert not (tmp_path / "agent.plist").exists()
+
+
+def test_uninstall_removes_the_tree_it_is_running_from(installed, tmp_path: Path):
+    """The one operation that deletes the running executable's own files.
+
+    A frozen runtime loads shared libraries out of its payload directory, so an
+    uninstall that removed them mid-flight would fail somewhere unrelated. The
+    hub's data directory is deliberately left behind.
+    """
+    prefix, command = installed
+    data_dir = tmp_path / "hub-data"
+    (data_dir / "runs").mkdir(parents=True)
+
+    result = run_installed(
+        command,
+        tmp_path,
+        "uninstall",
+        "--prefix", str(prefix),
+        "--bin-dir", str(command.parent),
+        "--plist-path", str(tmp_path / "agent.plist"),
+        ORCH_HUB_DATA_DIR=str(data_dir),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "orch-hub uninstalled" in result.stdout
+    assert not prefix.exists()
+    assert not command.is_symlink()
+    assert (data_dir / "runs").is_dir()
+
+
+def test_install_refuses_a_payload_for_another_machine(tmp_path: Path):
+    """Architecture mismatches fail before anything is written."""
+    foreign = tmp_path / "foreign-payload"
+    shutil.copytree(payload_dir(), foreign, symlinks=True)
+    manifest_path = foreign / "runtime.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest.update({"arch": "x86_64", "target": "darwin-x86_64"})
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    prefix = tmp_path / "prefix"
+
+    result = run_installed(
+        executable(), tmp_path, "install", "--from", str(foreign), "--prefix", str(prefix)
+    )
+
+    assert result.returncode == 1
+    assert "darwin-x86_64" in result.stderr
+    assert not prefix.exists()
