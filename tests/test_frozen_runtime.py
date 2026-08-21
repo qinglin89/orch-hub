@@ -53,6 +53,22 @@ def payload_dir() -> Path:
     return Path(configured).expanduser() if configured else DEFAULT_PAYLOAD
 
 
+def tree_members(root: Path) -> dict[str, tuple[bool, bool]]:
+    """Every path under ``root`` with the two properties a copy can lose.
+
+    A payload is not bytes alone: a dereferenced symlink or a dropped executable
+    bit produces a tree that still looks complete and no longer runs. What is
+    *in* the payload depends on the pinned interpreter — the current one bundles
+    a plain ``libpython`` where a framework build bundled a directory of relative
+    symlinks — so this compares the two trees to each other rather than naming
+    members that only one interpreter's payload has.
+    """
+    return {
+        path.relative_to(root).as_posix(): (path.is_symlink(), os.access(path, os.X_OK))
+        for path in sorted(root.rglob("*"))
+    }
+
+
 def executable() -> Path:
     path = payload_dir() / "orch-hub"
     if not path.is_file():
@@ -339,7 +355,8 @@ def test_install_places_a_runnable_versioned_copy(installed, tmp_path: Path, man
 
     assert (prefix / "current").is_symlink()
     assert os.readlink(prefix / "current") == f"versions/{manifest['version']}"
-    assert (version_dir / "_internal" / "Python").is_symlink()
+    # Copied, not rebuilt: same members, same link-or-file, same executability.
+    assert tree_members(version_dir) == tree_members(payload_dir())
     assert command.is_symlink()
 
     # Run it through both indirections: the command link and the current link.
@@ -576,9 +593,9 @@ def release(tmp_path_factory) -> Path:
 
     tests/test_release_package.py pins the packager's decisions against a
     synthetic payload it can shape freely. This ties the same code to the
-    artifact the freezer really emits: 30 MB, a bundled framework of relative
-    symlinks, and a Mach-O executable — the three things a synthetic fixture
-    cannot honestly stand in for.
+    artifact the freezer really emits: 30 MB, a bundled interpreter library, and
+    a Mach-O executable — the things a synthetic fixture cannot honestly stand
+    in for.
     """
     payload = payload_dir()
     executable()  # skip here, not mid-test, when nothing is built
@@ -648,21 +665,14 @@ def test_the_real_installer_verifies_itself_and_the_host(
 def test_the_real_installer_unpacks_the_payload_it_was_built_from(
     release: Path, tmp_path: Path, manifest: dict
 ):
-    """Extraction has to reproduce the payload, symlinked framework included."""
+    """Extraction has to reproduce the payload member for member."""
     installer = next(release.glob("*.run"))
     result = run_installer(installer, tmp_path, "--extract", str(tmp_path / "unpacked"))
     assert result.returncode == 0, result.stderr
     unpacked = tmp_path / "unpacked" / f"orch-hub-{manifest['target']}"
     original = payload_dir()
 
-    def members(root: Path) -> dict[str, tuple[bool, bool]]:
-        found = {}
-        for path in sorted(root.rglob("*")):
-            relative = path.relative_to(root).as_posix()
-            found[relative] = (path.is_symlink(), os.access(path, os.X_OK))
-        return found
-
-    assert members(unpacked) == members(original)
+    assert tree_members(unpacked) == tree_members(original)
     assert (unpacked / "orch-hub").read_bytes() == (original / "orch-hub").read_bytes()
 
 

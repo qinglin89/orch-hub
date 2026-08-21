@@ -13,20 +13,25 @@ manifest all address this directory.
 Three properties are worth more than the mechanics:
 
 - **The build is declared, not discovered.** Dependencies come from
-  ``pyproject.toml`` and are installed into an isolated build environment, so a
-  release cannot silently inherit whatever the maintainer happened to have
-  installed. The project itself is deliberately *not* installed there: the
-  freezer reads first-party code from the checkout, so what ships is the
-  working tree and never a stale copy in ``site-packages``.
+  ``pyproject.toml`` and the interpreter from :mod:`orch_hub.release_python`,
+  both installed into an isolated build environment, so a release cannot
+  silently inherit whatever the maintainer happened to have installed — down to
+  the Python that decides which macOS versions the artifact runs on. The
+  project itself is deliberately *not* installed there: the freezer reads
+  first-party code from the checkout, so what ships is the working tree and
+  never a stale copy in ``site-packages``.
 - **The payload declares itself.** ``runtime.json`` records version, target,
   architecture, and the minimum macOS the produced binaries actually require —
   read back out of the Mach-O headers rather than assumed from the build host.
   Nothing in it is a path, so the manifest carries no trace of the builder.
 - **The payload is audited before it is a release.** A build with findings
   fails; shipping a maintainer's absolute path or bearer token inside a binary
-  is not recoverable after publication. The audit runs on the staged build, so
-  a rejected candidate is never published and the last payload that passed
-  stays where the installer and the smoke test look for it.
+  is not recoverable after publication. The same applies to the minimum macOS
+  the produced binaries turn out to require: above the floor the release
+  promises, the build refuses rather than publishing an artifact that is only
+  wrong on somebody else's Mac. Both run on the staged build, so a rejected
+  candidate is never published and the last payload that passed stays where the
+  installer and the smoke test look for it.
 
 Cross-building is not attempted. A freezer bundles the interpreter and shared
 libraries of the machine it runs on, so the host must already be the target.
@@ -43,7 +48,7 @@ import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 # ``launchd`` and ``resources`` own the paths a payload must carry, so the build
@@ -61,13 +66,19 @@ from .atomic_dir import (
     place_directory,
 )
 from .launchd import TEMPLATE_RELATIVE_PATH as LAUNCHD_TEMPLATE_RELATIVE_PATH
-from .macho import PayloadFacts, scan_payload
+from .macho import PayloadFacts, scan_payload, version_key
 from .release_audit import (
     AuditReport,
     ForbiddenLiteral,
     SECRET_MATERIAL,
     audit_payload,
     maintainer_path_literals,
+)
+from .release_python import (
+    InterpreterError,
+    PinnedInterpreter,
+    ensure_interpreter,
+    pinned_interpreter,
 )
 from .resources import WEB_RELATIVE_PATH
 
@@ -84,6 +95,14 @@ MANIFEST_SCHEMA = "orch-hub-runtime/1"
 BUNDLE_DIR = "_internal"
 """Subdirectory the freezer puts bundled resources and libraries in."""
 
+INTERPRETER_DIR = "interpreters"
+"""Where provisioned build interpreters live under the scratch directory.
+
+Inside the build directory because it is a cache of downloaded bytes, and
+because a release build must not need write access to anything else on the
+machine — the same reason the pin is a redistributable archive rather than a
+system install."""
+
 RELEASE_EXTRA = "release"
 """``pyproject.toml`` optional-dependency group holding the build toolchain."""
 
@@ -94,6 +113,7 @@ ENTRY_RELATIVE_PATH = Path("orch_hub") / "__main__.py"
 BUILD_ONLY_MODULES = (
     "orch_hub.release_build",
     "orch_hub.release_package",
+    "orch_hub.release_python",
     "orch_hub.release_audit",
     "orch_hub.macho",
 )
@@ -150,16 +170,26 @@ class BuildOptions:
     venv_dir: Path
     python: str | None = None
     """Interpreter the build environment is created from — and therefore the
-    interpreter that gets bundled. It decides the payload's minimum macOS, so
-    a release pipeline pins a redistributable one instead of taking the host's.
+    interpreter that gets bundled. It decides the payload's minimum macOS, so a
+    release takes the pinned redistributable one instead of the host's.
 
-    ``None`` means unpinned: create the environment from whatever is running the
-    build, and accept an existing one as-is. A pin is a requirement about the
-    artifact, so it is enforced against the environment on disk."""
+    ``None`` means the pin: :func:`ensure_build_venv` provisions the interpreter
+    declared for the target and uses that. A path or command name overrides it,
+    which is how a maintainer builds a local-only payload without a download —
+    and why the override is a pin too, enforced against the environment on disk
+    rather than accepted from whatever it was last created from."""
 
     install: bool = True
     clean: bool = True
     allow_findings: bool = False
+    allow_unsupported_macos: bool = False
+    """Build a payload that demands a newer macOS than the release supports.
+
+    For a payload that is not going to be published — a local smoke test built
+    from the host interpreter, say. A release never sets it: the floor is a
+    promise the installer enforces on arrival, where it can only be reported,
+    not fixed."""
+
     literals: tuple[ForbiddenLiteral, ...] = ()
 
     @property
@@ -266,6 +296,38 @@ def check_host(*, system: str | None = None, machine: str | None = None) -> None
         )
 
 
+def check_min_macos(
+    min_macos: str | None, pin: PinnedInterpreter, *, allow: bool = False
+) -> None:
+    """Hold the produced payload to the oldest macOS the release promises.
+
+    The floor is measured off the binaries rather than declared, so this catches
+    every way it can rise: an interpreter compiled for a newer macOS, a
+    dependency wheel built against a newer SDK, a freezer bootloader from a
+    newer toolchain. All three ship a payload the installer then refuses on the
+    machines it was meant for, and refuses correctly — the number in the
+    manifest is true, which is exactly why the build is the last place it can
+    still be wrong about the *release*.
+
+    A payload whose floor cannot be read is refused too: the installer skips the
+    macOS gate when the payload declares nothing, so an unreadable floor is not
+    a missing check here, it is a missing check on every machine that installs
+    it.
+    """
+    if min_macos is not None and version_key(min_macos) <= version_key(pin.min_macos):
+        return
+    demanded = f"requires macOS {min_macos}" if min_macos else "declares no minimum macOS"
+    message = (
+        f"the payload {demanded}, but the {pin.target} release supports "
+        f"macOS {pin.min_macos}: build from the pinned interpreter "
+        f"(python {pin.python_version}, the default) or pass "
+        "--allow-unsupported-macos for a payload that is not going to be published"
+    )
+    if not allow:
+        raise BuildError(message)
+    print(f"warning: {message}", file=sys.stderr)
+
+
 def default_literals(
     checkout: Path, environ: dict[str, str], *, home: Path | None = None
 ) -> tuple[ForbiddenLiteral, ...]:
@@ -288,14 +350,20 @@ def build_runtime(options: BuildOptions) -> BuildResult:
     distributable path is only touched once the payload has passed. A build
     that fails its audit therefore publishes nothing and destroys nothing: the
     previous payload stays where the installer and smoke test look for it,
-    instead of being replaced by a candidate that was rejected.
+    instead of being replaced by a candidate that was rejected. The minimum
+    macOS the produced binaries turned out to require is held to the same rule,
+    for the same reason: the installer gates on that number, so a payload above
+    the promised floor is one whose only remaining failure is on a stranger's
+    Mac.
     """
     check_host()
+    pin = pinned_interpreter(TARGET)
     version = read_version(options.checkout)
     project = read_project(options.checkout)
     venv_python = ensure_build_venv(options, project)
     staged_dir = _freeze(options, venv_python)
     facts = scan_payload(staged_dir)
+    check_min_macos(facts.min_macos, pin, allow=options.allow_unsupported_macos)
     manifest = _write_manifest(
         staged_dir,
         version=version,
@@ -319,12 +387,14 @@ def ensure_build_venv(options: BuildOptions, project: dict) -> Path:
 
     The environment is a cache, but the interpreter inside it is part of the
     artifact: it is the one that gets bundled and the one that sets the
-    payload's minimum macOS. So a pinned interpreter is checked against the
-    environment already on disk and rebuilds it when they differ, rather than
-    bundling the previous interpreter while reporting the pin. The reused
-    directory is invisible in the build output, so that mistake would surface
-    only on the machine of whoever could not run the release.
+    payload's minimum macOS. So the interpreter is resolved first — the target's
+    pin unless the caller named another one — and then checked against the
+    environment already on disk, which is rebuilt when they differ rather than
+    bundling the previous interpreter while reporting the requested one. The
+    reused directory is invisible in the build output, so that mistake would
+    surface only on the machine of whoever could not run the release.
     """
+    options = replace(options, python=resolve_interpreter(options))
     venv_python = options.venv_dir / "bin" / "python"
     installed = _pin_mismatch(options)
     if not options.install:
@@ -365,13 +435,31 @@ def ensure_build_venv(options: BuildOptions, project: dict) -> Path:
     return venv_python
 
 
+def resolve_interpreter(options: BuildOptions) -> str:
+    """The interpreter this build uses, provisioning the pin when none is named.
+
+    An explicit ``--python`` is taken as given: it is the escape hatch for
+    building without a download, and second-guessing it would remove the only
+    way to build offline. Everything else gets the pinned redistributable
+    interpreter, so the default build produces a publishable payload instead of
+    one shaped by whichever Python the machine happens to have.
+    """
+    if options.python is not None:
+        return options.python
+    pin = pinned_interpreter(TARGET)
+    try:
+        return str(ensure_interpreter(pin, options.work_dir / INTERPRETER_DIR))
+    except InterpreterError as exc:
+        raise BuildError(str(exc)) from exc
+
+
 def _pin_mismatch(options: BuildOptions) -> str | None:
     """The existing environment's interpreter when it is not the pinned one.
 
-    ``None`` covers every case where reuse is correct: no pin, no environment
-    yet, or an environment already built from the requested interpreter. An
-    environment that cannot say what it was built from counts as a mismatch —
-    an unproven interpreter is not the pinned one.
+    ``None`` covers every case where reuse is correct: no resolved interpreter
+    to check against, no environment yet, or an environment already built from
+    the requested one. An environment that cannot say what it was built from
+    counts as a mismatch — an unproven interpreter is not the pinned one.
     """
     if options.python is None or not (options.venv_dir / "bin" / "python").is_file():
         return None
@@ -621,8 +709,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=None,
         help=(
             "interpreter the build environment is created from; it is the one "
-            "bundled, so it sets the payload's minimum macOS. Pinning it "
-            "rebuilds an environment that was created from another one"
+            "bundled, so it sets the payload's minimum macOS (default: the "
+            f"pinned redistributable interpreter, fetched into <work>/{INTERPRETER_DIR}). "
+            "Naming another one rebuilds an environment created from the pin"
         ),
     )
     parser.add_argument(
@@ -640,6 +729,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="report audit findings without failing the build",
     )
+    parser.add_argument(
+        "--allow-unsupported-macos",
+        action="store_true",
+        help=(
+            "build a payload that requires a newer macOS than the release "
+            "supports (never for a published artifact)"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = parser.parse_args(argv)
 
@@ -654,6 +751,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         install=not args.skip_install,
         clean=not args.no_clean,
         allow_findings=args.allow_findings,
+        allow_unsupported_macos=args.allow_unsupported_macos,
         literals=default_literals(checkout, dict(os.environ)),
     )
     options.work_dir.mkdir(parents=True, exist_ok=True)
@@ -678,7 +776,8 @@ def _print_human(result: BuildResult) -> None:
         "binaries:   "
         f"{manifest['binaries']} ({', '.join(manifest['architectures']) or 'none'})"
     )
-    print(f"min macOS:  {manifest['min_macos'] or 'undeclared'}")
+    floor = pinned_interpreter(manifest["target"]).min_macos
+    print(f"min macOS:  {manifest['min_macos'] or 'undeclared'} (supported: {floor})")
     scanned = f"{result.audit.files_scanned} files, {result.audit.archives_scanned} archives"
     if result.audit.clean:
         print(f"audit:      clean ({scanned})")

@@ -26,10 +26,11 @@ Three properties are worth more than the mechanics:
   payload integrity are baked into the shell header and verified before a byte
   is extracted — a compiled binary for the wrong machine cannot be run to
   report that it is for the wrong machine.
-- **Packaging re-audits the payload.** The build audits what it froze; this
-  audits what is about to become a downloadable file. They are the same check
-  at two different moments, and only the second one covers a payload that was
-  built once and packaged later.
+- **Packaging re-checks the payload.** The build audits what it froze and
+  holds it to the oldest macOS the release promises; this asks both again of
+  what is about to become a downloadable file. They are the same checks at two
+  different moments, and only the second one covers a payload that was built
+  once — or built with the build's own escape hatch — and packaged later.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .atomic_dir import PlacementError, place_directory
+from .macho import version_key
 from .release_audit import AuditReport, ForbiddenLiteral, audit_payload
 from .release_build import (
     EXECUTABLE_NAME,
@@ -59,6 +61,7 @@ from .release_build import (
     TARGET,
     default_literals,
 )
+from .release_python import PINNED
 
 RELEASE_SCHEMA = "orch-hub-release/1"
 """Schema of ``release.json``.
@@ -137,6 +140,13 @@ class PackageOptions:
     template_path: Path
     literals: tuple[ForbiddenLiteral, ...] = ()
     allow_findings: bool = False
+    allow_unsupported_macos: bool = False
+    """Package a payload that demands a newer macOS than the release supports.
+
+    The mirror of the build's own escape hatch, and needed for the same reason:
+    a payload built from the host interpreter is worth turning into a ``.run``
+    to try the installer out locally. Kept a separate decision from building
+    one, because this is the step whose output can be handed to somebody."""
 
 
 @dataclass(frozen=True)
@@ -421,12 +431,51 @@ def _describe(directory: Path, options: PackageOptions) -> _Payload:
     if not payload_dir.is_dir():
         raise PackageError(f"payload directory not found: {payload_dir}")
     manifest = read_payload_manifest(payload_dir)
+    _check_supported_macos(
+        manifest, payload_dir, allow=options.allow_unsupported_macos
+    )
     report = audit_payload(
         payload_dir, required=REQUIRED_MEMBERS, literals=options.literals
     )
     if report.findings and not options.allow_findings:
         raise PackageError(_findings_message(payload_dir, report))
     return _Payload(directory=payload_dir, manifest=manifest, audit=report)
+
+
+def _check_supported_macos(manifest: dict, payload_dir: Path, *, allow: bool) -> None:
+    """Refuse to publish a payload the release does not claim to support.
+
+    The build holds what it just froze to the floor promised for its target, but
+    a payload can be built once and packaged later — and the build's escape
+    hatch exists, so a payload above the floor is a file that can be sitting in
+    ``dist`` already. Packaging is where it would stop being a local experiment
+    and become something an engineer downloads, so the promise is checked again
+    here, against the manifest about to be embedded in an installer header.
+
+    A target with no pinned interpreter has no promised floor to be held to, and
+    this is not the place to invent one: it declares what it measured, and the
+    installer compares against that or, for a target that is not macOS, against
+    nothing.
+    """
+    target = value_of(manifest, "target")
+    pin = PINNED.get(target)
+    if pin is None:
+        return
+    declared = value_of(manifest, "min_macos")
+    if declared and version_key(declared) <= version_key(pin.min_macos):
+        return
+    demanded = f"requires macOS {declared}" if declared else "declares no minimum macOS"
+    # An absent floor is not a lenient release: the installer skips its macOS
+    # gate when the payload declares nothing, so this one would install on a Mac
+    # too old to run it and fail after unpacking.
+    message = (
+        f"{payload_dir} {demanded}, but the {target} release supports "
+        f"macOS {pin.min_macos}: rebuild it from the pinned interpreter, or "
+        "pass --allow-unsupported-macos to package it anyway"
+    )
+    if not allow:
+        raise PackageError(message)
+    print(f"warning: {message}", file=sys.stderr)
 
 
 def _check_directory_layout(options: PackageOptions) -> None:
@@ -822,6 +871,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         action="store_true",
         help="report payload audit findings without failing the packaging",
     )
+    parser.add_argument(
+        "--allow-unsupported-macos",
+        action="store_true",
+        help=(
+            "package a payload that requires a newer macOS than the release "
+            "supports (never for a published artifact)"
+        ),
+    )
     parser.add_argument("--json", action="store_true", help="emit the result as JSON")
     args = parser.parse_args(argv)
 
@@ -837,6 +894,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         .resolve(),
         literals=default_literals(checkout, dict(os.environ)),
         allow_findings=args.allow_findings,
+        allow_unsupported_macos=args.allow_unsupported_macos,
     )
     try:
         # The scratch tree is created by the staging step and by nothing else.

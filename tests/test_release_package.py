@@ -289,12 +289,45 @@ def test_an_os_or_arch_the_installer_cannot_compare_is_refused(
 
 def test_a_missing_min_macos_is_allowed_and_renders_empty(tmp_path: Path):
     # Absence means "no declared floor", which the installer treats as "do not
-    # compare" — not as a floor of zero and not as a reason to refuse.
-    payload = make_payload(tmp_path, min_macos=None)
+    # compare" — not as a floor of zero and not as a reason to refuse. Only a
+    # target the release promises a floor for is held to one, so this is asked
+    # of a target that carries no promise.
+    payload = make_payload(tmp_path, target="darwin-x86_64", min_macos=None)
     assert "min_macos" not in read_payload_manifest(payload)
     out = package(tmp_path, payload)
     header = _header(next(out.glob("*.run")))
     assert "MIN_MACOS=''" in header
+    release = json.loads((out / RELEASE_NAME).read_text(encoding="utf-8"))
+    assert release["targets"]["darwin-x86_64"]["min_macos"] is None
+
+
+def test_the_shipped_target_is_held_to_the_floor_it_promises(tmp_path: Path):
+    # The build refuses this payload, and can be told not to; packaging is the
+    # step whose output somebody downloads, so it asks again.
+    payload = make_payload(tmp_path, min_macos="26.0")
+
+    with pytest.raises(PackageError, match="requires macOS 26.0"):
+        package(tmp_path, payload)
+
+    assert not (tmp_path / "release").exists()
+
+
+def test_the_shipped_target_must_declare_a_floor_at_all(tmp_path: Path):
+    # The installer skips its macOS gate on an empty floor, so publishing one
+    # removes the check from every machine that installs it.
+    payload = make_payload(tmp_path, min_macos=None)
+
+    with pytest.raises(PackageError, match="declares no minimum macOS"):
+        package(tmp_path, payload)
+
+
+def test_an_unsupported_floor_can_be_packaged_deliberately(tmp_path: Path, capsys):
+    payload = make_payload(tmp_path, min_macos="26.0")
+
+    out = package(tmp_path, payload, allow_unsupported_macos=True)
+
+    assert "MIN_MACOS='26.0'" in _header(next(out.glob("*.run")))
+    assert "warning:" in capsys.readouterr().err
 
 
 def test_payloads_of_different_versions_are_not_one_release(tmp_path: Path):
@@ -580,12 +613,12 @@ def test_packaging_emits_an_installer_metadata_and_checksums(tmp_path: Path):
 def test_a_payload_manifest_is_carried_into_the_release_verbatim(tmp_path: Path):
     # A consumer comparing an installed runtime.json against the published
     # release has to find the same document, key for key.
-    payload = make_payload(tmp_path, min_macos=None)
+    payload = make_payload(tmp_path)
     out = package(tmp_path, payload)
     release = json.loads((out / RELEASE_NAME).read_text(encoding="utf-8"))
     written = json.loads((payload / MANIFEST_NAME).read_text(encoding="utf-8"))
     assert release["targets"]["darwin-arm64"]["runtime"] == written
-    assert release["targets"]["darwin-arm64"]["min_macos"] is None
+    assert release["targets"]["darwin-arm64"]["min_macos"] == "11.0"
 
 
 def test_release_metadata_keys_artifacts_by_target(tmp_path: Path):

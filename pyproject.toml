@@ -17,7 +17,9 @@ dependencies = [
 dev = ["pytest>=7", "httpx>=0.24"]
 # Build toolchain for the compiled standalone release runtime. Pinned exactly:
 # the freezer decides the payload's layout and bootloader, so an unpinned bump
-# would silently change what a release artifact *is*.
+# would silently change what a release artifact *is*. The other half of that
+# pin is not a package: the interpreter the payload bundles is declared in
+# orch_hub/release_python.py, because it sets the minimum macOS it runs on.
 release = ["pyinstaller==6.22.2"]
 
 [project.scripts]

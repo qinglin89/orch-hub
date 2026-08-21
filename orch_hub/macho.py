@@ -116,7 +116,7 @@ def scan_payload(root: Path) -> PayloadFacts:
         architectures.update(facts.architectures)
         if facts.min_macos is None:
             continue
-        parsed = _version_key(facts.min_macos)
+        parsed = version_key(facts.min_macos)
         if highest is None or parsed > highest:
             highest = parsed
             highest_text = facts.min_macos
@@ -236,7 +236,13 @@ def _format_version(value: int) -> str:
     return f"{major}.{minor}.{patch}" if patch else f"{major}.{minor}"
 
 
-def _version_key(text: str) -> tuple[int, ...]:
+def version_key(text: str) -> tuple[int, ...]:
+    """Order two macOS versions the way this module ranks them.
+
+    Public because the release build compares a payload's measured floor against
+    the floor it promises, and comparing those two by any other rule than the one
+    that picked the payload's own number is a check of something else.
+    """
     parts = []
     for piece in text.split("."):
         try:
@@ -251,6 +257,6 @@ def _version_key(text: str) -> tuple[int, ...]:
 def _highest(versions: Iterable[str]) -> str | None:
     best: str | None = None
     for version in versions:
-        if best is None or _version_key(version) > _version_key(best):
+        if best is None or version_key(version) > version_key(best):
             best = version
     return best

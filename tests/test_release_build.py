@@ -26,10 +26,12 @@ from orch_hub.release_build import (
     BuildOptions,
     build_requirements,
     check_host,
+    check_min_macos,
     default_literals,
     read_project,
     read_version,
 )
+from orch_hub.release_python import PinnedInterpreter, pinned_interpreter
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -107,6 +109,49 @@ def test_other_hosts_are_refused_before_a_build_starts(system: str, machine: str
         check_host(system=system, machine=machine)
 
 
+def test_a_floor_at_or_below_the_promise_is_accepted():
+    pin = pinned_interpreter(TARGET)
+    check_min_macos(pin.min_macos, pin)
+    check_min_macos("10.15", pin)
+
+
+def test_a_floor_above_the_promise_names_both_and_the_way_out():
+    pin = pinned_interpreter(TARGET)
+    with pytest.raises(BuildError) as raised:
+        check_min_macos("26.0", pin)
+    message = str(raised.value)
+    assert "requires macOS 26.0" in message
+    assert f"supports macOS {pin.min_macos}" in message
+    assert "--allow-unsupported-macos" in message
+
+
+def test_a_payload_that_declares_no_floor_is_refused():
+    # The installer skips its macOS gate when the payload declares nothing, so
+    # an unreadable floor removes the check from every machine that installs it.
+    with pytest.raises(BuildError, match="declares no minimum macOS"):
+        check_min_macos(None, pinned_interpreter(TARGET))
+
+
+def test_the_floor_is_compared_as_a_version_not_as_text():
+    # "11.0" sorts before "9.0" as text, so a string comparison would publish a
+    # payload that needs a macOS eleven releases newer than the promise.
+    older = PinnedInterpreter(
+        target="darwin-arm64",
+        python_version="3.14.7",
+        url="https://example.invalid/cpython.tar.gz",
+        sha256="0" * 64,
+        min_macos="9.0",
+    )
+    with pytest.raises(BuildError, match="requires macOS 11.0"):
+        check_min_macos("11.0", older)
+
+
+def test_an_unsupported_floor_can_be_built_deliberately(capsys):
+    pin = pinned_interpreter(TARGET)
+    check_min_macos("26.0", pin, allow=True)
+    assert "warning:" in capsys.readouterr().err
+
+
 def test_payload_is_named_by_target(tmp_path: Path):
     assert options(tmp_path).payload_dir.name == f"orch-hub-{TARGET}"
     assert TARGET == "darwin-arm64"
@@ -156,6 +201,7 @@ def test_build_only_modules_are_kept_out_of_the_payload():
     assert set(release_build.BUILD_ONLY_MODULES) == {
         "orch_hub.release_build",
         "orch_hub.release_package",
+        "orch_hub.release_python",
         "orch_hub.release_audit",
         "orch_hub.macho",
     }
@@ -323,12 +369,44 @@ def test_the_version_info_spelling_is_the_same_identity(tmp_path: Path, monkeypa
     assert not runs.created_a_venv()
 
 
-def test_an_unpinned_build_reuses_whatever_environment_exists(tmp_path: Path, monkeypatch):
-    # Without a pin there is nothing to enforce: the environment is a cache, and
-    # the driver must not probe or rebuild it.
+def cached_interpreter(work_dir: Path) -> Path:
+    """The pinned interpreter, already provisioned under the scratch directory.
+
+    Provisioning is covered by tests/test_release_python.py; what matters here
+    is that a build given no interpreter reaches for exactly this path, so the
+    cache is primed rather than the download stubbed.
+    """
+    pin = pinned_interpreter(TARGET)
+    python = work_dir / release_build.INTERPRETER_DIR / pin.name / pin.relative_python
+    python.parent.mkdir(parents=True)
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    return python
+
+
+def test_a_build_that_names_no_interpreter_uses_the_pinned_one(
+    tmp_path: Path, monkeypatch
+):
+    # The default has to be the pin rather than the host: an interpreter nobody
+    # chose is exactly what makes a payload refuse to start on an older Mac.
     venv_dir = tmp_path / "work" / "venv"
-    fake_venv(venv_dir, executable="/whatever/bin/python3.14")
+    python = cached_interpreter(tmp_path / "work")
     runs = FakeRuns()
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir), read_project(REPO_ROOT)
+    )
+    assert [str(python), "-m", "venv", str(venv_dir)] in runs.commands
+
+
+def test_an_environment_built_from_the_pin_is_reused_without_a_flag(
+    tmp_path: Path, monkeypatch
+):
+    venv_dir = tmp_path / "work" / "venv"
+    python = cached_interpreter(tmp_path / "work")
+    fake_venv(venv_dir, executable=str(python))
+    runs = FakeRuns(f"{python}\n3.14.4\n")
     monkeypatch.setattr(release_build, "_run", runs)
 
     release_build.ensure_build_venv(
@@ -336,7 +414,24 @@ def test_an_unpinned_build_reuses_whatever_environment_exists(tmp_path: Path, mo
     )
     assert (venv_dir / "marker").exists()
     assert not runs.created_a_venv()
-    assert runs.captured == 0
+
+
+def test_a_default_build_replaces_an_environment_built_from_another_interpreter(
+    tmp_path: Path, monkeypatch
+):
+    # The environment is a cache, but a cache holding the host interpreter would
+    # quietly produce the payload the pin exists to prevent.
+    venv_dir = tmp_path / "work" / "venv"
+    python = cached_interpreter(tmp_path / "work")
+    fake_venv(venv_dir, executable="/opt/homebrew/bin/python3.14")
+    runs = FakeRuns(f"{python}\n3.14.7\n")
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir), read_project(REPO_ROOT)
+    )
+    assert not (venv_dir / "marker").exists()
+    assert [str(python), "-m", "venv", str(venv_dir)] in runs.commands
 
 
 def test_reusing_an_environment_refuses_a_different_pinned_interpreter(
@@ -393,6 +488,7 @@ def prepare_build(
     *,
     staged_files: dict[str, bytes],
     literals=(),
+    min_macos: str | None = "11.0",
 ) -> BuildOptions:
     """Run a build for real from the freeze onwards, without freezing anything.
 
@@ -423,7 +519,9 @@ def prepare_build(
     monkeypatch.setattr(
         release_build,
         "scan_payload",
-        lambda root: PayloadFacts(architectures=("arm64",), min_macos="11.0", binaries=1),
+        lambda root: PayloadFacts(
+            architectures=("arm64",), min_macos=min_macos, binaries=1
+        ),
     )
     monkeypatch.setattr(release_build, "_interpreter_version", lambda python: "3.14.4")
     monkeypatch.setattr(release_build, "_builder_identity", lambda python: "pyinstaller 6.22.2")
@@ -486,6 +584,65 @@ def test_a_payload_that_passes_replaces_the_previous_one(tmp_path: Path, monkeyp
     # Replaced rather than merged: nothing of the old payload is left behind.
     assert not (payload_dir / "marker").exists()
     assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_a_payload_above_the_floor_is_not_published(tmp_path: Path, monkeypatch):
+    # The installer refuses this payload on every Mac older than the builder's,
+    # and refuses it correctly — which is why the build is the last place the
+    # mistake can still be caught.
+    payload_dir = previous_payload(tmp_path)
+    build_options = prepare_build(
+        tmp_path, monkeypatch, staged_files=payload_files(), min_macos="26.0"
+    )
+
+    with pytest.raises(BuildError, match="requires macOS 26.0"):
+        release_build.build_runtime(build_options)
+
+    assert (payload_dir / "marker").exists()  # last good payload untouched
+    assert not (payload_dir / "runtime.json").exists()
+
+
+def test_a_payload_without_a_readable_floor_is_not_published(tmp_path: Path, monkeypatch):
+    payload_dir = previous_payload(tmp_path)
+    build_options = prepare_build(
+        tmp_path, monkeypatch, staged_files=payload_files(), min_macos=None
+    )
+
+    with pytest.raises(BuildError, match="declares no minimum macOS"):
+        release_build.build_runtime(build_options)
+
+    assert (payload_dir / "marker").exists()
+
+
+def test_a_payload_below_the_floor_is_published_with_its_own_number(
+    tmp_path: Path, monkeypatch
+):
+    # An older floor is a wider release, not a violation; what ships is what was
+    # measured, so the installer keeps gating on the truth.
+    build_options = prepare_build(
+        tmp_path, monkeypatch, staged_files=payload_files(), min_macos="10.15"
+    )
+
+    result = release_build.build_runtime(build_options)
+
+    assert result.manifest["min_macos"] == "10.15"
+
+
+def test_an_unpublishable_payload_can_still_be_built_on_purpose(
+    tmp_path: Path, monkeypatch, capsys
+):
+    # A local smoke test of the frozen runtime is worth building from the host
+    # interpreter; it is only worth refusing when somebody could publish it.
+    build_options = prepare_build(
+        tmp_path, monkeypatch, staged_files=payload_files(), min_macos="26.0"
+    )
+
+    result = release_build.build_runtime(
+        BuildOptions(**{**vars(build_options), "allow_unsupported_macos": True})
+    )
+
+    assert result.manifest["min_macos"] == "26.0"
+    assert "warning:" in capsys.readouterr().err
 
 
 UNCOPYABLE = "blob.bin"
