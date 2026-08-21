@@ -99,13 +99,22 @@ spells it. Unlike that one, an unsubstituted leftover here is never a
 compatibility case: the template and the code that renders it ship in the same
 checkout, so a leftover is a bug and fails the packaging."""
 
-MACOS_VERSION_RE = re.compile(r"\d+(?:\.\d+)*")
+MACOS_VERSION_RE = re.compile(r"[0-9]+(?:\.[0-9]+)*")
 """A macOS floor every consumer of the manifest can actually compare.
 
 Spelled to match the installer's own ``is_numeric_version``, which is the
-strictest reader: digits and dots, no empty component at either end or in the
-middle. Anything else is not a stricter floor or a looser one — it is a floor
-that no gate downstream applies."""
+strictest reader: ASCII digits and dots, no empty component at either end or in
+the middle. Anything else is not a stricter floor or a looser one — it is a
+floor that no gate downstream applies.
+
+``[0-9]`` for the same reason the shell writes ``[!0-9.]``, and deliberately
+not ``\\d``: that also matches the decimal digits of other scripts, which
+Python's ``int`` reads as ordinary numbers. A floor written in Arabic-Indic
+digits therefore passes a ``\\d`` check *and* the floor comparison as an honest
+eleven — the one shape of unreadable floor that looks right to every check on
+this side — and then means whatever the installing machine's locale makes of
+it: nothing at all on a normal Mac, and on an Arabic one a version the shell's
+own predicate accepts and its arithmetic cannot compare."""
 
 _CHUNK_SIZE = 1 << 20
 
@@ -252,24 +261,29 @@ def _check_declared_macos(manifest: dict, path: Path) -> None:
     Declaring nothing is honest and stays allowed: the installer compares
     against no floor and the payload runs, or fails, on its own terms. A value
     none of its readers can parse only looks like the opposite. The shell
-    installer skips its gate on anything outside digits and dots, the installed
-    runtime reads the numeric prefix and stops at the first component that is
-    not a number, and this module's own floor comparison counts an unreadable
-    component as zero — so ``unknown``, ``11.x`` and ``10..15`` are each *below*
-    the supported floor they were meant to raise, and every one of them
-    publishes a requirement that nothing enforces.
+    installer skips its gate on anything outside ASCII digits and dots, the
+    installed runtime reads the numeric prefix and stops at the first component
+    that is not a number, and this module's own floor comparison counts an
+    unreadable component as zero — so ``unknown``, ``11.x`` and ``10..15`` are
+    each *below* the supported floor they were meant to raise, and every one of
+    them publishes a requirement that nothing enforces.
 
     Refused rather than repaired. What the payload really requires is measured
     off its Mach-O headers at build time; inventing a number for it here would
     put a floor nobody measured into the field that carries the measured one.
+
+    The value is echoed through :func:`ascii`, which is :func:`repr` for every
+    floor that could have been published. It differs for exactly the value that
+    needs it: a floor written in another script's digits reads as a perfectly
+    ordinary version until its escapes are visible.
     """
     declared = value_of(manifest, "min_macos")
     if declared and not MACOS_VERSION_RE.fullmatch(declared):
         raise PackageError(
-            f"{path} declares min_macos {declared!r}, which is not a dotted "
-            "numeric version: every macOS gate downstream skips a floor it "
-            "cannot read, so this payload would install on a Mac too old to "
-            "run it"
+            f"{path} declares min_macos {ascii(declared)}, which is not a "
+            "dotted ASCII numeric version: every macOS gate downstream skips a "
+            "floor it cannot read, so this payload would install on a Mac too "
+            "old to run it"
         )
 
 

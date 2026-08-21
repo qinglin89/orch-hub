@@ -30,9 +30,11 @@ from pathlib import Path
 import pytest
 
 from orch_hub import install, release_package
+from orch_hub.macho import version_key
 from orch_hub.release_build import MANIFEST_NAME, MANIFEST_SCHEMA, REQUIRED_MEMBERS
 from orch_hub.release_package import (
     CHECKSUM_NAME,
+    MACOS_VERSION_RE,
     RELEASE_NAME,
     RELEASE_SCHEMA,
     PackageError,
@@ -150,6 +152,46 @@ def tree_state(root: Path) -> dict[str, str]:
         else:
             state[key] = f"{sha256_file(path)} {path.stat().st_mode & 0o777:o}"
     return state
+
+
+UNICODE_FLOOR = "\u0661\u0661.\u0660"
+"""A minimum macOS written in Arabic-Indic digits; it renders as ``١١.٠``.
+
+Spelled in escapes because that is the only spelling that shows what it is.
+Python's ``int`` reads it as eleven point zero like any other number, so every
+check on the packaging side can be satisfied by it and it looks like an
+ordinary version wherever a human would look. The installer that ships it takes
+ASCII digits, and on any normal Mac reads this as no version at all."""
+
+
+def shell_reads_as_numeric(version: str) -> bool:
+    """Ask the checked-in installer's own predicate whether it can read a version.
+
+    Lifted from the template verbatim rather than re-spelled here. A copy in
+    this file could agree with the packager while the shipped script disagrees,
+    and that disagreement is the whole subject: a floor the installer cannot
+    read is not a strict floor or a lenient one, it is no macOS gate at all on
+    every machine that runs the release.
+
+    Asked under ``LC_ALL=C``, so the answer is one fact rather than the ambient
+    machine's. ``[!0-9.]`` is a collation range: under an Arabic locale this
+    same predicate calls ``١١.٠`` numeric and hands it to shell arithmetic that
+    then cannot read it. That is the sharper reason such a floor is refused
+    where the artifact is made — what it would mean depends on the locale of a
+    machine the packager never sees.
+    """
+    source = TEMPLATE.read_text(encoding="utf-8")
+    start = source.index("is_numeric_version() {")
+    predicate = source[start : source.index("\n}\n", start) + len("\n}")]
+    assert "case" in predicate and "esac" in predicate, predicate
+    completed = subprocess.run(
+        ["sh", "-c", f'{predicate}\nis_numeric_version "$1"', "sh", version],
+        capture_output=True,
+        text=True,
+        env={**os.environ, "LC_ALL": "C"},
+    )
+    assert completed.returncode in (0, 1), completed.stderr
+    return completed.returncode == 0
 
 
 # --------------------------------------------------------------------------
@@ -334,7 +376,26 @@ def test_a_floor_that_cannot_be_read_is_not_published(
     # so it skips the macOS refusal and installs on a Mac that cannot run it.
     payload = make_payload(tmp_path, target=target, min_macos=declared)
 
-    with pytest.raises(PackageError, match="not a dotted numeric version"):
+    with pytest.raises(PackageError, match="not a dotted ASCII numeric version"):
+        package(tmp_path, payload)
+
+    assert not (tmp_path / "release").exists()
+
+
+def test_a_floor_only_this_side_can_read_is_not_published(tmp_path: Path):
+    # The dangerous shape of unreadable, and the reason the rule is spelled in
+    # ASCII digits rather than in `\d`: nothing about this floor looks wrong
+    # here. It is read as exactly the version the release promises, so it
+    # compares equal to the promise instead of below it, and every check on the
+    # packaging side is satisfied. What it means downstream is then the
+    # installing machine's business: no macOS gate at all on a normal Mac, and
+    # arithmetic that cannot compare it under a locale that reads those digits.
+    assert version_key(UNICODE_FLOOR) == version_key("11.0")
+    assert not shell_reads_as_numeric(UNICODE_FLOOR)
+
+    payload = make_payload(tmp_path, min_macos=UNICODE_FLOOR)
+
+    with pytest.raises(PackageError, match="not a dotted ASCII numeric version"):
         package(tmp_path, payload)
 
     assert not (tmp_path / "release").exists()
@@ -347,7 +408,7 @@ def test_an_unreadable_floor_is_not_what_the_escape_hatch_is_for(tmp_path: Path)
     # to wave through.
     payload = make_payload(tmp_path, min_macos="unknown")
 
-    with pytest.raises(PackageError, match="not a dotted numeric version"):
+    with pytest.raises(PackageError, match="not a dotted ASCII numeric version"):
         package(tmp_path, payload, allow_unsupported_macos=True)
 
 
@@ -565,6 +626,36 @@ def test_the_checked_in_template_is_valid_posix_shell():
         ["sh", "-n", str(TEMPLATE)], capture_output=True, text=True
     )
     assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.parametrize(
+    "declared, readable",
+    [
+        ("11.0", True),
+        ("26", True),
+        ("10.15.7", True),
+        ("011.0", True),
+        ("", False),
+        ("unknown", False),
+        ("11.x", False),
+        ("10..15", False),
+        (".11", False),
+        ("11.", False),
+        (UNICODE_FLOOR, False),
+    ],
+)
+def test_a_floor_reads_here_exactly_as_it_reads_in_the_shipped_script(
+    declared: str, readable: bool
+):
+    # What this packager publishes is what the released installer compares
+    # against, and what it refuses is what the installer would have silently
+    # skipped. The two rules are written in different languages in different
+    # files, and nothing but this keeps them one rule — the last drift between
+    # them let a floor no installer could read reach a header. Each verdict is
+    # named rather than only compared, so the two cannot agree by being wrong
+    # together.
+    assert bool(MACOS_VERSION_RE.fullmatch(declared)) is readable
+    assert shell_reads_as_numeric(declared) is readable
 
 
 # --------------------------------------------------------------------------
