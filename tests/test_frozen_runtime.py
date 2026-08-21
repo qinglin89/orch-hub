@@ -468,6 +468,81 @@ def test_uninstall_refuses_a_prefix_the_installer_does_not_own(tmp_path: Path):
     assert (home / "Documents" / "notes.txt").read_text(encoding="utf-8") == "keep me"
 
 
+def test_purge_refuses_a_service_configuration_it_cannot_read(
+    installed, tmp_path: Path
+):
+    """The purge target comes from the installed plist, so it must be readable.
+
+    A plist that parses but carries an unreadable environment used to resolve
+    the *default* data dir — on a real machine, the operator's own
+    ``~/.orch-hub`` — and ``--purge-data --yes`` would then delete run history
+    the service never wrote there. Nothing may be removed instead.
+    """
+    prefix, command = installed
+    plist_path = tmp_path / "agent.plist"
+    with plist_path.open("wb") as fh:
+        plistlib.dump(
+            {
+                "Label": "com.qinglin89.orch-hub",
+                "ProgramArguments": [str(prefix / "current" / "orch-hub"), "serve"],
+                "EnvironmentVariables": ["not", "a", "dict"],
+            },
+            fh,
+        )
+    # HOME is tmp_path here, so this is the default the reader used to fall back
+    # to; the real one is never in reach of this test.
+    default_data = tmp_path / ".orch-hub"
+    (default_data / "runs").mkdir(parents=True)
+
+    result = run_installed(
+        command,
+        tmp_path,
+        "uninstall",
+        "--purge-data",
+        "--yes",
+        "--prefix", str(prefix),
+        "--bin-dir", str(command.parent),
+        "--plist-path", str(plist_path),
+    )
+
+    assert result.returncode == 1
+    assert "EnvironmentVariables" in result.stderr
+    assert (default_data / "runs").is_dir()
+    assert (prefix / "current" / "orch-hub").is_file()
+    assert plist_path.is_file()
+    assert command.is_symlink()
+
+
+def test_uninstall_refuses_a_prefix_that_only_looks_installed(tmp_path: Path):
+    """An install-shaped foreign tree: `versions/<name>/runtime.json` and data.
+
+    Ownership has to be proven from the manifest's content, not from a filename
+    any runtime may use. Checked on the shipped binary because the source-level
+    version of this proof is one the release cannot be assumed to carry.
+    """
+    prefix = tmp_path / "prefix"
+    project = prefix / "versions" / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "main.js").write_text("console.log(1)\n", encoding="utf-8")
+    (project / "runtime.json").write_text(
+        json.dumps({"runtime": "node", "version": "22.3.0"}), encoding="utf-8"
+    )
+
+    result = run_installed(
+        executable(),
+        tmp_path,
+        "uninstall",
+        "--prefix", str(prefix),
+        "--bin-dir", str(tmp_path / "bin"),
+        "--plist-path", str(tmp_path / "agent.plist"),
+    )
+
+    assert result.returncode == 1
+    assert "not an installed orch-hub version" in result.stderr
+    kept = (project / "src" / "main.js").read_text(encoding="utf-8")
+    assert kept == "console.log(1)\n"
+
+
 def test_install_refuses_a_payload_for_another_machine(tmp_path: Path):
     """Architecture mismatches fail before anything is written."""
     foreign = tmp_path / "foreign-payload"

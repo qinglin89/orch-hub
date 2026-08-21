@@ -37,6 +37,7 @@ from orch_hub.launchd import (
     TEMPLATE_RELATIVE_PATH,
     UNLOAD_POLL_INTERVAL,
     _is_transient_bootstrap_failure,
+    _require_plist_env,
     _resolve_leftover_placeholders,
     deploy_service,
     installed_bark_url,
@@ -1091,6 +1092,129 @@ def test_installed_bind_refuses_an_unusable_port(tmp_path, port):
 
     with pytest.raises(LaunchdError, match=PORT_ENV):
         launchd.installed_bind(plist_path=plist_path)
+
+
+def write_plist(path: Path, data: dict) -> None:
+    """Write a plist that is *syntactically* whatever the test asks for."""
+    with path.open("wb") as fh:
+        plistlib.dump(data, fh, fmt=plistlib.FMT_XML)
+
+
+@pytest.mark.parametrize("env", [["not", "a", "dict"], "not-a-dict", 7])
+def test_installed_readers_fail_closed_on_a_malformed_environment(tmp_path, env):
+    """A plist can parse perfectly and still carry an unreadable environment.
+
+    Validating only the root left the destructive and operational readers
+    defaulting on structure they could not read: the lenient view answers a
+    non-dictionary ``EnvironmentVariables`` with ``{}``, which is
+    indistinguishable from a service that was never configured — so a purge
+    would resolve ``~/.orch-hub`` and a rollback would probe 127.0.0.1:8765,
+    neither of which the service ever used.
+    """
+    plist_path = tmp_path / PLIST_NAME
+    write_plist(
+        plist_path,
+        {"Label": LABEL, "ProgramArguments": ["/x"], "EnvironmentVariables": env},
+    )
+
+    with pytest.raises(LaunchdError, match="malformed EnvironmentVariables"):
+        launchd.installed_data_dir(plist_path=plist_path)
+    with pytest.raises(LaunchdError, match="malformed EnvironmentVariables"):
+        launchd.installed_bind(plist_path=plist_path)
+
+
+def test_installed_data_dir_refuses_a_non_string_data_dir(tmp_path):
+    """`str()` on a list produced a path, and a purge would have deleted it."""
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(plist_path, {DATA_DIR_ENV: [str(tmp_path / "d")]})
+
+    with pytest.raises(LaunchdError, match=DATA_DIR_ENV):
+        launchd.installed_data_dir(plist_path=plist_path)
+
+
+@pytest.mark.parametrize("port", [9101, ["9101"]])
+def test_installed_bind_refuses_a_non_string_port(tmp_path, port):
+    """launchd only passes string values; anything else is a plist to fix.
+
+    Coercion made an integer port *look* readable, so a rollback would report a
+    service healthy from a plist launchd itself would refuse to load.
+    """
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(plist_path, {HOST_ENV: "127.0.0.1", PORT_ENV: port})
+
+    with pytest.raises(LaunchdError, match=PORT_ENV):
+        launchd.installed_bind(plist_path=plist_path)
+
+
+def test_strict_readers_ignore_an_unrelated_non_string_value(tmp_path):
+    """Strictness is scoped to the value the caller's decision rests on.
+
+    A hand-mangled entry the operation never reads is not a reason to refuse to
+    uninstall a service or to check whether it came back.
+    """
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(
+        plist_path,
+        {
+            DATA_DIR_ENV: str(tmp_path / "d"),
+            HOST_ENV: "127.0.0.1",
+            PORT_ENV: "9101",
+            BARK_URL_ENV: 12345,
+        },
+    )
+
+    assert launchd.installed_data_dir(plist_path=plist_path) == tmp_path / "d"
+    assert launchd.installed_bind(plist_path=plist_path) == ("127.0.0.1", 9101)
+
+
+def test_strict_env_refuses_a_non_string_key(tmp_path):
+    """Read through the parsed shape: a binary plist can carry such a key.
+
+    ``plistlib``'s binary parser assigns whatever object a key reference names,
+    so a corrupt file can yield a non-string key that no ``ORCH_HUB_*`` lookup
+    would ever match. The strict reader refuses instead of quietly missing it.
+    """
+    with pytest.raises(LaunchdError, match="non-string EnvironmentVariables keys"):
+        _require_plist_env(
+            {"EnvironmentVariables": {7: "x"}},
+            tmp_path / PLIST_NAME,
+            keys=(DATA_DIR_ENV,),
+        )
+
+
+def test_strict_env_keeps_an_absent_environment_a_default(tmp_path):
+    """No environment is a fact, not a guess: launchd then passes none at all.
+
+    So the defaults are what the service actually ran with, which is exactly
+    what the missing-plist case answers.
+    """
+    plist_path = tmp_path / PLIST_NAME
+    write_plist(plist_path, {"Label": LABEL, "ProgramArguments": ["/x"]})
+
+    assert launchd.installed_data_dir(plist_path=plist_path) == DEFAULT_DATA_DIR
+    assert launchd.installed_bind(plist_path=plist_path) == (DEFAULT_HOST, DEFAULT_PORT)
+
+
+def test_status_still_reports_a_malformed_environment_instead_of_failing(tmp_path):
+    """The lenient/strict split is deliberate, so pin both halves of it."""
+    plist_path = tmp_path / PLIST_NAME
+    write_plist(
+        plist_path,
+        {
+            "Label": LABEL,
+            "ProgramArguments": ["/x"],
+            "EnvironmentVariables": ["not", "a", "dict"],
+        },
+    )
+
+    result = status_service(
+        plist_path=plist_path,
+        runner=FakeRunner(print_loaded=False),
+        health_checker=lambda host, port: "unreachable: refused",
+    )
+
+    assert (result.host, result.port) == (DEFAULT_HOST, DEFAULT_PORT)
+    assert result.program == "/x"
 
 
 def test_status_still_reports_a_malformed_plist_instead_of_failing(tmp_path):

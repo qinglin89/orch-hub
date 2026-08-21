@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 
 from orch_hub import install, launchd
+from orch_hub.atomic_dir import INCOMING_SUFFIX
 from orch_hub.config import DATA_DIR_ENV, HOST_ENV, MANDREL_PATH_ENV, PORT_ENV, TOKEN_ENV
 from orch_hub.install import (
     InstallError,
@@ -939,6 +940,122 @@ def test_uninstall_refuses_a_versions_dir_full_of_foreign_directories(tmp_path):
         )
 
     assert (prefix / "versions" / "0.1.0" / "src").is_dir()
+
+
+def test_uninstall_refuses_an_impostor_prefix_with_an_arbitrary_manifest(tmp_path):
+    """A file named `runtime.json` proves nothing — many runtimes ship one.
+
+    The prefix here is shaped exactly like an installation from the outside: a
+    lone ``versions/`` directory whose child carries a ``runtime.json``. Only
+    reading that file, and matching what it declares to where it sits, tells the
+    two apart — and getting it wrong deletes somebody's project.
+    """
+    prefix = tmp_path / "prefix"
+    project = prefix / "versions" / "project"
+    (project / "src").mkdir(parents=True)
+    (project / "src" / "main.js").write_text("console.log(1)\n", encoding="utf-8")
+    (project / "runtime.json").write_text(
+        json.dumps({"runtime": "node", "version": "22.3.0"}), encoding="utf-8"
+    )
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.write_text("installed", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "orch-hub").symlink_to(prefix / "current" / "orch-hub")
+    runner = FakeLaunchctl()
+
+    with pytest.raises(InstallError, match="not an installed orch-hub version"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=bin_dir,
+            plist_path=plist_path,
+            runner=runner,
+        )
+
+    kept = (project / "src" / "main.js").read_text(encoding="utf-8")
+    assert kept == "console.log(1)\n"
+    assert json.loads((project / "runtime.json").read_text(encoding="utf-8")) == {
+        "runtime": "node",
+        "version": "22.3.0",
+    }
+    # Refused before every side effect, launchctl and the command link included.
+    assert plist_path.read_text(encoding="utf-8") == "installed"
+    assert (bin_dir / "orch-hub").is_symlink()
+    assert runner.calls == []
+
+
+def test_uninstall_refuses_a_version_filed_under_another_name(tmp_path):
+    """The manifest has to describe the directory it is in, not just exist."""
+    prefix = tmp_path / "prefix"
+    install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
+    (prefix / "versions" / "0.1.0").rename(prefix / "versions" / "9.9.9")
+    runner = FakeLaunchctl()
+
+    with pytest.raises(InstallError, match="filed as '9.9.9'"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=tmp_path / "bin",
+            plist_path=tmp_path / PLIST_NAME,
+            runner=runner,
+        )
+
+    assert (prefix / "versions" / "9.9.9" / "orch-hub").is_file()
+    assert runner.calls == []
+
+
+def test_uninstall_refuses_a_prefix_with_no_installed_version(tmp_path):
+    """An empty `versions/` used to pass by having nothing to object to."""
+    prefix = tmp_path / "prefix"
+    (prefix / "versions").mkdir(parents=True)
+    runner = FakeLaunchctl()
+
+    with pytest.raises(InstallError, match="holds no installed version"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=tmp_path / "bin",
+            plist_path=tmp_path / PLIST_NAME,
+            runner=runner,
+        )
+
+    assert (prefix / "versions").is_dir()
+    assert runner.calls == []
+
+
+def test_uninstall_refuses_a_prefix_holding_only_install_debris(tmp_path):
+    """Scratch is tolerated beside a version, never accepted *as* one."""
+    prefix = tmp_path / "prefix"
+    debris = prefix / "versions" / f"0.1.0{INCOMING_SUFFIX}"
+    debris.mkdir(parents=True)
+    (debris / "half-copied").write_text("x", encoding="utf-8")
+
+    with pytest.raises(InstallError, match="holds no installed version"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=tmp_path / "bin",
+            plist_path=tmp_path / PLIST_NAME,
+            runner=FakeLaunchctl(),
+        )
+
+    assert (debris / "half-copied").is_file()
+
+
+def test_uninstall_tolerates_debris_from_an_interrupted_install(tmp_path):
+    """A kill mid-copy leaves scratch behind; that is ours, not a foreign tree."""
+    prefix = tmp_path / "prefix"
+    install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
+    debris = prefix / "versions" / f"0.2.0{INCOMING_SUFFIX}"
+    debris.mkdir()
+    (debris / "half-copied").write_text("x", encoding="utf-8")
+
+    result = uninstall(
+        prefix=prefix,
+        bin_dir=tmp_path / "bin",
+        plist_path=tmp_path / PLIST_NAME,
+        runner=FakeLaunchctl(),
+    )
+
+    assert result.prefix_removed is True
+    assert not prefix.exists()
 
 
 def test_uninstall_reports_an_unreadable_prefix_as_an_error(tmp_path):

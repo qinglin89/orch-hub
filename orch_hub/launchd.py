@@ -302,11 +302,15 @@ def installed_data_dir(*, plist_path: Path | None = None) -> Path:
     An unreadable installed plist is an error rather than a default: the caller
     is about to *delete* the directory this answers with, and "the service was
     never configured" and "its configuration cannot be parsed" are different
-    facts that must not produce the same path.
+    facts that must not produce the same path. Structure counts as parsing: a
+    plist whose ``EnvironmentVariables`` is not a dictionary, or whose data dir
+    is not a string, is configuration this cannot read — not configuration that
+    is absent.
     """
     resolved = (plist_path or default_plist_path()).expanduser()
     plist = _require_parsable_plist(resolved)
-    raw = _plist_env(plist).get(DATA_DIR_ENV, "").strip()
+    env = _require_plist_env(plist, resolved, keys=(DATA_DIR_ENV,))
+    raw = env.get(DATA_DIR_ENV, "").strip()
     return Path(raw).expanduser() if raw else DEFAULT_DATA_DIR
 
 
@@ -316,12 +320,15 @@ def installed_bind(*, plist_path: Path | None = None) -> tuple[str, int]:
     Strict where :func:`status_service` is lenient, and for the same reason
     ``installed_data_dir`` is: an operator command uses this answer to decide
     whether the service it just changed came back. A default substituted for an
-    unreadable plist or an out-of-range port would probe an endpoint the service
-    never used and report health for something else entirely. ``status`` may
-    guess because it reports the parse error next to the guess; this cannot.
+    unreadable plist, a malformed environment, or an out-of-range port would
+    probe an endpoint the service never used and report health for something
+    else entirely. ``status`` may guess because it reports the parse error next
+    to the guess; this cannot.
     """
     resolved = (plist_path or default_plist_path()).expanduser()
-    env = _plist_env(_require_parsable_plist(resolved))
+    env = _require_plist_env(
+        _require_parsable_plist(resolved), resolved, keys=(HOST_ENV, PORT_ENV)
+    )
     host = env.get(HOST_ENV, DEFAULT_HOST) or DEFAULT_HOST
     raw = (env.get(PORT_ENV) or "").strip()
     if not raw:
@@ -346,11 +353,65 @@ def _require_parsable_plist(path: Path) -> dict | None:
     a default. A file that exists and does not parse raises: whatever the caller
     would do with a default, it would be doing it to a service configured with
     something else.
+
+    This covers the file's syntax only. A destructive or operational caller
+    pairs it with :func:`_require_plist_env`, because a syntactically perfect
+    plist can still carry an environment nothing can be read out of.
     """
     plist, error = _read_plist_with_error(path)
     if error:
         raise LaunchdError(f"cannot read the installed launchd plist {path}: {error}")
     return plist
+
+
+def _require_plist_env(
+    plist: dict | None, path: Path, *, keys: tuple[str, ...]
+) -> dict[str, str]:
+    """Installed service environment for a caller that must not guess.
+
+    The strict half of :func:`_plist_env`, and the difference is the whole
+    point: the lenient reader answers a malformed ``EnvironmentVariables`` with
+    ``{}`` and coerces whatever it finds with ``str``, which turns "this
+    configuration cannot be read" into "this service was never configured".
+    That is the right answer for ``status``, which prints the plist beside its
+    guess, and the wrong one for a purge that *deletes* what it resolves or a
+    rollback that decides a service is healthy from what it probes.
+
+    So structure fails closed — a present ``EnvironmentVariables`` that is not a
+    dictionary, or a key that is not a string, means no value here can be
+    trusted. Values fail closed for ``keys`` only, the ones the caller's
+    decision actually rests on: an unrelated hand-mangled entry is not a reason
+    to refuse to uninstall a service. Nothing is coerced; a value this does not
+    vouch for is not in the result at all.
+
+    A *missing* ``EnvironmentVariables`` stays a default, and correctly so:
+    launchd then passes the service no environment, so the defaults are what it
+    actually ran with rather than a guess about what it was configured with.
+    """
+    if plist is None:
+        return {}
+    env = plist.get("EnvironmentVariables")
+    if env is None:
+        return {}
+    if not isinstance(env, dict):
+        raise LaunchdError(
+            f"installed launchd plist {path} has a malformed "
+            f"EnvironmentVariables ({type(env).__name__}, expected a dictionary)"
+        )
+    unreadable = sorted(repr(key) for key in env if not isinstance(key, str))
+    if unreadable:
+        raise LaunchdError(
+            f"installed launchd plist {path} has non-string "
+            f"EnvironmentVariables keys: {', '.join(unreadable)}"
+        )
+    for key in keys:
+        value = env.get(key)
+        if value is not None and not isinstance(value, str):
+            raise LaunchdError(
+                f"installed {key} is not a string: "
+                f"{type(value).__name__} in {path}"
+            )
+    return {key: value for key, value in env.items() if isinstance(value, str)}
 
 
 def verify_mandrel_checkout(path: Path) -> None:
@@ -790,6 +851,13 @@ def _read_plist_with_error(path: Path) -> tuple[dict | None, str | None]:
 
 
 def _plist_env(plist: dict | None) -> dict[str, str]:
+    """Best-effort view of an installed service's environment.
+
+    Deliberately lenient: it is read by diagnostics (``status``) and by callers
+    that *rewrite* the plist wholesale (``deploy``/``update``), where refusing a
+    malformed one would remove the natural way to repair it. Callers that delete
+    or probe what they read use :func:`_require_plist_env` instead.
+    """
     if not plist:
         return {}
     env = plist.get("EnvironmentVariables")

@@ -39,7 +39,13 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from .atomic_dir import PlacementError, discard_path, place_directory
+from .atomic_dir import (
+    INCOMING_SUFFIX,
+    PREVIOUS_SUFFIX,
+    PlacementError,
+    discard_path,
+    place_directory,
+)
 from .launchd import (
     LABEL,
     Deployment,
@@ -688,10 +694,16 @@ def _verify_removable_prefix(root: Path) -> bool:
 
     ``--prefix`` accepts any path and uninstall deletes it recursively, so a
     typo — or ``--prefix ~`` — is one command away from removing unrelated
-    files. Ownership is established positively: the prefix carries the
-    ``versions/`` directory this module creates, every entry beside it is one of
-    ours, and every installed version is a payload rather than an unrelated
-    directory that happens to be filed there.
+    files. Ownership is established positively, and the proof has to be
+    something only this installer produces: the prefix carries the ``versions/``
+    directory this module creates, every entry beside it is one of ours, and
+    ``versions/`` holds *at least one* directory that is a payload this
+    installer would accept, filed under the version that payload declares.
+
+    A bare filename proves nothing — any project may keep a file called
+    ``runtime.json`` — so the manifest is parsed and matched to the directory it
+    sits in, and an empty ``versions/`` no longer passes by having nothing to
+    object to.
 
     Returns whether there is anything to remove; a prefix that does not exist is
     not an error, because uninstall still has a plist and a command link to
@@ -722,13 +734,61 @@ def _verify_removable_prefix(root: Path) -> bool:
             f"{root} is not an orch-hub install prefix: no {VERSIONS_DIR}/ "
             "directory; refusing to remove it"
         )
+    installed = 0
     for entry in _list_dir(versions_dir):
-        if not (entry / MANIFEST_NAME).is_file():
-            raise InstallError(
-                f"{entry} is not an installed orch-hub version (no "
-                f"{MANIFEST_NAME}); refusing to remove {root}"
-            )
+        problem = _installed_version_problem(entry)
+        if problem is None:
+            installed += 1
+            continue
+        # Debris from an interrupted publication is ours, but it is not a
+        # version: it is skipped rather than counted, so it can never be the
+        # only thing "proving" ownership.
+        if _is_publication_scratch(entry.name):
+            continue
+        raise InstallError(
+            f"{entry} is not an installed orch-hub version ({problem}); "
+            f"refusing to remove {root}"
+        )
+    if not installed:
+        raise InstallError(
+            f"{root} is not an orch-hub install prefix: {VERSIONS_DIR}/ holds no "
+            "installed version; refusing to remove it"
+        )
     return True
+
+
+def _installed_version_problem(entry: Path) -> str | None:
+    """Why ``entry`` is not an installed orch-hub version, or ``None``.
+
+    The test is the one :func:`read_payload_manifest` already applies to a
+    payload before placing it, plus the binding that placing it creates: the
+    version the manifest declares is the directory it was filed under. Reusing
+    that function rather than re-listing its rules is deliberate — a second copy
+    would decide "is this ours" by different rules than the ones that put it
+    there.
+    """
+    if entry.is_symlink() or not entry.is_dir():
+        return "not a directory"
+    try:
+        manifest = read_payload_manifest(entry)
+    except InstallError as exc:
+        return str(exc)
+    declared = _payload_version(manifest, entry / MANIFEST_NAME)
+    if declared != entry.name:
+        return f"declares version {declared!r} but is filed as {entry.name!r}"
+    return None
+
+
+def _is_publication_scratch(name: str) -> bool:
+    """Whether ``name`` is a scratch path this module's own publication makes.
+
+    ``place_directory`` stages beside its target and holds the tree it replaces
+    beside it too; both are cleared on the error paths, so one survives only a
+    kill or a power loss mid-install. Refusing to uninstall because of debris the
+    installer itself left would be a fault of this check, not evidence of a
+    foreign prefix.
+    """
+    return name.endswith(INCOMING_SUFFIX) or name.endswith(PREVIOUS_SUFFIX)
 
 
 def _list_dir(path: Path) -> list[Path]:
