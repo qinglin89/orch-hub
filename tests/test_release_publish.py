@@ -17,11 +17,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
 
+from orch_hub import release_publish as publish_module
 from orch_hub.release_build import MANIFEST_NAME, MANIFEST_SCHEMA
 from orch_hub.release_package import (
     CHECKSUM_NAME,
@@ -439,6 +442,103 @@ def test_refuses_an_artifact_name_that_is_not_a_plain_file_name(
     with pytest.raises(
         PublishError, match="(has no name|not a plain file name|cannot be passed)"
     ):
+        verify_release(release_dir)
+
+
+@pytest.mark.parametrize("name", [RELEASE_NAME, CHECKSUM_NAME, PUBLICATION_NAME])
+def test_refuses_an_artifact_taking_a_name_the_format_reserves(
+    tmp_path: Path, name: str
+):
+    """Two of these describe the release; one is written beside it at publication.
+
+    An artifact filed under any of them is published as a *different* file than
+    the one every digest in the release describes: the publication record is
+    written into the set last and would overwrite it, and neither inventory
+    document can carry a digest that depends on itself. The refusal lands while
+    the inventory is being read, before any release file is opened, which is
+    why the declaration alone is enough to trigger it.
+    """
+    release_dir = make_release(tmp_path)
+    document = read_release(release_dir)
+    document["targets"]["darwin-arm64"]["artifacts"][0]["name"] = name
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+
+    with pytest.raises(PublishError, match="name the release format reserves"):
+        verify_release(release_dir)
+
+
+def test_refuses_a_target_declaring_more_than_one_artifact(tmp_path: Path):
+    """``orch-hub-release/1`` files exactly one installer per target.
+
+    A second artifact is not a smaller release to check — it is a file with no
+    checks attached at all, since every check here is selected by what an
+    artifact is.
+    """
+    release_dir = make_release(tmp_path)
+    document = read_release(release_dir)
+    extra = release_dir / "notes.txt"
+    extra.write_text("release notes\n", encoding="utf-8")
+    document["targets"]["darwin-arm64"]["artifacts"].append(
+        {
+            "name": extra.name,
+            "kind": "notes",
+            "size": extra.stat().st_size,
+            "sha256": sha256_file(extra),
+        }
+    )
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+
+    with pytest.raises(PublishError, match="declares 2 artifacts"):
+        verify_release(release_dir)
+
+
+def test_refuses_an_artifact_of_a_kind_this_publisher_cannot_check(tmp_path: Path):
+    """Fail closed on the kind itself, not only on what it hides.
+
+    The installer here is honest — same bytes, same header — and only its kind
+    is unknown. That is still refused: every check in this module is selected
+    by what an artifact is, so a kind with no checks attached is a file that
+    would be published unchecked, and the next release format to add one has to
+    teach this publisher what to do with it first.
+    """
+    release_dir = make_release(tmp_path)
+    document = read_release(release_dir)
+    document["targets"]["darwin-arm64"]["artifacts"][0]["kind"] = "opaque"
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+
+    with pytest.raises(PublishError, match="declares kind 'opaque'"):
+        verify_release(release_dir)
+
+
+def test_refuses_an_installer_relabelled_as_an_uncheckable_kind(tmp_path: Path):
+    """A self-consistent release whose only lie is the artifact's kind.
+
+    The installer is built for one target and filed under another, its kind is
+    changed to something with no checks attached, and the inventory and the
+    checksum file are rewritten so every digest agrees. What still disagrees is
+    the header inside the installer — and reading the declared kind to decide
+    whether to look at that header is what let the release opt out of the one
+    check that proves the set belongs together.
+    """
+    release_dir = make_release(tmp_path)
+    installer = installer_of(release_dir)
+    installer.write_bytes(
+        installer.read_bytes().replace(
+            b"TARGET='darwin-arm64'", b"TARGET='darwin-x86_64'"
+        )
+    )
+    document = read_release(release_dir)
+    artifact = document["targets"]["darwin-arm64"]["artifacts"][0]
+    artifact["kind"] = "opaque"
+    artifact["size"] = installer.stat().st_size
+    artifact["sha256"] = sha256_file(installer)
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+
+    with pytest.raises(PublishError, match="declares kind 'opaque'"):
         verify_release(release_dir)
 
 
@@ -870,6 +970,196 @@ def test_refuses_a_scratch_directory_inside_the_release(tmp_path: Path):
         )
 
 
+def test_refuses_a_release_inside_the_directory_the_publication_stages_in(
+    tmp_path: Path,
+):
+    """The scratch directory is not what gets cleared — ``publish-<tag>`` is.
+
+    Comparing the release against the scratch directory therefore says nothing
+    about the path that is actually emptied. A release sitting below that path
+    is read, verified, and then deleted by the very run that verified it, which
+    is the one outcome verification exists to make impossible.
+    """
+    release_dir = make_release(tmp_path)
+    work = tmp_path / "work"
+    nested = work / "publish-v9.9.9" / "release"
+    nested.parent.mkdir(parents=True)
+    shutil.move(str(release_dir), str(nested))
+    before = tree_state(nested)
+
+    with pytest.raises(PublishError, match="release directory is inside the scratch"):
+        publish_to(tmp_path, nested, str(tmp_path / "storage"), work_dir=work)
+
+    assert tree_state(nested) == before
+
+
+def test_refuses_a_destination_inside_the_directory_the_publication_stages_in(
+    tmp_path: Path,
+):
+    """Same omission, and the tag that pays for it is one already published.
+
+    Clearing ``publish-<tag>`` takes a destination underneath it along, so the
+    republish check runs against a destination the same run has already
+    emptied and reports the tag free.
+    """
+    release_dir = make_release(tmp_path)
+    work = tmp_path / "work"
+    destination = work / "publish-v9.9.9" / "storage"
+    publish_to(
+        tmp_path, release_dir, str(destination), work_dir=tmp_path / "other-work"
+    )
+    before = tree_state(destination)
+
+    with pytest.raises(PublishError, match="destination is inside the scratch"):
+        publish_to(tmp_path, release_dir, str(destination), work_dir=work)
+
+    assert tree_state(destination) == before
+
+
+def test_refuses_a_release_that_changed_after_it_was_verified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The published bytes are the verified bytes, not the named ones.
+
+    Verification reads the release directory and the copy happens after it. A
+    release that changes across that gap — a rebuild finishing in another
+    terminal, a hand edit — would otherwise be published under a checksum file
+    describing what used to be there, leaving the published copy as the only
+    witness and disagreeing with itself.
+    """
+    release_dir = make_release(tmp_path)
+    destination = tmp_path / "storage"
+    verified_bytes = installer_of(release_dir).read_bytes()
+    real = publish_module.verify_release
+
+    def verify_then_tamper(directory: Path):
+        verified = real(directory)
+        installer = installer_of(release_dir)
+        installer.write_bytes(installer.read_bytes() + b"\n# smuggled\n")
+        return verified
+
+    monkeypatch.setattr(publish_module, "verify_release", verify_then_tamper)
+
+    with pytest.raises(PublishError, match="its inventory says"):
+        publish_to(tmp_path, release_dir, str(destination))
+
+    assert not destination.exists()
+    assert installer_of(release_dir).read_bytes() != verified_bytes
+
+
+def test_a_release_naming_the_publication_record_is_never_published(tmp_path: Path):
+    """The whole collision, end to end: declared, verified, copied, overwritten.
+
+    Publishing it succeeded before, and the file that landed under the release's
+    own inventory digest was the publication record instead of the artifact.
+    """
+    release_dir = make_release(tmp_path)
+    document = read_release(release_dir)
+    installer_of(release_dir).rename(release_dir / PUBLICATION_NAME)
+    document["targets"]["darwin-arm64"]["artifacts"][0]["name"] = PUBLICATION_NAME
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+    destination = tmp_path / "storage"
+
+    with pytest.raises(PublishError, match="name the release format reserves"):
+        publish_to(tmp_path, release_dir, str(destination))
+
+    assert not destination.exists()
+
+
+def test_a_tag_claimed_after_verification_is_not_replaced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Checking that a tag is free and then placing it are two operations.
+
+    A publisher that wins the tag in between had its release replaced by a
+    check that had already passed — silently, since the losing run reported
+    success. The claim has to be the same operation as the creation.
+    """
+    release_dir = make_release(tmp_path)
+    destination = tmp_path / "storage"
+    real = publish_module._bring_alongside
+
+    def claim_it_first(stage: Path, parent: Path, name: str) -> Path:
+        incoming = real(stage, parent, name)
+        winner = parent / name
+        winner.mkdir(parents=True)
+        (winner / "orch-hub-9.9.9-darwin-arm64.run").write_bytes(b"the winner\n")
+        return incoming
+
+    monkeypatch.setattr(publish_module, "_bring_alongside", claim_it_first)
+
+    with pytest.raises(PublishError, match="already exists"):
+        publish_to(tmp_path, release_dir, str(destination))
+
+    published = destination / "v9.9.9"
+    assert [path.name for path in published.iterdir()] == [
+        "orch-hub-9.9.9-darwin-arm64.run"
+    ]
+    assert (published / "orch-hub-9.9.9-darwin-arm64.run").read_bytes() == b"the winner\n"
+    assert sorted(path.name for path in destination.iterdir()) == ["v9.9.9"]
+
+
+def test_concurrent_publishers_of_one_tag_leave_exactly_one_release(tmp_path: Path):
+    """Four publishers, one tag, no coordination between them.
+
+    The assertion holds for every interleaving rather than for a lucky one:
+    whoever creates the directory owns the tag, and everyone else is refused
+    before they have written anything into the destination.
+    """
+    release_dir = make_release(tmp_path)
+    destination = tmp_path / "storage"
+    destination.mkdir()
+    # Built before the race: the shared helpers write a stub checkout, and a
+    # thread reading it mid-write would make this test fail for a reason that
+    # has nothing to do with the tag.
+    plans = [
+        options(
+            tmp_path,
+            release_dir,
+            str(destination),
+            work_dir=tmp_path / f"work-{index}",
+        )
+        for index in range(4)
+    ]
+    start = threading.Barrier(len(plans))
+    lock = threading.Lock()
+    outcomes: list[object] = []
+
+    def attempt(plan) -> None:
+        start.wait()
+        try:
+            outcome: object = publish(plan, runner=FakeRunner())
+        except PublishError as exc:
+            outcome = exc
+        with lock:
+            outcomes.append(outcome)
+
+    threads = [threading.Thread(target=attempt, args=(plan,)) for plan in plans]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    refused = [item for item in outcomes if isinstance(item, PublishError)]
+    assert len(outcomes) - len(refused) == 1
+    assert all("already exists" in str(item) for item in refused)
+    assert sorted(path.name for path in destination.iterdir()) == ["v9.9.9"]
+    for path in sorted(release_dir.iterdir()):
+        assert sha256_file(destination / "v9.9.9" / path.name) == sha256_file(path)
+
+
+def test_publication_leaves_no_scratch_beside_the_published_tag(tmp_path: Path):
+    """The transfer lands under a name no competing publisher can be holding,
+    and it is gone by the time the tag is there."""
+    release_dir = make_release(tmp_path)
+    destination = tmp_path / "storage"
+
+    publish_to(tmp_path, release_dir, str(destination))
+
+    assert sorted(path.name for path in destination.iterdir()) == ["v9.9.9"]
+
+
 def test_publishing_one_release_twice_produces_the_same_publication(tmp_path: Path):
     """A publication is a pure function of its tag and its bytes.
 
@@ -973,6 +1263,33 @@ def test_a_failed_upload_leaves_no_scratch_directory(tmp_path: Path):
 
     work = tmp_path / "work"
     assert not work.exists() or list(work.iterdir()) == []
+
+
+def test_a_release_that_changed_after_verification_is_never_uploaded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The staged bytes are checked before the destination, whichever it is.
+
+    An upload is worse than a copy here: the artifacts are then somewhere this
+    machine cannot take them back from, under a tag that promises they will not
+    change.
+    """
+    release_dir = make_release(tmp_path)
+    runner = FakeRunner()
+    real = publish_module.verify_release
+
+    def verify_then_tamper(directory: Path):
+        verified = real(directory)
+        installer = installer_of(release_dir)
+        installer.write_bytes(installer.read_bytes() + b"\n# smuggled\n")
+        return verified
+
+    monkeypatch.setattr(publish_module, "verify_release", verify_then_tamper)
+
+    with pytest.raises(PublishError, match="its inventory says"):
+        publish_to(tmp_path, release_dir, "github:qinglin89/orch-hub", runner=runner)
+
+    assert [call for call in runner.calls if call[0] == GH_BIN] == []
 
 
 # --------------------------------------------------------------------------

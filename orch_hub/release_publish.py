@@ -52,11 +52,12 @@ import json
 import re
 import shutil
 import sys
+import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .atomic_dir import PlacementError, discard_path, place_directory
+from .atomic_dir import discard_path
 from .release_build import BuildError, read_version
 from .release_package import (
     CHECKSUM_KIND,
@@ -80,6 +81,16 @@ commit — facts that do not exist until somebody decides to hand the release
 out."""
 
 PUBLICATION_NAME = "publication.json"
+
+RESERVED_NAMES = frozenset({RELEASE_NAME, CHECKSUM_NAME, PUBLICATION_NAME})
+"""File names a target's artifact may not claim.
+
+Two of them describe the set and one is written beside it here. A release that
+filed an artifact under one of these names would be published as a *different*
+file than the one that was verified: the publication record is written last and
+would overwrite an artifact of the same name, and the two inventory documents
+cannot describe a file whose digest depends on themselves. Refusing the name is
+the only reading of that release that is not a lie about its bytes."""
 
 TAG_PREFIX = "v"
 """How a tag names a version. ``v0.1.0`` publishes ``0.1.0`` and nothing else."""
@@ -247,12 +258,15 @@ def parse_destination(value: str) -> Destination:
     )
 
 
-def check_tag(tag: str, version: str) -> None:
-    """Refuse a tag that does not name this release, or names a path.
+def check_tag_name(tag: str) -> None:
+    """Refuse a tag that names a path rather than a release.
 
-    The tag becomes a directory under the destination and an argument to
-    ``gh``, on top of being the identity a consumer quotes. All three want the
-    same thing from it, so it is checked once, here, before any of them see it.
+    Split from the version binding below because it is needed *earlier*: the
+    tag is a path component of the scratch directory and of the published
+    directory, so the paths this run creates and destroys cannot be resolved —
+    and therefore cannot be checked against each other — until the tag is known
+    to be a plain name. The version binding needs the release document, which
+    is read after those paths are known to be safe.
     """
     if not tag:
         raise PublishError("no tag given")
@@ -268,6 +282,16 @@ def check_tag(tag: str, version: str) -> None:
             f"tag {tag!r} does not start with {TAG_PREFIX!r}; a release tag is "
             f"{TAG_PREFIX}<version>"
         )
+
+
+def check_tag(tag: str, version: str) -> None:
+    """Refuse a tag that does not name this release, or names a path.
+
+    The tag becomes a directory under the destination and an argument to
+    ``gh``, on top of being the identity a consumer quotes. All three want the
+    same thing from it, so it is checked once, here, before any of them see it.
+    """
+    check_tag_name(tag)
     named = tag[len(TAG_PREFIX) :]
     if named != version:
         raise PublishError(
@@ -416,8 +440,11 @@ def verify_release(directory: Path) -> VerifiedRelease:
                 sha256=digest,
             )
         )
-        if entry["kind"] == INSTALLER_KIND:
-            _check_installer_header(path, entry["target"], version, release)
+        # Unconditional, not selected by the declared kind: every declared
+        # artifact is an installer because ``_declared_artifacts`` refuses a
+        # release that says otherwise. Reading the kind here instead would put
+        # the check behind a string the release controls.
+        _check_installer_header(path, entry["target"], version, release)
 
     release_path = release_dir / RELEASE_NAME
     digests[RELEASE_NAME] = _digest(release_path)
@@ -476,7 +503,16 @@ def _read_release_document(path: Path) -> dict:
 
 
 def _declared_artifacts(release: dict, release_dir: Path) -> dict[str, dict]:
-    """Flatten the target-keyed inventory into the files it accounts for."""
+    """Flatten the target-keyed inventory into the files it accounts for.
+
+    The kind is held to the schema rather than read from it. Every later check
+    is selected by kind — the installer header cross-check most of all — so a
+    kind this publisher does not know is a kind it cannot check, and trusting
+    the string would let a release opt its own installer out of the one check
+    that proves the installer belongs to the target it is filed under.
+    ``orch-hub-release/1`` files exactly one installer per target; anything
+    else is a schema this module has not been taught to verify.
+    """
     targets = release.get("targets")
     if not isinstance(targets, dict) or not targets:
         raise PublishError(f"{release_dir / RELEASE_NAME} declares no targets")
@@ -487,14 +523,32 @@ def _declared_artifacts(release: dict, release_dir: Path) -> dict[str, dict]:
         artifacts = entry.get("artifacts")
         if not isinstance(artifacts, list) or not artifacts:
             raise PublishError(f"target {target!r} declares no artifacts")
+        if len(artifacts) != 1:
+            raise PublishError(
+                f"target {target!r} declares {len(artifacts)} artifacts; "
+                f"{RELEASE_SCHEMA} files exactly one {INSTALLER_KIND} per target"
+            )
         for item in artifacts:
             if not isinstance(item, dict):
                 raise PublishError(f"target {target!r} has a non-object artifact")
             name = _safe_name(str(item.get("name", "")), f"target {target!r} artifact")
+            if name in RESERVED_NAMES:
+                raise PublishError(
+                    f"artifact {name!r} takes a name the release format reserves; "
+                    f"{RELEASE_NAME} and {CHECKSUM_NAME} describe the set and "
+                    f"{PUBLICATION_NAME} is written beside it when it is published"
+                )
             if name in declared:
                 raise PublishError(
                     f"artifact {name!r} is declared by two targets; one file "
                     "cannot be two targets' release"
+                )
+            kind = str(item.get("kind", ""))
+            if kind != INSTALLER_KIND:
+                raise PublishError(
+                    f"artifact {name!r} declares kind {kind!r}; {RELEASE_SCHEMA} "
+                    f"files exactly one {INSTALLER_KIND} per target, and a kind "
+                    "this publisher does not know is a kind it cannot check"
                 )
             size = item.get("size")
             if not isinstance(size, int) or isinstance(size, bool) or size < 0:
@@ -506,7 +560,7 @@ def _declared_artifacts(release: dict, release_dir: Path) -> dict[str, dict]:
                     "a lowercase hex digest"
                 )
             declared[name] = {
-                "kind": str(item.get("kind", "")),
+                "kind": kind,
                 "size": size,
                 "sha256": digest,
                 "target": target,
@@ -723,19 +777,27 @@ def publish(options: PublishOptions, *, runner: Runner = run_command) -> Publish
     operation with two endings: the same directory of files is assembled and
     checked once, and only then does anything leave the machine or become
     visible at a path a consumer reads.
+
+    The layout is resolved before any of it, because verification is only worth
+    something if the thing verified is still there afterwards: the scratch
+    directory is cleared with ``rmtree`` and the destination holds tags that
+    were published for good, so both of those paths are compared against the
+    concrete paths this run will destroy before the first file is read.
     """
-    _check_layout(options)
-    release = verify_release(options.release_dir)
+    check_tag_name(options.tag)
+    layout = _resolve_layout(options)
+    release = verify_release(layout.release_dir)
     check_tag(options.tag, release.version)
     check_checkout_version(options.checkout, release.version)
     revision = resolve_tag(options.checkout, options.tag, runner=runner)
 
-    stage = _stage(options, release, revision)
+    stage = _stage(layout, release, revision)
     try:
+        _check_stage(stage, release)
         if options.destination.scheme == "github":
             published = _publish_to_github(options, release, revision, stage, runner)
         else:
-            published = _publish_to_directory(options, revision, stage)
+            published = _publish_to_directory(layout.target, stage)
     finally:
         discard_path(stage, best_effort=True)
     return PublishResult(
@@ -748,27 +810,71 @@ def publish(options: PublishOptions, *, runner: Runner = run_command) -> Publish
     )
 
 
-def _check_layout(options: PublishOptions) -> None:
-    """Keep the three directories out of each other.
+@dataclass(frozen=True)
+class _Layout:
+    """Every path this publication reads, writes, or destroys, resolved once."""
 
-    Staging or publishing inside the release directory would add files to the
-    set that was just verified — and for the filesystem destination, publishing
-    into it would then copy the copy.
+    release_dir: Path
+    stage: Path
+    """Cleared with ``rmtree`` before it is filled — the one path this run
+    destroys on its own side."""
+
+    target: Path | None
+    """``<destination>/<tag>`` for the filesystem channel, ``None`` for a
+    release host, which has no path on this machine."""
+
+
+def _resolve_layout(options: PublishOptions) -> _Layout:
+    """Keep the directories out of each other, in both directions.
+
+    Nesting is only ever a problem in one direction at a time, and which
+    direction depends on which path is destructive. Comparing the *parents* is
+    not enough for that: the scratch directory as a whole is untouched, but
+    ``<work>/publish-<tag>`` is emptied, so it is the concrete stage path — and
+    the concrete ``<destination>/<tag>`` — that have to be compared. A release
+    directory below the stage is deleted after being verified; a destination
+    below the stage loses tags that were already published, before anything
+    here can notice they existed.
     """
     release_dir = options.release_dir.expanduser().resolve()
     work_dir = options.work_dir.expanduser().resolve()
+    stage = work_dir / _stage_name(options.tag)
+    target: Path | None = None
+
     _refuse_nested(release_dir, work_dir, "the scratch directory is inside the release")
+    _refuse_nested(
+        stage, release_dir, "the release directory is inside the scratch directory"
+    )
     if options.destination.scheme == "directory":
-        target = Path(options.destination.location)
+        destination = Path(options.destination.location).expanduser().resolve()
         _refuse_nested(
-            release_dir, target, "the destination is inside the release directory"
+            release_dir, destination, "the destination is inside the release directory"
         )
         _refuse_nested(
-            target, release_dir, "the release directory is inside the destination"
+            destination, release_dir, "the release directory is inside the destination"
         )
         _refuse_nested(
-            target, work_dir, "the scratch directory is inside the destination"
+            destination, work_dir, "the scratch directory is inside the destination"
         )
+        _refuse_nested(
+            stage, destination, "the destination is inside the scratch directory"
+        )
+        target = destination / options.tag
+    return _Layout(release_dir=release_dir, stage=stage, target=target)
+
+
+def _stage_name(tag: str) -> str:
+    """Name of the scratch directory one publication assembles itself in.
+
+    Deliberately derived from the tag rather than made unique: a path that
+    cannot be predicted cannot be checked for containment, and the containment
+    check is what keeps this directory from swallowing the release it is
+    publishing. It lives in the maintainer's own build directory, where the
+    competing-publisher case that unique names exist for does not arise — the
+    place publishers actually meet is the destination, which claims its names
+    atomically instead.
+    """
+    return f"publish-{tag}"
 
 
 def _refuse_nested(outer: Path, inner: Path, message: str) -> None:
@@ -776,12 +882,10 @@ def _refuse_nested(outer: Path, inner: Path, message: str) -> None:
         raise PublishError(f"{message}: {inner} under {outer}")
 
 
-def _stage(
-    options: PublishOptions, release: VerifiedRelease, revision: Revision
-) -> Path:
+def _stage(layout: _Layout, release: VerifiedRelease, revision: Revision) -> Path:
     """Assemble exactly what gets published, on the destination's side of the
     verification."""
-    stage = options.work_dir / f"publish-{revision.tag}"
+    stage = layout.stage
     discard_path(stage)
     try:
         stage.mkdir(parents=True)
@@ -798,27 +902,115 @@ def _stage(
     return stage
 
 
-def _publish_to_directory(
-    options: PublishOptions, revision: Revision, stage: Path
-) -> str:
-    target = Path(options.destination.location) / revision.tag
-    if target.exists() or target.is_symlink():
+def _check_stage(stage: Path, release: VerifiedRelease) -> None:
+    """Hold the bytes about to be published to the bytes that were verified.
+
+    ``verify_release`` reads the release directory; this reads what is actually
+    going out, immediately before it goes. The gap between them is a copy, and
+    a release directory that changed across it — a rebuild, a hand edit, a
+    packaging run finishing in the next terminal — would otherwise publish
+    bytes nothing here ever checked, under a checksum file that says otherwise.
+    The published copy is then the only witness, and it disagrees with itself.
+
+    The name set is checked too, because ``publication.json`` is written into
+    this directory last: an artifact filed under that name would be silently
+    replaced by the record. ``_declared_artifacts`` refuses that release, and
+    this is what proves the refusal is the reason the staged set is clean.
+    """
+    expected = {item.name: item for item in release.files}
+    try:
+        present = sorted(entry.name for entry in stage.iterdir())
+    except OSError as exc:
+        raise PublishError(
+            f"cannot read the staged publication at {stage}: {exc}"
+        ) from exc
+    accounted = sorted({*expected, PUBLICATION_NAME})
+    if present != accounted:
+        raise PublishError(
+            f"the staged publication at {stage} holds {', '.join(present)}, not "
+            f"the verified release and its record ({', '.join(accounted)})"
+        )
+    for name, item in sorted(expected.items()):
+        _verify_file(stage / name, item.size, item.sha256)
+
+
+def _publish_to_directory(target: Path | None, stage: Path) -> str:
+    """Claim the tag, then fill it — never replace what is already there.
+
+    ``orch_hub.atomic_dir`` deliberately *replaces*: a build's payload and an
+    installer's version have to land on top of the previous one. Publication
+    wants the opposite guarantee and cannot be built out of that one, because
+    "check that the target is absent, then place" is two operations: a second
+    publisher creating the tag in between has its release replaced by a check
+    that already passed. The one thing that is not two operations is ``mkdir``,
+    which either creates the directory or reports that somebody else did — so
+    that is the claim, and everything else happens inside a directory this
+    process is then known to own.
+
+    The cost is a window in which the claimed directory exists but is not full
+    yet. It is bounded by same-filesystem renames, and it is the right trade:
+    a reader arriving mid-publication sees a tag that is still filling, while
+    the alternative silently destroyed a tag somebody was already installing.
+    """
+    if target is None:  # pragma: no cover - the caller selects by scheme
+        raise PublishError("no filesystem destination to publish to")
+    parent = target.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise PublishError(f"cannot create the destination {parent}: {exc}") from exc
+
+    incoming = _bring_alongside(stage, parent, target.name)
+    try:
+        _claim(target)
+    except PublishError:
+        discard_path(incoming, best_effort=True)
+        raise
+    try:
+        for entry in sorted(incoming.iterdir()):
+            entry.rename(target / entry.name)
+    except OSError as exc:
+        # Nothing else can be writing here: a competing publisher of this tag
+        # failed its own claim above and never learned the name.
+        discard_path(target, best_effort=True)
+        discard_path(incoming, best_effort=True)
+        raise PublishError(f"cannot place the release at {target}: {exc}") from exc
+    discard_path(incoming, best_effort=True)
+    return str(target)
+
+
+def _claim(target: Path) -> None:
+    """Take the tag, atomically, or report that it is taken."""
+    try:
+        target.mkdir()
+    except FileExistsError as exc:
         raise PublishError(
             f"{target} already exists; a published tag is not republished. "
             "Remove it deliberately, or publish a new version."
-        )
+        ) from exc
+    except OSError as exc:
+        raise PublishError(f"cannot claim {target}: {exc}") from exc
+
+
+def _bring_alongside(stage: Path, parent: Path, name: str) -> Path:
+    """Move the staged set onto the destination's filesystem, out of the way.
+
+    The transfer is the only step that can cross a filesystem, so it is the
+    only one that can fail half-done — and it happens under a name
+    ``mkdtemp`` guarantees no other publisher holds, before the tag is claimed,
+    so a failure leaves debris nobody is reading and the tag still unpublished.
+    """
     try:
-        place_directory(
-            stage,
-            target,
-            transfer=lambda source, destination: shutil.move(
-                str(source), str(destination)
-            ),
-            what=f"release {revision.tag}",
-        )
-    except PlacementError as exc:
-        raise PublishError(str(exc)) from exc
-    return str(target)
+        incoming = Path(tempfile.mkdtemp(prefix=f".{name}.incoming-", dir=parent))
+    except OSError as exc:
+        raise PublishError(f"cannot stage the release under {parent}: {exc}") from exc
+    try:
+        for item in sorted(stage.iterdir()):
+            shutil.move(str(item), str(incoming / item.name))
+    except OSError as exc:
+        discard_path(incoming, best_effort=True)
+        raise PublishError(f"cannot stage the release at {incoming}: {exc}") from exc
+    return incoming
 
 
 def _publish_to_github(
