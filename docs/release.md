@@ -43,9 +43,10 @@ change, but no other target is produced today.
 
 ## Requirements
 
-- An Apple Silicon Mac running at least the `min_macos` the release declares
-  (`release.json`, or `--version` on the installer). The current release
-  declares macOS 11.0.
+- An Apple Silicon Mac running at least the `min_macos` the release declares in
+  `release.json`. The installer checks that floor with `--check`; its
+  `--version` output identifies only the version and target. The current
+  release declares macOS 11.0.
 - A local [Mandrel](https://github.com/qinglin89/mandrel) checkout with an
   executable `bin/mandrel`, and at least one repo registered with it. orch-hub
   needs no Python; **Mandrel is a separate program with its own requirements**,
@@ -60,6 +61,7 @@ Fetch the artifacts, check them, and run the installer by path:
 ```bash
 # 1. Download the release files into one directory.
 curl -fLO <url>/orch-hub-0.1.0-darwin-arm64.run
+curl -fLO <url>/release.json
 curl -fLO <url>/SHA256SUMS
 
 # 2. Verify what you received before running it.
@@ -91,6 +93,13 @@ Installer options:
 | `--version` | Print the version and target, then exit. |
 
 Both `--opt value` and `--opt=value` are accepted.
+
+If the first install uses a non-default `--prefix`, repeat it when running a
+later `.run`: the self-extractor runs from a temporary payload and cannot infer
+which custom prefix an earlier installer used. An installed `orch-hub` command
+does infer its own prefix. Repeat a custom `--bin-dir` on later installer runs
+and on `orch-hub uninstall` so those operations update or remove that link
+instead of the default `~/.local/bin/orch-hub`.
 
 ## What the installer refuses, and when
 
@@ -160,7 +169,7 @@ Resolution order, per setting:
 |---|---|
 | Mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then the legacy `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then the installed plist. There is no portable default; the first setup fails with guidance if none exists. The value is verified: it must be a directory holding an **executable** `bin/mandrel`, because the registry runs that file directly. |
 | Bearer token | `--token`, then `ORCH_HUB_TOKEN`, then the installed plist, then a generated token printed once. |
-| Host / port / data dir | corresponding flag, then environment, then default (`127.0.0.1`, `8765`, `~/.orch-hub`). |
+| Host / port / data dir | corresponding flag, then environment, then the installed plist, then default (`127.0.0.1`, `8765`, `~/.orch-hub`). |
 | Plist / log paths | `--plist-path` / `--log-dir`, then the `~/Library/...` defaults. |
 | Bark push URL | `ORCH_HUB_BARK_URL`, then the value already in the installed plist, else disabled. No flag — the URL embeds a device-key secret, so it is supplied through the environment and never printed. |
 
@@ -465,13 +474,14 @@ binding this step exists to make.
 | A destination that already holds this tag | The one guarantee a consumer cannot verify locally is that the bytes behind a version did not change after they were handed out. |
 | A release directory, scratch directory, or destination nested inside another | The scratch tree is created and cleared by the run; a release or destination under it would be destroyed by the run meant to read or fill it, and a scratch tree under either puts working files inside the set being verified or beside the tags being handed out. Refused in both directions. |
 
-Publication assembles and re-checks a staging directory first and places it
-last, so the same set of files is verified once and only then becomes visible
-at a path a consumer reads. Each invocation owns a uniquely named staging
-directory, and a filesystem destination's tag is claimed with a single `mkdir`
-rather than "check it is absent, then place" — so two concurrent publications
-of one tag produce one winner and one clear refusal, never a success report
-describing bytes that another publisher placed.
+Publication assembles and re-checks an invocation-owned staging directory first.
+For a filesystem destination, it brings those files onto the destination's
+filesystem before claiming the tag with a single `mkdir`, then fills the claimed
+directory with same-filesystem renames. Two concurrent publications of one tag
+therefore produce one winner and one clear refusal, never a success report
+describing bytes that another publisher placed. The claimed directory can be
+briefly visible while it is being filled; a placement failure removes it, so a
+failed first publication leaves no canonical partial tree behind.
 
 Alongside the artifacts it writes `publication.json`: schema, name, version,
 tag, commit, and the file inventory **including the digest of `SHA256SUMS`

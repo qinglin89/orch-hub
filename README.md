@@ -59,6 +59,7 @@ published model/effort choices.
 
 ```bash
 curl -fLO <url>/orch-hub-0.1.0-darwin-arm64.run
+curl -fLO <url>/release.json
 curl -fLO <url>/SHA256SUMS
 shasum -a 256 -c SHA256SUMS
 sh orch-hub-0.1.0-darwin-arm64.run --mandrel /absolute/path/to/mandrel
