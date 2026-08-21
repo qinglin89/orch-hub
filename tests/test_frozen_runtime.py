@@ -40,6 +40,12 @@ from orch_hub import release_package
 from orch_hub.release_audit import ForbiddenLiteral, audit_payload
 from orch_hub.release_build import default_literals
 from orch_hub.release_package import PackageOptions, package_release
+from orch_hub.release_publish import (
+    PUBLICATION_NAME,
+    PublishOptions,
+    parse_destination,
+    publish,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD_ENV = "ORCH_HUB_RUNTIME_PAYLOAD"
@@ -740,3 +746,73 @@ def test_the_real_installer_leaves_no_scratch_directory_behind(
     )
     assert result.returncode == 0, result.stderr
     assert list(scratch.iterdir()) == []
+
+
+def tagged_checkout(root: Path, tag: str) -> Path:
+    """A real repository sitting on ``tag`` with a clean tree.
+
+    Publication resolves the tag with git rather than trusting the caller, so a
+    smoke test of the real artifact set needs a real tag to resolve.
+    """
+    checkout = root / "checkout"
+    checkout.mkdir()
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "smoke",
+        "GIT_AUTHOR_EMAIL": "smoke@example.com",
+        "GIT_COMMITTER_NAME": "smoke",
+        "GIT_COMMITTER_EMAIL": "smoke@example.com",
+    }
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", *args], cwd=checkout, env=env, check=True, capture_output=True
+        )
+
+    git("init", "--quiet")
+    (checkout / "VERSION").write_text(f"{tag}\n", encoding="utf-8")
+    git("add", "VERSION")
+    git("commit", "--quiet", "-m", tag)
+    git("tag", "-a", tag, "-m", tag)
+    return checkout
+
+
+def test_the_real_release_publishes_under_its_tag(
+    release: Path, tmp_path: Path, manifest: dict
+):
+    """Publish the artifact set an engineer would actually be handed.
+
+    tests/test_release_publish.py pins every refusal against synthetic releases.
+    This runs the accepting path over the real one: a 17 MB self-extractor whose
+    header has to be found and whose digest has to be recomputed from the same
+    bytes the packager wrote.
+    """
+    tag = f"v{manifest['version']}"
+    destination = tmp_path / "storage"
+    result = publish(
+        PublishOptions(
+            checkout=tagged_checkout(tmp_path, tag),
+            release_dir=release,
+            work_dir=tmp_path / "work",
+            tag=tag,
+            destination=parse_destination(str(destination)),
+        )
+    )
+
+    published = Path(result.published)
+    assert published == (destination / tag).resolve()
+    for path in release.iterdir():
+        assert (published / path.name).read_bytes() == path.read_bytes()
+    # The published copy answers the same check a consumer runs on arrival.
+    verified = subprocess.run(
+        ["shasum", "-a", "256", "-c", "SHA256SUMS"],
+        cwd=str(published),
+        capture_output=True,
+        text=True,
+    )
+    assert verified.returncode == 0, verified.stdout + verified.stderr
+    record = json.loads((published / PUBLICATION_NAME).read_text(encoding="utf-8"))
+    assert record["tag"] == tag
+    assert record["version"] == manifest["version"]
+    # The one digest the release cannot carry for itself.
+    assert "SHA256SUMS" in {item["name"] for item in record["files"]}

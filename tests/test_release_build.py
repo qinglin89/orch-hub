@@ -201,6 +201,7 @@ def test_build_only_modules_are_kept_out_of_the_payload():
     assert set(release_build.BUILD_ONLY_MODULES) == {
         "orch_hub.release_build",
         "orch_hub.release_package",
+        "orch_hub.release_publish",
         "orch_hub.release_python",
         "orch_hub.release_audit",
         "orch_hub.macho",

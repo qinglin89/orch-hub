@@ -113,6 +113,7 @@ ENTRY_RELATIVE_PATH = Path("orch_hub") / "__main__.py"
 BUILD_ONLY_MODULES = (
     "orch_hub.release_build",
     "orch_hub.release_package",
+    "orch_hub.release_publish",
     "orch_hub.release_python",
     "orch_hub.release_audit",
     "orch_hub.macho",
