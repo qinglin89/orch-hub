@@ -41,6 +41,7 @@ from pathlib import Path
 
 from .atomic_dir import PlacementError, discard_path, place_directory
 from .launchd import (
+    LABEL,
     Deployment,
     DeployOptions,
     LaunchdError,
@@ -49,8 +50,8 @@ from .launchd import (
     installed_bind,
     installed_data_dir,
     restart_service,
+    service_target,
     stop_service,
-    verify_mandrel_checkout,
     wait_for_health,
 )
 from .resources import is_frozen
@@ -68,6 +69,13 @@ CURRENT_LINK = "current"
 PREVIOUS_MARKER = "previous"
 COMMAND_NAME = "orch-hub"
 MANIFEST_NAME = "runtime.json"
+MANIFEST_SCHEMA = "orch-hub-runtime/1"
+"""Payload self-description this installer knows how to place.
+
+Deliberately a second copy of :mod:`orch_hub.release_build`'s constant rather
+than an import: the build module is excluded from the payload by name, so an
+installed runtime cannot import it. A test asserts the two stay equal, which is
+the only place the duplication can go wrong."""
 
 INCOMING_LINK = f".{CURRENT_LINK}.incoming"
 """Scratch name the selection symlink is built under before it is swapped in.
@@ -75,6 +83,15 @@ INCOMING_LINK = f".{CURRENT_LINK}.incoming"
 A symlink cannot be edited in place, so selection creates the new one beside the
 old and renames it over: ``rename`` replaces the entry atomically, which means a
 reader never sees ``current`` missing."""
+
+OWNED_PREFIX_ENTRIES = frozenset(
+    {VERSIONS_DIR, CURRENT_LINK, PREVIOUS_MARKER, INCOMING_LINK}
+)
+"""Everything this module ever creates directly under a prefix.
+
+Uninstall removes the prefix recursively, so "is this ours" has to be answerable
+without trusting the path it was given. Anything else present means the
+directory holds something orch-hub did not put there."""
 
 
 class InstallError(RuntimeError):
@@ -174,7 +191,6 @@ class UninstallResult:
     plist_removed: bool
     link_path: Path | None
     link_removed: bool
-    service_error: str | None
     data_dir: Path | None
     data_removed: bool
 
@@ -202,12 +218,18 @@ def default_bin_dir() -> Path:
 
 
 def read_payload_manifest(payload_dir: Path) -> dict:
-    """Read and sanity-check a payload's ``runtime.json``.
+    """Read and validate a payload's ``runtime.json``.
 
     The manifest is the payload's self-description, so it is also the only
     honest source for what the payload *is*: its version, its target, and the
     executable to run. Reading those instead of assuming them is what keeps a
     second target a matter of another manifest rather than another installer.
+
+    It is also *input*: the version becomes a directory name under the prefix
+    and the executable name is assumed by every installed path. Both are
+    checked here, before the first filesystem write, because a manifest that
+    says ``"version": "../.."`` would otherwise decide where a recursive copy
+    lands.
     """
     path = payload_dir / MANIFEST_NAME
     if not path.is_file():
@@ -218,13 +240,48 @@ def read_payload_manifest(payload_dir: Path) -> dict:
         raise InstallError(f"cannot read {path}: {exc}") from exc
     if not isinstance(manifest, dict):
         raise InstallError(f"{path} is not a JSON object")
-    version = str(manifest.get("version") or "").strip()
-    if not version:
-        raise InstallError(f"{path} declares no version")
-    executable = payload_dir / str(manifest.get("executable") or COMMAND_NAME)
+    schema = str(manifest.get("schema") or "").strip()
+    if schema != MANIFEST_SCHEMA:
+        raise InstallError(
+            f"{path} declares schema {schema or 'none'!r}, "
+            f"but this installer places {MANIFEST_SCHEMA!r}"
+        )
+    name = str(manifest.get("name") or COMMAND_NAME).strip()
+    if name != COMMAND_NAME:
+        raise InstallError(f"{path} describes {name!r}, not an orch-hub payload")
+    version = _payload_version(manifest, path)
+    declared = str(manifest.get("executable") or COMMAND_NAME).strip()
+    # Honouring an arbitrary executable name would mean the command link, the
+    # plist program, and the self-replacement guard each had to read it back;
+    # they all spell it `orch-hub`, so the contract is enforced instead.
+    if declared != COMMAND_NAME:
+        raise InstallError(
+            f"{path} declares executable {declared!r}; "
+            f"an installed runtime must be named {COMMAND_NAME!r}"
+        )
+    executable = payload_dir / declared
     if not executable.is_file():
         raise InstallError(f"payload has no executable at {executable}")
     return manifest
+
+
+def _payload_version(manifest: dict, path: Path) -> str:
+    """Version from a manifest, proven usable as a single directory name.
+
+    ``<prefix>/versions/<version>`` is built by joining, and joining an absolute
+    or ``..``-bearing component silently discards the prefix. A version that
+    survives this is also one ``read_current`` can read back out of the
+    selection link, which a version carrying a separator would not be.
+    """
+    version = str(manifest.get("version") or "").strip()
+    if not version:
+        raise InstallError(f"{path} declares no version")
+    if version != Path(version).name or "\0" in version or version.startswith("."):
+        raise InstallError(
+            f"{path} declares version {version!r}; a version must be a single "
+            "path component naming a directory under versions/"
+        )
+    return version
 
 
 def check_target(
@@ -375,7 +432,7 @@ def install_version(
         raise InstallError(f"payload directory not found: {payload}")
     manifest = read_payload_manifest(payload)
     check_target(manifest)
-    version = str(manifest["version"]).strip()
+    version = _payload_version(manifest, payload / MANIFEST_NAME)
     root = _resolve_prefix(prefix)
     target = root / VERSIONS_DIR / version
     _refuse_self_replacement(payload, target, version)
@@ -540,6 +597,10 @@ def rollback(
         )
     if target == installation.current:
         raise InstallError(f"version {target} is already selected")
+    # Read where health will be probed *before* the selection moves: a service
+    # configuration that cannot be parsed has to fail while the running version
+    # is still the selected one, not after a restart onto a new one.
+    host, port = installed_bind(plist_path=plist_path)
     select_version(root, target)
     try:
         restart_service(plist_path=plist_path, runner=runner)
@@ -552,7 +613,6 @@ def rollback(
             f"selected {target} but could not restart the service: {exc}; "
             "start it with `orch-hub launchd start`"
         ) from exc
-    host, port = installed_bind(plist_path=plist_path)
     health = wait_for_health(
         host, port, checker=health_checker, sleeper=sleeper
     )
@@ -576,20 +636,28 @@ def uninstall(
     history, audit events, and evaluation artifacts are not re-creatable from a
     release, so removing a program must not remove them by default.
 
-    A service that cannot be stopped is reported rather than fatal. The common
-    reason is that it was never installed, and refusing to clean up an
-    installation because launchd has nothing to unload would leave the operator
-    with no way to finish.
+    Two things are established before anything is deleted. The prefix must be
+    an installation this installer made — ``--prefix`` takes any path, and a
+    recursive removal is the wrong place to find out it was a typo. And the
+    service must actually be stopped: ``stop_service`` already answers "there
+    was no job" without raising, so a raised error means a live service could
+    not be unloaded, and deleting its plist and data around it would leave a
+    running process with no configuration and ``KeepAlive`` unable to restart
+    it.
     """
     root = _resolve_prefix(prefix)
     resolved_plist = (plist_path or default_plist_path()).expanduser()
+    prefix_present = _verify_removable_prefix(root)
     resolved_data = _uninstall_data_dir(data_dir, resolved_plist) if purge_data else None
 
-    service_error: str | None = None
     try:
         stop_service(runner=runner)
     except LaunchdError as exc:
-        service_error = str(exc)
+        raise InstallError(
+            f"cannot stop the {LABEL} service, so nothing was removed: {exc}; "
+            "stop it and retry, or unload it by hand with "
+            f"`launchctl bootout {service_target()}`"
+        ) from exc
 
     plist_removed = _remove_file(resolved_plist)
     link_path, link_removed = _unlink_command(root, bin_dir)
@@ -598,7 +666,7 @@ def uninstall(
         data_removed = _remove_tree(resolved_data)
     # Last, because on a frozen runtime this is the directory the running
     # executable lives in: everything above still needs the payload's files.
-    prefix_removed = _remove_tree(root)
+    prefix_removed = _remove_tree(root) if prefix_present else False
     return UninstallResult(
         prefix=root,
         prefix_removed=prefix_removed,
@@ -606,7 +674,6 @@ def uninstall(
         plist_removed=plist_removed,
         link_path=link_path,
         link_removed=link_removed,
-        service_error=service_error,
         data_dir=resolved_data,
         data_removed=data_removed,
     )
@@ -614,6 +681,66 @@ def uninstall(
 
 def _resolve_prefix(prefix: Path | None) -> Path:
     return (prefix or default_prefix()).expanduser()
+
+
+def _verify_removable_prefix(root: Path) -> bool:
+    """Prove ``root`` is an orch-hub installation, or refuse to touch it.
+
+    ``--prefix`` accepts any path and uninstall deletes it recursively, so a
+    typo — or ``--prefix ~`` — is one command away from removing unrelated
+    files. Ownership is established positively: the prefix carries the
+    ``versions/`` directory this module creates, every entry beside it is one of
+    ours, and every installed version is a payload rather than an unrelated
+    directory that happens to be filed there.
+
+    Returns whether there is anything to remove; a prefix that does not exist is
+    not an error, because uninstall still has a plist and a command link to
+    clean up.
+    """
+    if root.is_symlink():
+        raise InstallError(
+            f"{root} is a symlink, not an installation directory; "
+            "name the real prefix"
+        )
+    if not root.exists():
+        return False
+    if not root.is_dir():
+        raise InstallError(f"{root} is not a directory")
+    entries = _list_dir(root)
+    foreign = sorted(
+        entry.name for entry in entries if entry.name not in OWNED_PREFIX_ENTRIES
+    )
+    if foreign:
+        listed = ", ".join(foreign[:5]) + ("..." if len(foreign) > 5 else "")
+        raise InstallError(
+            f"{root} is not an orch-hub install prefix: it holds {listed}; "
+            "refusing to remove it"
+        )
+    versions_dir = root / VERSIONS_DIR
+    if not versions_dir.is_dir():
+        raise InstallError(
+            f"{root} is not an orch-hub install prefix: no {VERSIONS_DIR}/ "
+            "directory; refusing to remove it"
+        )
+    for entry in _list_dir(versions_dir):
+        if not (entry / MANIFEST_NAME).is_file():
+            raise InstallError(
+                f"{entry} is not an installed orch-hub version (no "
+                f"{MANIFEST_NAME}); refusing to remove {root}"
+            )
+    return True
+
+
+def _list_dir(path: Path) -> list[Path]:
+    """Directory entries, with an unreadable directory as an operational error.
+
+    An unreadable prefix must not reach the caller as a traceback: this runs on
+    the way to a removal the CLI reports as ``error: ...`` and exit 1.
+    """
+    try:
+        return list(path.iterdir())
+    except OSError as exc:
+        raise InstallError(f"cannot read {path}: {exc}") from exc
 
 
 def _refuse_self_replacement(payload: Path, target: Path, version: str) -> None:

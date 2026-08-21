@@ -634,8 +634,6 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print("orch-hub uninstalled")
-    if result.service_error:
-        print(f"note: service stop reported: {result.service_error}")
     print(f"plist: {'removed' if result.plist_removed else 'not installed'}")
     if result.link_removed and result.link_path:
         print(f"command link: removed {result.link_path}")

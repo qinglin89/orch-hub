@@ -18,10 +18,18 @@
        `<install-prefix>/current/orch-hub serve` (one executable, no console
        scripts), a source checkout is `<checkout>/.venv/bin/orch-hub-api`.
        For manual recovery, write the absolute program and its arguments as one
-       <string> per element. -->
+       <string> per element.
+
+       The value below is deliberately the checkout console script spelled with
+       the long-standing REPLACE-ORCH-HUB-CHECKOUT placeholder, not a new token
+       naming the program. An installed CLI older than this template blanks
+       every REPLACE-... token it does not know, so a new token would render
+       ProgramArguments as [""] — a service that boots out and cannot come
+       back. Substituting a token that old code still knows keeps that path
+       renderable; current code overwrites the whole array anyway. -->
   <key>ProgramArguments</key>
   <array>
-    <string>REPLACE-ORCH-HUB-PROGRAM</string>
+    <string>REPLACE-ORCH-HUB-CHECKOUT/.venv/bin/orch-hub-api</string>
   </array>
 
   <key>EnvironmentVariables</key>

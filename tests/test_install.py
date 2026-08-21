@@ -106,7 +106,11 @@ def make_payload(tmp_path: Path, version: str = "0.1.0", **manifest_extra) -> Pa
 def make_mandrel(tmp_path: Path) -> Path:
     mandrel = tmp_path / "mandrel"
     (mandrel / "bin").mkdir(parents=True, exist_ok=True)
-    (mandrel / "bin" / "mandrel").write_text("#!/bin/sh\n", encoding="utf-8")
+    entry = mandrel / "bin" / "mandrel"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    # Executable, because the registry adapter runs it. A fixture that skipped
+    # this would be asserting setup accepts a checkout the hub cannot read.
+    entry.chmod(0o755)
     return mandrel
 
 
@@ -164,7 +168,9 @@ def test_manifest_not_an_object(tmp_path):
 
 def test_manifest_without_version(tmp_path):
     payload = make_payload(tmp_path)
-    (payload / "runtime.json").write_text('{"executable": "orch-hub"}', encoding="utf-8")
+    (payload / "runtime.json").write_text(
+        '{"schema": "orch-hub-runtime/1", "executable": "orch-hub"}', encoding="utf-8"
+    )
     with pytest.raises(InstallError, match="declares no version"):
         read_payload_manifest(payload)
 
@@ -174,6 +180,86 @@ def test_manifest_without_executable(tmp_path):
     (payload / "orch-hub").unlink()
     with pytest.raises(InstallError, match="no executable"):
         read_payload_manifest(payload)
+
+
+def test_manifest_schema_must_match_the_installer(tmp_path):
+    payload = make_payload(tmp_path, "0.9.0", schema="orch-hub-runtime/2")
+
+    with pytest.raises(InstallError, match="this installer places"):
+        read_payload_manifest(payload)
+
+
+def test_manifest_must_describe_orch_hub(tmp_path):
+    payload = make_payload(tmp_path, "0.9.1", name="something-else")
+
+    with pytest.raises(InstallError, match="not an orch-hub payload"):
+        read_payload_manifest(payload)
+
+
+@pytest.mark.parametrize(
+    "version",
+    ["/etc", "../escape", "a/b", "..", ".", ".hidden", "0.1.0/"],
+)
+def test_manifest_version_must_be_one_safe_path_component(tmp_path, version):
+    """A version becomes a directory name; joining an unsafe one escapes."""
+    payload = tmp_path / "payload-unsafe"
+    payload.mkdir()
+    (payload / "orch-hub").write_text("#!/bin/sh\n", encoding="utf-8")
+    (payload / "runtime.json").write_text(
+        json.dumps(
+            {
+                "schema": "orch-hub-runtime/1",
+                "name": "orch-hub",
+                "version": version,
+                "os": HOST_OS,
+                "arch": HOST_ARCH,
+                "executable": "orch-hub",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(InstallError, match="version"):
+        read_payload_manifest(payload)
+
+
+def test_install_refuses_a_version_that_escapes_the_prefix(tmp_path):
+    """The escape a bad version would perform, proven not to happen."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("mine", encoding="utf-8")
+    payload = make_payload(tmp_path, "0.1.0")
+    manifest = json.loads((payload / "runtime.json").read_text(encoding="utf-8"))
+    manifest["version"] = f"../../{outside.name}"
+    (payload / "runtime.json").write_text(json.dumps(manifest), encoding="utf-8")
+    prefix = tmp_path / "prefix"
+
+    with pytest.raises(InstallError, match="single path component"):
+        install_version(payload, prefix=prefix, link=False)
+
+    assert (outside / "keep.txt").read_text(encoding="utf-8") == "mine"
+    assert not prefix.exists()
+
+
+def test_install_refuses_a_mismatched_executable_name(tmp_path):
+    """Every installed path spells the command `orch-hub`; so must the payload."""
+    payload = make_payload(tmp_path, "0.9.2", executable="orch-hub-api")
+    (payload / "orch-hub-api").write_text("#!/bin/sh\n", encoding="utf-8")
+    prefix = tmp_path / "prefix"
+
+    with pytest.raises(InstallError, match="must be named"):
+        install_version(payload, prefix=prefix, link=False)
+
+    assert not prefix.exists()
+
+
+def test_installer_and_builder_agree_on_the_payload_manifest():
+    """The manifest constants are duplicated on purpose; drift is not."""
+    from orch_hub import release_build
+
+    assert install.MANIFEST_SCHEMA == release_build.MANIFEST_SCHEMA
+    assert install.MANIFEST_NAME == release_build.MANIFEST_NAME
+    assert install.COMMAND_NAME == release_build.EXECUTABLE_NAME
 
 
 def test_check_target_rejects_other_arch():
@@ -618,6 +704,52 @@ def test_rollback_probes_the_configured_bind(tmp_path):
     assert probes == [("127.0.0.9", 9876)]
 
 
+def test_rollback_refuses_an_unreadable_service_configuration(tmp_path):
+    """Health is probed at the plist's bind, so an unreadable plist is fatal.
+
+    Defaulting would restart the service and then probe 127.0.0.1:8765 — quite
+    possibly some other listener — and report its answer as this service's
+    health. The refusal happens before the selection moves, so the version that
+    is running stays the version that is selected.
+    """
+    prefix = tmp_path / "prefix"
+    plist_path = tmp_path / PLIST_NAME
+    install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
+    install_version(make_payload(tmp_path, "0.2.0"), prefix=prefix, link=False)
+    setup_from(tmp_path, prefix, FakeLaunchctl(), plist_path=plist_path)
+    plist_path.write_text("<plist>truncated", encoding="utf-8")
+    runner = FakeLaunchctl()
+
+    with pytest.raises(LaunchdError, match="cannot read the installed launchd plist"):
+        rollback(prefix=prefix, plist_path=plist_path, runner=runner)
+
+    assert read_current(prefix) == "0.2.0"
+    assert runner.calls == []
+
+
+def test_purge_refuses_an_unreadable_service_configuration(tmp_path):
+    """A purge deletes what the plist names; an unreadable one names nothing."""
+    prefix = tmp_path / "prefix"
+    plist_path = tmp_path / PLIST_NAME
+    data_dir = tmp_path / "data"
+    install_version(make_payload(tmp_path), prefix=prefix, link=False)
+    setup_from(tmp_path, prefix, FakeLaunchctl(), plist_path=plist_path)
+    (data_dir / "runs").mkdir(parents=True, exist_ok=True)
+    plist_path.write_text("<plist>truncated", encoding="utf-8")
+
+    with pytest.raises(LaunchdError, match="cannot read the installed launchd plist"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=tmp_path / "bin",
+            plist_path=plist_path,
+            purge_data=True,
+            runner=FakeLaunchctl(),
+        )
+
+    assert (data_dir / "runs").is_dir()
+    assert (prefix / "current" / "orch-hub").is_file()
+
+
 def test_rollback_without_a_previous_version(tmp_path):
     prefix = tmp_path / "prefix"
     install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
@@ -736,23 +868,111 @@ def test_uninstall_leaves_a_foreign_command_alone(tmp_path):
     assert (bin_dir / "orch-hub").is_symlink()
 
 
-def test_uninstall_reports_a_service_stop_failure_without_failing(tmp_path):
+def test_uninstall_aborts_when_the_service_cannot_be_stopped(tmp_path):
+    """A live service that will not unload must keep its plist and its files.
+
+    ``stop_service`` answers "there was no job" without raising, so a raised
+    error means the service is there and still running. Deleting its plist, its
+    data, and its executable around it would leave a live process with no
+    configuration and KeepAlive unable to bring it back.
+    """
     prefix = tmp_path / "prefix"
-    install_version(make_payload(tmp_path), prefix=prefix, link=False)
+    bin_dir = tmp_path / "bin"
+    plist_path = tmp_path / PLIST_NAME
+    data_dir = tmp_path / "data"
+    install_version(make_payload(tmp_path), prefix=prefix, bin_dir=bin_dir)
+    setup_from(tmp_path, prefix, FakeLaunchctl(), plist_path=plist_path)
+    (data_dir / "runs").mkdir(parents=True, exist_ok=True)
 
     def refuse(args, **kwargs):
         argv = tuple(str(arg) for arg in args)
         return CommandResult(argv, 1, "", "Operation not permitted")
 
-    result = uninstall(
-        prefix=prefix,
-        bin_dir=tmp_path / "bin",
-        plist_path=tmp_path / PLIST_NAME,
-        runner=refuse,
-    )
+    with pytest.raises(InstallError, match="nothing was removed"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=bin_dir,
+            plist_path=plist_path,
+            purge_data=True,
+            runner=refuse,
+        )
 
-    assert "Operation not permitted" in (result.service_error or "")
-    assert result.prefix_removed is True
+    assert plist_path.is_file()
+    assert (prefix / "current" / "orch-hub").is_file()
+    assert (bin_dir / "orch-hub").is_symlink()
+    assert (data_dir / "runs").is_dir()
+
+
+def test_uninstall_refuses_a_prefix_it_does_not_own(tmp_path):
+    """`--prefix ~` must not become a recursive delete of unrelated files."""
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Documents" / "notes.txt").write_text("keep me", encoding="utf-8")
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.write_text("installed", encoding="utf-8")
+    runner = FakeLaunchctl()
+
+    with pytest.raises(InstallError, match="not an orch-hub install prefix"):
+        uninstall(
+            prefix=home,
+            bin_dir=tmp_path / "bin",
+            plist_path=plist_path,
+            runner=runner,
+        )
+
+    assert (home / "Documents" / "notes.txt").read_text(encoding="utf-8") == "keep me"
+    # Refused before every side effect, launchctl included.
+    assert plist_path.read_text(encoding="utf-8") == "installed"
+    assert runner.calls == []
+
+
+def test_uninstall_refuses_a_versions_dir_full_of_foreign_directories(tmp_path):
+    prefix = tmp_path / "prefix"
+    (prefix / "versions" / "0.1.0" / "src").mkdir(parents=True)
+
+    with pytest.raises(InstallError, match="not an installed orch-hub version"):
+        uninstall(
+            prefix=prefix,
+            bin_dir=tmp_path / "bin",
+            plist_path=tmp_path / PLIST_NAME,
+            runner=FakeLaunchctl(),
+        )
+
+    assert (prefix / "versions" / "0.1.0" / "src").is_dir()
+
+
+def test_uninstall_reports_an_unreadable_prefix_as_an_error(tmp_path):
+    """Not a traceback: the CLI contract is `error: ...` and a non-zero exit."""
+    prefix = tmp_path / "prefix"
+    install_version(make_payload(tmp_path), prefix=prefix, link=False)
+    prefix.chmod(0o000)
+    try:
+        with pytest.raises(InstallError, match="cannot read"):
+            uninstall(
+                prefix=prefix,
+                bin_dir=tmp_path / "bin",
+                plist_path=tmp_path / PLIST_NAME,
+                runner=FakeLaunchctl(),
+            )
+    finally:
+        prefix.chmod(0o755)
+
+
+def test_uninstall_refuses_a_symlinked_prefix(tmp_path):
+    real = tmp_path / "real"
+    install_version(make_payload(tmp_path), prefix=real, link=False)
+    linked = tmp_path / "linked"
+    linked.symlink_to(real)
+
+    with pytest.raises(InstallError, match="is a symlink"):
+        uninstall(
+            prefix=linked,
+            bin_dir=tmp_path / "bin",
+            plist_path=tmp_path / PLIST_NAME,
+            runner=FakeLaunchctl(),
+        )
+
+    assert (real / "current" / "orch-hub").is_file()
 
 
 def test_uninstall_of_nothing_is_not_an_error(tmp_path):

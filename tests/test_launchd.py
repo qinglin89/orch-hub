@@ -422,6 +422,44 @@ def test_resolve_leftover_placeholders_blanks_unknown_but_fails_required():
         )
 
 
+def test_shipped_template_still_renders_under_the_previous_renderer():
+    """The other half of the skew: a newer template, an older installed CLI.
+
+    Before ``ProgramArguments`` was rendered from ``program_argv``, the renderer
+    substituted a fixed set of REPLACE- tokens and blanked every token it did
+    not recognize — the program array included. A template whose program value
+    used a token that renderer never learned would therefore render
+    ``ProgramArguments: [""]``, and an old ``orch-hub launchd deploy`` would
+    write it, boot out the working service, and fail to start the replacement.
+
+    The prior contract is restated here rather than called: what has to stay
+    compatible is the checked-in template, and the code that would render it is
+    by definition not this checkout's.
+    """
+    checkout = Path("/opt/orch-hub")
+    legacy_required = {
+        "REPLACE-ORCH-HUB-CHECKOUT": str(checkout),
+        "REPLACE-BEARER-TOKEN": "token",
+        "REPLACE-ORCH-HUB-HOST": "127.0.0.1",
+        "REPLACE-ORCH-HUB-PORT": "8765",
+        "REPLACE-MANDREL-CHECKOUT": "/opt/mandrel",
+        "REPLACE-ORCH-HUB-DATA-DIR": "/opt/data",
+        "REPLACE-ORCH-HUB-LOG-DIR": "/opt/logs",
+        "REPLACE-PATH": "/usr/bin:/bin",
+    }
+    template = read_plist(Path(__file__).parents[1] / TEMPLATE_RELATIVE_PATH)
+
+    rendered = _resolve_leftover_placeholders(
+        launchd._replace_placeholders(template, legacy_required),
+        required=frozenset(legacy_required),
+    )
+
+    assert rendered["ProgramArguments"] == [
+        str(checkout / ".venv" / "bin" / "orch-hub-api")
+    ]
+    assert "REPLACE-" not in plistlib.dumps(rendered).decode("utf-8")
+
+
 def test_deploy_tolerates_unknown_optional_template_placeholder(tmp_path):
     # Old-code / new-template skew end to end: a checkout whose launchd template
     # adds an optional env placeholder the installed code predates (the reported
@@ -1030,6 +1068,46 @@ def test_installed_data_dir_and_bind_fall_back_without_a_plist(tmp_path):
     assert launchd.installed_bind(plist_path=missing) == (DEFAULT_HOST, DEFAULT_PORT)
 
 
+def test_installed_readers_fail_closed_on_a_malformed_plist(tmp_path):
+    """"Not configured" and "cannot be parsed" must not answer the same.
+
+    A purge deletes what ``installed_data_dir`` names and a rollback probes what
+    ``installed_bind`` names; defaulting a corrupt plist would delete a
+    directory the service never used and call an unrelated endpoint healthy.
+    """
+    broken = tmp_path / PLIST_NAME
+    broken.write_text("<plist>not really", encoding="utf-8")
+
+    with pytest.raises(LaunchdError, match="cannot read the installed launchd plist"):
+        launchd.installed_data_dir(plist_path=broken)
+    with pytest.raises(LaunchdError, match="cannot read the installed launchd plist"):
+        launchd.installed_bind(plist_path=broken)
+
+
+@pytest.mark.parametrize("port", ["not-a-port", "0", "70000", "-1"])
+def test_installed_bind_refuses_an_unusable_port(tmp_path, port):
+    plist_path = tmp_path / PLIST_NAME
+    install_plist(plist_path, {HOST_ENV: "127.0.0.1", PORT_ENV: port})
+
+    with pytest.raises(LaunchdError, match=PORT_ENV):
+        launchd.installed_bind(plist_path=plist_path)
+
+
+def test_status_still_reports_a_malformed_plist_instead_of_failing(tmp_path):
+    """Status is diagnostic: it guesses *and* shows the parse error."""
+    broken = tmp_path / PLIST_NAME
+    broken.write_text("<plist>not really", encoding="utf-8")
+
+    result = status_service(
+        plist_path=broken,
+        runner=FakeRunner(print_loaded=False),
+        health_checker=lambda host, port: "unreachable: refused",
+    )
+
+    assert result.plist_error
+    assert (result.host, result.port) == (DEFAULT_HOST, DEFAULT_PORT)
+
+
 # --------------------------------------------------------------------------
 # mandrel verification and health waiting
 # --------------------------------------------------------------------------
@@ -1038,7 +1116,9 @@ def test_installed_data_dir_and_bind_fall_back_without_a_plist(tmp_path):
 def test_verify_mandrel_checkout(tmp_path):
     mandrel = tmp_path / "mandrel"
     (mandrel / "bin").mkdir(parents=True)
-    (mandrel / "bin" / "mandrel").write_text("#!/bin/sh\n", encoding="utf-8")
+    entry = mandrel / "bin" / "mandrel"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o755)
 
     launchd.verify_mandrel_checkout(mandrel)
 
@@ -1047,6 +1127,23 @@ def test_verify_mandrel_checkout(tmp_path):
     (tmp_path / "bare").mkdir()
     with pytest.raises(LaunchdError, match="does not look like a mandrel checkout"):
         launchd.verify_mandrel_checkout(tmp_path / "bare")
+
+
+def test_verify_mandrel_checkout_requires_an_executable_entry_point(tmp_path):
+    """The registry *runs* bin/mandrel; a readable file is not enough.
+
+    A non-executable entry point passes a file test and then fails at every
+    registry read, which shows up as the empty repo list this check exists to
+    make impossible.
+    """
+    mandrel = tmp_path / "mandrel"
+    (mandrel / "bin").mkdir(parents=True)
+    entry = mandrel / "bin" / "mandrel"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o644)
+
+    with pytest.raises(LaunchdError, match="not executable"):
+        launchd.verify_mandrel_checkout(mandrel)
 
 
 def test_deploy_can_require_a_real_mandrel_checkout(tmp_path):

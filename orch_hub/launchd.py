@@ -298,18 +298,59 @@ def installed_data_dir(*, plist_path: Path | None = None) -> Path:
     command that has to name it — uninstall's optional purge — reads the value
     the service actually uses instead of re-deriving a default that may not be
     the one holding their run history.
+
+    An unreadable installed plist is an error rather than a default: the caller
+    is about to *delete* the directory this answers with, and "the service was
+    never configured" and "its configuration cannot be parsed" are different
+    facts that must not produce the same path.
     """
     resolved = (plist_path or default_plist_path()).expanduser()
-    raw = _plist_env(_read_plist(resolved)).get(DATA_DIR_ENV, "").strip()
+    plist = _require_parsable_plist(resolved)
+    raw = _plist_env(plist).get(DATA_DIR_ENV, "").strip()
     return Path(raw).expanduser() if raw else DEFAULT_DATA_DIR
 
 
 def installed_bind(*, plist_path: Path | None = None) -> tuple[str, int]:
-    """Return the host/port the installed service is configured to serve on."""
+    """Return the host/port the installed service is configured to serve on.
+
+    Strict where :func:`status_service` is lenient, and for the same reason
+    ``installed_data_dir`` is: an operator command uses this answer to decide
+    whether the service it just changed came back. A default substituted for an
+    unreadable plist or an out-of-range port would probe an endpoint the service
+    never used and report health for something else entirely. ``status`` may
+    guess because it reports the parse error next to the guess; this cannot.
+    """
     resolved = (plist_path or default_plist_path()).expanduser()
-    env = _plist_env(_read_plist(resolved))
+    env = _plist_env(_require_parsable_plist(resolved))
     host = env.get(HOST_ENV, DEFAULT_HOST) or DEFAULT_HOST
-    return host, _status_port(env.get(PORT_ENV))
+    raw = (env.get(PORT_ENV) or "").strip()
+    if not raw:
+        return host, DEFAULT_PORT
+    try:
+        port = int(raw)
+    except ValueError:
+        raise LaunchdError(
+            f"installed {PORT_ENV} is not a number: {raw!r} in {resolved}"
+        ) from None
+    if not 1 <= port <= 65535:
+        raise LaunchdError(
+            f"installed {PORT_ENV} must be in 1-65535, got {port} in {resolved}"
+        )
+    return host, port
+
+
+def _require_parsable_plist(path: Path) -> dict | None:
+    """Read an installed plist, refusing to treat a corrupt one as absent.
+
+    ``None`` means the file is not there, which callers legitimately answer with
+    a default. A file that exists and does not parse raises: whatever the caller
+    would do with a default, it would be doing it to a service configured with
+    something else.
+    """
+    plist, error = _read_plist_with_error(path)
+    if error:
+        raise LaunchdError(f"cannot read the installed launchd plist {path}: {error}")
+    return plist
 
 
 def verify_mandrel_checkout(path: Path) -> None:
@@ -318,8 +359,13 @@ def verify_mandrel_checkout(path: Path) -> None:
     The registry — and therefore every managed repo the hub can see — comes from
     ``<mandrel>/bin/mandrel``. A path that does not carry it produces a hub that
     starts, serves, and reports zero repos, which reads as "nothing to do"
-    rather than as "misconfigured". Checking the executable's presence when the
-    value is supplied turns that into one clear error at the right moment.
+    rather than as "misconfigured". Checking the executable when the value is
+    supplied turns that into one clear error at the right moment.
+
+    Executability is part of the check, not a nicety: the registry adapter
+    *executes* this path. A present-but-not-executable file passes a file test
+    and then fails at every registry read, which is the same empty repo list
+    this check exists to prevent.
     """
     resolved = path.expanduser()
     if not resolved.is_dir():
@@ -328,6 +374,11 @@ def verify_mandrel_checkout(path: Path) -> None:
     if not binary.is_file():
         raise LaunchdError(
             f"{resolved} does not look like a mandrel checkout: no {binary}"
+        )
+    if not os.access(binary, os.X_OK):
+        raise LaunchdError(
+            f"{binary} is not executable; the registry runs it directly "
+            "(chmod +x it)"
         )
 
 
@@ -634,6 +685,11 @@ def _with_program_arguments(data: dict, program_argv: tuple[str, ...]) -> dict:
     with a placeholder for manual recovery, and rendering supplies the real
     argv. A template that lost the key entirely fails here rather than
     producing a plist launchd cannot start.
+
+    What the template's placeholder *is* still matters, even though this
+    discards it: it keeps carrying ``REPLACE-ORCH-HUB-CHECKOUT`` so a CLI older
+    than this code renders a working checkout program instead of blanking a
+    token it never learned. See the template's own comment.
     """
     argv = data.get(PROGRAM_KEY)
     if not isinstance(argv, list) or not argv:

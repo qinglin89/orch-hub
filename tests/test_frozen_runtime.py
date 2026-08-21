@@ -370,7 +370,9 @@ def test_setup_renders_the_bundled_plist_template(
     plist_path = tmp_path / "agent.plist"
     mandrel = tmp_path / "mandrel"
     (mandrel / "bin").mkdir(parents=True)
-    (mandrel / "bin" / "mandrel").write_text("#!/bin/sh\n", encoding="utf-8")
+    entry = mandrel / "bin" / "mandrel"
+    entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    entry.chmod(0o755)  # the registry runs it; setup verifies that it can
     host, port = served.rsplit("/", 1)[-1].split(":")
 
     result = run_installed(
@@ -439,6 +441,31 @@ def test_uninstall_removes_the_tree_it_is_running_from(installed, tmp_path: Path
     assert not prefix.exists()
     assert not command.is_symlink()
     assert (data_dir / "runs").is_dir()
+
+
+def test_uninstall_refuses_a_prefix_the_installer_does_not_own(tmp_path: Path):
+    """The shipped binary's most destructive verb, aimed at unrelated files.
+
+    ``--prefix`` takes any path and uninstall removes it recursively, so this is
+    the one command where a typo is unrecoverable. Proven on the artifact an
+    engineer actually receives, not only on the source it was frozen from.
+    """
+    home = tmp_path / "home"
+    (home / "Documents").mkdir(parents=True)
+    (home / "Documents" / "notes.txt").write_text("keep me", encoding="utf-8")
+
+    result = run_installed(
+        executable(),
+        tmp_path,
+        "uninstall",
+        "--prefix", str(home),
+        "--bin-dir", str(tmp_path / "bin"),
+        "--plist-path", str(tmp_path / "agent.plist"),
+    )
+
+    assert result.returncode == 1
+    assert "not an orch-hub install prefix" in result.stderr
+    assert (home / "Documents" / "notes.txt").read_text(encoding="utf-8") == "keep me"
 
 
 def test_install_refuses_a_payload_for_another_machine(tmp_path: Path):

@@ -1009,7 +1009,6 @@ def test_uninstall_cli_keeps_data_by_default(monkeypatch, capsys):
             plist_removed=True,
             link_path=Path("/b/orch-hub"),
             link_removed=True,
-            service_error=None,
             data_dir=None,
             data_removed=False,
         ),
@@ -1036,7 +1035,7 @@ def test_uninstall_cli_requires_confirmation_to_purge_data(monkeypatch, capsys):
     assert "pass --yes to confirm" in capsys.readouterr().err
 
 
-def test_uninstall_cli_reports_a_service_stop_failure(monkeypatch, capsys):
+def test_uninstall_cli_reports_a_purge_and_a_foreign_command_link(monkeypatch, capsys):
     monkeypatch.setattr(
         cli,
         "uninstall",
@@ -1047,7 +1046,6 @@ def test_uninstall_cli_reports_a_service_stop_failure(monkeypatch, capsys):
             plist_removed=False,
             link_path=Path("/b/orch-hub"),
             link_removed=False,
-            service_error="stop launchd service failed with exit 5",
             data_dir=Path("/d"),
             data_removed=True,
         ),
@@ -1057,6 +1055,21 @@ def test_uninstall_cli_reports_a_service_stop_failure(monkeypatch, capsys):
 
     assert rc == 0
     out = capsys.readouterr().out
-    assert "note: service stop reported:" in out
     assert "command link: left /b/orch-hub (not ours)" in out
     assert "data dir: removed /d" in out
+
+
+def test_uninstall_cli_reports_a_refused_removal(monkeypatch, capsys):
+    """A refusal is an error exit, not a summary claiming things were removed."""
+
+    def refuse(**kwargs):
+        raise InstallError("cannot stop the com.qinglin89.orch-hub service")
+
+    monkeypatch.setattr(cli, "uninstall", refuse)
+
+    rc = cli.main(["uninstall"])
+
+    assert rc == 1
+    captured = capsys.readouterr()
+    assert "error: cannot stop" in captured.err
+    assert "orch-hub uninstalled" not in captured.out
