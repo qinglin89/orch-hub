@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-21
+verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
 ---
 
 # APIs: CLI
@@ -63,12 +63,15 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 - Post-success output: deploy/update print only the launchd/Bark/token summary;
   they do not inspect Claude settings or request statusLine setup. Claude usage
   is supplied by the CLI cache poller without an operator configuration change.
-- Configuration precedence: CLI flag, environment, default for paths/host/port;
-  bearer token specifically resolves as `--token`, `ORCH_HUB_TOKEN`, existing
-  installed plist token, then generated token printed once. Bark URL resolves
-  as `ORCH_HUB_BARK_URL`, then existing installed plist value, then disabled;
-  it has no CLI flag, and CLI output reports only `bark push:
-  enabled/disabled` because the URL embeds a device-key secret.
+- Configuration precedence: the Mandrel checkout resolves as `--mandrel`,
+  current env, legacy env, then an existing installed plist; there is no
+  portable default, so first deploy requires an explicit source. Host, port,
+  and data paths retain their flag/environment/default resolution. The bearer
+  token resolves as `--token`, `ORCH_HUB_TOKEN`, existing installed plist token,
+  then a generated token printed once. Bark URL resolves as
+  `ORCH_HUB_BARK_URL`, then existing installed plist value, then disabled; it
+  has no CLI flag, and CLI output reports only `bark push: enabled/disabled`
+  because the URL embeds a device-key secret.
 - Errors: operational failures return exit 1 with `error: ...`; non-transient
   bootout/bootstrap failures are not retried, and missing or invalid templates
   fail before venv/pip work.
@@ -98,9 +101,10 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 - Source: `orch_hub.cli` resolves config, then delivers through
   `notifications.build_notifier(config)`.
 - Behavior: sends one harmless `probe_notification()` and exits 0 only after the
-  backend accepts delivery. If `ORCH_HUB_BARK_URL` is unset in the shell, it
-  falls back to the installed launchd plist's value; `--plist-path` overrides
-  that lookup for tests or alternate installs.
+  backend accepts delivery. When the current/legacy Mandrel path or
+  `ORCH_HUB_BARK_URL` is unset in the shell, it recovers that configuration from
+  the installed launchd plist; `--plist-path` overrides that lookup for tests or
+  alternate installs.
 - Errors: missing config exits 1 with a clear message; backend failures exit 1
   with the failure type/detail after redacting the resolved Bark URL/device key.
 - Non-goal: does not call `RunManager` or write run records, history events,

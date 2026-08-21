@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-21
+verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
 ---
 
 # Features: Operations Surfaces
@@ -29,7 +29,8 @@ Implemented behavior:
 - `orch-hub notify test` sends one `probe_notification()` directly through the
   configured notifier and exits 0 only after backend acceptance. Missing config
   or delivery failure exits non-zero, the resolved Bark URL is redacted from
-  errors, and an unset shell env falls back to the installed launchd plist.
+  errors, and an unset shell Mandrel path or Bark URL falls back to the selected
+  installed launchd plist.
 - `Notification` carries title/body/optional group. `BarkNotifier` sends JSON
   to the configured endpoint with a bounded timeout and injectable transport;
   the URL is treated as secret and is never logged.
@@ -97,6 +98,9 @@ Implemented behavior:
 - Token resolution is explicit `--token`, then `ORCH_HUB_TOKEN`, then an
   existing installed plist token, then a generated token printed once. The
   installed plist is written mode `600` because it embeds the bearer token.
+- Mandrel-path resolution is explicit `--mandrel`, current env, legacy env,
+  then an existing installed plist. There is no portable default; first deploy
+  fails with actionable guidance when none of those sources exists.
 - Bark URL resolution is `ORCH_HUB_BARK_URL`, then the existing installed-plist
   value, then disabled. It has no CLI flag; CLI output prints only whether Bark
   push is enabled because the URL embeds a device-key secret.

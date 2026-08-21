@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
+last-updated: 2026-08-21
+verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
 ---
 
 # APIs: HTTP — Core
@@ -150,9 +150,10 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
   `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
   `ORCH_HUB_EVAL_RETENTION`, and `ORCH_HUB_CODEX_HOME`; the legacy
-  `ORCH_HUB_AI_NATIVE_DEPLOYMENT` remains a one-release fallback for the
-  mandrel path; surrounding whitespace is stripped and empty/whitespace-only
-  values count as unset.
+  `ORCH_HUB_AI_NATIVE_DEPLOYMENT` remains a fallback for the Mandrel path.
+  There is no path default: if both current and legacy names are unset or blank,
+  app construction fails with actionable configuration guidance. Surrounding
+  whitespace is stripped and empty/whitespace-only values count as unset.
 - Module-level `app` is the `uvicorn orch_hub.api:app` target.
 - `run(host=None, port=None)` and console script `orch-hub-api` serve the app
   on `ORCH_HUB_HOST` / `ORCH_HUB_PORT`, defaulting to `127.0.0.1:8765`;

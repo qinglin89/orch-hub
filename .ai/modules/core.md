@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
+last-updated: 2026-08-21
+verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
 ---
 
 # Modules: Core
@@ -36,10 +36,11 @@ Notification commands dispatch through the configured notifier path:
 orch-hub notify test
 ```
 
-`notify test` resolves `Config.from_env()`, falls back to the installed launchd
-plist's Bark URL when the shell env is unset, sends one probe notification
-directly through `build_notifier(config)`, and reports delivery failure without
-printing the secret endpoint.
+`notify test` resolves process configuration, recovering the Mandrel path and
+Bark URL from the selected installed launchd plist when the shell has not
+exported them, sends one probe notification directly through
+`build_notifier(config)`, and reports delivery failure without printing the
+secret endpoint.
 
 Evaluation commands expose operator smoke checks:
 
@@ -58,21 +59,20 @@ notifications, semantic.
 
 Location: `orch_hub/config.py`
 
-Responsibility: define `ORCH_HUB_MANDREL_PATH` override (with
-`ORCH_HUB_AI_NATIVE_DEPLOYMENT` as a one-release legacy fallback), default
-mandrel path, `ORCH_HUB_TOKEN` bearer-token loading,
+Responsibility: require `ORCH_HUB_MANDREL_PATH` (with
+`ORCH_HUB_AI_NATIVE_DEPLOYMENT` as a legacy fallback), load the
+`ORCH_HUB_TOKEN` bearer token,
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
 `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
 `ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CLAUDE_HOME`, `ORCH_HUB_CODEX_HOME`, and
-derived Claude transcript, mandrel executable, and registry file paths:
-
-```text
-/Users/linqing/workplace/github.com/qinglin89/mandrel
-```
+derived Claude transcript, Mandrel executable, and registry file paths. The
+Mandrel checkout has no portable default; a process without either current or
+legacy path configuration fails with actionable guidance.
 
 All current environment variables strip surrounding whitespace. Empty or
-whitespace-only values count as unset; a malformed or out-of-range
+whitespace-only values count as unset (and therefore fail for the required
+Mandrel path); a malformed or out-of-range
 `ORCH_HUB_PORT` raises `ValueError` instead of silently binding the default.
 `ORCH_HUB_DATA_DIR` defaults to `~/.orch-hub`; the run manager writes
 `<data_dir>/runs/<run_id>/` directories there, and evaluation writes

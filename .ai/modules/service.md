@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-21
+verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
 ---
 
 # Modules: Service Surface
@@ -132,12 +132,16 @@ bootstrap through `launchctl`. Required template placeholders fail before write
 or load; unknown optional placeholders from newer templates render as `""` for
 old-CLI/new-template update compatibility. After a successful bootout,
 deploy/update poll for the label to disappear and retry transient bootstrap
-exit-5/input-output failures with bounded backoff. Token precedence is explicit
-option, env var, existing plist, then generated token. Bark URL precedence is
+exit-5/input-output failures with bounded backoff. The Mandrel checkout has no
+maintainer-specific default: precedence is explicit `--mandrel`, current env,
+legacy env, then an existing installed plist; first deploy fails with guidance
+when none exists. Token precedence is explicit option, env var, existing plist,
+then generated token. Bark URL precedence is
 `ORCH_HUB_BARK_URL`, then existing installed-plist value, then disabled; it has
 no deploy CLI flag and is never echoed because the URL embeds a device-key
-secret. `installed_bark_url(plist_path=...)` reads the installed plist value for
-`orch-hub notify test` when the current shell has not exported the URL.
+secret. `installed_mandrel_path(...)` and `installed_bark_url(...)` read the
+installed service configuration for `orch-hub notify test` when the current
+shell has not exported it.
 
 `start_service`, `stop_service`, and `restart_service` are launchd lifecycle
 helpers only. They bootstrap or boot out the fixed label and deliberately do
