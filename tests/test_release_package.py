@@ -321,6 +321,36 @@ def test_the_shipped_target_must_declare_a_floor_at_all(tmp_path: Path):
         package(tmp_path, payload)
 
 
+@pytest.mark.parametrize("declared", ["unknown", "11.x", "10..15", ".11", "11."])
+@pytest.mark.parametrize("target", ["darwin-arm64", "darwin-x86_64"])
+def test_a_floor_that_cannot_be_read_is_not_published(
+    tmp_path: Path, target: str, declared: str
+):
+    # Two routes to the same published artifact: against the pinned target each
+    # of these compares at or below the 11.0 promise, because a reader scoring
+    # unreadable components as zero cannot do otherwise, and a target with no
+    # pinned floor has nothing to compare them against at all. What arrives is
+    # identical either way — the installer's own numeric test rejects all five,
+    # so it skips the macOS refusal and installs on a Mac that cannot run it.
+    payload = make_payload(tmp_path, target=target, min_macos=declared)
+
+    with pytest.raises(PackageError, match="not a dotted numeric version"):
+        package(tmp_path, payload)
+
+    assert not (tmp_path / "release").exists()
+
+
+def test_an_unreadable_floor_is_not_what_the_escape_hatch_is_for(tmp_path: Path):
+    # --allow-unsupported-macos publishes a payload whose floor is known and
+    # higher than the release supports. A floor that cannot be read is not a
+    # higher one; it is a manifest no build here produces, so there is nothing
+    # to wave through.
+    payload = make_payload(tmp_path, min_macos="unknown")
+
+    with pytest.raises(PackageError, match="not a dotted numeric version"):
+        package(tmp_path, payload, allow_unsupported_macos=True)
+
+
 def test_an_unsupported_floor_can_be_packaged_deliberately(tmp_path: Path, capsys):
     payload = make_payload(tmp_path, min_macos="26.0")
 

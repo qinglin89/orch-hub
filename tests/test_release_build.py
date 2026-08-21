@@ -245,11 +245,25 @@ def test_first_party_modules_refuse_an_empty_package(tmp_path: Path):
         release_build.first_party_modules(tmp_path)
 
 
-def test_reusing_a_build_environment_requires_one_to_exist(tmp_path: Path):
+def test_reusing_a_build_environment_requires_one_to_exist(
+    tmp_path: Path, monkeypatch
+):
+    # The refusal comes before the pin is provisioned, and this test says so
+    # rather than only that it is refused: --skip-install means "build from what
+    # is already here", so fetching 75 MB of interpreter first replaces an
+    # actionable error with the network's, and makes an offline build fail for
+    # the wrong reason.
+    def unexpected_fetch(*args, **kwargs):
+        raise AssertionError("provisioned an interpreter for a build that reuses one")
+
+    monkeypatch.setattr(release_build, "ensure_interpreter", unexpected_fetch)
+
     with pytest.raises(BuildError, match="no interpreter"):
         release_build.ensure_build_venv(
             options(tmp_path, install=False), read_project(REPO_ROOT)
         )
+
+    assert not (tmp_path / "work" / release_build.INTERPRETER_DIR).exists()
 
 
 class FakeRuns:

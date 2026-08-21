@@ -387,22 +387,28 @@ def ensure_build_venv(options: BuildOptions, project: dict) -> Path:
 
     The environment is a cache, but the interpreter inside it is part of the
     artifact: it is the one that gets bundled and the one that sets the
-    payload's minimum macOS. So the interpreter is resolved first — the target's
-    pin unless the caller named another one — and then checked against the
+    payload's minimum macOS. So the interpreter is resolved — the target's pin
+    unless the caller named another one — and then checked against the
     environment already on disk, which is rebuilt when they differ rather than
     bundling the previous interpreter while reporting the requested one. The
     reused directory is invisible in the build output, so that mistake would
     surface only on the machine of whoever could not run the release.
+
+    A build told to reuse an environment that is not there is refused *before*
+    any of that. Resolving the pin provisions it, and a download is a poor way
+    to discover that the caller asked for something the build directory cannot
+    answer: it turns an actionable "create the environment first" into whatever
+    the network said, on the one path where nothing is going to be built anyway.
     """
-    options = replace(options, python=resolve_interpreter(options))
     venv_python = options.venv_dir / "bin" / "python"
+    if not options.install and not venv_python.is_file():
+        raise BuildError(
+            f"build environment {options.venv_dir} has no interpreter; "
+            "run without --skip-install to create it"
+        )
+    options = replace(options, python=resolve_interpreter(options))
     installed = _pin_mismatch(options)
     if not options.install:
-        if not venv_python.is_file():
-            raise BuildError(
-                f"build environment {options.venv_dir} has no interpreter; "
-                "run without --skip-install to create it"
-            )
         if installed is not None:
             raise BuildError(
                 f"build environment {options.venv_dir} was created from {installed}, "
