@@ -9,6 +9,13 @@ case; this module is what makes that a checked property instead of an
 assumption, because the failure mode (a maintainer's token shipped inside a
 release) is silent and unrecoverable once published.
 
+The check has to reach the code that actually runs, which is not in any file:
+the freezer appends its own archives, and the payload's Python lives inside
+them as compressed code objects. So the audit opens zip archives, the archive
+appended to an executable, and the module archive nested in that — a scan of
+the bytes on disk would report a clean payload no matter what a frozen module
+contains.
+
 The audit is build-time tooling. It is deliberately not reachable from the CLI
 and not part of a release payload: nothing in the served surface needs it, and
 a release should not carry the list of things a release must not carry.
@@ -20,7 +27,10 @@ report, the build log, and any JSON a release pipeline may keep.
 
 from __future__ import annotations
 
+import marshal
+import struct
 import zipfile
+import zlib
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -89,6 +99,28 @@ clean from the outside can still carry first-party source one level down.
 
 _CHUNK_SIZE = 1 << 20
 """Read size for the literal scan; files are streamed, not loaded whole."""
+
+_CARCHIVE_MAGIC = b"MEI\014\013\012\013\016"
+_CARCHIVE_COOKIE_FORMAT = "!8sIIII64s"
+_CARCHIVE_COOKIE_LENGTH = struct.calcsize(_CARCHIVE_COOKIE_FORMAT)
+_CARCHIVE_TOC_FORMAT = "!IIIIBc"
+_CARCHIVE_TOC_LENGTH = struct.calcsize(_CARCHIVE_TOC_FORMAT)
+_CARCHIVE_PYZ_TYPECODE = "z"
+_CARCHIVE_OPTION_TYPECODE = "o"
+_PYZ_MAGIC = b"PYZ\0"
+_PYZ_HEADER_LENGTH = 12
+"""Layout of the archive a freezer appends to its executable.
+
+The payload's real Python code does not sit in any file the operating system
+can see: the executable carries an appended archive whose table of contents
+points at zlib-compressed members, one of which is a second archive holding
+every module as a compressed code object. A scan of the file's bytes therefore
+proves nothing about the code that actually runs — a maintainer path or a token
+baked into a module is compressed out of sight. These constants are read from
+the format the freezer writes rather than from its library, because the audit
+runs on the bare interpreter that drives a build, before the build environment
+that holds the freezer exists.
+"""
 
 
 @dataclass(frozen=True)
@@ -297,6 +329,8 @@ def _scan_file(
     if path.suffix.lower() in ARCHIVE_SUFFIXES:
         _scan_archive(collector, path, posix, literals, package_name)
         return
+    if not _scan_embedded_archive(collector, path, posix, literals, package_name):
+        return  # unreadable and already reported; the byte scan would fail alike
     if not literals:
         return
     try:
@@ -325,17 +359,7 @@ def _scan_archive(
     with archive:
         for name in archive.namelist():
             member = f"{posix}!{name}"
-            member_path = PurePosixPath(name)
-            if _is_first_party_source(member_path, package_name, root_scripts=False):
-                collector.add(
-                    FIRST_PARTY_SOURCE, member, "first-party python source in archive"
-                )
-            for part in member_path.parts:
-                if part in REPOSITORY_STATE_NAMES:
-                    collector.add(
-                        REPOSITORY_STATE, member, f"repository state member: {part}"
-                    )
-                    break
+            _check_archive_member(collector, member, name, package_name)
             if not literals:
                 continue
             try:
@@ -345,9 +369,250 @@ def _scan_archive(
                     UNREADABLE, member, f"could not read archive member: {type(exc).__name__}"
                 )
                 continue
-            for literal in literals:
-                if literal.encoded() in data:
-                    collector.add(literal.kind, member, f"contains {literal.label}")
+            _check_member_literals(collector, member, data, literals)
+
+
+def _check_archive_member(
+    collector: _Collector, member: str, name: str, package_name: str
+) -> None:
+    """Apply the name-based rules to one member of any archive.
+
+    Archive members are named by the tool that wrote them, so the same module
+    appears as ``orch_hub.api.pyc`` in a zip, ``orch_hub.api`` in a freezer's
+    module archive, and ``orch_hub/api.pyc`` on disk. All three spellings reach
+    the same rules from here.
+    """
+    member_path = PurePosixPath(name)
+    if _is_first_party_source(member_path, package_name, root_scripts=False):
+        collector.add(FIRST_PARTY_SOURCE, member, "first-party python source in archive")
+    for part in member_path.parts:
+        if part in REPOSITORY_STATE_NAMES:
+            collector.add(REPOSITORY_STATE, member, f"repository state member: {part}")
+            break
+
+
+def _check_member_literals(
+    collector: _Collector,
+    member: str,
+    data: bytes,
+    literals: Sequence[ForbiddenLiteral],
+) -> None:
+    for literal in literals:
+        if literal.encoded() in data:
+            collector.add(literal.kind, member, f"contains {literal.label}")
+
+
+def _scan_embedded_archive(
+    collector: _Collector,
+    path: Path,
+    posix: str,
+    literals: Sequence[ForbiddenLiteral],
+    package_name: str,
+) -> bool:
+    """Audit the freezer archive appended to ``path``, if it carries one.
+
+    Returns whether the file could be read at all, so the caller can skip a
+    byte scan that would fail the same way rather than reporting it twice.
+
+    A file that merely happens to contain the magic bytes is not treated as an
+    archive: the header is range-checked first, and only a structurally sound
+    one commits the file to archive handling, where a later failure is an
+    ``UNREADABLE`` finding instead of a silent skip.
+    """
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            offset = _find_cookie(handle, size)
+            if offset < 0:
+                return True
+            cookie = _read_cookie(handle, offset)
+            if cookie is None:
+                return True
+            collector.archives_scanned += 1
+            _scan_carchive(
+                collector, handle, cookie, size, posix, literals, package_name
+            )
+    except OSError as exc:
+        collector.add(UNREADABLE, posix, f"could not read payload file: {type(exc).__name__}")
+        return False
+    return True
+
+
+def _find_cookie(handle, size: int) -> int:
+    """Offset of the archive header in ``handle``, or ``-1`` when absent.
+
+    Searched back-to-front because the header sits at the end of the archive,
+    which itself sits behind the executable's own code — and, on macOS, in
+    front of an appended code signature, so it is not at the end of the file
+    either. Chunks overlap so a header split across two reads is still found.
+    """
+    end = size
+    while end >= len(_CARCHIVE_MAGIC):
+        start = max(end - _CHUNK_SIZE, 0)
+        length = end - start
+        if length < len(_CARCHIVE_MAGIC):
+            break
+        handle.seek(start)
+        buffer = handle.read(length)
+        found = buffer.rfind(_CARCHIVE_MAGIC)
+        if found != -1:
+            return start + found
+        end = start + len(_CARCHIVE_MAGIC) - 1
+    return -1
+
+
+def _read_cookie(handle, offset: int) -> tuple[int, int, int] | None:
+    """Parse the archive header into ``(start, toc_offset, toc_length)``."""
+    handle.seek(offset)
+    data = handle.read(_CARCHIVE_COOKIE_LENGTH)
+    if len(data) < _CARCHIVE_COOKIE_LENGTH:
+        return None
+    _, length, toc_offset, toc_length, _, library = struct.unpack(
+        _CARCHIVE_COOKIE_FORMAT, data
+    )
+    end = offset + _CARCHIVE_COOKIE_LENGTH
+    start = end - length
+    if not library.rstrip(b"\0") or start < 0 or toc_length <= 0:
+        return None
+    if start + toc_offset + toc_length > end:
+        return None
+    return start, toc_offset, toc_length
+
+
+def _scan_carchive(
+    collector: _Collector,
+    handle,
+    cookie: tuple[int, int, int],
+    size: int,
+    posix: str,
+    literals: Sequence[ForbiddenLiteral],
+    package_name: str,
+) -> None:
+    """Audit every member of the archive appended to a payload file."""
+    start, toc_offset, toc_length = cookie
+    try:
+        entries = _carchive_entries(handle, start, toc_offset, toc_length)
+    except (ValueError, struct.error) as exc:
+        collector.add(
+            UNREADABLE, posix, f"could not read embedded archive: {type(exc).__name__}"
+        )
+        return
+    for name, offset, length, compressed, typecode in entries:
+        if typecode == _CARCHIVE_OPTION_TYPECODE:
+            continue  # a bootloader option, not a payload member
+        member = f"{posix}!{name}"
+        _check_archive_member(collector, member, name, package_name)
+        if typecode == _CARCHIVE_PYZ_TYPECODE:
+            _scan_pyz(
+                collector, handle, start + offset, size, member, literals, package_name
+            )
+            continue
+        if not literals or length <= 0:
+            continue
+        try:
+            data = _read_entry(handle, start + offset, length, compressed, size)
+        except (OSError, ValueError, zlib.error) as exc:
+            collector.add(
+                UNREADABLE, member, f"could not read archive member: {type(exc).__name__}"
+            )
+            continue
+        _check_member_literals(collector, member, data, literals)
+
+
+def _carchive_entries(
+    handle, start: int, toc_offset: int, toc_length: int
+) -> list[tuple[str, int, int, bool, str]]:
+    handle.seek(start + toc_offset)
+    data = handle.read(toc_length)
+    entries = []
+    cursor = 0
+    while cursor + _CARCHIVE_TOC_LENGTH <= len(data):
+        entry_length, offset, length, _, compressed, typecode = struct.unpack(
+            _CARCHIVE_TOC_FORMAT, data[cursor : cursor + _CARCHIVE_TOC_LENGTH]
+        )
+        if entry_length < _CARCHIVE_TOC_LENGTH or cursor + entry_length > len(data):
+            raise ValueError("archive table of contents is malformed")
+        name = data[cursor + _CARCHIVE_TOC_LENGTH : cursor + entry_length]
+        cursor += entry_length
+        entries.append(
+            (
+                name.rstrip(b"\0").decode("utf-8", "replace"),
+                offset,
+                length,
+                bool(compressed),
+                typecode.decode("ascii", "replace"),
+            )
+        )
+    return entries
+
+
+def _scan_pyz(
+    collector: _Collector,
+    handle,
+    start: int,
+    size: int,
+    member: str,
+    literals: Sequence[ForbiddenLiteral],
+    package_name: str,
+) -> None:
+    """Audit the module archive holding the payload's frozen code objects.
+
+    Only each entry's decompressed bytes are scanned; the code objects are
+    never unmarshalled. A literal lives in them as plain UTF-8 either way, and
+    unmarshalling would tie the audit to the bytecode version of the
+    interpreter that got bundled rather than the one running the build.
+    """
+    try:
+        entries = _pyz_entries(handle, start)
+    except (ValueError, EOFError, TypeError, struct.error) as exc:
+        collector.add(
+            UNREADABLE, member, f"could not read module archive: {type(exc).__name__}"
+        )
+        return
+    collector.archives_scanned += 1
+    for name, offset, length in entries:
+        nested = f"{member}!{name}"
+        _check_archive_member(collector, nested, name, package_name)
+        if not literals or length <= 0:
+            continue  # a namespace package has a table entry but no data
+        try:
+            data = _read_entry(handle, start + offset, length, True, size)
+        except (OSError, ValueError, zlib.error) as exc:
+            collector.add(
+                UNREADABLE, nested, f"could not read archive member: {type(exc).__name__}"
+            )
+            continue
+        _check_member_literals(collector, nested, data, literals)
+
+
+def _pyz_entries(handle, start: int) -> list[tuple[str, int, int]]:
+    handle.seek(start)
+    header = handle.read(_PYZ_HEADER_LENGTH)
+    if len(header) < _PYZ_HEADER_LENGTH or not header.startswith(_PYZ_MAGIC):
+        raise ValueError("not a module archive")
+    (toc_offset,) = struct.unpack("!i", header[8:_PYZ_HEADER_LENGTH])
+    if toc_offset < 0:
+        raise ValueError("module archive table of contents is malformed")
+    handle.seek(start + toc_offset)
+    entries = []
+    for entry in marshal.load(handle):
+        name, (_, offset, length) = entry
+        entries.append((str(name), int(offset), int(length)))
+    return entries
+
+
+def _read_entry(handle, offset: int, length: int, compressed: bool, size: int) -> bytes:
+    """Read one archive member, never further than the file it lives in.
+
+    A table of contents is data, and a corrupt one can declare a member of any
+    size at any offset. Clamping to the file keeps a damaged payload a finding
+    rather than an allocation the build dies on.
+    """
+    if offset < 0 or offset >= size:
+        raise ValueError("archive member lies outside the file")
+    handle.seek(offset)
+    data = handle.read(min(length, size - offset))
+    return zlib.decompress(data) if compressed else data
 
 
 def _scan_stream(path: Path, literals: Sequence[ForbiddenLiteral]) -> list[ForbiddenLiteral]:

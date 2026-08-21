@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from orch_hub import release_build
+from orch_hub.macho import PayloadFacts
 from orch_hub.release_audit import MAINTAINER_PATH, SECRET_MATERIAL
 from orch_hub.release_build import (
     TARGET,
@@ -198,6 +199,309 @@ def test_reusing_a_build_environment_requires_one_to_exist(tmp_path: Path):
         release_build.ensure_build_venv(
             options(tmp_path, install=False), read_project(REPO_ROOT)
         )
+
+
+class FakeRuns:
+    """Stand-in for the driver's subprocess runner.
+
+    Records what a build would have executed, and answers the interpreter
+    identity probe — the only command the environment logic reads output from.
+    """
+
+    def __init__(self, identity: str = "/base/bin/python3.14\n3.14.4\n"):
+        self.identity = identity
+        self.commands: list[list[str]] = []
+        self.captured = 0
+
+    def __call__(self, argv, what, *, cwd=None, capture=False):
+        self.commands.append(list(argv))
+        if capture:
+            self.captured += 1
+            return self.identity
+        return None
+
+    def created_a_venv(self) -> bool:
+        return any("venv" in command for command in self.commands)
+
+
+def fake_venv(
+    venv_dir: Path,
+    *,
+    executable: str,
+    version: str = "3.14.4",
+    version_key: str = "version",
+) -> Path:
+    """A build environment that records the interpreter it was created from."""
+    (venv_dir / "bin").mkdir(parents=True, exist_ok=True)
+    python = venv_dir / "bin" / "python"
+    python.write_text("#!/bin/sh\n", encoding="utf-8")
+    python.chmod(0o755)
+    (venv_dir / "pyvenv.cfg").write_text(
+        f"home = /base/bin\n{version_key} = {version}\nexecutable = {executable}\n",
+        encoding="utf-8",
+    )
+    (venv_dir / "marker").write_text("previous environment", encoding="utf-8")
+    return python
+
+
+def test_a_pinned_interpreter_replaces_an_environment_built_from_another(
+    tmp_path: Path, monkeypatch
+):
+    # The bundled interpreter sets the payload's minimum macOS, so a pin that
+    # silently reused the previous environment would report one interpreter and
+    # ship another — visible only to whoever cannot run the release.
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(venv_dir, executable="/old/bin/python3.14")
+    runs = FakeRuns("/new/bin/python3.14\n3.14.4\n")
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir, python="/new/bin/python3.14"),
+        read_project(REPO_ROOT),
+    )
+    assert not (venv_dir / "marker").exists()  # rebuilt, not reused
+    assert ["/new/bin/python3.14", "-m", "venv", str(venv_dir)] in runs.commands
+
+
+def test_an_environment_built_from_the_pinned_interpreter_is_reused(
+    tmp_path: Path, monkeypatch
+):
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(venv_dir, executable="/pinned/bin/python3.14")
+    runs = FakeRuns("/pinned/bin/python3.14\n3.14.4\n")
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir, python="/pinned/bin/python3.14"),
+        read_project(REPO_ROOT),
+    )
+    assert (venv_dir / "marker").exists()
+    assert not runs.created_a_venv()
+
+
+def test_an_interpreter_upgraded_in_place_replaces_the_environment(
+    tmp_path: Path, monkeypatch
+):
+    # Same path, different interpreter: the recorded version is the other half
+    # of the identity.
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(venv_dir, executable="/opt/bin/python3", version="3.14.4")
+    runs = FakeRuns("/opt/bin/python3\n3.15.0\n")
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir, python="/opt/bin/python3"),
+        read_project(REPO_ROOT),
+    )
+    assert not (venv_dir / "marker").exists()
+
+
+def test_the_version_info_spelling_is_the_same_identity(tmp_path: Path, monkeypatch):
+    # venv records `3.14.4` or `3.14.4.final.0` depending on the version that
+    # wrote it; reading them as different interpreters would rebuild the
+    # environment on every single build.
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(
+        venv_dir,
+        executable="/base/bin/python3.14",
+        version="3.14.4.final.0",
+        version_key="version_info",
+    )
+    runs = FakeRuns("/base/bin/python3.14\n3.14.4\n")
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir, python="/base/bin/python3.14"),
+        read_project(REPO_ROOT),
+    )
+    assert (venv_dir / "marker").exists()
+    assert not runs.created_a_venv()
+
+
+def test_an_unpinned_build_reuses_whatever_environment_exists(tmp_path: Path, monkeypatch):
+    # Without a pin there is nothing to enforce: the environment is a cache, and
+    # the driver must not probe or rebuild it.
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(venv_dir, executable="/whatever/bin/python3.14")
+    runs = FakeRuns()
+    monkeypatch.setattr(release_build, "_run", runs)
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir), read_project(REPO_ROOT)
+    )
+    assert (venv_dir / "marker").exists()
+    assert not runs.created_a_venv()
+    assert runs.captured == 0
+
+
+def test_reusing_an_environment_refuses_a_different_pinned_interpreter(
+    tmp_path: Path, monkeypatch
+):
+    # --skip-install may not rebuild anything, so the mismatch has to be said
+    # out loud rather than resolved silently.
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(venv_dir, executable="/old/bin/python3.14")
+    monkeypatch.setattr(release_build, "_run", FakeRuns("/new/bin/python3.14\n3.14.4\n"))
+
+    with pytest.raises(BuildError, match="not from the requested"):
+        release_build.ensure_build_venv(
+            options(tmp_path, venv_dir=venv_dir, python="/new/bin/python3.14", install=False),
+            read_project(REPO_ROOT),
+        )
+
+
+def test_an_environment_that_cannot_name_its_interpreter_is_rebuilt(
+    tmp_path: Path, monkeypatch
+):
+    # An environment that cannot say what it was built from is not the pinned
+    # one until proven otherwise.
+    venv_dir = tmp_path / "work" / "venv"
+    fake_venv(venv_dir, executable="/base/bin/python3.14")
+    (venv_dir / "pyvenv.cfg").unlink()
+    monkeypatch.setattr(release_build, "_run", FakeRuns())
+
+    release_build.ensure_build_venv(
+        options(tmp_path, venv_dir=venv_dir, python="/base/bin/python3.14"),
+        read_project(REPO_ROOT),
+    )
+    assert not (venv_dir / "marker").exists()
+
+
+def payload_files(extra: dict[str, bytes] | None = None) -> dict[str, bytes]:
+    """A payload holding every member a usable runtime must have.
+
+    Taken from the driver's own list, so a new required member is staged here
+    too instead of turning these tests into missing-member tests.
+    """
+    files = {
+        member: b"payload member"
+        for member in release_build.REQUIRED_MEMBERS
+        if member != release_build.MANIFEST_NAME  # the build writes this one
+    }
+    files.update(extra or {})
+    return files
+
+
+def prepare_build(
+    tmp_path: Path,
+    monkeypatch,
+    *,
+    staged_files: dict[str, bytes],
+    literals=(),
+) -> BuildOptions:
+    """Run a build for real from the freeze onwards, without freezing anything.
+
+    Everything the driver decides after the freezer returns — describing the
+    payload, auditing it, publishing it — runs unmodified; only the freezer,
+    the build environment and the Mach-O scan are stood in for.
+    """
+    checkout = tmp_path / "checkout"
+    (checkout / "orch_hub").mkdir(parents=True)
+    (checkout / "orch_hub" / "__init__.py").write_text(
+        '__version__ = "1.2.3"\n', encoding="utf-8"
+    )
+    (checkout / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    staged_dir = tmp_path / "work" / "dist" / "orch-hub"
+
+    def fake_freeze(build_options, venv_python):
+        for relative, content in staged_files.items():
+            path = staged_dir / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+        return staged_dir
+
+    monkeypatch.setattr(release_build, "check_host", lambda: None)
+    monkeypatch.setattr(
+        release_build, "ensure_build_venv", lambda build_options, project: tmp_path / "python"
+    )
+    monkeypatch.setattr(release_build, "_freeze", fake_freeze)
+    monkeypatch.setattr(
+        release_build,
+        "scan_payload",
+        lambda root: PayloadFacts(architectures=("arm64",), min_macos="11.0", binaries=1),
+    )
+    monkeypatch.setattr(release_build, "_interpreter_version", lambda python: "3.14.4")
+    monkeypatch.setattr(release_build, "_builder_identity", lambda python: "pyinstaller 6.22.2")
+    return options(tmp_path, checkout=checkout, literals=tuple(literals))
+
+
+def previous_payload(tmp_path: Path) -> Path:
+    payload_dir = tmp_path / "dist" / f"orch-hub-{TARGET}"
+    payload_dir.mkdir(parents=True)
+    (payload_dir / "marker").write_text("last good payload", encoding="utf-8")
+    return payload_dir
+
+
+def test_a_rejected_payload_is_not_published_and_leaves_the_last_one_intact(
+    tmp_path: Path, monkeypatch
+):
+    # The distributable path is what the installer and the smoke test consume,
+    # so a candidate that failed its audit must not be sitting there — and the
+    # payload that did pass must not have been deleted to make room for it.
+    payload_dir = previous_payload(tmp_path)
+    build_options = prepare_build(
+        tmp_path,
+        monkeypatch,
+        staged_files=payload_files({"_internal/blob.bin": b"built in /Users/maintainer/x"}),
+        literals=release_build.maintainer_path_literals(["/Users/maintainer"]),
+    )
+
+    with pytest.raises(BuildError, match="payload audit"):
+        release_build.build_runtime(build_options)
+
+    assert (payload_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+    assert not (payload_dir / "_internal").exists()
+    assert not (payload_dir / "runtime.json").exists()
+    assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_a_missing_required_member_also_stops_publication(tmp_path: Path, monkeypatch):
+    # Absence of the forbidden is only half of a distributable payload; an
+    # incomplete one must not reach the distributable path either.
+    payload_dir = previous_payload(tmp_path)
+    build_options = prepare_build(
+        tmp_path, monkeypatch, staged_files={"orch-hub": b"executable only"}
+    )
+
+    with pytest.raises(BuildError, match="required member is absent"):
+        release_build.build_runtime(build_options)
+    assert (payload_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+
+
+def test_a_payload_that_passes_replaces_the_previous_one(tmp_path: Path, monkeypatch):
+    payload_dir = previous_payload(tmp_path)
+    build_options = prepare_build(tmp_path, monkeypatch, staged_files=payload_files())
+
+    result = release_build.build_runtime(build_options)
+
+    assert result.payload_dir == payload_dir
+    assert result.audit.clean
+    assert result.manifest["version"] == "1.2.3"
+    assert (payload_dir / "runtime.json").is_file()
+    # Replaced rather than merged: nothing of the old payload is left behind.
+    assert not (payload_dir / "marker").exists()
+    assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_a_publication_that_fails_puts_the_previous_payload_back(
+    tmp_path: Path, monkeypatch
+):
+    # The swap itself can fail — a full disk, a payload open elsewhere. The
+    # distributable path must not be left empty when it does.
+    payload_dir = previous_payload(tmp_path)
+    staged_dir = tmp_path / "staged"
+    staged_dir.mkdir()
+    (staged_dir / "orch-hub").write_text("new payload", encoding="utf-8")
+
+    def refuse(source, destination):
+        raise OSError("no space left on device")
+
+    monkeypatch.setattr(release_build.shutil, "move", refuse)
+    with pytest.raises(BuildError, match="cannot place the payload"):
+        release_build._place_payload(staged_dir, payload_dir)
+
+    assert (payload_dir / "marker").read_text(encoding="utf-8") == "last good payload"
+    assert list(payload_dir.parent.iterdir()) == [payload_dir]
 
 
 def test_entry_point_is_the_module_python_m_runs():

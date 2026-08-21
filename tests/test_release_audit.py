@@ -10,7 +10,10 @@ freezer's own module naming looks nothing like an on-disk package.
 
 from __future__ import annotations
 
+import marshal
+import struct
 import zipfile
+import zlib
 from pathlib import Path
 
 from orch_hub.release_audit import (
@@ -160,6 +163,165 @@ def test_literals_are_found_inside_archive_members(tmp_path: Path):
     assert paths_for(audit_payload(tmp_path, literals=literals), MAINTAINER_PATH) == [
         "_internal/base_library.zip!os.pyc"
     ]
+
+
+def module_archive(modules: dict[str, bytes]) -> bytes:
+    """A freezer's module archive: each module zlib-compressed on its own.
+
+    Written here rather than imported from the freezer, for the same reason the
+    audit parses it by hand: the format is what a released payload contains, and
+    the build driver runs on an interpreter that does not have the freezer
+    installed. A change in the format has to fail this test.
+    """
+    header = _PYZ_MAGIC + b"\x00\x01\x02\x03"  # magic, then a bytecode version
+    body = b""
+    entries = []
+    for name, source in modules.items():
+        blob = zlib.compress(source)
+        entries.append((name, (0, len(header) + 4 + len(body), len(blob))))
+        body += blob
+    entries.append(("namespace_pkg", (3, 0, 0)))  # a package with no data blob
+    toc_offset = len(header) + 4 + len(body)
+    return header + struct.pack("!i", toc_offset) + body + marshal.dumps(entries)
+
+
+def freezer_archive(entries: list[tuple[str, bytes, str, bool]]) -> bytes:
+    """An executable-shaped file with a freezer archive appended to it.
+
+    The archive is neither at the start of the file nor at its end: real
+    payloads carry the program's own code in front of it and, on macOS, a code
+    signature behind it.
+    """
+    body = b""
+    toc = b""
+    for name, blob, typecode, compress in entries:
+        stored = zlib.compress(blob) if compress else blob
+        raw_name = name.encode("utf-8") + b"\0"
+        entry_length = _TOC_LENGTH + len(raw_name)
+        padding = -entry_length % 16  # the freezer pads names to a 16-byte stride
+        toc += struct.pack(
+            "!IIIIBc",
+            entry_length + padding,
+            len(_PROGRAM_CODE) + len(body),
+            len(stored),
+            len(blob),
+            int(compress),
+            typecode.encode("ascii"),
+        )
+        toc += raw_name + b"\0" * padding
+        body += stored
+    archive = body + toc
+    cookie = struct.pack(
+        "!8sIIII64s",
+        _MAGIC,
+        len(_PROGRAM_CODE) + len(archive) + _COOKIE_LENGTH,
+        len(_PROGRAM_CODE) + len(body),
+        len(toc),
+        314,
+        b"Python",
+    )
+    return _PROGRAM_CODE + archive + cookie + _SIGNATURE
+
+
+_MAGIC = b"MEI\014\013\012\013\016"
+_PYZ_MAGIC = b"PYZ\0"
+_COOKIE_LENGTH = struct.calcsize("!8sIIII64s")
+_TOC_LENGTH = struct.calcsize("!IIIIBc")
+_PROGRAM_CODE = b"\xcf\xfa\xed\xfe" + b"bootloader" * 200
+_SIGNATURE = b"\xfa\xde\x0c\xc0" + b"signature" * 100
+
+
+def test_literal_inside_a_frozen_module_is_reported(tmp_path: Path):
+    # The payload's Python is not in any file: it is a compressed code object
+    # inside an archive inside the executable. Scanning the file's bytes proves
+    # nothing about it, which is exactly where a build path or a token hides.
+    frozen = b"secret lives at /Users/maintainer/checkout in this code object"
+    executable = write(
+        tmp_path,
+        "orch-hub",
+        freezer_archive(
+            [
+                ("PYZ.pyz", module_archive({"orch_hub.api": frozen}), "z", False),
+                ("pyi-contents-directory _internal", b"", "o", False),
+            ]
+        ),
+    )
+    assert b"/Users/maintainer" not in executable.read_bytes()  # invisible on disk
+
+    literals = maintainer_path_literals(["/Users/maintainer"])
+    report = audit_payload(tmp_path, literals=literals)
+    assert paths_for(report, MAINTAINER_PATH) == ["orch-hub!PYZ.pyz!orch_hub.api"]
+    # The executable's archive and the module archive nested inside it.
+    assert report.archives_scanned == 2
+
+
+def test_literal_inside_a_frozen_entry_script_is_reported(tmp_path: Path):
+    # Not every frozen code object lives in the module archive: the program's
+    # entry script and the freezer's own bootstrap sit in the outer archive,
+    # compressed one by one.
+    write(
+        tmp_path,
+        "orch-hub",
+        freezer_archive([("__main__", b"token sk-live-secret", "s", True)]),
+    )
+    literal = ForbiddenLiteral(label="bearer token", value="sk-live-secret")
+    report = audit_payload(tmp_path, literals=[literal])
+    assert paths_for(report, SECRET_MATERIAL) == ["orch-hub!__main__"]
+    assert "sk-live-secret" not in report.findings[0].detail
+
+
+def test_frozen_module_names_are_not_read_as_source_files(tmp_path: Path):
+    # A frozen module is a code object named `orch_hub.api`, not a shipped
+    # source file — flagging it would fail every real build.
+    write(
+        tmp_path,
+        "orch-hub",
+        freezer_archive(
+            [("PYZ.pyz", module_archive({"orch_hub.api": b"", "os": b""}), "z", False)]
+        ),
+    )
+    assert audit_payload(tmp_path).clean
+
+
+def test_source_file_inside_a_freezer_archive_is_reported(tmp_path: Path):
+    # A data entry, though, is a file the payload carries under its own name.
+    write(
+        tmp_path,
+        "orch-hub",
+        freezer_archive([("orch_hub/api.pyc", b"\x00", "x", False)]),
+    )
+    assert paths_for(audit_payload(tmp_path), FIRST_PARTY_SOURCE) == [
+        "orch-hub!orch_hub/api.pyc"
+    ]
+
+
+def test_corrupt_freezer_archive_is_reported_rather_than_skipped(tmp_path: Path):
+    # A structurally sound header commits the file to archive handling, so a
+    # truncated archive behind it is an unproven payload, not a clean one.
+    intact = freezer_archive([("PYZ.pyz", module_archive({"orch_hub.api": b""}), "z", False)])
+    write(tmp_path, "orch-hub", intact.replace(_PYZ_MAGIC, b"XXX\0", 1))
+    assert paths_for(audit_payload(tmp_path), UNREADABLE) == ["orch-hub!PYZ.pyz"]
+
+
+def test_a_member_declared_outside_the_file_is_reported(tmp_path: Path):
+    # A table of contents is data, and a corrupt one can claim a member of any
+    # size at any offset. Reading it as declared would end the build in an
+    # allocation instead of a finding.
+    archive = bytearray(freezer_archive([("CORRUPT_ME", b"data", "x", False)]))
+    entry = archive.rfind(b"CORRUPT_ME") - _TOC_LENGTH
+    archive[entry + 4 : entry + 12] = struct.pack("!II", 0xFFFFFF00, 0xFFFFFF00)
+    write(tmp_path, "orch-hub", bytes(archive))
+
+    literal = ForbiddenLiteral(label="bearer token", value="sk-live-secret")
+    report = audit_payload(tmp_path, literals=[literal])
+    assert paths_for(report, UNREADABLE) == ["orch-hub!CORRUPT_ME"]
+
+
+def test_magic_bytes_without_a_valid_header_are_not_an_archive(tmp_path: Path):
+    # The pattern can occur in ordinary binary content; treating that as a
+    # corrupt archive would report a finding on a clean payload.
+    write(tmp_path, "_internal/libssl.dylib", b"\x00" * 64 + _MAGIC + b"\x01" * 64)
+    assert audit_payload(tmp_path).clean
 
 
 def test_missing_required_member_is_reported(tmp_path: Path):

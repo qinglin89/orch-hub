@@ -34,6 +34,8 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub.release_audit import ForbiddenLiteral, audit_payload
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
 PAYLOAD_ENV = "ORCH_HUB_RUNTIME_PAYLOAD"
 DEFAULT_PAYLOAD = REPO_ROOT / "dist" / "orch-hub-darwin-arm64"
@@ -147,6 +149,39 @@ def served(tmp_path_factory) -> Iterator[str]:
             process.wait(timeout=10)
         except subprocess.TimeoutExpired:  # pragma: no cover - stuck child
             process.kill()
+
+
+def test_the_audit_reads_the_code_frozen_into_the_executable():
+    """The payload audit must reach the code that actually ships.
+
+    The synthetic archives in tests/test_release_audit.py pin the parser
+    against a format written by hand; this pins it against the artifact the
+    freezer really produces. A first-party symbol is used as the canary because
+    it exists only in compiled first-party code — so finding it proves the
+    audit decompressed a frozen module, and a maintainer path or a token in one
+    would be found the same way.
+    """
+    binary = executable()
+    canary = ForbiddenLiteral(label="first-party symbol", value="runtime_root")
+    # Invisible to a scan of the payload's bytes: this is the gap being closed.
+    assert canary.value.encode() not in binary.read_bytes()
+
+    report = audit_payload(payload_dir(), literals=[canary])
+    assert f"{binary.name}!PYZ.pyz!orch_hub.resources" in [
+        finding.path for finding in report.findings
+    ]
+    # The archive appended to the executable, the module archive inside it, and
+    # the standard library's own zip.
+    assert report.archives_scanned >= 3
+
+
+def test_the_built_payload_carries_no_first_party_source_or_repository_state():
+    # The build audits what it produced, but the payload on disk is what gets
+    # packaged; checking it here keeps that a property of the artifact rather
+    # than of the run that made it.
+    executable()  # skip rather than fail when nothing has been built
+    report = audit_payload(payload_dir())
+    assert report.findings == ()
 
 
 def test_runtime_reports_itself_as_frozen(tmp_path: Path):

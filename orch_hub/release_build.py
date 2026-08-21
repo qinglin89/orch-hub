@@ -24,7 +24,9 @@ Three properties are worth more than the mechanics:
   Nothing in it is a path, so the manifest carries no trace of the builder.
 - **The payload is audited before it is a release.** A build with findings
   fails; shipping a maintainer's absolute path or bearer token inside a binary
-  is not recoverable after publication.
+  is not recoverable after publication. The audit runs on the staged build, so
+  a rejected candidate is never published and the last payload that passed
+  stays where the installer and the smoke test look for it.
 
 Cross-building is not attempted. A freezer bundles the interpreter and shared
 libraries of the machine it runs on, so the host must already be the target.
@@ -72,6 +74,9 @@ MANIFEST_SCHEMA = "orch-hub-runtime/1"
 
 BUNDLE_DIR = "_internal"
 """Subdirectory the freezer puts bundled resources and libraries in."""
+
+PREVIOUS_SUFFIX = ".previous"
+"""Suffix the payload being replaced is held under while it is replaced."""
 
 RELEASE_EXTRA = "release"
 """``pyproject.toml`` optional-dependency group holding the build toolchain."""
@@ -136,10 +141,14 @@ class BuildOptions:
     out_dir: Path
     work_dir: Path
     venv_dir: Path
-    python: str = sys.executable
+    python: str | None = None
     """Interpreter the build environment is created from — and therefore the
     interpreter that gets bundled. It decides the payload's minimum macOS, so
-    a release pipeline pins a redistributable one instead of taking the host's."""
+    a release pipeline pins a redistributable one instead of taking the host's.
+
+    ``None`` means unpinned: create the environment from whatever is running the
+    build, and accept an existing one as-is. A pin is a requirement about the
+    artifact, so it is enforced against the environment on disk."""
 
     install: bool = True
     clean: bool = True
@@ -266,43 +275,71 @@ def default_literals(
 
 
 def build_runtime(options: BuildOptions) -> BuildResult:
-    """Freeze, arrange, describe, and audit one runtime payload."""
+    """Freeze, describe, and audit one runtime payload, then publish it.
+
+    Everything happens on the staged directory the freezer wrote, and the
+    distributable path is only touched once the payload has passed. A build
+    that fails its audit therefore publishes nothing and destroys nothing: the
+    previous payload stays where the installer and smoke test look for it,
+    instead of being replaced by a candidate that was rejected.
+    """
     check_host()
     version = read_version(options.checkout)
     project = read_project(options.checkout)
     venv_python = ensure_build_venv(options, project)
-    frozen_dir = _freeze(options, venv_python)
-    payload_dir = _place_payload(frozen_dir, options.payload_dir)
-    facts = scan_payload(payload_dir)
+    staged_dir = _freeze(options, venv_python)
+    facts = scan_payload(staged_dir)
     manifest = _write_manifest(
-        payload_dir,
+        staged_dir,
         version=version,
         facts=facts,
         python_version=_interpreter_version(venv_python),
         builder=_builder_identity(venv_python),
     )
     report = audit_payload(
-        payload_dir, required=REQUIRED_MEMBERS, literals=options.literals
+        staged_dir, required=REQUIRED_MEMBERS, literals=options.literals
     )
     if report.findings and not options.allow_findings:
         raise BuildError(_findings_message(report))
+    payload_dir = _place_payload(staged_dir, options.payload_dir)
     return BuildResult(
         payload_dir=payload_dir, manifest=manifest, audit=report, facts=facts
     )
 
 
 def ensure_build_venv(options: BuildOptions, project: dict) -> Path:
-    """Create (or reuse) the isolated build environment and return its python."""
+    """Create (or reuse) the isolated build environment and return its python.
+
+    The environment is a cache, but the interpreter inside it is part of the
+    artifact: it is the one that gets bundled and the one that sets the
+    payload's minimum macOS. So a pinned interpreter is checked against the
+    environment already on disk and rebuilds it when they differ, rather than
+    bundling the previous interpreter while reporting the pin. The reused
+    directory is invisible in the build output, so that mistake would surface
+    only on the machine of whoever could not run the release.
+    """
     venv_python = options.venv_dir / "bin" / "python"
+    installed = _pin_mismatch(options)
     if not options.install:
         if not venv_python.is_file():
             raise BuildError(
                 f"build environment {options.venv_dir} has no interpreter; "
                 "run without --skip-install to create it"
             )
+        if installed is not None:
+            raise BuildError(
+                f"build environment {options.venv_dir} was created from {installed}, "
+                f"not from the requested {options.python}; "
+                "run without --skip-install to rebuild it"
+            )
         return venv_python
+    if installed is not None:
+        shutil.rmtree(options.venv_dir)
     if not venv_python.is_file():
-        _run([options.python, "-m", "venv", str(options.venv_dir)], "create build venv")
+        _run(
+            [options.python or sys.executable, "-m", "venv", str(options.venv_dir)],
+            "create build venv",
+        )
     _run(
         [str(venv_python), "-m", "pip", "install", "--quiet", "--upgrade", "pip"],
         "upgrade build pip",
@@ -319,6 +356,71 @@ def ensure_build_venv(options: BuildOptions, project: dict) -> Path:
         "install build requirements",
     )
     return venv_python
+
+
+def _pin_mismatch(options: BuildOptions) -> str | None:
+    """The existing environment's interpreter when it is not the pinned one.
+
+    ``None`` covers every case where reuse is correct: no pin, no environment
+    yet, or an environment already built from the requested interpreter. An
+    environment that cannot say what it was built from counts as a mismatch —
+    an unproven interpreter is not the pinned one.
+    """
+    if options.python is None or not (options.venv_dir / "bin" / "python").is_file():
+        return None
+    installed = _venv_interpreter(options.venv_dir)
+    if installed is not None and installed == _base_interpreter(options.python):
+        return None
+    return installed or "an unrecorded interpreter"
+
+
+def _base_interpreter(python: str) -> str:
+    """Identity a new build environment created from ``python`` would record.
+
+    Asked of the interpreter in exactly the terms ``venv`` writes down — the
+    real path of the executable and the three-part version — so the answer is
+    comparable with an existing environment's own record. A symlinked
+    interpreter resolves to the same real path either way, which is what keeps
+    a pinned build from rebuilding the environment on every run.
+    """
+    result = _run(
+        [
+            python,
+            "-c",
+            "import os, sys;"
+            "print(os.path.realpath(sys.executable));"
+            "print('%d.%d.%d' % sys.version_info[:3])",
+        ],
+        f"query the interpreter {python}",
+        capture=True,
+    )
+    lines = (result or "").splitlines()
+    if len(lines) < 2 or not lines[0].strip():
+        raise BuildError(f"interpreter {python} did not report its identity")
+    return _interpreter_identity(lines[0].strip(), lines[1].strip())
+
+
+def _venv_interpreter(venv_dir: Path) -> str | None:
+    """Identity ``venv`` recorded when it created ``venv_dir``, if it is legible."""
+    try:
+        text = (venv_dir / "pyvenv.cfg").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    values = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:
+            values[key.strip()] = value.strip()
+    executable = values.get("executable")
+    version = values.get("version") or values.get("version_info")
+    if not executable or not version:
+        return None
+    return _interpreter_identity(executable, version)
+
+
+def _interpreter_identity(executable: str, version: str) -> str:
+    # venv may record `3.14.4` or `3.14.4.final.0`; compare the release only.
+    return f"{executable} (python {'.'.join(version.split('.')[:3])})"
 
 
 def _freeze(options: BuildOptions, venv_python: Path) -> Path:
@@ -373,16 +475,36 @@ def _freeze(options: BuildOptions, venv_python: Path) -> Path:
     return produced
 
 
-def _place_payload(frozen_dir: Path, payload_dir: Path) -> Path:
-    """Move a finished build into its target-keyed name.
+def _place_payload(staged_dir: Path, payload_dir: Path) -> Path:
+    """Publish a passed build under its target-keyed name.
 
-    The previous payload is replaced only once the new one exists, so a failed
-    build leaves the last good payload in place.
+    The previous payload is moved aside rather than deleted, and put back if
+    the move fails, so an interrupted publication cannot leave the
+    distributable path empty or half-populated. It is removed only once the new
+    payload is in place.
     """
     payload_dir.parent.mkdir(parents=True, exist_ok=True)
-    if payload_dir.exists():
-        shutil.rmtree(payload_dir)
-    shutil.move(str(frozen_dir), str(payload_dir))
+    previous_dir = payload_dir.with_name(f"{payload_dir.name}{PREVIOUS_SUFFIX}")
+    # Cleared before anything moves, so that finding it below means the swap
+    # started and the payload it holds is the one to put back.
+    try:
+        if previous_dir.exists():
+            shutil.rmtree(previous_dir)
+    except OSError as exc:
+        raise BuildError(f"cannot clear {previous_dir}: {exc}") from exc
+    replaced = payload_dir.exists()
+    try:
+        if replaced:
+            payload_dir.rename(previous_dir)
+        shutil.move(str(staged_dir), str(payload_dir))
+    except OSError as exc:
+        if replaced and previous_dir.is_dir():
+            if payload_dir.exists():
+                shutil.rmtree(payload_dir, ignore_errors=True)
+            previous_dir.rename(payload_dir)
+        raise BuildError(f"cannot place the payload at {payload_dir}: {exc}") from exc
+    if replaced:
+        shutil.rmtree(previous_dir, ignore_errors=True)
     return payload_dir
 
 
@@ -501,10 +623,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--python",
-        default=sys.executable,
+        default=None,
         help=(
             "interpreter the build environment is created from; it is the one "
-            "bundled, so it sets the payload's minimum macOS"
+            "bundled, so it sets the payload's minimum macOS. Pinning it "
+            "rebuilds an environment that was created from another one"
         ),
     )
     parser.add_argument(
