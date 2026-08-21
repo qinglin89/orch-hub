@@ -194,9 +194,24 @@ class FakeRunner:
         return next(call for call in self.calls if call[0] == GH_BIN)
 
 
+def stub_checkout(root: Path, version: str = "9.9.9") -> Path:
+    """A checkout that declares a version, which is all publication reads.
+
+    Publication holds the artifact set to the source it is being tagged from,
+    so a test checkout has to declare a version for the accepting path to be
+    reachable at all.
+    """
+    checkout = root / f"checkout-{version}"
+    (checkout / "orch_hub").mkdir(parents=True, exist_ok=True)
+    (checkout / "orch_hub" / "__init__.py").write_text(
+        f'__version__ = "{version}"\n', encoding="utf-8"
+    )
+    return checkout
+
+
 def options(tmp_path: Path, release_dir: Path, destination: str, **overrides):
     defaults = dict(
-        checkout=tmp_path / "checkout",
+        checkout=stub_checkout(tmp_path),
         release_dir=release_dir,
         work_dir=tmp_path / "work",
         tag="v9.9.9",
@@ -573,6 +588,33 @@ def test_refuses_a_tag_that_does_not_name_this_release(tag: str, expected: str):
         check_tag(tag, "9.9.9")
 
 
+def test_refuses_artifacts_built_from_another_version_of_the_source(tmp_path: Path):
+    # `dist/` survives every build, so what is sitting there after a version
+    # bump is the previous version's artifact set.
+    release_dir = make_release(tmp_path)
+
+    with pytest.raises(PublishError, match="declares version '9.9.10'"):
+        publish_to(
+            tmp_path,
+            release_dir,
+            str(tmp_path / "storage"),
+            tag="v9.9.9",
+            checkout=stub_checkout(tmp_path, "9.9.10"),
+        )
+
+
+def test_refuses_a_checkout_that_declares_no_version(tmp_path: Path):
+    release_dir = make_release(tmp_path)
+
+    with pytest.raises(PublishError, match="cannot read the version"):
+        publish_to(
+            tmp_path,
+            release_dir,
+            str(tmp_path / "storage"),
+            checkout=tmp_path / "not-a-checkout",
+        )
+
+
 def test_accepts_the_tag_naming_this_release():
     assert check_tag("v9.9.9", "9.9.9") is None
 
@@ -755,7 +797,13 @@ def test_a_second_tag_publishes_beside_the_first(tmp_path: Path):
     destination = tmp_path / "storage"
 
     publish_to(tmp_path, release_dir, str(destination))
-    publish_to(tmp_path, other, str(destination), tag="v9.9.10")
+    publish_to(
+        tmp_path,
+        other,
+        str(destination),
+        tag="v9.9.10",
+        checkout=stub_checkout(tmp_path, "9.9.10"),
+    )
 
     assert sorted(path.name for path in destination.iterdir()) == ["v9.9.10", "v9.9.9"]
 
@@ -938,8 +986,7 @@ def test_default_release_directory_is_where_packaging_leaves_one(tmp_path: Path)
 
 def real_checkout(root: Path, tag: str) -> Path:
     """A repository on ``tag`` with a clean tree, for the paths that run git."""
-    checkout = root / "checkout"
-    checkout.mkdir()
+    checkout = stub_checkout(root, tag.lstrip("v"))
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "t",
@@ -954,8 +1001,7 @@ def real_checkout(root: Path, tag: str) -> Path:
         )
 
     git("init", "--quiet")
-    (checkout / "VERSION").write_text(f"{tag}\n", encoding="utf-8")
-    git("add", "VERSION")
+    git("add", "orch_hub/__init__.py")
     git("commit", "--quiet", "-m", tag)
     git("tag", "-a", tag, "-m", tag)
     return checkout

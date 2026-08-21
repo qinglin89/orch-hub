@@ -755,7 +755,11 @@ def tagged_checkout(root: Path, tag: str) -> Path:
     smoke test of the real artifact set needs a real tag to resolve.
     """
     checkout = root / "checkout"
-    checkout.mkdir()
+    (checkout / "orch_hub").mkdir(parents=True)
+    # Publication holds the artifact set to the version the source declares.
+    (checkout / "orch_hub" / "__init__.py").write_text(
+        f'__version__ = "{tag.lstrip("v")}"\n', encoding="utf-8"
+    )
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "smoke",
@@ -770,8 +774,7 @@ def tagged_checkout(root: Path, tag: str) -> Path:
         )
 
     git("init", "--quiet")
-    (checkout / "VERSION").write_text(f"{tag}\n", encoding="utf-8")
-    git("add", "VERSION")
+    git("add", "orch_hub/__init__.py")
     git("commit", "--quiet", "-m", tag)
     git("tag", "-a", tag, "-m", tag)
     return checkout

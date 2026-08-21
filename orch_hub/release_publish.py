@@ -57,6 +57,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .atomic_dir import PlacementError, discard_path, place_directory
+from .release_build import BuildError, read_version
 from .release_package import (
     CHECKSUM_KIND,
     CHECKSUM_NAME,
@@ -271,6 +272,32 @@ def check_tag(tag: str, version: str) -> None:
     if named != version:
         raise PublishError(
             f"tag {tag!r} names version {named!r}, but this release is {version!r}"
+        )
+
+
+def check_checkout_version(checkout: Path, version: str) -> None:
+    """Refuse an artifact set that is not this checkout's version.
+
+    ``dist/`` survives every build, so what is sitting there is whatever was
+    built last — which is the *previous* version's artifact set exactly when
+    the release being tagged is a version bump, and the most likely way to
+    publish bytes nobody meant to publish.
+
+    This is the strongest binding available on this side. The tag proves the
+    checkout is the tag; nothing in a compiled payload records the revision it
+    was frozen from, so a rebuild that never happened *at the same version*
+    still passes here. Closing that needs the build to record its source
+    revision, which is a build-side change and a separate piece of work.
+    """
+    try:
+        declared = read_version(checkout)
+    except (BuildError, OSError) as exc:
+        raise PublishError(f"cannot read the version {checkout} declares: {exc}") from exc
+    if declared != version:
+        raise PublishError(
+            f"{checkout} declares version {declared!r} but the release is "
+            f"{version!r}; these artifacts were not built from the source being "
+            "tagged — rebuild and repackage before publishing"
         )
 
 
@@ -700,6 +727,7 @@ def publish(options: PublishOptions, *, runner: Runner = run_command) -> Publish
     _check_layout(options)
     release = verify_release(options.release_dir)
     check_tag(options.tag, release.version)
+    check_checkout_version(options.checkout, release.version)
     revision = resolve_tag(options.checkout, options.tag, runner=runner)
 
     stage = _stage(options, release, revision)
