@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "46963f7a80f2d65a6ec349346c82af997f0ea4c64b372d93ec07944aa65a56e9",
+  "canonical_payload_sha256": "00c4eb11c0da24e65962f1d57d9dd2bfe6ce9e3c14131188f29a9ede8b2ebb8e",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -231,14 +231,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "aaee63d1eb39e8ca99bd3f2c151e6ed5a297817dfeaf7b5702043e313443819f",
-      "canonical_size_bytes": 40141,
+      "canonical_sha256": "15eb2f935d7de2c37829c023edea047682bc7b0d6e897ea1c88e2e891a7b28a5",
+      "canonical_size_bytes": 40239,
       "target_relative_path": ".mandrel/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "d7c6da9ddb380ac6d0e55f61ccf7c5db564380b57d579da72b738d2f7851b8e2",
-      "canonical_size_bytes": 155600,
+      "canonical_sha256": "1edd737e99c3c852e5a9d5e7a7e18a2e233e51d95c8dc415d61d33739d873eb4",
+      "canonical_size_bytes": 155674,
       "target_relative_path": ".mandrel/orchestrator/orchestrator.py"
     },
     {
@@ -705,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "33af2807738cd020ecbc1b60ed6d8e563fe87f4b",
+  "source_git_commit": "9227c37d061c5881148400cefe1797895808bde3",
   "source_repo": "mandrel"
 }
