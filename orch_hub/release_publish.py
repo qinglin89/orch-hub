@@ -779,10 +779,10 @@ def publish(options: PublishOptions, *, runner: Runner = run_command) -> Publish
     visible at a path a consumer reads.
 
     The layout is resolved before any of it, because verification is only worth
-    something if the thing verified is still there afterwards: the scratch
-    directory is cleared with ``rmtree`` and the destination holds tags that
-    were published for good, so both of those paths are compared against the
-    concrete paths this run will destroy before the first file is read.
+    something if the thing verified is still there afterwards: everything this
+    run creates and destroys on its own side lives under the scratch directory,
+    and the destination holds tags that were published for good, so those three
+    trees are held apart before the first file is read.
     """
     check_tag_name(options.tag)
     layout = _resolve_layout(options)
@@ -815,9 +815,18 @@ class _Layout:
     """Every path this publication reads, writes, or destroys, resolved once."""
 
     release_dir: Path
-    stage: Path
-    """Cleared with ``rmtree`` before it is filled — the one path this run
-    destroys on its own side."""
+
+    work_dir: Path
+    """Root of everything this run destroys on its own side.
+
+    The staging directory is taken *inside* it, one per invocation, and is the
+    only thing here that gets an ``rmtree``. So this is the tree held apart from
+    the release and the destination: every concrete path this run clears lies
+    under it, and nothing outside it is ever touched."""
+
+    stage_prefix: str
+    """What the staging directory is named after, before ``mkdtemp`` makes it
+    this invocation's own."""
 
     target: Path | None
     """``<destination>/<tag>`` for the filesystem channel, ``None`` for a
@@ -825,25 +834,29 @@ class _Layout:
 
 
 def _resolve_layout(options: PublishOptions) -> _Layout:
-    """Keep the directories out of each other, in both directions.
+    """Three trees, none of them inside another.
 
-    Nesting is only ever a problem in one direction at a time, and which
-    direction depends on which path is destructive. Comparing the *parents* is
-    not enough for that: the scratch directory as a whole is untouched, but
-    ``<work>/publish-<tag>`` is emptied, so it is the concrete stage path — and
-    the concrete ``<destination>/<tag>`` — that have to be compared. A release
-    directory below the stage is deleted after being verified; a destination
-    below the stage loses tags that were already published, before anything
-    here can notice they existed.
+    One rule, applied in both directions, because which direction is dangerous
+    depends on which path is destructive and here every one of them is. The
+    scratch directory is where this run creates and clears; a release directory
+    or a destination anywhere under it would be destroyed by the run that was
+    supposed to be reading it or holding it. And a scratch directory under
+    either of *them* puts this run's working files inside the set being
+    verified, or beside the tags being handed out.
+
+    Comparing the scratch directory as a whole rather than the concrete path it
+    clears is the safe side of that comparison, not the loose one: the staging
+    directory is taken inside it and named unpredictably, so refusing the whole
+    tree refuses every path this run could possibly destroy — including the
+    ones no caller can name in advance.
     """
     release_dir = options.release_dir.expanduser().resolve()
     work_dir = options.work_dir.expanduser().resolve()
-    stage = work_dir / _stage_name(options.tag)
     target: Path | None = None
 
     _refuse_nested(release_dir, work_dir, "the scratch directory is inside the release")
     _refuse_nested(
-        stage, release_dir, "the release directory is inside the scratch directory"
+        work_dir, release_dir, "the release directory is inside the scratch directory"
     )
     if options.destination.scheme == "directory":
         destination = Path(options.destination.location).expanduser().resolve()
@@ -857,24 +870,27 @@ def _resolve_layout(options: PublishOptions) -> _Layout:
             destination, work_dir, "the scratch directory is inside the destination"
         )
         _refuse_nested(
-            stage, destination, "the destination is inside the scratch directory"
+            work_dir, destination, "the destination is inside the scratch directory"
         )
         target = destination / options.tag
-    return _Layout(release_dir=release_dir, stage=stage, target=target)
+    return _Layout(
+        release_dir=release_dir,
+        work_dir=work_dir,
+        stage_prefix=_stage_prefix(options.tag),
+        target=target,
+    )
 
 
-def _stage_name(tag: str) -> str:
-    """Name of the scratch directory one publication assembles itself in.
+def _stage_prefix(tag: str) -> str:
+    """What the scratch directory of one publication is named after.
 
-    Deliberately derived from the tag rather than made unique: a path that
-    cannot be predicted cannot be checked for containment, and the containment
-    check is what keeps this directory from swallowing the release it is
-    publishing. It lives in the maintainer's own build directory, where the
-    competing-publisher case that unique names exist for does not arise — the
-    place publishers actually meet is the destination, which claims its names
-    atomically instead.
+    A prefix and not the whole name: ``mkdtemp`` finishes it, so no two
+    publications can be handed the same directory. The tag stays in it because
+    the leftovers of a crashed run are read by the maintainer whose build
+    directory they are sitting in, and "which publication was this" is the only
+    question they will have.
     """
-    return f"publish-{tag}"
+    return f"publish-{tag}."
 
 
 def _refuse_nested(outer: Path, inner: Path, message: str) -> None:
@@ -883,12 +899,30 @@ def _refuse_nested(outer: Path, inner: Path, message: str) -> None:
 
 
 def _stage(layout: _Layout, release: VerifiedRelease, revision: Revision) -> Path:
-    """Assemble exactly what gets published, on the destination's side of the
-    verification."""
-    stage = layout.stage
-    discard_path(stage)
+    """Assemble exactly what gets published, in a directory nobody else holds.
+
+    Everything after this point — the re-verification, the transfer, the upload
+    — reads this directory and nothing else, so it has to belong to this
+    invocation alone. A name derived from the tag does not: two publications of
+    one tag out of one build directory are handed the same path, and the second
+    clears and refills it in the gap between the first one's check and its
+    transfer. The first then hands out bytes it never checked while reporting
+    the digests it did check — the one combination that leaves no witness, since
+    the published set is somebody else's and internally consistent.
+
+    ``mkdtemp`` is the whole of the fix: the directory is created by the process
+    that then owns it, under a name no concurrent publisher can be holding.
+    Competing publishers still meet, but only at the destination, where the tag
+    is claimed atomically and exactly one of them wins.
+    """
     try:
-        stage.mkdir(parents=True)
+        layout.work_dir.mkdir(parents=True, exist_ok=True)
+        stage = Path(tempfile.mkdtemp(prefix=layout.stage_prefix, dir=layout.work_dir))
+    except OSError as exc:
+        raise PublishError(
+            f"cannot stage the publication under {layout.work_dir}: {exc}"
+        ) from exc
+    try:
         for item in release.files:
             shutil.copy2(release.directory / item.name, stage / item.name)
         (stage / PUBLICATION_NAME).write_text(

@@ -66,14 +66,25 @@ exit 0
 
 
 def make_payload(
-    root: Path, *, version: str = "9.9.9", target: str = "darwin-arm64"
+    root: Path,
+    *,
+    version: str = "9.9.9",
+    target: str = "darwin-arm64",
+    label: str = "",
 ) -> Path:
-    """A payload directory shaped like a real one, minus the interpreter."""
+    """A payload directory shaped like a real one, minus the interpreter.
+
+    ``label`` changes the runtime's bytes without changing anything the release
+    format describes, which is how a test gets two equally valid releases of one
+    version that a digest can tell apart.
+    """
     declared_os, _, declared_arch = target.partition("-")
     payload = root / f"orch-hub-{target}"
     (payload / "_internal").mkdir(parents=True, exist_ok=True)
     binary = payload / "orch-hub"
-    binary.write_text(FAKE_RUNTIME, encoding="utf-8")
+    binary.write_text(
+        FAKE_RUNTIME + (f"# {label}\n" if label else ""), encoding="utf-8"
+    )
     binary.chmod(0o755)
     (payload / MANIFEST_NAME).write_text(
         json.dumps(
@@ -99,18 +110,29 @@ def make_payload(
 
 
 def make_release(
-    tmp_path: Path, *, version: str = "9.9.9", targets=("darwin-arm64",)
+    tmp_path: Path,
+    *,
+    version: str = "9.9.9",
+    targets=("darwin-arm64",),
+    label: str = "",
 ) -> Path:
-    """Package synthetic payloads into a real release directory."""
-    source = tmp_path / "payloads"
+    """Package synthetic payloads into a real release directory.
+
+    ``label`` gives a release its own payload bytes *and* its own directories,
+    so several of them can sit side by side at one version — what a publisher
+    racing another publisher of the same tag actually looks like.
+    """
+    suffix = f"-{label}" if label else ""
+    source = tmp_path / f"payloads{suffix}"
     payloads = tuple(
-        make_payload(source, version=version, target=target) for target in targets
+        make_payload(source, version=version, target=target, label=label)
+        for target in targets
     )
     result = package_release(
         PackageOptions(
             payload_dirs=payloads,
-            out_dir=tmp_path / "dist" / "release",
-            work_dir=tmp_path / "build",
+            out_dir=tmp_path / f"dist{suffix}" / "release",
+            work_dir=tmp_path / f"build{suffix}",
             template_path=TEMPLATE,
             # The synthetic payload carries none of the frozen runtime's
             # required members; the audit gate has its own tests.
@@ -970,19 +992,25 @@ def test_refuses_a_scratch_directory_inside_the_release(tmp_path: Path):
         )
 
 
-def test_refuses_a_release_inside_the_directory_the_publication_stages_in(
-    tmp_path: Path,
-):
-    """The scratch directory is not what gets cleared — ``publish-<tag>`` is.
+def test_refuses_a_release_inside_the_scratch_directory(tmp_path: Path):
+    """The scratch tree is where this run clears, so the release cannot be in it.
 
-    Comparing the release against the scratch directory therefore says nothing
-    about the path that is actually emptied. A release sitting below that path
-    is read, verified, and then deleted by the very run that verified it, which
-    is the one outcome verification exists to make impossible.
+    Which concrete path gets emptied is not knowable to a caller: the staging
+    directory is taken inside the scratch directory under a name ``mkdtemp``
+    picks, because a predictable one is shared by two publishers of the same
+    tag. Holding the whole tree apart is what makes that unknowable path
+    harmless — and it is the safe side of the comparison, since every path this
+    run can possibly destroy on its own side lies below it.
+
+    Deliberately stricter than the destruction it prevents: a release that
+    happens not to collide with today's ``mkdtemp`` name is still a release
+    living inside another command's working area, and refusing it costs
+    nothing (packaging leaves ``dist/release``, publication works in
+    ``build/release``).
     """
     release_dir = make_release(tmp_path)
     work = tmp_path / "work"
-    nested = work / "publish-v9.9.9" / "release"
+    nested = work / "release"
     nested.parent.mkdir(parents=True)
     shutil.move(str(release_dir), str(nested))
     before = tree_state(nested)
@@ -993,18 +1021,16 @@ def test_refuses_a_release_inside_the_directory_the_publication_stages_in(
     assert tree_state(nested) == before
 
 
-def test_refuses_a_destination_inside_the_directory_the_publication_stages_in(
-    tmp_path: Path,
-):
-    """Same omission, and the tag that pays for it is one already published.
+def test_refuses_a_destination_inside_the_scratch_directory(tmp_path: Path):
+    """Same rule, and what it protects here is a tag already published.
 
-    Clearing ``publish-<tag>`` takes a destination underneath it along, so the
-    republish check runs against a destination the same run has already
-    emptied and reports the tag free.
+    A destination below the scratch tree puts tags that were handed out into
+    the directory this run creates and clears in, which would make "a published
+    tag is never replaced" depend on which name ``mkdtemp`` happened to pick.
     """
     release_dir = make_release(tmp_path)
     work = tmp_path / "work"
-    destination = work / "publish-v9.9.9" / "storage"
+    destination = work / "storage"
     publish_to(
         tmp_path, release_dir, str(destination), work_dir=tmp_path / "other-work"
     )
@@ -1014,6 +1040,26 @@ def test_refuses_a_destination_inside_the_directory_the_publication_stages_in(
         publish_to(tmp_path, release_dir, str(destination), work_dir=work)
 
     assert tree_state(destination) == before
+
+
+def test_refuses_a_scratch_directory_inside_the_destination(tmp_path: Path):
+    """The remaining direction: working files among the tags.
+
+    Not destructive, but the destination is the one directory whose contents
+    are a promise to somebody else, and a staging directory that is mid-fill —
+    or left behind by a run that died — is not part of that promise.
+    """
+    release_dir = make_release(tmp_path)
+    destination = tmp_path / "storage"
+
+    with pytest.raises(
+        PublishError, match="scratch directory is inside the destination"
+    ):
+        publish_to(
+            tmp_path, release_dir, str(destination), work_dir=destination / "work"
+        )
+
+    assert not destination.exists()
 
 
 def test_refuses_a_release_that_changed_after_it_was_verified(
@@ -1100,53 +1146,125 @@ def test_a_tag_claimed_after_verification_is_not_replaced(
     assert sorted(path.name for path in destination.iterdir()) == ["v9.9.9"]
 
 
+def test_a_publication_never_hands_out_a_stage_another_one_is_filling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Two publications of one tag out of one build directory — the default.
+
+    The staging path used to be ``<work>/publish-<tag>`` for both of them, and
+    the second one clears and refills it. Interleaved here at the only point
+    where that is silent — after the first has checked its stage and before it
+    moves it — the first published the second's artifacts, reported success,
+    and returned its own digests. Nothing downstream disagreed with anything,
+    because the published set was somebody else's and internally consistent:
+    ``shasum -c`` passes inside it, and the only witness is a result nobody
+    compares against the bytes.
+
+    The stage is this invocation's own now, so the interleaved publication
+    fills a different directory and neither one can see the other's.
+    """
+    mine = make_release(tmp_path, label="mine")
+    theirs = make_release(tmp_path, label="theirs")
+    assert sha256_file(installer_of(mine)) != sha256_file(installer_of(theirs))
+    destination = tmp_path / "storage"
+    work = tmp_path / "work"
+    before = tree_state(theirs)
+    real = publish_module._check_stage
+    interleaved: list[Path] = []
+
+    def check_then_let_the_other_stage(stage: Path, release) -> None:
+        real(stage, release)
+        if interleaved:
+            return
+        layout = publish_module._resolve_layout(
+            options(tmp_path, theirs, str(destination), work_dir=work)
+        )
+        interleaved.append(
+            publish_module._stage(
+                layout,
+                publish_module.verify_release(theirs),
+                publish_module.Revision(tag="v9.9.9", commit=COMMIT),
+            )
+        )
+
+    monkeypatch.setattr(publish_module, "_check_stage", check_then_let_the_other_stage)
+
+    result = publish_to(tmp_path, mine, str(destination), work_dir=work)
+
+    assert interleaved, "the competing publication never staged"
+    published = destination / "v9.9.9"
+    for item in result.files:
+        assert sha256_file(published / item.name) == item.sha256
+        assert sha256_file(mine / item.name) == item.sha256
+    # Each side kept its own: neither stage was the other's, and the release
+    # that lost the tag was never read out of.
+    other_stage = interleaved[0]
+    assert sha256_file(other_stage / installer_of(theirs).name) == sha256_file(
+        installer_of(theirs)
+    )
+    assert tree_state(theirs) == before
+
+
 def test_concurrent_publishers_of_one_tag_leave_exactly_one_release(tmp_path: Path):
-    """Four publishers, one tag, no coordination between them.
+    """Four publishers, one tag, one build directory, no coordination.
+
+    One build directory because that is the one the command defaults to:
+    publishers handed separate scratch directories never touch each other's
+    staging, so they cannot say whether sharing one is safe. And a release of
+    its own bytes each, so "the winner published its own artifacts" is a claim
+    with a failing case rather than a tautology.
 
     The assertion holds for every interleaving rather than for a lucky one:
     whoever creates the directory owns the tag, and everyone else is refused
     before they have written anything into the destination.
     """
-    release_dir = make_release(tmp_path)
+    releases = [make_release(tmp_path, label=f"r{index}") for index in range(4)]
+    assert len({sha256_file(installer_of(item)) for item in releases}) == len(releases)
     destination = tmp_path / "storage"
     destination.mkdir()
+    work = tmp_path / "work"
     # Built before the race: the shared helpers write a stub checkout, and a
     # thread reading it mid-write would make this test fail for a reason that
     # has nothing to do with the tag.
     plans = [
-        options(
-            tmp_path,
-            release_dir,
-            str(destination),
-            work_dir=tmp_path / f"work-{index}",
-        )
-        for index in range(4)
+        (release_dir, options(tmp_path, release_dir, str(destination), work_dir=work))
+        for release_dir in releases
     ]
     start = threading.Barrier(len(plans))
     lock = threading.Lock()
-    outcomes: list[object] = []
+    outcomes: list[tuple[Path, object]] = []
 
-    def attempt(plan) -> None:
+    def attempt(release_dir: Path, plan) -> None:
         start.wait()
         try:
             outcome: object = publish(plan, runner=FakeRunner())
         except PublishError as exc:
             outcome = exc
         with lock:
-            outcomes.append(outcome)
+            outcomes.append((release_dir, outcome))
 
-    threads = [threading.Thread(target=attempt, args=(plan,)) for plan in plans]
+    threads = [threading.Thread(target=attempt, args=pair) for pair in plans]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join()
 
-    refused = [item for item in outcomes if isinstance(item, PublishError)]
-    assert len(outcomes) - len(refused) == 1
+    winners = [pair for pair in outcomes if not isinstance(pair[1], PublishError)]
+    refused = [item for _, item in outcomes if isinstance(item, PublishError)]
+    assert len(winners) == 1
     assert all("already exists" in str(item) for item in refused)
     assert sorted(path.name for path in destination.iterdir()) == ["v9.9.9"]
-    for path in sorted(release_dir.iterdir()):
-        assert sha256_file(destination / "v9.9.9" / path.name) == sha256_file(path)
+
+    source, result = winners[0]
+    published = destination / "v9.9.9"
+    assert sorted(path.name for path in published.iterdir()) == sorted(
+        [*(item.name for item in result.files), PUBLICATION_NAME]
+    )
+    for item in result.files:
+        assert sha256_file(published / item.name) == item.sha256
+        assert sha256_file(source / item.name) == item.sha256
+    # Every publisher, winner and refused alike, took its stage away with it.
+    assert list(work.iterdir()) == []
 
 
 def test_publication_leaves_no_scratch_beside_the_published_tag(tmp_path: Path):
