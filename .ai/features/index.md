@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Features
@@ -28,6 +28,7 @@ below.
 | Agent subscription usage | implemented | display-only Claude/Codex capacity; never gates | usage.md |
 | Notifications | implemented | best-effort Bark pushes (questions, run end, intake, semantic jobs) | ops.md |
 | Launchd service | implemented | resident macOS service packaging + ops CLI | ops.md |
+| Compiled release delivery | implemented | source-minimized darwin-arm64 runtime + versioned install/rollback + immutable artifact publication | ops.md |
 | Remote intake-task | implemented | confirmed remote task drafting into target repos | intake.md |
 | IM bot control | future | later IM surface (planned: notifications or bot adapter + api; future bot callback interface) | ops.md |
 
@@ -42,6 +43,6 @@ below.
 | run-observability.md | Log viewing, run history/audit |
 | dashboard.md | Mobile dashboard shell, theme, responsiveness, accessibility, Overview, route infrastructure |
 | dashboard-views.md | Mobile dashboard routed view catalog: repo/task/start/history/log/evaluation/report-feed/intake |
-| ops.md | Notifications, launchd service, future IM bot surface |
+| ops.md | Notifications, launchd service, compiled release delivery, future IM bot surface |
 | usage.md | Agent subscription usage display: Claude cache/collector, Codex rollouts, statusLine fallback |
 | intake.md | Remote intake-task: admission, draft/revise/confirm/cancel lifecycle |

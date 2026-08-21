@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Architecture: Core Flows
@@ -136,3 +136,23 @@ versions. Protected `GET /api/usage` returns both providers fail-soft;
 missing/stale/failed sources never feed attention, readiness, run state, or
 launch/intake gates.
 
+Release production: a pinned standalone ARM64 CPython plus the project sources
+and resources enter a PyInstaller onedir build. The producer audits the
+executable CArchive, nested compressed PYZ content, collected files, Mach-O
+deployment floors, and operator smoke behavior before atomically replacing the
+canonical build. Packaging revalidates that build, writes a deterministic
+self-extracting `.run`, `release.json`, and `SHA256SUMS`, then replaces the
+canonical release directory only after every staged check passes. Publication
+requires a verified Git tag, rechecks staged bytes, writes `publication.json`
+to close the checksum-set identity, and creates one tag destination without
+overwriting an existing publication.
+
+Release install: the shell preamble checks ARM64 macOS and the manifest's
+minimum version, verifies the embedded archive digest, then extracts. The
+Python installer validates the cross-language manifest and payload, stages a
+versioned runtime below the selected prefix, and updates `current`, `previous`,
+and the command link after validation. Setup renders launchd from either a
+checkout program or the compiled `current/orch-hub serve` program while
+preserving installed host, port, data, Mandrel, token, and Bark values when not
+overridden. Uninstall stops the fixed service and removes only a prefix whose
+ownership marker is valid and bound to its payload.

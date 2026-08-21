@@ -1,13 +1,13 @@
 ---
-last-updated: 2026-08-21
-verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Features: Operations Surfaces
 
-Notifications, launchd service, and the future IM bot surface. Subscription
-usage: `usage.md`; remote intake: `intake.md`; dashboard shell/views:
-`dashboard.md`, `dashboard-views.md`.
+Notifications, launchd service, compiled release delivery, and the future IM
+bot surface. Subscription usage: `usage.md`; remote intake: `intake.md`;
+dashboard shell/views: `dashboard.md`, `dashboard-views.md`.
 
 ## Notifications
 
@@ -82,7 +82,8 @@ long-lived launchd agent on macOS.
 Modules: launchd, cli, config, api, docs, deploy.
 
 APIs: CLI `orch-hub launchd deploy|update|start|stop|restart|status`;
-`orch-hub-api`; launchd plist template/docs.
+`orch-hub setup`; `orch-hub-api` / `orch-hub serve`; launchd plist
+template/docs.
 
 Implemented behavior:
 
@@ -93,6 +94,16 @@ Implemented behavior:
   `launchctl print` stops reporting the label, then retry transient bootstrap
   exit-5/input-output failures with bounded backoff. The template is parsed
   before venv/pip work.
+- The same renderer accepts an installed compiled program: checkout deployment
+  runs `<checkout>/.venv/bin/orch-hub-api`; release setup runs
+  `<prefix>/current/orch-hub serve`. `program_argv` is the sole launch answer,
+  and `ProgramArguments` is rendered as an array rather than reconstructed from
+  a checkout.
+- `orch-hub setup` verifies a selected installed version and executable
+  Mandrel checkout, writes/loads the plist without pip or a checkout, then
+  waits for `/api/health`. Setup/upgrade inherit host, port, data dir, Mandrel,
+  token, and Bark URL from the installed plist when flags/environment omit
+  them; the same fail-closed config parser handles inherited values.
 - Deploy/update print no Claude statusLine setup guidance; Claude usage works
   from the CLI cache without any operator settings change.
 - Token resolution is explicit `--token`, then `ORCH_HUB_TOKEN`, then an
@@ -110,6 +121,8 @@ Implemented behavior:
   `PATH`. Required placeholders fail loudly before writing/loading; unknown
   optional `REPLACE-...` placeholders from a newer template render as `""` so
   an older installed CLI can update a newer checkout when empty means disabled.
+  Its legacy checkout-shaped program value is intentional old-CLI/new-template
+  compatibility; the current renderer replaces the whole program array.
 - `RunAtLoad` and `KeepAlive` keep the service resident; stdout/stderr go to
   `~/Library/Logs/orch-hub/`.
 - `start` bootstraps the installed plist if the job is unloaded; `stop` boots
@@ -125,6 +138,51 @@ Implemented behavior:
   singleton service cardinality, template ownership, token behavior, manual
   fallback commands, log inspection, optional Bark URL config, push delivery
   checks through `notify test`, and Tailscale-only exposure assumptions.
+
+## Compiled Release Delivery
+
+Status: implemented (`darwin-arm64` only)
+
+Description: Build and audit a standalone runtime, install it without Python or
+an orch-hub checkout, and package/publish immutable unsigned release artifacts.
+
+Modules: resources, macho, release_audit, release_build, release_python,
+install, atomic_dir, release_package, release_publish, cli, launchd, docs,
+deploy.
+
+APIs: CLI `serve|version|install|setup|upgrade|rollback|versions|uninstall`;
+producer CLIs `python3 -m orch_hub.release_build|release_package|release_publish`;
+`.run`, `runtime.json`, `release.json`, `SHA256SUMS`, `publication.json`.
+
+Implemented behavior:
+
+- PyInstaller onedir freezes one executable plus runtime libraries/resources;
+  first-party `.py`/`.pyc`, repo/protocol/task state, secrets, and maintainer
+  paths are forbidden. The audit opens the executable CArchive and nested PYZ,
+  not only filesystem files.
+- The build uses a digest-pinned python-build-standalone interpreter and
+  measures the produced Mach-O floor; a missing or above-promise floor fails.
+  Packaging validates an ASCII dotted floor because downstream readers cannot
+  safely enforce an unreadable declaration.
+- Installed layout is `<prefix>/versions/<version>`, atomic `current`, recorded
+  `previous`, and a stable command link. Upgrade/rollback select a version and
+  restart the fixed service without rewriting data or configuration; uninstall
+  proves prefix ownership and stops the service before deletion, preserving
+  hub data unless purge is explicitly confirmed.
+- The self-extracting POSIX-shell `.run` checks os/arch, minimum macOS, and its
+  appended archive digest before unpacking, then delegates install/setup to the
+  extracted runtime. `--extract` verifies integrity but intentionally skips the
+  host gate.
+- Packaging deterministically emits a target-keyed `release.json`, installer,
+  and `SHA256SUMS`. Publication re-verifies bytes, tag/version/HEAD/clean-tree
+  identity, and installer headers; filesystem storage uses atomic `mkdir`
+  no-clobber while GitHub publication uses `gh release create --verify-tag`.
+  `publication.json` pins the checksum file's digest and source tag/commit.
+- Publication proves checkout/tag identity and artifact self-consistency, not
+  the compiled payload's source revision; installed-version retention,
+  statusLine reachability, and payload source provenance remain separate tasks.
+- Human workflow and refusal tables live in `docs/release.md`; the artifact is
+  unsigned, with signing/notarization reserved as an optional future wrapper.
 
 ## IM Bot Control
 

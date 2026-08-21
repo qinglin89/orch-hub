@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Project Overview
@@ -15,8 +15,8 @@ binding, launchd service packaging/docs, the control-dir file-channel adapter,
 the run manager, run/escalation HTTP routes, log viewing, run history/audit,
 the mobile dashboard, display-only agent subscription usage, Bark
 notifications, remote intake-task, the task-evaluation foundation,
-deterministic static task metrics, the optional semantic task evaluator, and
-the global evaluation-report feed:
+deterministic static task metrics, the optional semantic task evaluator, the
+global evaluation-report feed, and compiled release delivery:
 read the
 mandrel local registry, list
 managed repos, report launch
@@ -128,6 +128,10 @@ and links back to existing per-task detail.
 - Provide a mobile-first dashboard for repo, task, run, question, log, intake,
   and task-evaluation views.
 - Support launchd-based long-lived operation on macOS.
+- Deliver an unsigned, source-minimized Apple-Silicon runtime without target-
+  machine Python or an orch-hub checkout: versioned user-local installation,
+  rollback-safe selection, pre-unpack host/integrity gates, deterministic
+  release metadata/checksums, and tag-bound private/public publication.
 
 ## Non-Goals
 
@@ -154,7 +158,9 @@ and links back to existing per-task detail.
 - HTTP service: FastAPI and uvicorn, with a localhost-default entry point,
   environment-configured host/port, and fail-closed bearer-token middleware.
 - UI: mobile-first web dashboard served by the hub.
-- Local deployment: launchd user-agent template and docs on macOS.
+- Local deployment: launchd user-agent from checkout or compiled user-local
+  PyInstaller onedir runtime on macOS; shipped target is `darwin-arm64` with a
+  digest-pinned redistributable interpreter and measured macOS floor.
 - Network boundary: Tailscale for private connectivity, with a simple bearer token in v1.
 - Notifications: Bark is the implemented v1 push path; IM bots are later.
 - External command/data sources: `mandrel` from the mandrel checkout; Claude CLI
@@ -186,6 +192,15 @@ orch_hub/
   usage.py
   logs.py
   notifications.py
+  resources.py
+  install.py
+  atomic_dir.py
+  macho.py
+  release_audit.py
+  release_build.py
+  release_python.py
+  release_package.py
+  release_publish.py
   subprocess_utils.py
   task_store.py
   control_dir.py
@@ -207,8 +222,11 @@ tests/
 deploy/
   launchd/
     com.qinglin89.orch-hub.plist
+  release/
+    installer.sh
 docs/
   launchd.md
+  release.md
 ```
 
 ## External Project Facts

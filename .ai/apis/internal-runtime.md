@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # APIs: Internal — Runtime
@@ -166,17 +166,22 @@ run records, intake records, history, or control-dir files. `orch-hub notify
 test` delivers a probe directly through the same notifier factory so delivery
 failure is visible to the CLI exit code while remaining outside manager state.
 
-## Launchd Service Template
+## Launchd Service Template And Deployment
 
-Input: environment variables in
+Input: `DeployOptions`, environment/installed plist, and
 `deploy/launchd/com.qinglin89.orch-hub.plist`.
 
-Output: resident `orch-hub-api` process managed by launchd, with stdout/stderr
-logs under `~/Library/Logs/orch-hub/`.
+Output: resident checkout `orch-hub-api` or compiled
+`<prefix>/current/orch-hub serve`, managed by launchd with stdout/stderr logs.
 
-Behavior: user-agent template sets all current `ORCH_HUB_*` variables
-including optional `ORCH_HUB_BARK_URL`, plus an explicit `PATH`, starts at
-login, and restarts on exit. Required placeholders must resolve before writing
-or bootstrapping; unknown optional placeholders are blanked for forward
-compatibility with newer templates. Install/start/stop/reload/log commands live
-in `docs/launchd.md`.
+Behavior: `Deployment.program_argv` is authoritative and renders the complete
+`ProgramArguments` array. The template retains a legacy checkout-shaped value
+so the previous CLI can render a newer checkout; the current renderer replaces
+it. The user agent sets all current `ORCH_HUB_*` values plus explicit `PATH`,
+starts at login, and restarts on exit. Required placeholders fail before side
+effects; unknown optional placeholders blank for forward compatibility.
+Host/port/data, Mandrel, token, and Bark configuration inherit from the
+installed plist when current input omits them. Destructive/operational plist
+readers reject malformed environment structure/types; status and wholesale
+rewrite remain lenient. `setup_service` verifies an installed selection and
+Mandrel executable, deploys without pip/checkout, and waits for health.

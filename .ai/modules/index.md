@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Modules
@@ -12,6 +12,15 @@ Full responsibilities live in the detail files below.
 | CLI | `orch_hub/cli.py` | `repos` readiness output; launchd/notify/eval-doctor dispatch |
 | Config | `orch_hub/config.py` | env defaults/overrides; token/Bark/eval/Claude/Codex settings; derived paths |
 | Launchd operations | `orch_hub/launchd.py` | deploy/update/lifecycle/status; Bark URL surfacing |
+| Runtime resources | `orch_hub/resources.py` | checkout/wheel/frozen resource-root resolution |
+| Installed runtime | `orch_hub/install.py` | versioned placement, selection, setup, upgrade, rollback, uninstall |
+| Atomic directory placement | `orch_hub/atomic_dir.py` | last-good replace primitive for payload/release/version/cache trees |
+| Mach-O inspection | `orch_hub/macho.py` | target architectures + measured minimum-macOS floor |
+| Release audit | `orch_hub/release_audit.py` | source/path/secret audit across files, archives, CArchive/PYZ |
+| Release build | `orch_hub/release_build.py` | pinned standalone PyInstaller payload build + manifest/audit gates |
+| Release interpreter | `orch_hub/release_python.py` | digest-pinned redistributable interpreter provisioning |
+| Release package | `orch_hub/release_package.py` | deterministic `.run`, target manifest, inventory, checksums |
+| Release publish | `orch_hub/release_publish.py` | tag/byte verification + filesystem/GitHub no-republish delivery |
 | Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | managed repo discovery from `mandrel` or registry file |
 | Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch readiness checks |
@@ -43,7 +52,8 @@ Full responsibilities live in the detail files below.
 | Notifications | `orch_hub/notifications.py` | notifier interface; Bark backend; formatters |
 | Web UI | `orch_hub/web/` | mobile-first dashboard SPA assets |
 | Launchd plist | `deploy/launchd/com.qinglin89.orch-hub.plist` | launchd user-agent template |
-| Operator docs | `docs/` | launchd/evaluation/Claude usage operator docs |
+| Release installer template | `deploy/release/installer.sh` | POSIX self-extractor header and pre-unpack gates |
+| Operator docs | `docs/` | launchd/release/evaluation/Claude usage operator docs |
 | Tests | `tests/` | pytest coverage with fake repos and mocked subprocesses |
 
 ## Detail Files
@@ -58,6 +68,7 @@ Full responsibilities live in the detail files below.
 | runtime.md | Repo admission, run manager, orchestrator launch config, run monitor |
 | runtime-io.md | History, control-dir, logs, sessions, session-entry task snapshots, notifications |
 | service.md | API app, launchd operations |
+| release.md | Frozen resources, install lifecycle, build/audit/package/publish modules |
 | web.md | Web UI shell, theme, accessibility/route infrastructure, Overview |
 | web-views.md | Web UI routed views: repo/task, run controls, run history, report feed, evaluation, intake |
 | boundaries.md | Cross-module boundary rules (what each module must not do) |

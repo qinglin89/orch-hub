@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Conventions
@@ -62,6 +62,12 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 - Keep tests in `tests/`.
 - Keep web assets under `orch_hub/web/` or a clear equivalent when the dashboard exists.
 - Keep deployment templates under `deploy/` and operator docs under `docs/`.
+- Keep release construction, validation, packaging, and publication logic in
+  focused `orch_hub/release_*` modules; keep the installer template under
+  `deploy/release/`.
+- Treat `build/release/` as producer scratch/canonical build state and
+  `dist/release/` as generated release output; neither is installed runtime
+  state.
 - Do not place generated run dirs inside managed target repos unless deliberately matching an orchestrator contract.
 - Put hub-owned run dirs under `<ORCH_HUB_DATA_DIR>/runs/`, outside every
   managed target repo.
@@ -95,6 +101,11 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
   `tests/test_web_keyboard.py`), which drives the real SPA against a stubbed
   browser and skips when no `jsc` is available; served-asset greps are for
   static shell/boundary guarantees.
+- Use synthetic release trees, freezer archives, and injected command runners
+  for build/package/publish tests; use fake launchctl behavior for installed
+  runtime and launchd tests.
+- A frozen-runtime smoke test must consume the existing build explicitly; it
+  must not rebuild the payload it claims to verify.
 
 ## Dependencies
 
@@ -102,6 +113,9 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 - FastAPI and uvicorn are core runtime dependencies for the HTTP foundation.
 - httpx is a dev dependency for FastAPI TestClient coverage.
 - Frontend dependencies should be justified by the dashboard implementation, not added during CLI-only work.
+- PyInstaller is a pinned release-production dependency. The installed runtime
+  remains self-contained and should not acquire a Python or producer-tool
+  dependency.
 
 ## Security
 

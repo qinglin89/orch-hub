@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-21
-verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Modules: Service Surface
@@ -123,25 +123,28 @@ structured `launch` (server-built argv) or legacy `extra_args`, never both.
 Location: `orch_hub/launchd.py`
 
 Responsibility: manage the singleton macOS launchd user agent
-`com.qinglin89.orch-hub`. `deploy_service` / `update` resolve the checkout,
-mandrel path, token, host/port/data dir, plist path, log dir,
-`PATH`, and optional Bark URL; render the installed plist from
-`deploy/launchd/com.qinglin89.orch-hub.plist`; install/update the checkout
-`.venv` package; validate with `plutil`; boot out any loaded service; and
-bootstrap through `launchctl`. Required template placeholders fail before write
-or load; unknown optional placeholders from newer templates render as `""` for
-old-CLI/new-template update compatibility. After a successful bootout,
-deploy/update poll for the label to disappear and retry transient bootstrap
-exit-5/input-output failures with bounded backoff. The Mandrel checkout has no
-maintainer-specific default: precedence is explicit `--mandrel`, current env,
-legacy env, then an existing installed plist; first deploy fails with guidance
-when none exists. Token precedence is explicit option, env var, existing plist,
-then generated token. Bark URL precedence is
-`ORCH_HUB_BARK_URL`, then existing installed-plist value, then disabled; it has
-no deploy CLI flag and is never echoed because the URL embeds a device-key
-secret. `installed_mandrel_path(...)` and `installed_bark_url(...)` read the
-installed service configuration for `orch-hub notify test` when the current
-shell has not exported it.
+`com.qinglin89.orch-hub` for two runtime shapes. Checkout deploy/update installs
+`<checkout>/.venv` and runs `orch-hub-api`; compiled setup installs nothing and
+runs `<prefix>/current/orch-hub serve`. `Deployment.program_argv` is the sole
+program contract; the plist's variable-length `ProgramArguments` array is
+rendered from it. The template retains its legacy checkout-shaped program value
+for old-CLI/new-template compatibility, then the current renderer replaces the
+whole array. Required placeholders fail before side effects; unknown optional
+placeholders render `""`.
+
+All deploy shapes resolve Mandrel, token, host/port/data dir, plist/log paths,
+`PATH`, and Bark URL; validate with `plutil`; boot out the singleton; and
+bootstrap with unload polling plus bounded transient exit-5 retry. Installed
+host/port/data values are inherited when the shell omits them, then parsed by
+the ordinary fail-closed config path; Mandrel/token/Bark have their own
+explicit → environment → installed precedence. Compiled setup additionally
+requires an executable `bin/mandrel` and waits for health.
+
+Installed-plist reads are strict when they select a destructive/operational
+target (`installed_data_dir`, `installed_bind`) and lenient when diagnostics or
+a wholesale rewrite can expose/repair corruption (`status_service`, deploy).
+`installed_mandrel_path(...)` and `installed_bark_url(...)` support plain-shell
+operator commands without re-exporting resident configuration.
 
 `start_service`, `stop_service`, and `restart_service` are launchd lifecycle
 helpers only. They bootstrap or boot out the fixed label and deliberately do

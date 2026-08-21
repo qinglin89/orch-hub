@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Design: Patterns
@@ -77,3 +77,16 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 - For raw task content, gate on task-index membership and resolve the task file
   target under the resolved `.ai-tasks` directory so symlinked files cannot
   disclose content outside the task dir.
+- Make an artifact producer at least as strict as its consumer: package and
+  publication revalidate the build/release data they consume instead of
+  trusting an earlier phase.
+- Validate cross-language manifest fields at production time and consumption
+  time; shell preflight handles host/floor/digest gates, then Python performs
+  the complete manifest and payload validation.
+- Stage, validate, and fsync before replacing a canonical generated directory;
+  use create-only placement for immutable publication destinations.
+- Express containment checks symmetrically and against concrete resolved paths
+  before recursive removal; uninstall additionally requires a payload-bound
+  ownership marker.
+- Frozen-runtime smoke tests consume an existing canonical release build and
+  must not trigger an implicit rebuild, so the bytes under test stay explicit.

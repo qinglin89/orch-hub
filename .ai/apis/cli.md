@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-21
-verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # APIs: CLI
@@ -47,6 +47,41 @@ verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
 managed repo and is also display-only; it does not affect readiness or launch
 gating. Human `repos` output does not show commit or housekeeping metadata.
 
+## `orch-hub serve|version`
+
+- `serve [--host HOST] [--port PORT]` starts the API/dashboard in the
+  foreground through the same `orch_hub.__main__` dispatch used by the frozen
+  binary; it replaces the absent `orch-hub-api` console script in a compiled
+  release.
+- `version [--json]` reports package version, source/frozen runtime shape, and
+  Python version. The self-extracting installer's separate `--version` reports
+  only artifact version and target.
+
+## Installed-runtime verbs
+
+- `install --from PAYLOAD [--prefix P] [--bin-dir B] [--no-link] [--json]`
+  validates and places one payload, atomically selects it, and optionally links
+  `orch-hub` through `current`.
+- `setup [--prefix P] [--mandrel M] [--token T] [--host H] [--port N]
+  [--data-dir D] [--plist-path P] [--log-dir L]` configures the compiled
+  program in launchd and exits non-zero unless health reaches `ok`.
+- `upgrade --from PAYLOAD [--prefix P] [--bin-dir B] [--plist-path P]`
+  installs/selects a version and reruns setup while inheriting installed service
+  configuration; failure leaves the prior version installed and names rollback.
+- `rollback [--to VERSION] [--prefix P] [--plist-path P]` selects the recorded
+  previous or named installed version, restarts without plist rewrite, and exits
+  non-zero on restart/health failure. Bind parsing happens before selection and
+  fails closed.
+- `versions [--prefix P] [--json]` lists installed versions plus
+  current/previous markers.
+- `uninstall [--prefix P] [--bin-dir B] [--plist-path P]
+  [--purge-data --yes]` proves prefix ownership, stops the singleton service
+  before deletion, removes only its own link/plist/runtime, and keeps hub data
+  by default. Custom `--bin-dir` must be repeated to remove that link.
+- A frozen installed command infers its own non-default prefix; a `.run`
+  self-extractor runs from temporary payload state, so later installer runs
+  must repeat a non-default `--prefix`/`--bin-dir`.
+
 ## `orch-hub launchd deploy|update`
 
 - Purpose: install or refresh the resident macOS launchd service from the
@@ -66,15 +101,32 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 - Configuration precedence: the Mandrel checkout resolves as `--mandrel`,
   current env, legacy env, then an existing installed plist; there is no
   portable default, so first deploy requires an explicit source. Host, port,
-  and data paths retain their flag/environment/default resolution. The bearer
-  token resolves as `--token`, `ORCH_HUB_TOKEN`, existing installed plist token,
-  then a generated token printed once. Bark URL resolves as
+  and data paths resolve flag, environment, installed plist, then default. The
+  bearer token resolves as `--token`, `ORCH_HUB_TOKEN`, existing installed
+  plist token, then a generated token printed once. Bark URL resolves as
   `ORCH_HUB_BARK_URL`, then existing installed plist value, then disabled; it
   has no CLI flag, and CLI output reports only `bark push: enabled/disabled`
   because the URL embeds a device-key secret.
 - Errors: operational failures return exit 1 with `error: ...`; non-transient
   bootout/bootstrap failures are not retried, and missing or invalid templates
   fail before venv/pip work.
+
+## Release producer CLIs
+
+- `python3 -m orch_hub.release_build [--out|--work|--venv|--python ...]
+  [--skip-install] [--no-clean] [--allow-findings]
+  [--allow-unsupported-macos] [--json]` provisions the pinned interpreter,
+  freezes/audits a staged payload, and publishes only a passing candidate.
+- `python3 -m orch_hub.release_package [--payload P ...]
+  [--out|--work|--template ...] [--allow-findings]
+  [--allow-unsupported-macos] [--json]` emits the deterministic target-keyed
+  artifact set. A payload may be repeated for multiple targets; the shipped
+  target is darwin-arm64.
+- `python3 -m orch_hub.release_publish --tag v<version> --to DEST
+  [--release|--work ...] [--json]` re-verifies a packaged set and publishes it
+  once to `<directory>/<tag>/` or `github:<owner>/<repo>`. It requires tag =
+  clean HEAD and checkout/release versions to agree; GitHub requires `gh` and a
+  remote tag because `--verify-tag` is mandatory.
 
 ## `orch-hub launchd start|stop|restart`
 

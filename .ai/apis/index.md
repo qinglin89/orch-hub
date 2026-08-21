@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # APIs and Interfaces
@@ -15,3 +15,4 @@ verified-against: cad31851334def4258d4004c2e62516807aaff85
 | internal-core.md | Registry/readiness/task-store/usage interfaces, API conventions |
 | internal-evaluation.md | Evaluation-service, static-metrics, semantic-evaluator, and report-catalog internal interfaces |
 | internal-runtime.md | Repo-admission, intake, run, control-dir, log, history, notifier, launchd-template interfaces |
+| internal-release.md | Frozen resources, installed runtime, build/audit/package/publish interfaces and schemas |

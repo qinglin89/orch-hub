@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Architecture: Ownership and Boundaries
@@ -26,6 +26,8 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 | Commit metadata | target repo git history | display/evidence only; never gates |
 | Housekeeping marker | target repo `.ai/.housekeeping-pending` | display-only; never gates |
 | Notifications | derived from run/question/intake/semantic-job state | best-effort delivery; must not affect state writes |
+| Installed runtime | selected user prefix with version directories, `current`/`previous`, and payload-bound ownership marker | installer-owned immutable program bytes; mutable hub data stays outside; uninstall refuses unproven prefixes |
+| Release artifacts | local `build/release/`, `dist/release/`, and immutable per-tag publication destination | producer-owned generated state; validate staged bytes before canonical replace, and never overwrite a published tag |
 
 ## Component Boundaries
 
@@ -72,6 +74,13 @@ invariants: `index.md`. Runtime flows: `flows.md`.
   decisions.
 - API, CLI, dashboard, launchd, and future bot surfaces stay adapters over
   shared services.
+- Runtime resource lookup is the only source/frozen filesystem abstraction;
+  installed-runtime commands consume the selected versioned prefix and do not
+  depend on a checkout.
+- Release build/audit/package/publish modules are producer tooling. They may
+  inspect source and generated artifacts but do not own installed runtime state.
+- `atomic_dir` is a last-good replacement primitive. Immutable publication uses
+  explicit create-only placement because replacing an existing tag is invalid.
 
 ## External Dependencies
 
@@ -90,3 +99,7 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 - Codex local session rollouts for read-only rate-limit display; Codex is
   never invoked for usage.
 - Tailscale or an equivalent private network.
+- Pinned PyInstaller and python-build-standalone CPython for release production;
+  neither is a dependency of an installed runtime.
+- POSIX shell and standard macOS tools for the self-extracting installer; Git
+  and optionally `gh` establish the publication tag gate.

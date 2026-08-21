@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Project Map
@@ -30,6 +30,7 @@ behavior and rationale stay in the owning doc.
 | Auth and private access | api, config | fail-closed bearer middleware; private network still required |
 | Notifications | notifications, config, runs, intake, semantic_jobs, monitor, launchd, api, cli | Bark backend; isolated best-effort delivery |
 | Launchd service | launchd, cli, config, api, docs, deploy | plist template = truth; fixed service label only |
+| Compiled release delivery | resources, macho, release_audit, release_build, release_python, install, atomic_dir, release_package, release_publish, cli, launchd, docs, deploy | pinned/measured floor; audit frozen archives; versioned selection; deterministic artifacts; tag/byte gates; published tags never replaced |
 | Run history and audit | history, runs, orch_config, sessions, task_snapshots, api, models, control_dir, task_store, evaluation | append-only events.jsonl; metadata only, never answer text |
 
 ## Feature -> APIs
@@ -53,6 +54,7 @@ behavior and rationale stay in the owning doc.
 | Auth and private access | `ORCH_HUB_TOKEN`; `Authorization: Bearer <token>`; public `GET /api/health` |
 | Notifications | internal notifier interface; `ORCH_HUB_BARK_URL`; CLI `orch-hub notify test` |
 | Launchd service | CLI `orch-hub launchd deploy\|update\|start\|stop\|restart\|status`; `orch-hub-api`; `deploy/launchd/com.qinglin89.orch-hub.plist`; `docs/launchd.md` |
+| Compiled release delivery | CLI `serve\|version\|install\|setup\|upgrade\|rollback\|versions\|uninstall`; producer CLI `release_build\|release_package\|release_publish`; `.run`; `runtime.json`; `release.json`; `SHA256SUMS`; `publication.json` |
 | Run history and audit | `GET /api/history/runs`; `GET /api/runs/{run_id}/task`; run sessions/effective-config routes |
 
 ## Module -> Key Responsibilities
@@ -68,6 +70,15 @@ behavior and rationale stay in the owning doc.
 | subprocess_utils | shared blocking command runs; capped streamed stdout |
 | cli | human/JSON output; launchd/notify/eval/catalog dispatch |
 | launchd | plist render/install; launchctl lifecycle; status probe |
+| resources | source/frozen resource-root resolution |
+| install | versioned payload placement/selection; setup/upgrade/rollback/uninstall |
+| atomic_dir | last-good replace placement; never publication no-clobber |
+| macho | Mach-O architectures + minimum-macOS scan |
+| release_audit | filesystem/archive/CArchive/PYZ source/path/secret audit |
+| release_build | pinned standalone frozen payload build + manifest/audit gates |
+| release_python | digest-pinned redistributable interpreter provisioning |
+| release_package | deterministic installer/manifest/inventory/checksum production |
+| release_publish | tag/byte/header verification; filesystem/GitHub no-republish delivery |
 | task_store | `.ai-tasks` index/frontmatter parsing; contained reads |
 | admission | per-repo run↔intake start critical section |
 | intake | intake lifecycle/audit; verified confirm/rollback |

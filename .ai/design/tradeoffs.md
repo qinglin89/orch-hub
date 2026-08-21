@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: 29e4c53412a0960cba31118549551de691b1af70
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Design: Tradeoffs
@@ -104,8 +104,8 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 
 - Chose: configure the resident service entirely through environment variables.
 - Reason: launchd user agents naturally carry configuration in
-  `EnvironmentVariables`, and the installed `orch-hub-api` console script can
-  remain argument-free.
+  `EnvironmentVariables`; the checkout's `orch-hub-api` console script remains
+  argument-free and the compiled program needs only `serve`.
 - Consequence: malformed env values must fail explicitly or be reported as
   operational CLI errors; the plist embeds `ORCH_HUB_TOKEN` and must be kept
   permission-restricted.
@@ -179,3 +179,50 @@ verified-against: 29e4c53412a0960cba31118549551de691b1af70
 - Consequence: the dashboard can consume stable repo and task APIs; run,
   question, log, and auth behavior were added as separate slices, and the v1
   dashboard now uses those APIs without adding frontend build tooling.
+
+## Tradeoff: PyInstaller onedir vs onefile or a native compiler
+
+- Chose: one ARM64 PyInstaller onedir payload wrapped by a self-extracting
+  installer.
+- Reason: it keeps one operator-facing artifact while making the runtime tree
+  auditable and avoiding onefile's startup extraction and native-compiler
+  compatibility work.
+- Consequence: the installed version is a directory, and the release producer
+  must inspect both the executable archive and nested PYZ content for excluded
+  source and repository state.
+
+## Tradeoff: versioned prefix vs in-place executable replacement
+
+- Chose: immutable `<prefix>/versions/<version>` payloads with `current` and
+  `previous` links.
+- Reason: a staged candidate can validate before activation and rollback keeps
+  a concrete known-good version.
+- Consequence: later installs must use the same nondefault prefix/bin directory,
+  and version retention is a separate policy task.
+
+## Tradeoff: pinned standalone CPython vs the host Python
+
+- Chose: a digest-pinned python-build-standalone CPython and a measured Mach-O
+  deployment floor.
+- Reason: release bytes should not depend on a workstation's mutable Python or
+  claim broader macOS compatibility than their native objects support.
+- Consequence: producer pins and floor validation are release maintenance; the
+  installed runtime has no host-Python dependency.
+
+## Tradeoff: local build with tag-gated publish vs CI-origin artifacts
+
+- Chose: build and package locally, then require a verified Git tag before
+  filesystem or GitHub publication.
+- Reason: it delivers the private release workflow without first creating a CI
+  signing and artifact pipeline.
+- Consequence: checksums prove published-byte integrity, but the payload does
+  not yet record the source revision it was frozen from.
+
+## Tradeoff: replace staging vs immutable tag publication
+
+- Chose: atomic last-good replacement for build/package outputs and create-only
+  placement for a published tag.
+- Reason: canonical producer outputs may advance after validation, while an
+  existing tag publication must never be silently replaced.
+- Consequence: the shared atomic-directory helper is intentionally unsuitable
+  for the publication destination.

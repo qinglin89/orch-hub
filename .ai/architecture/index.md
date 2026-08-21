@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Architecture
@@ -13,6 +13,8 @@ global feed. It coordinates existing
 systems rather than replacing them: mandrel remains the
 registry, target repos own their task files and deployed orchestrator
 payloads, and orch-hub owns only its service surface plus external run state.
+The service can run from a checkout or from a versioned compiled installation;
+release construction and publication remain operator-side producer flows.
 
 ## System Shape
 
@@ -75,6 +77,13 @@ resident operation and manages only the fixed orch-hub service label; graceful
 run stop stays in the run-control/control-dir path. Configured secrets (bearer
 tokens, Bark endpoints) must not be logged or displayed.
 
+Compiled delivery is an unsigned, self-checking artifact rather than a code
+signature boundary. The installer validates host architecture, the measured
+macOS floor, and payload digests before extraction. The build audit rejects
+source-bearing first-party payloads and repository, protocol, task, agent,
+secret, and absolute-path leakage, including content nested in freezer
+archives.
+
 ## Detail Files
 
 | File | Contains |
@@ -112,6 +121,16 @@ tokens, Bark endpoints) must not be logged or displayed.
 - Claude usage requires no statusLine setup. A legacy statusLine hook remains
   operator-installed; orch-hub never edits `~/.claude/**`, and the wrapper
   preserves the operator's visible statusline behavior.
+- Compiled installs are versioned under one user-owned prefix; `current` and
+  `previous` move only after a staged candidate validates, while mutable data
+  stays outside the prefix and uninstall requires a payload-bound ownership
+  marker.
+- Release build and package outputs keep the last known-good canonical bytes
+  until a staged replacement passes. Publication is immutable per tag and
+  uses create-only placement, not the replace-oriented atomic-directory helper.
+- A release tag gates publication of locally built bytes. Publication records
+  checksums and closure metadata, but payload source revision is not yet part of
+  the artifact identity.
 
 ## Related Memory
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-22
+verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
 ---
 
 # Glossary
@@ -42,5 +42,12 @@ verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 
 - Readiness: pre-launch checks proving a managed repo has required deployed
   files, task index, clean git state, and a passing `mandrel status`.
-- Launchd service: resident macOS user agent that runs `orch-hub-api` from the repo venv.
+- Launchd service: resident macOS user agent that runs checkout
+  `orch-hub-api` or compiled `<prefix>/current/orch-hub serve`.
 - Deployment template: checked-in operational artifact such as `deploy/launchd/com.qinglin89.orch-hub.plist`.
+- Release payload: audited PyInstaller onedir runtime plus `runtime.json`,
+  installed as one immutable version directory.
+- Release artifact: self-extracting `.run` plus `release.json` and
+  `SHA256SUMS`; publication adds `publication.json` for tag/commit closure.
+- Install prefix: user-owned root containing versioned payloads and atomic
+  `current`/`previous` selection; mutable hub data is stored elsewhere.
