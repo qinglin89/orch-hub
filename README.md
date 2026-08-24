@@ -317,5 +317,6 @@ inventory, or a destination already holding the tag. See
 
 orch-hub is currently developed as a personal, local operator surface. It is
 not a hosted service, a multi-user control plane, or a replacement for Mandrel.
-The web dashboard is the primary control surface; IM bot control is not
-implemented.
+The source repository remains private; an unsigned Apple Silicon binary preview
+is available from
+[orch-hub-releases](https://github.com/qinglin89/orch-hub-releases).
