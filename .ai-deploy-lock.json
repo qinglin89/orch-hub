@@ -1,10 +1,10 @@
 {
-  "canonical_payload_sha256": "00c4eb11c0da24e65962f1d57d9dd2bfe6ce9e3c14131188f29a9ede8b2ebb8e",
+  "canonical_payload_sha256": "1805488a2b1a32f9c07a501d9de4a1cca524a47966d6717c9d72603462de7b3b",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
-      "canonical_sha256": "56150f42e554a27a18287aae0bff545b0638c3225a2b40bfa75e08568a915033",
-      "canonical_size_bytes": 10135,
+      "canonical_sha256": "8a8d348a93d326ea17904444265672f71afcc981d9ff6c216c68ceb3226d30e8",
+      "canonical_size_bytes": 10297,
       "target_relative_path": ".ai-protocol/meta/init.md"
     },
     {
@@ -105,8 +105,8 @@
     },
     {
       "canonical_relative_path": "canonical/claude/skills/ai-init/SKILL.md",
-      "canonical_sha256": "a971a81a8628520065e357d6a8d50fc49b0c6d6a8df898264d833c25cd582a0a",
-      "canonical_size_bytes": 7167,
+      "canonical_sha256": "3a3353da72ead4b93e79164fd643275b35b5b96240031af7301c3ee63d696c72",
+      "canonical_size_bytes": 7195,
       "target_relative_path": ".claude/skills/ai-init/SKILL.md"
     },
     {
@@ -705,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "9227c37d061c5881148400cefe1797895808bde3",
+  "source_git_commit": "b30d8eb22387ef7c6dde8bc279e056b679b99f16",
   "source_repo": "mandrel"
 }
