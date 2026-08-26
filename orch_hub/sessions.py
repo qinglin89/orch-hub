@@ -51,6 +51,10 @@ single run's own dir (its snapshot, else its ``spawn.out`` stdout capture) and
 never touches the repo-side log, whose filename a fast re-run of the same task
 can collide with. That containment is what makes these markers usable as
 *per-run* evidence — the run manager classifies a finished run from them.
+:func:`read_run_closeout` is the same read for the one completion the brackets
+cannot express (a blocked session resumed in place, archiving the task without
+opening a bracket): the orchestrator's ``close-out done`` line, anchored the
+same way, out of the same capture.
 """
 
 from __future__ import annotations
@@ -93,6 +97,12 @@ carries ``status=``; a plan-gate end does not (optional group)."""
 
 _RUN_FINISHED = re.compile(r"^run finished:.*context≈(\d+) tokens$")
 """Both backends' per-turn line ends ``context≈{N} tokens``; match on that."""
+
+_CLOSE_OUT_DONE = re.compile(r"^close-out done\b")
+"""``close-out done``, and its ``close-out done (performed in-session by the
+native hook chain; ...)`` variant. Not a bracket marker and not part of a
+session summary — the run's own terminal statement that its task's close-out
+finished, read by :func:`read_run_closeout`."""
 
 
 class _Open:
@@ -248,6 +258,53 @@ def read_run_owned(run_dir: Path, record: RunRecord) -> SessionsSnapshot:
     if snapshot is not None and snapshot.sessions:
         return snapshot
     return _parse_file(record.spawn_out)
+
+
+def read_run_closeout(record: RunRecord) -> bool:
+    """Did *this* run log its task's close-out as done?
+
+    The second run-owned completion carrier, in the same anchored-marker
+    vocabulary as the brackets and read out of the same ``spawn.out`` capture:
+    the orchestrator logs ``close-out done`` when it drives the close-out from
+    its loop head, and ``close-out done (performed in-session ...)`` when it
+    verifies one a session's native hook chain already ran. Either line is
+    written during this run into this run's own dir and never changes again.
+
+    It is needed because one real completion path leaves no bracket at all. A
+    *blocked* task is resumed by re-entering the blocked session directly
+    (``handle_blocked()``) rather than through the bracketed session runner, so
+    a final gate concluded in that resumed turn archives the task without any
+    ``--- {role} session start/end`` pair being logged. Such a run's last
+    bracket reads ``status=blocked``, or it has none at all when it launched
+    against the already-blocked task — brackets alone would call a run that
+    finished its task merely ended.
+
+    Deliberately read from the capture only: ``sessions.json`` holds parsed
+    brackets, so it cannot carry this line, and reading the repo-side log would
+    give up the containment (:func:`read_run_owned`) the verdict depends on. An
+    absent or unreadable capture is ``False``, never an error.
+    """
+    return _scan_closeout(record.spawn_out)
+
+
+def _scan_closeout(path: Path | None) -> bool:
+    """Stream one file for the close-out marker; absent/unreadable -> ``False``.
+
+    Same anchor rule as :func:`parse_sessions` — a marker only counts on a
+    genuine ``[HH:MM:SS] `` line, so agent text quoting the phrase cannot fake
+    it — and the same single-pass, bounded-memory read.
+    """
+    if path is None:
+        return False
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for raw in handle:
+                anchored = _ANCHOR.match(raw.rstrip("\r\n"))
+                if anchored is not None and _CLOSE_OUT_DONE.match(anchored.group(2)):
+                    return True
+    except OSError:
+        return False
+    return False
 
 
 def _parse_file(path: Path | None) -> SessionsSnapshot:

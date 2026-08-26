@@ -105,7 +105,13 @@ from .protocol_provenance import (
 )
 from .readiness import check_readiness
 from .resources import strip_bootloader_env
-from .sessions import read_live, read_run_owned, read_snapshot, write_snapshot
+from .sessions import (
+    read_live,
+    read_run_closeout,
+    read_run_owned,
+    read_snapshot,
+    write_snapshot,
+)
 from .task_snapshots import capture_entries, settle_snapshots
 from .task_store import (
     STATUS_MISSING,
@@ -172,6 +178,11 @@ its task, mapped to the operator-facing detail. The orchestrator logs the task's
 state as *that session* left it (:mod:`orch_hub.sessions`), so unlike the task
 file itself these two are per-run and frozen. Every other value is an interim
 status: real evidence, but not of completion."""
+
+_CLOSED_OUT_DETAIL = "task closed out during this run"
+"""Detail for the completion a bracket cannot carry: the run logged its task's
+close-out as done without a session end line saying so
+(:func:`orch_hub.sessions.read_run_closeout`)."""
 
 _RUN_ID_TS = "%Y%m%dT%H%M%SZ"
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
@@ -1333,9 +1344,9 @@ class RunManager:
         Exit 0 is ambiguous (task done vs graceful boundary stop vs a ``--once``
         session), so classification prefers file evidence over it — but only
         evidence scoped to this one run, all of it inside ``run_dir`` and frozen
-        the moment the run ended: the session brackets it logged
-        (:meth:`_session_done_detail`), then its own control dir's stop signals,
-        then its own exit code. ``exit_code=None`` (ended while the hub was down)
+        the moment the run ended: the completion it logged
+        (:meth:`_done_detail`), then its own control dir's stop signals, then
+        its own exit code. ``exit_code=None`` (ended while the hub was down)
         classifies from the file evidence alone.
 
         Containment is the point. The target repo's ``.ai-tasks/`` state is
@@ -1347,7 +1358,7 @@ class RunManager:
         dir holds no completion or stop evidence degrades to ``ended``/``error``
         — honestly unknown — rather than borrowing another run's outcome.
         """
-        done_detail = self._session_done_detail(run_dir, record)
+        done_detail = self._done_detail(run_dir, record)
         if done_detail is not None:
             return STATE_COMPLETED, done_detail
         flagged = stop_requested(record.control_dir)
@@ -1371,27 +1382,43 @@ class RunManager:
         return STATE_ERROR, f"exited {record.exit_code}"
 
     @staticmethod
-    def _session_done_detail(run_dir: Path, record: RunRecord) -> str | None:
+    def _done_detail(run_dir: Path, record: RunRecord) -> str | None:
         """This run's own evidence that it finished its task, or ``None``.
 
-        The orchestrator closes every session by reading the task file it just
-        worked on and logging ``status=<end_status>`` — ``completed+archived``
-        when close-out has already taken the file away, otherwise the frontmatter
-        status. That line is written *during* this run, into this run's own log
-        and stdout capture (:func:`orch_hub.sessions.read_run_owned` reads only
-        the run dir), so it is a point observation that never changes afterwards,
-        unlike the task file it observed.
+        Two carriers, both written *during* this run into this run's own dir
+        (:func:`orch_hub.sessions.read_run_owned` and
+        :func:`~orch_hub.sessions.read_run_closeout` read nothing else), so both
+        are point observations that never change afterwards — unlike the task
+        file they observed.
 
-        The last session decides: the orchestrator's loop returns as soon as it
-        sees the task completed or archived, so a run that finished its task has
-        that status on its final bracket and cannot open another. Anything else
-        — an interim status, a plan-gate bracket with no ``status=`` at all, a
-        run that logged no session — is simply not evidence of completion here.
+        The brackets come first, and usually decide. The orchestrator closes
+        every session by reading the task file it just worked on and logging
+        ``status=<end_status>`` — ``completed+archived`` when close-out has
+        already taken the file away, otherwise the frontmatter status. The last
+        bracket is the one that counts: the loop returns as soon as it sees the
+        task completed or archived, so a run that finished its task carries that
+        status on its final bracket and cannot open another.
+
+        A bracket is not the only way a run can finish a task, though. A
+        ``blocked`` task is resumed *inside* the blocked session instead of
+        through the bracketed session runner, so a final gate concluded in that
+        resumed turn archives the task while the run's last bracket still says
+        ``status=blocked`` — or while it has no bracket at all, when the run
+        launched against the already-blocked task. The close-out line the run
+        logs on its way out is the same fact in the same log, and it also covers
+        a run launched against an already-``completed`` task, which re-runs
+        close-out and nothing else.
+
+        Anything short of those — an interim end status, a plan-gate bracket
+        with no ``status=``, a run that logged neither a bracket nor a close-out
+        — is simply not evidence of completion here.
         """
         sessions = read_run_owned(run_dir, record).sessions
-        if not sessions:
-            return None
-        return _DONE_END_STATUSES.get(sessions[-1].end_status or "")
+        if sessions:
+            detail = _DONE_END_STATUSES.get(sessions[-1].end_status or "")
+            if detail is not None:
+                return detail
+        return _CLOSED_OUT_DETAIL if read_run_closeout(record) else None
 
 
 def _write_record(run_dir: Path, record: RunRecord) -> None:

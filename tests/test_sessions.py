@@ -10,6 +10,7 @@ multi-turn context growth, transcript interleave).
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import replace
 from pathlib import Path
 
 from orch_hub import sessions
@@ -269,6 +270,71 @@ def test_read_live_parses_located_log(tmp_path):
     snap = read_live(make_record(log_dir))
     assert [s.sid for s in snap.sessions] == ["bbb"]
     assert snap.sessions[0].context_tokens == 120000
+
+
+# -- read_run_closeout ---------------------------------------------------------
+
+
+CLOSE_OUT_NATIVE = (
+    "[09:12:00] close-out done (performed in-session by the native hook chain; "
+    "orchestrator verified archive/index/tree/remaining tasks)"
+)
+
+
+def capture_record(spawn_out: Path | None) -> RunRecord:
+    record = make_record(None)
+    return replace(record, spawn_out=spawn_out)
+
+
+def test_read_run_closeout_finds_the_driven_line(tmp_path):
+    capture = tmp_path / "spawn.out"
+    capture.write_text(
+        "\n".join([*dev_session("bbb"), "[09:12:00] close-out done"]) + "\n",
+        encoding="utf-8",
+    )
+    assert sessions.read_run_closeout(capture_record(capture)) is True
+
+
+def test_read_run_closeout_finds_the_native_hook_chain_line(tmp_path):
+    # The blocked-resume completion: no bracket was ever opened for the resumed
+    # session, so this line is the run's only statement that it finished its task.
+    capture = tmp_path / "spawn.out"
+    capture.write_text(
+        "\n".join(
+            [
+                "[09:10:00] resuming blocked review session rev-nc-0001 with answer",
+                "[09:11:00] run finished: status=finished context≈90000 tokens",
+                "[09:11:30] task file archived mid-session — the native hook chain "
+                "ran the close-out inside the resumed session; skipping post-checks",
+                CLOSE_OUT_NATIVE,
+                "[09:12:01] orchestrator done",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert sessions.read_run_closeout(capture_record(capture)) is True
+
+
+def test_read_run_closeout_ignores_unanchored_text(tmp_path):
+    # Same anchor rule as the bracket markers: agent transcript text quoting the
+    # phrase carries no ``[HH:MM:SS] `` prefix and must not fake a completion.
+    capture = tmp_path / "spawn.out"
+    capture.write_text(
+        "close-out done\nthe reviewer wrote: close-out done\n", encoding="utf-8"
+    )
+    assert sessions.read_run_closeout(capture_record(capture)) is False
+
+
+def test_read_run_closeout_without_the_line_is_false(tmp_path):
+    capture = tmp_path / "spawn.out"
+    capture.write_text("\n".join(dev_session("bbb")) + "\n", encoding="utf-8")
+    assert sessions.read_run_closeout(capture_record(capture)) is False
+
+
+def test_read_run_closeout_absent_capture_is_false(tmp_path):
+    assert sessions.read_run_closeout(capture_record(None)) is False
+    assert sessions.read_run_closeout(capture_record(tmp_path / "nope.out")) is False
 
 
 # -- snapshot IO ---------------------------------------------------------------

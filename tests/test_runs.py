@@ -1360,6 +1360,124 @@ def test_a_run_with_no_evidence_of_its_own_degrades_to_ended(tmp_path):
     assert "no completion evidence" in status.detail
 
 
+BLOCKED_RESUME_CLOSEOUT_LINES = [
+    "[03:20:00] resuming blocked review session rev1 with answer",
+    "[03:25:00] run finished: tool=codex exit=0 status=finished context≈90000 tokens",
+    "[03:25:10] task file archived mid-session — the native hook chain ran the "
+    "close-out inside the resumed session; skipping post-checks",
+    "[03:25:11] close-out done (performed in-session by the native hook chain; "
+    "orchestrator verified archive/index/tree/remaining tasks)",
+    "[03:25:12] orchestrator done",
+]
+"""What the orchestrator logs when a *blocked* task's resumed session concludes
+its final gate: the resume re-enters the blocked session in place, so no
+``--- {role} session start/end`` bracket is ever opened for the turn that
+finished the task."""
+
+
+def write_spawn_capture(manager, record: RunRecord, lines: list[str]) -> Path:
+    """Write the run's own stdout capture — every ``log()`` line is printed too."""
+    path = manager.runs_dir / record.run_id / "spawn.out"
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
+def test_a_blocked_resume_that_archives_the_task_classifies_completed(tmp_path):
+    # Launched against a blocked task: the operator answers the blocker, the
+    # resumed reviewer passes the final gate, and its native hook chain archives
+    # the task in-session. The run finished its task with no bracket to say so,
+    # and brackets alone would have called it merely 'ended'.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    write_task_file(repo.path, TASK_ID, status="blocked")
+    record = manager.start_run(repo, TASK_ID, acknowledge_blocked=True)
+    write_orch_log(repo, BLOCKED_RESUME_CLOSEOUT_LINES)
+    write_spawn_capture(manager, record, BLOCKED_RESUME_CLOSEOUT_LINES)
+
+    end_run(spawner, 0)
+    close_out_task(repo)  # the shared evidence moves on; the verdict must not
+
+    status = only_status(manager)
+    assert status.state == "completed"
+    assert status.detail == "task closed out during this run"
+
+
+def test_a_blocked_resume_after_earlier_sessions_classifies_completed(tmp_path):
+    # Same path, reached mid-run: a review session ends with status=blocked, the
+    # loop resumes that session with the human's answer, and the final gate
+    # concludes there. The last bracket still reads 'blocked' — an interim status
+    # — so the close-out line is the only completion evidence the run holds.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    lines = ORCH_LOG_LINES[:-1] + [
+        "[03:15:00] --- review session end: sid=rev1 status=blocked",
+        *BLOCKED_RESUME_CLOSEOUT_LINES,
+    ]
+    write_orch_log(repo, lines)
+    write_spawn_capture(manager, record, lines)
+
+    end_run(spawner, 0)
+
+    status = only_status(manager)
+    assert status.state == "completed"
+    assert status.detail == "task closed out during this run"
+
+
+def test_a_blocked_run_with_no_close_out_line_stays_ended(tmp_path):
+    # The other half of the same shape: the resumed session did *not* conclude
+    # the gate, so nothing closed out. Without that line the run holds no
+    # completion evidence at all and degrades honestly.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    lines = ORCH_LOG_LINES[:-1] + [
+        "[03:15:00] --- review session end: sid=rev1 status=blocked",
+        "[03:20:00] resuming blocked review session rev1 with answer",
+    ]
+    write_orch_log(repo, lines)
+    write_spawn_capture(manager, record, lines)
+
+    end_run(spawner, 0)
+
+    assert only_status(manager).state == "ended"
+
+
+def test_a_stopped_blocked_resume_is_not_repainted_by_a_close_out_line(tmp_path):
+    # Completion evidence outranks stop evidence, so pin the case where the two
+    # meet: no close-out line, a human 'stop' answer, and a last bracket reading
+    # 'blocked'. The run stopped; nothing here says it finished the task.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    lines = ORCH_LOG_LINES[:-1] + [
+        "[03:15:00] --- review session end: sid=rev1 status=blocked",
+    ]
+    write_orch_log(repo, lines)
+    write_spawn_capture(manager, record, lines)
+    answer_stop(record)
+
+    end_run(spawner, 0)
+    close_out_task(repo)
+
+    assert only_status(manager).state == "stopped"
+
+
+def test_close_out_evidence_is_read_from_the_run_dir_not_the_repo_log(tmp_path):
+    # Containment: the repo-side log is located by a name two same-second runs of
+    # one task share, so it is not evidence about one run. A close-out line that
+    # exists only there must not promote this run.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, BLOCKED_RESUME_CLOSEOUT_LINES)
+    write_spawn_capture(manager, record, BLOCKED_RESUME_CLOSEOUT_LINES[:1])
+
+    end_run(spawner, 0)
+
+    assert only_status(manager).state == "ended"
+
+
 def test_pre_snapshot_run_classifies_from_its_spawn_out_capture(tmp_path):
     # The orchestrator writes its marker stream to stdout as well as to its log,
     # so the run dir's own spawn.out carries the evidence for runs that predate
