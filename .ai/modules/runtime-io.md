@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-26
+verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
 ---
 
 # Modules: Runtime I/O and Observability
@@ -80,7 +80,11 @@ boundaries plus `run finished: ... context≈N tokens` turn lines, reconciles
 keeps the latest/peak context figure, and tolerates missing, truncated, orphaned,
 or mid-write lines as partial data. `read_live(record)` locates and parses the
 current repo-side log; `write_snapshot`/`read_snapshot` atomically persist and
-tolerantly load `sessions.json`.
+tolerantly load `sessions.json`. Terminal classification uses
+`read_run_owned(run_dir, record)` for final session evidence (snapshot first,
+then the run's `spawn.out`) and `read_run_closeout(record)` for the anchored
+`close-out done` completion path that has no session bracket. Neither helper
+reads the collision-prone repo-side log or mutable task state.
 
 ## Session Entry Task Snapshots
 

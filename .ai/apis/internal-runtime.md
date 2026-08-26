@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-26
+verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
 ---
 
 # APIs: Internal — Runtime
@@ -93,6 +93,9 @@ optional plain `usage_refresh` callable once after persistence. `stop_run`
 delegates to `control_dir.request_stop`, appends
 `stop_requested` only on the first idempotent write, and refuses ended or
 broken runs so a post-mortem flag cannot rewrite end classification.
+Terminal verdicts come only from the run's frozen session/close-out evidence,
+then its control-dir stop evidence, then exit code; missing evidence degrades
+to `ended`/`error` and never consults the target repo's current task state.
 `audit_answer` appends responder/question metadata plus optional answer `mode`
 after a control-dir answer write, without copying answer text. `recent_runs`
 returns newest-first `RunHistoryEntry` values from run records plus

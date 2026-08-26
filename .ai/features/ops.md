@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-26
+verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
 ---
 
 # Features: Operations Surfaces
@@ -45,8 +45,8 @@ Implemented behavior:
   title, and run/control-dir/history state is unchanged.
 - Terminal notifications fire exactly once when `_refresh` observes a
   live-to-ended transition. The message uses the same `_classify_end` state and
-  detail as the dashboard; close-out completion is represented by the
-  `completed` classification detail for task completion or archival.
+  detail as the dashboard; `completed` comes from that run's frozen final
+  session status or anchored `close-out done` line, never later task state.
 - Pending-question notifications fire from `_status` while the run is live,
   reusing the existing `pending_questions` scan. Each question is de-duped by
   in-memory `(run_id, seq)`; answered questions are filtered out before

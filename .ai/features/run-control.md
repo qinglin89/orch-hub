@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-26
+verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
 ---
 
 # Features: Run Control
@@ -83,9 +83,11 @@ Implemented behavior:
   was down, `ended_ts` is persisted with `exit_code=None`.
 - Live status is `active` or `waiting` based on pending control-dir questions
   and carries `stop_requested=true` while the live run's `stop.flag` exists.
-  End status is classified as `completed`, `stopped`, `error`, or `ended` by
-  task completion/archival evidence, stop evidence, and then exit code; terminal
-  run payloads keep `stop_requested=false`.
+  End status is classified as `completed`, `stopped`, `error`, or `ended` from
+  frozen evidence in that run's own dir: final session status or an anchored
+  `close-out done` line, then control-dir stop evidence, then exit code. It
+  never falls back to the target repo's later task state; terminal run payloads
+  keep `stop_requested=false`.
 - `stop_run` writes `stop.flag` through `control_dir.request_stop` and refuses
   unknown, broken, or already-ended runs.
 - HTTP run routes resolve repos through registry discovery, return serialized

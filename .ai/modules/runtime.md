@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-26
+verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
 ---
 
 # Modules: Runtime
@@ -67,11 +67,14 @@ recorded with `exit_code=None`. Live `RunStatus` reads derive a
 `stop_requested` overlay from `control_dir.stop_requested` so a requested stop
 survives dashboard reloads until the run ends; terminal statuses leave that
 field false because stop evidence is expressed by end classification. End
-classification prefers task completion or archival evidence, then hub stop
-evidence (`stop.flag` or a valid `"stop"` answer), then bare exit code. Broken
-run dirs surface as `error` states and do not block repo launches when no repo
-attribution is available. The manager appends `run_started`, `run_ended`,
-`stop_requested`, and `answer_recorded` events and exposes newest-first
+classification uses only frozen evidence owned by the run: completion from
+the final parsed session status or the anchored `close-out done` line in its
+`spawn.out`, then hub stop evidence (`stop.flag` or a valid `"stop"` answer),
+then bare exit code. Missing evidence degrades to `ended`/`error`; the target
+repo's current task state is never a fallback. Broken run dirs surface as
+`error` states and do not block repo launches when no repo attribution is
+available. The manager appends `run_started`, `run_ended`, `stop_requested`,
+and `answer_recorded` events and exposes newest-first
 `recent_runs(limit=...)` history entries. Answer events include optional
 `mode` metadata (`answer`/`discuss`/`null`) but never the answer text.
 
