@@ -196,6 +196,30 @@ def only_status(manager: RunManager):
     return statuses[0]
 
 
+def write_orch_log(repo: ManagedRepo, lines: list[str], *, stamp: str = "20260708T030000Z") -> Path:
+    """Drop an orchestrator-style log into the run's real ``log_dir``.
+
+    The stamp matches ``FIXED_NOW`` (the run's ``started_ts``) so the log locator
+    attributes it to the run, and the filename shape mirrors the deployed
+    orchestrator's ``<utc-ts>-<task-id>.log``.
+    """
+    log_dir = repo.path / ".mandrel" / "orchestrator" / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    path = log_dir / f"{stamp}-{TASK_ID}.log"
+    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
+    return path
+
+
+ORCH_LOG_LINES = [
+    "[03:00:10] --- dev session start: sid=dev1 backend=claude:x@max status_before=in_progress",
+    "[03:10:00] run finished: status=finished context≈150000 tokens",
+    "[03:10:00] --- dev session end: sid=dev1 status=final_review",
+    "[03:11:00] --- review session start: sid=(pending) backend=codex:y@xhigh status_before=final_review",
+    "[03:15:00] run finished: tool=codex exit=0 status=finished context≈90000 tokens",
+    "[03:15:00] --- review session end: sid=rev1 status=completed+archived",
+]
+
+
 # -- command construction ------------------------------------------------------
 
 
@@ -1098,16 +1122,36 @@ def test_recent_runs_summary_is_bounded_and_not_a_page(tmp_path):
 # -- end-of-run classification ----------------------------------------------------
 
 
-def end_run(spawner: FakeSpawner, exit_code: int) -> None:
-    spawner.procs[0].returncode = exit_code
+def end_run(spawner: FakeSpawner, exit_code: int, index: int = 0) -> None:
+    spawner.procs[index].returncode = exit_code
 
 
-def test_exit_zero_with_completed_task_classifies_completed(tmp_path):
+def close_out_task(repo: ManagedRepo) -> None:
+    """Do to the target repo what close-out does: archive the task, drop its row."""
+    write_index(repo.path, [])
+    (repo.path / ".ai-tasks" / f"{TASK_ID}.md").unlink()
+
+
+def answer_stop(record: RunRecord, seq: int = 1) -> None:
+    """Write the control-dir question/answer pair for a human ``stop``."""
+    record.control_dir.joinpath(f"{seq:03d}-question.json").write_text(
+        json.dumps({"seq": seq, "banner": "?"}), encoding="utf-8"
+    )
+    record.control_dir.joinpath(f"{seq:03d}-answer.json").write_text(
+        json.dumps({"answer": "stop"}), encoding="utf-8"
+    )
+
+
+def test_own_session_ending_on_a_completed_task_classifies_completed(tmp_path):
+    # The run's *own* log says the final gate passed while it was running. The
+    # target repo's task file still reads in_progress and is never consulted.
     repo = make_repo(tmp_path)
     manager, spawner, _ = make_manager(tmp_path)
     manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:-1] + [
+        "[03:15:00] --- review session end: sid=rev1 status=completed",
+    ])
 
-    write_task_file(repo.path, TASK_ID, status="completed")
     end_run(spawner, 0)
 
     status = only_status(manager)
@@ -1115,13 +1159,12 @@ def test_exit_zero_with_completed_task_classifies_completed(tmp_path):
     assert "close-out" in status.detail
 
 
-def test_exit_zero_with_archived_task_classifies_completed(tmp_path):
+def test_own_session_ending_on_an_archived_task_classifies_completed(tmp_path):
     repo = make_repo(tmp_path)
     manager, spawner, _ = make_manager(tmp_path)
     manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES)  # last bracket: status=completed+archived
 
-    write_index(repo.path, [])  # close-out removed the row
-    (repo.path / ".ai-tasks" / f"{TASK_ID}.md").unlink()
     end_run(spawner, 0)
 
     status = only_status(manager)
@@ -1160,12 +1203,7 @@ def test_stop_answer_plus_nonzero_exit_is_a_human_stop(tmp_path):
     manager, spawner, _ = make_manager(tmp_path)
     record = manager.start_run(repo, TASK_ID)
 
-    record.control_dir.joinpath("001-question.json").write_text(
-        json.dumps({"seq": 1, "banner": "?"}), encoding="utf-8"
-    )
-    record.control_dir.joinpath("001-answer.json").write_text(
-        json.dumps({"answer": "stop"}), encoding="utf-8"
-    )
+    answer_stop(record)
     end_run(spawner, 1)
 
     status = only_status(manager)
@@ -1245,6 +1283,104 @@ def test_observed_exit_code_is_persisted_for_later_managers(tmp_path):
     assert status.detail == "exited 5"
 
 
+def test_each_run_of_one_task_keeps_its_own_verdict(tmp_path):
+    # A task outlives its runs. Three runs of one task here: the first stopped on
+    # a human 'stop' answer, the second died with a nonzero exit, the third
+    # finished the task — and close-out then archives it. Back when the shared
+    # task state decided the verdict, that last step retroactively repainted all
+    # three 'completed' and left the stop and exit branches unreachable behind it.
+    repo = make_repo(tmp_path)
+    manager, spawner, clock = make_manager(tmp_path)
+
+    stopped = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:3], stamp="20260708T030000Z")
+    answer_stop(stopped)
+    end_run(spawner, 1, index=0)
+    manager.list_runs()  # observe the end: the repo is free for the next run
+
+    clock.tick(60)
+    failed = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:3], stamp="20260708T030100Z")
+    end_run(spawner, 1, index=1)
+    manager.list_runs()
+
+    clock.tick(60)
+    completed = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES, stamp="20260708T030200Z")
+    end_run(spawner, 0, index=2)
+    manager.list_runs()
+
+    close_out_task(repo)  # the shared evidence moves on; the verdicts must not
+
+    assert {s.record.run_id: s.state for s in manager.list_runs()} == {
+        stopped.run_id: "stopped",
+        failed.run_id: "error",
+        completed.run_id: "completed",
+    }
+
+
+def test_a_stopped_run_stays_stopped_when_the_task_later_completes(tmp_path):
+    # The run answered 'stop' and went no further. Whatever the task does
+    # afterwards — reaches the final gate, gets archived, is re-opened under the
+    # same id — is a later run's story, not this one's.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, ORCH_LOG_LINES[:3])
+    answer_stop(record)
+    end_run(spawner, 1)
+
+    assert only_status(manager).state == "stopped"
+
+    write_task_file(repo.path, TASK_ID, status="completed")
+    assert only_status(manager).state == "stopped"
+
+    close_out_task(repo)
+    assert only_status(manager).state == "stopped"
+
+    write_index(repo.path, [TASK_ID])  # re-opened under the same id
+    write_task_file(repo.path, TASK_ID, status="in_progress")
+    assert only_status(manager).state == "stopped"
+
+
+def test_a_run_with_no_evidence_of_its_own_degrades_to_ended(tmp_path):
+    # This run's dir holds nothing: no session bracket, no stop signal, a bare
+    # exit 0. Its task is completed and archived — exactly the reading that used
+    # to make it 'completed'. Unknown is the honest verdict; the alternative is
+    # borrowing another run's outcome.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+
+    close_out_task(repo)
+    end_run(spawner, 0)
+
+    status = only_status(manager)
+    assert status.state == "ended"
+    assert "no completion evidence" in status.detail
+
+
+def test_pre_snapshot_run_classifies_from_its_spawn_out_capture(tmp_path):
+    # The orchestrator writes its marker stream to stdout as well as to its log,
+    # so the run dir's own spawn.out carries the evidence for runs that predate
+    # sessions.json — and for any run whose end found no log to snapshot.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    run_dir = manager.runs_dir / record.run_id
+    (run_dir / "spawn.out").write_text(
+        "".join(line + "\n" for line in ORCH_LOG_LINES), encoding="utf-8"
+    )
+
+    end_run(spawner, 0)  # no repo-side log exists: the snapshot lands empty
+
+    assert only_status(manager).state == "completed"
+    assert read_snapshot(run_dir).sessions == ()
+
+    (run_dir / "sessions.json").unlink()  # a genuinely pre-field run
+    assert only_status(manager).state == "completed"
+
+
 # -- broken run dirs ---------------------------------------------------------------
 
 
@@ -1305,7 +1441,7 @@ def test_run_end_fires_one_notification_with_the_classified_state(tmp_path):
     manager, spawner, _ = make_manager(tmp_path, notifier=notifier)
     manager.start_run(repo, TASK_ID)
 
-    write_task_file(repo.path, TASK_ID, status="completed")
+    write_orch_log(repo, ORCH_LOG_LINES)  # this run archived its task
     end_run(spawner, 0)
     manager.list_runs()  # observe the end -> fires
 
@@ -1636,30 +1772,6 @@ def test_multiple_plan_revisions_each_notify(tmp_path):
 
 
 # -- per-session context snapshot (sessions.json) ------------------------------
-
-
-def write_orch_log(repo: ManagedRepo, lines: list[str], *, stamp: str = "20260708T030000Z") -> Path:
-    """Drop an orchestrator-style log into the run's real ``log_dir``.
-
-    The stamp matches ``FIXED_NOW`` (the run's ``started_ts``) so the log locator
-    attributes it to the run, and the filename shape mirrors the deployed
-    orchestrator's ``<utc-ts>-<task-id>.log``.
-    """
-    log_dir = repo.path / ".mandrel" / "orchestrator" / "logs"
-    log_dir.mkdir(parents=True, exist_ok=True)
-    path = log_dir / f"{stamp}-{TASK_ID}.log"
-    path.write_text("".join(line + "\n" for line in lines), encoding="utf-8")
-    return path
-
-
-ORCH_LOG_LINES = [
-    "[03:00:10] --- dev session start: sid=dev1 backend=claude:x@max status_before=in_progress",
-    "[03:10:00] run finished: status=finished context≈150000 tokens",
-    "[03:10:00] --- dev session end: sid=dev1 status=final_review",
-    "[03:11:00] --- review session start: sid=(pending) backend=codex:y@xhigh status_before=final_review",
-    "[03:15:00] run finished: tool=codex exit=0 status=finished context≈90000 tokens",
-    "[03:15:00] --- review session end: sid=rev1 status=completed+archived",
-]
 
 
 def sessions_json(manager: RunManager, run_id: str) -> Path:
@@ -2204,7 +2316,7 @@ def test_effective_config_snapshot_failure_does_not_corrupt_run_end(tmp_path, mo
     end_run(spawner, 0)
     status = only_status(manager)  # must not raise
 
-    assert status.state == "ended"
+    assert status.state == "completed"  # from the run's own session evidence
     assert read_record(manager, record.run_id)["ended_ts"] is not None
     assert not effective_config_json(manager, record.run_id).exists()
 

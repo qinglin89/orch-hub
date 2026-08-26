@@ -45,6 +45,12 @@ path); an *ended* run is served from the snapshot persisted into its run dir
 (:func:`write_snapshot`/:func:`read_snapshot`), so the summary survives later
 cleanup of the repo-side log. The run manager owns both — it writes the snapshot
 once at the live->ended transition and chooses parse-vs-snapshot per read.
+
+:func:`read_run_owned` is the third read, and the strict one: it stays inside a
+single run's own dir (its snapshot, else its ``spawn.out`` stdout capture) and
+never touches the repo-side log, whose filename a fast re-run of the same task
+can collide with. That containment is what makes these markers usable as
+*per-run* evidence — the run manager classifies a finished run from them.
 """
 
 from __future__ import annotations
@@ -214,7 +220,38 @@ def read_live(record: RunRecord) -> SessionsSnapshot:
     rotated/was removed, yields an empty snapshot, never an error — the same
     graceful-absence contract the logs module uses.
     """
-    path = logs.locate_log(record)
+    return _parse_file(logs.locate_log(record))
+
+
+def read_run_owned(run_dir: Path, record: RunRecord) -> SessionsSnapshot:
+    """Parse the sessions of *this* run from artifacts inside its own run dir.
+
+    The first non-empty of two run-local sources: the ``sessions.json`` persisted
+    at the run's end, then the ``spawn.out`` capture of its stdout. The fallback
+    works because ``o.log()`` prints every line it writes to the log file, so the
+    capture holds the whole marker stream — and only that: ``flog()`` and
+    ``transcript()`` are file-only, which leaves the capture a strict, smaller
+    subset with none of the transcript text the anchor rule exists to skip. The
+    snapshot still goes first (already parsed, and the same artifact the sessions
+    view serves, so a verdict cannot contradict the session list beside it); the
+    capture covers a run predating the snapshot field and a run whose end found
+    no locatable log, whose snapshot is therefore an empty one it can fill.
+
+    Deliberately *not* :func:`read_live`: the repo-side log is located by a
+    ``<utc-ts>-<task-id>.log`` convention two runs of one task started in the
+    same second share, so it is not evidence about one run. Everything read here
+    was written by this run into its own dir and never changes again — which is
+    what lets a caller classify a finished run from it. Absent or unreadable
+    sources yield an empty snapshot, never an error.
+    """
+    snapshot = read_snapshot(run_dir)
+    if snapshot is not None and snapshot.sessions:
+        return snapshot
+    return _parse_file(record.spawn_out)
+
+
+def _parse_file(path: Path | None) -> SessionsSnapshot:
+    """Stream one file through :func:`parse_sessions`; absent/unreadable -> empty."""
     if path is None:
         return SessionsSnapshot()
     try:

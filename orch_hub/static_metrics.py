@@ -24,7 +24,8 @@ is that consumer: it derives an **evidence-only** run outcome
 (:data:`RUN_OUTCOME_LIVE` … :data:`RUN_OUTCOME_BROKEN`) from the raw persisted
 signals a pack carries — ``ended_ts``/``exit_code``/``error`` plus the
 ``stop_requested`` history event — *not* from ``RunManager._classify_end``
-(which needs live control-dir/task-store reads the pack does not contain). The
+(which also reads the run's control dir directly, a surface the pack does not
+carry). The
 outcome is coarser than the run manager's live verdict and is labelled so:
 ``clean`` (exit 0) does not distinguish task-completed from a graceful boundary
 stop — that protocol-completion signal comes from the task file, read by the

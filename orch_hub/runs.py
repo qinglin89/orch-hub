@@ -9,7 +9,8 @@ subprocess side of the orchestrator contract
     <data_dir>/runs/<run_id>/
         run.json      hub-owned run record (atomic rewrite on updates)
         control/      the --control-dir file channel, fresh per run
-        spawn.out     subprocess stdout+stderr (startup-failure diagnosis)
+        spawn.out     subprocess stdout+stderr (startup diagnosis, end evidence)
+        sessions.json this run's parsed session brackets, written at its end
         protocol.json the deployed protocol identity, captured before the spawn
 
 Run dirs live outside every target repo working tree (an in-repo dir would
@@ -32,7 +33,7 @@ the run). Run state is file-backed — a fresh :class:`RunManager` reattaches
 by scanning run dirs and probing pid liveness; the in-memory process handles
 exist only to capture exit codes of runs that end while the hub is alive.
 Runs that end while the hub is down keep ``exit_code=None`` and classify
-from the control-dir stop signals and task frontmatter alone.
+from the run dir's own file evidence alone (:meth:`RunManager._classify_end`).
 
 Launches fail closed: the existing readiness checker and task-store
 inventory gate every start, and one repo never has two live runs. The one
@@ -104,7 +105,7 @@ from .protocol_provenance import (
 )
 from .readiness import check_readiness
 from .resources import strip_bootloader_env
-from .sessions import read_live, read_snapshot, write_snapshot
+from .sessions import read_live, read_run_owned, read_snapshot, write_snapshot
 from .task_snapshots import capture_entries, settle_snapshots
 from .task_store import (
     STATUS_MISSING,
@@ -161,6 +162,16 @@ STATE_COMPLETED = "completed"
 STATE_STOPPED = "stopped"
 STATE_ERROR = "error"
 STATE_ENDED = "ended"
+
+_DONE_END_STATUSES = {
+    "completed+archived": "task archived by close-out during this run",
+    "completed": "task completed in this run (close-out may still be pending)",
+}
+"""Session-end ``status=`` values that prove the run being classified finished
+its task, mapped to the operator-facing detail. The orchestrator logs the task's
+state as *that session* left it (:mod:`orch_hub.sessions`), so unlike the task
+file itself these two are per-run and frozen. Every other value is an interim
+status: real evidence, but not of completion."""
 
 _RUN_ID_TS = "%Y%m%dT%H%M%SZ"
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
@@ -1021,7 +1032,7 @@ class RunManager:
         # single time per run; settled records return early above). Classify
         # here so the notification carries the same completed/stopped/error/ended
         # verdict the dashboard shows.
-        state, detail = self._classify_end(updated)
+        state, detail = self._classify_end(run_dir, updated)
         self._emit(run_end_notification(updated, state, detail))
         # Same once-per-run transition: the run has just stopped spending agent
         # subscription quota, so this is when a refreshed usage reading is worth
@@ -1313,19 +1324,30 @@ class RunManager:
                 pending=len(pending),
                 stop_requested=stop_requested(record.control_dir),
             )
-        state, detail = self._classify_end(record)
+        state, detail = self._classify_end(run_dir, record)
         return RunStatus(record=record, state=state, detail=detail)
 
-    def _classify_end(self, record: RunRecord) -> tuple[str, str | None]:
-        """Interpret a finished run per the contract (README §5).
+    def _classify_end(self, run_dir: Path, record: RunRecord) -> tuple[str, str | None]:
+        """Interpret a finished run from evidence that describes *that* run.
 
-        Exit 0 is ambiguous (task done vs graceful boundary stop vs a
-        ``--once`` session), so classification prefers evidence: task
-        frontmatter/archival first, then the hub's own stop signals, then the
-        bare exit code. ``exit_code=None`` (ended while the hub was down)
+        Exit 0 is ambiguous (task done vs graceful boundary stop vs a ``--once``
+        session), so classification prefers file evidence over it — but only
+        evidence scoped to this one run, all of it inside ``run_dir`` and frozen
+        the moment the run ended: the session brackets it logged
+        (:meth:`_session_done_detail`), then its own control dir's stop signals,
+        then its own exit code. ``exit_code=None`` (ended while the hub was down)
         classifies from the file evidence alone.
+
+        Containment is the point. The target repo's ``.ai-tasks/`` state is
+        shared by every run of a ``(repo, task)`` and keeps mutating long after
+        any one of them ends, so consulting it made a run's verdict a function of
+        *when it was read*: the instant close-out archived a task, every earlier
+        ended run of it re-read as ``completed`` and the stop/exit branches below
+        became unreachable. Nothing here can drift that way, and a run whose own
+        dir holds no completion or stop evidence degrades to ``ended``/``error``
+        — honestly unknown — rather than borrowing another run's outcome.
         """
-        done_detail = self._task_done_detail(record)
+        done_detail = self._session_done_detail(run_dir, record)
         if done_detail is not None:
             return STATE_COMPLETED, done_detail
         flagged = stop_requested(record.control_dir)
@@ -1342,34 +1364,34 @@ class RunManager:
         if record.exit_code == 0:
             return (
                 STATE_ENDED,
-                "exited 0 without completing the task (e.g. a --once session)",
+                "exited 0 with no completion evidence (e.g. a --once session)",
             )
         if record.exit_code is None:
             return STATE_ENDED, "ended while the hub was down; exit status unknown"
         return STATE_ERROR, f"exited {record.exit_code}"
 
-    def _task_done_detail(self, record: RunRecord) -> str | None:
-        """Task-frontmatter evidence that the run finished its task.
+    @staticmethod
+    def _session_done_detail(run_dir: Path, record: RunRecord) -> str | None:
+        """This run's own evidence that it finished its task, or ``None``.
 
-        ``completed`` status means the final gate passed (close-out may still
-        be pending); the id vanishing from a present index means close-out
-        archived it. The repo is rebuilt from the record via
-        :meth:`RunRecord.managed_repo`.
+        The orchestrator closes every session by reading the task file it just
+        worked on and logging ``status=<end_status>`` — ``completed+archived``
+        when close-out has already taken the file away, otherwise the frontmatter
+        status. That line is written *during* this run, into this run's own log
+        and stdout capture (:func:`orch_hub.sessions.read_run_owned` reads only
+        the run dir), so it is a point observation that never changes afterwards,
+        unlike the task file it observed.
+
+        The last session decides: the orchestrator's loop returns as soon as it
+        sees the task completed or archived, so a run that finished its task has
+        that status on its final bracket and cannot open another. Anything else
+        — an interim status, a plan-gate bracket with no ``status=`` at all, a
+        run that logged no session — is simply not evidence of completion here.
         """
-        repo = record.managed_repo()
-        if repo is None or not record.task_id:
+        sessions = read_run_owned(run_dir, record).sessions
+        if not sessions:
             return None
-        inventory = self._task_lister(repo)
-        if not inventory.index_present:
-            return None
-        task = next(
-            (t for t in inventory.tasks if t.task_id == record.task_id), None
-        )
-        if task is None:
-            return "task archived by close-out"
-        if task.status == "completed":
-            return "task completed (close-out may still be pending)"
-        return None
+        return _DONE_END_STATUSES.get(sessions[-1].end_status or "")
 
 
 def _write_record(run_dir: Path, record: RunRecord) -> None:
