@@ -994,14 +994,16 @@ def test_prompt_never_carries_transcript_text_only_the_rollup():
     assert "content" not in section and "assistant" not in section
 
 
-# -- session coverage (work sessions this hub never ran) ----------------------
+# -- session coverage (work sessions the session evidence misses) -------------
 # The one discrepancy the evidence *displays* without explaining: the static
 # metrics put `protocol.work_entry_count` and `runs.dev_session_count` side by
 # side, and a task whose dev work happened outside a hub run leaves no artifact to
 # report missing — the omissions list is built from artifacts the hub knows it
 # failed to produce, so nothing in it can name work it never saw. These cover the
-# gap being derived from exactly those two numbers, worded as this record's reach,
-# and priced like the other partial-input degradations.
+# gap being derived from exactly those two numbers, worded as what this record
+# does not cover (never as a run that is absent — the same gap appears when a run
+# recorded here wrote no session summary), and priced like the other
+# partial-input degradations.
 
 
 def log_entries(work: int, review: int = 0) -> str:
@@ -1056,12 +1058,19 @@ def sessions(dev: int, review: int = 0) -> SessionsSnapshot:
     ))
 
 
-def coverage_pack(work: int, *, dev: int, review_entries: int = 0, review: int = 0):
+def coverage_pack(work: int, *, dev: int, review_entries: int = 0, review: int = 0,
+                  unrecorded_runs: int = 0):
     """A pack for a task file with `work` work entries whose runs observed `dev` dev
     sessions, plus the real static report over it (the two counts the evaluator is
-    shown come from that report, so the tests read them from there too)."""
+    shown come from that report, so the tests read them from there too).
+
+    `unrecorded_runs` adds related runs that are in the pack with their records but
+    carry no `sessions.json` at all — a live run, one predating the artifact, or one
+    whose file was unreadable (`read_snapshot` degrades all three to None), which is
+    the other way a work session goes uncovered."""
     p = pack(
         *([run_ev(sessions=sessions(dev, review))] if dev or review else []),
+        *[run_ev(run_id=f"r-nosess-{i}") for i in range(1, unrecorded_runs + 1)],
         tgt=target_with(task_file(work, review_entries)),
     )
     static = StaticEvaluator(
@@ -1086,30 +1095,33 @@ def coverage_omissions(evidence: SemanticEvidence) -> list[str]:
     return [o for o in evidence.omissions if o.startswith("session coverage")]
 
 
-def test_evidence_records_the_work_sessions_this_hub_never_ran():
-    # The shape already in the wild: 4 work entries, 2 of them observed as hub dev
-    # sessions. The static report shows both numbers; nothing else said what the
-    # difference between them means.
+def test_evidence_records_the_work_sessions_its_session_evidence_misses():
+    # The shape already in the wild: 4 work entries, 2 of them covered by hub dev
+    # session evidence. The static report shows both numbers; nothing else said what
+    # the difference between them means.
     p, static = coverage_pack(4, dev=2)
 
     evidence = build_semantic_evidence(p, static_report=static)
 
     assert static.protocol.work_entry_count == 4
     assert static.runs.dev_session_count == 2
-    assert evidence.unobserved_work_sessions == 2
+    assert evidence.uncovered_work_sessions == 2
     note, = coverage_omissions(evidence)
-    assert "covers 2 of the task file's 4 work session(s)" in note
+    assert "accounts for 2 of the task file's 4 work session(s)" in note
 
 
 def test_the_coverage_omission_attributes_the_gap_to_the_record_not_the_task():
     # The whole point of the note: the reading it must deny is the one the model
-    # would otherwise reach for — two work entries with no run evidence read as a
-    # handoff defect. It says what this hub did not see, never what the task did.
+    # would otherwise reach for — two work entries with no session evidence read as
+    # a handoff defect. It says what this record does not cover, never what the task
+    # did, and never asserts a *reason* the counts cannot establish.
     p, static = coverage_pack(4, dev=2)
 
     note, = coverage_omissions(build_semantic_evidence(p, static_report=static))
 
-    assert "left no run record here" in note
+    assert "are not covered here" in note
+    assert "may have run outside this hub, or their run's session record here may" \
+        " be absent or incomplete" in note
     assert "the shortfall is the reach of this record, not work the task skipped" in note
 
 
@@ -1119,7 +1131,7 @@ def test_the_coverage_omission_reaches_the_prompt_with_the_other_omissions():
     prompt = build_prompt(build_semantic_evidence(p, static_report=static))
     section = prompt.split("== EVIDENCE OMISSIONS")[1]
 
-    assert "covers 2 of the task file's 4 work session(s)" in section
+    assert "accounts for 2 of the task file's 4 work session(s)" in section
     # ...under the rule that already covers every other omission, so no second rule
     # about coverage had to be written into the prompt.
     assert "treat the omissions as reduced certainty, NOT as defects" in prompt
@@ -1134,20 +1146,22 @@ def test_full_session_coverage_records_no_omission():
     evidence = build_semantic_evidence(p, static_report=static)
 
     assert static.protocol.entry_count == 4 and static.protocol.work_entry_count == 2
-    assert evidence.unobserved_work_sessions == 0
+    assert evidence.uncovered_work_sessions == 0
     assert coverage_omissions(evidence) == []
 
 
-def test_a_pack_with_no_runs_reports_every_work_session_unobserved():
+def test_a_pack_with_no_runs_reports_every_work_session_uncovered():
     # A task run entirely outside this hub: there is no run record to be missing,
     # which is exactly why the artifact-derived omissions cannot name it.
     p, static = coverage_pack(3, dev=0)
 
     evidence = build_semantic_evidence(p, static_report=static)
 
-    assert evidence.unobserved_work_sessions == 3
+    assert evidence.uncovered_work_sessions == 3
     note, = coverage_omissions(evidence)
-    assert "covers 0 of the task file's 3 work session(s)" in note
+    assert "accounts for 0 of the task file's 3 work session(s)" in note
+    assert not p.runs  # nothing here to name as unrecorded
+    assert "carry no session record at all" not in note
 
 
 def test_more_observed_sessions_than_work_entries_is_not_a_coverage_gap():
@@ -1157,7 +1171,7 @@ def test_more_observed_sessions_than_work_entries_is_not_a_coverage_gap():
 
     evidence = build_semantic_evidence(p, static_report=static)
 
-    assert evidence.unobserved_work_sessions == 0
+    assert evidence.uncovered_work_sessions == 0
     assert coverage_omissions(evidence) == []
 
 
@@ -1168,12 +1182,48 @@ def test_coverage_is_not_claimed_without_a_static_report():
 
     evidence = build_semantic_evidence(p, static_report=None)
 
-    assert evidence.unobserved_work_sessions == 0
+    assert evidence.uncovered_work_sessions == 0
     assert coverage_omissions(evidence) == []
     assert any("static metrics unavailable" in o for o in evidence.omissions)
 
 
-def test_unobserved_work_sessions_lower_confidence_like_the_other_omissions():
+def test_a_run_here_without_a_session_record_is_never_called_an_absent_run():
+    # The counts cannot tell "ran elsewhere" from "ran here and wrote no session
+    # summary": `dev_session_count` sums each run's persisted `sessions.json`, which
+    # is None for a live run, a pre-field run, or an unreadable file. The run record
+    # is right there in the pack, so the note must not report it missing — it names
+    # the unrecorded run as one possible source of the shortfall and leaves the rest
+    # open.
+    p, static = coverage_pack(2, dev=0, unrecorded_runs=1)
+
+    evidence = build_semantic_evidence(p, static_report=static)
+
+    assert [r.record.run_id for r in p.runs] == ["r-nosess-1"]  # the run IS here
+    assert static.runs.run_count == 1 and static.runs.dev_session_count == 0
+    assert evidence.uncovered_work_sessions == 2
+    note, = coverage_omissions(evidence)
+    assert "left no run record" not in note
+    assert "1 of this task's 1 related run(s) here carry no session record at all," \
+        " which may account for part of the shortfall" in note
+
+
+def test_a_short_session_record_leaves_the_reason_open():
+    # The subtler undercount: the snapshot exists and parsed, but carries fewer
+    # brackets than the run had (rows dropped by a partial/corrupt file). Nothing in
+    # the pack can detect that, so there is no unrecorded run to name and the note
+    # must stay non-committal rather than asserting where the work ran.
+    p, static = coverage_pack(2, dev=1)
+
+    evidence = build_semantic_evidence(p, static_report=static)
+
+    assert evidence.uncovered_work_sessions == 1
+    note, = coverage_omissions(evidence)
+    assert "accounts for 1 of the task file's 2 work session(s)" in note
+    assert "carry no session record at all" not in note
+    assert "their run's session record here may be absent or incomplete" in note
+
+
+def test_uncovered_work_sessions_lower_confidence_like_the_other_omissions():
     # Same pack shape, same warnings, same `.ai/` availability — only the coverage
     # differs, so the delta is exactly this omission's documented cost.
     covered, static_covered = coverage_pack(2, dev=2)

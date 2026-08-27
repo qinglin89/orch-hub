@@ -22,10 +22,10 @@ The evaluation is built from four composable, independently-tested pieces:
   ``omissions`` list. Raw orchestrator logs / ``spawn.out`` tails are deliberately
   **excluded** (the scope bars unbounded raw logs from the evaluator input) and
   recorded as an omission; a ``.ai/`` part the pack could not carry is recorded
-  the same way and leaves its dimension ungrounded; and so are the task's work
-  sessions this hub never ran, whose absence the record could otherwise only show
-  as an unexplained gap between two counts — so a thin input *lowers confidence*
-  rather than failing the evaluation.
+  the same way and leaves its dimension ungrounded; and so are the task file's
+  work sessions this record's session evidence does not account for, which the
+  record could otherwise only show as an unexplained gap between two counts — so a
+  thin input *lowers confidence* rather than failing the evaluation.
 - **prompt contract** (:func:`build_prompt`) — render the evidence into the
   evaluator prompt, instructing the model to emit exactly one JSON report between
   the :data:`SEMANTIC_START` / :data:`SEMANTIC_END` sentinels (``/intake-task``'s
@@ -178,19 +178,20 @@ above and for the same reason: each gates a judgment the evidence can otherwise
 ground. Does not apply when :attr:`SemanticEvidence.reads_available` is True —
 including a section that carries only *degraded* sessions, whose per-session
 reasons are themselves the evidence that the reading could not be measured."""
-_PENALTY_UNOBSERVED_SESSIONS = 0.10
-"""Some of the task file's work sessions left no run record in this hub — the run,
-session, and read evidence covers only part of the task's arc, so every run-derived
-rollup is a partial view of the task rather than a complete one. Priced
-like the input gates above because it gates the same kind of judgment: what the
-observed runs say about reliability, pacing, and diagnostics can no longer be read
-as what the *task* did.
+_PENALTY_UNCOVERED_SESSIONS = 0.10
+"""Part of the task file's work sessions is not accounted for by this record's
+session evidence — whether those sessions ran outside this hub or their run's
+session summary is absent or short here, the run, session, and read evidence
+covers only part of the task's arc, so every run-derived rollup is a partial view
+of the task rather than a complete one. Priced like the input gates above because
+it gates the same kind of judgment: what the observed runs say about reliability,
+pacing, and diagnostics can no longer be read as what the *task* did.
 
 Flat rather than scaled by the size of the gap, like every other cost here: what
 the penalty prices is the class of judgment the evidence can support, and one
-unobserved session already moves the run rollups from complete to partial. The
+uncovered session already moves the run rollups from complete to partial. The
 size of the gap belongs in the omission note, which states both counts, and the
-fully-unobserved end already costs more than the partial one without any scaling —
+fully-uncovered end already costs more than the partial one without any scaling —
 a pack with no runs at all has no session transcripts and no git window to scope
 patches to, so it trips :data:`_PENALTY_NO_READS` and :data:`_PENALTY_NO_AI_DIFFS`
 as well.
@@ -202,7 +203,7 @@ withholds a duplicate note elsewhere in this module bars restating *one* gate
 twice, not pricing two gates a single root cause happened to close together.
 
 Does not apply when the static report is absent — the counts are read from it (see
-:func:`_unobserved_work_sessions`), and :data:`_PENALTY_NO_STATIC` is already the
+:func:`_uncovered_work_sessions`), and :data:`_PENALTY_NO_STATIC` is already the
 larger charge for that."""
 _PENALTY_PER_WARNING = 0.05
 """Per evidence-degradation warning: a missing/corrupt run artifact, a
@@ -301,19 +302,25 @@ class SemanticEvidence:
     outside this bounded input. Every omission lowers :meth:`confidence_penalty`
     rather than failing the evaluation.
 
-    ``unobserved_work_sessions`` is that same honesty turned on the run evidence
-    itself: how many of the task file's work sessions left no run record in this
-    hub (``protocol.work_entry_count`` minus ``runs.dev_session_count``, floored at
-    zero). Both numbers are already in the static metrics the prompt shows, which
-    is the point — it is the one discrepancy the evidence displays and does not
-    explain, so a model is free to read two work entries the hub never saw as a
-    handoff defect, and free to read them differently on the next turn. Recorded as
-    an omission like any other input the record could not carry, which is what the
-    prompt's "reduced certainty, NOT defects" rule already covers. Deliberately
-    *not* the same fact as
+    ``uncovered_work_sessions`` is that same honesty turned on the run evidence
+    itself: how many of the task file's work sessions this record's session
+    evidence does not account for (``protocol.work_entry_count`` minus
+    ``runs.dev_session_count``, floored at zero). Both numbers are already in the
+    static metrics the prompt shows, which is the point — it is the one
+    discrepancy the evidence displays and does not explain, so a model is free to
+    read two work entries no session evidence reaches as a handoff defect, and free
+    to read them differently on the next turn. Recorded as an omission like any
+    other input the record could not carry, which is what the prompt's "reduced
+    certainty, NOT defects" rule already covers.
+
+    A coverage measure and never a claim about where the work ran: a related run
+    whose ``sessions.json`` was never written, is unreadable, or parsed short
+    counts zero (or short) dev sessions while its run record sits right there in
+    the pack, so the shortfall may well be sessions this hub itself ran
+    (:func:`_uncovered_work_sessions`). Deliberately *not* the same fact as
     :attr:`orch_hub.session_reads.ReadBehavior.unobserved_sessions`, which counts
-    sessions this hub *did* run but could not read a transcript for: those are in
-    the pack with their rollups, these left nothing here at all.
+    sessions the pack *does* know of but could not read a transcript for: those
+    have their session summary here, these have none.
 
     ``evidence_schema_version`` is the shape version of the pack this was distilled
     from, carried so :func:`parse_report` can stamp it on the report for cohorting.
@@ -343,7 +350,7 @@ class SemanticEvidence:
     evidence_schema_version: str | None = None
     entry_fidelity: str | None = None
     reads: ReadBehavior | None = None
-    unobserved_work_sessions: int = 0
+    uncovered_work_sessions: int = 0
 
     @property
     def static_metrics_available(self) -> bool:
@@ -364,11 +371,11 @@ class SemanticEvidence:
         """Degradation penalty in ``[0, _PENALTY_CAP]`` from missing/partial input.
 
         Sums the documented per-omission costs — static metrics absent, ``.ai/``
-        diffs unavailable, work sessions this hub never observed, and per
-        evidence-degradation warning (capped) — so a thin evidence input honestly
-        lowers the report's confidence. Capped so the thinnest evidence still
-        retains some confidence (the task file is the primary subject and is almost
-        always present)."""
+        diffs unavailable, work sessions this record's session evidence does not
+        cover, and per evidence-degradation warning (capped) — so a thin evidence
+        input honestly lowers the report's confidence. Capped so the thinnest
+        evidence still retains some confidence (the task file is the primary
+        subject and is almost always present)."""
         penalty = 0.0
         if not self.static_metrics_available:
             penalty += _PENALTY_NO_STATIC
@@ -378,8 +385,8 @@ class SemanticEvidence:
             penalty += _PENALTY_NO_AI_SNIPPETS
         if not self.reads_available:
             penalty += _PENALTY_NO_READS
-        if self.unobserved_work_sessions > 0:
-            penalty += _PENALTY_UNOBSERVED_SESSIONS
+        if self.uncovered_work_sessions > 0:
+            penalty += _PENALTY_UNCOVERED_SESSIONS
         penalty += min(_PENALTY_WARNING_CAP, len(self.evidence_warnings) * _PENALTY_PER_WARNING)
         return min(_PENALTY_CAP, penalty)
 
@@ -400,7 +407,7 @@ class SemanticEvidence:
             "ai_diff": self.ai_diff.to_dict() if self.ai_diff is not None else None,
             "reads_available": self.reads_available,
             "reads": self.reads.to_dict() if self.reads is not None else None,
-            "unobserved_work_sessions": self.unobserved_work_sessions,
+            "uncovered_work_sessions": self.uncovered_work_sessions,
             "evidence_schema_version": self.evidence_schema_version,
             "entry_fidelity": self.entry_fidelity,
             "omissions": list(self.omissions),
@@ -417,13 +424,13 @@ def build_semantic_evidence(
     pack's bounded ``.ai/`` snapshot and windowed patches, and the pack's evidence
     warnings. Raw logs are excluded by construction, and every exclusion is
     appended to ``omissions`` so the omission is a fact in the record, not a silent
-    gap — including the one exclusion no artifact can report, the task's work
-    sessions this hub never ran (:func:`_unobserved_work_sessions`), which exists
-    only as a discrepancy between two counts the prompt already shows. Total over
-    any pack: an absent task file, an absent static report, a git-less pack, and a
-    pack with no ``ai`` section at all (a v1 pack, or a repo with no ``.ai/``) all
-    degrade to their empty defaults and lower the confidence penalty rather than
-    raising.
+    gap — including the one exclusion no artifact can report, the task file's work
+    sessions this record's session evidence does not account for
+    (:func:`_uncovered_work_sessions`), which exists only as a discrepancy between
+    two counts the prompt already shows. Total over any pack: an absent task file,
+    an absent static report, a git-less pack, and a pack with no ``ai`` section at
+    all (a v1 pack, or a repo with no ``.ai/``) all degrade to their empty defaults
+    and lower the confidence penalty rather than raising.
     """
     git = pack.git
     git_subjects = ()
@@ -443,7 +450,7 @@ def build_semantic_evidence(
     reads = pack.reads
     reads_available = reads is not None and reads.available
 
-    unobserved_sessions = _unobserved_work_sessions(static_report)
+    uncovered_sessions = _uncovered_work_sessions(static_report)
 
     evidence_warnings = tuple(pack.warnings) + tuple(
         w for run in pack.runs for w in run.warnings
@@ -472,21 +479,38 @@ def build_semantic_evidence(
         evidence_warnings += tuple(reads.warnings)
 
     omissions: list[str] = []
-    if unobserved_sessions:
+    if uncovered_sessions:
         # The one discrepancy the prompt shows without explaining. Stated as a
-        # property of this record's reach and never of the task's execution: the
-        # hub cannot know why a work session left no run record here, and the only
-        # reading it must be denied is the one it would otherwise reach for.
+        # property of this record's reach and never of the task's execution — and
+        # not even as a claim about which record is missing: the shortfall is what
+        # the session evidence does not account for, which a session run outside
+        # this hub and a run recorded here whose session summary never landed both
+        # produce identically (:func:`_uncovered_work_sessions`). The reason stays
+        # open, except for the one part the pack itself can answer — the related
+        # runs here carrying no session record at all, named because otherwise the
+        # model would read their sessions as work done somewhere else. The only
+        # reading that must be denied is still the one it would reach for first.
         # A positive gap is only ever derived from a present static report.
         observed = static_report.runs.dev_session_count
         entries = static_report.protocol.work_entry_count
+        unrecorded = sum(1 for run in pack.runs if run.sessions is None)
+        note = (
+            "session coverage: this record's session evidence accounts for"
+            f" {observed} of the task file's {entries} work session(s); the other"
+            f" {uncovered_sessions} session(s) are not covered here — they may"
+            " have run outside this hub, or their run's session record here may be"
+            " absent or incomplete"
+        )
+        if unrecorded:
+            note += (
+                f" ({unrecorded} of this task's {len(pack.runs)} related run(s)"
+                " here carry no session record at all, which may account for part"
+                " of the shortfall)"
+            )
         omissions.append(
-            f"session coverage: this hub's run evidence covers {observed} of the"
-            f" task file's {entries} work session(s); the other"
-            f" {unobserved_sessions} left no run record here (run outside this hub,"
-            " or before it observed the task), so the run/session evidence"
-            " describes only part of the task's arc — the shortfall is the reach of"
-            " this record, not work the task skipped"
+            f"{note}; either way the run/session evidence describes only part of"
+            " the task's arc — the shortfall is the reach of this record, not work"
+            " the task skipped"
         )
     if pack.runs:
         # The pack carries bounded log/spawn.out tails, but they are intentionally
@@ -543,14 +567,14 @@ def build_semantic_evidence(
         ai_docs=ai_docs,
         ai_diff=ai_diff,
         reads=reads,
-        unobserved_work_sessions=unobserved_sessions,
+        uncovered_work_sessions=uncovered_sessions,
         evidence_schema_version=EVIDENCE_SCHEMA_VERSION,
         entry_fidelity=pack.entry_fidelity,
     )
 
 
-def _unobserved_work_sessions(static_report: StaticMetricsReport | None) -> int:
-    """How many of the task file's work sessions this hub has no run record for.
+def _uncovered_work_sessions(static_report: StaticMetricsReport | None) -> int:
+    """How many of the task file's work sessions the session evidence misses.
 
     Read from the static report rather than re-derived from the pack, because the
     two counts it subtracts are exactly the two the prompt already renders side by
@@ -560,10 +584,20 @@ def _unobserved_work_sessions(static_report: StaticMetricsReport | None) -> int:
     static report there are no counts to compare and nothing is claimed — the
     absence is already recorded and charged as its own omission.
 
-    Floored at zero: the opposite sign is a different fact (a session the hub
-    observed that wrote no entry — a run that died mid-session, or a session log
-    the pack read as truncated), which is not an omission of this record and is not
-    silently netted against one.
+    A *coverage* measure, not a count of sessions run elsewhere, because the
+    subtrahend cannot support the stronger claim: ``runs.dev_session_count`` sums
+    each related run's persisted ``sessions.json``, which reads as empty for a run
+    that never wrote one (still live, predating the artifact, or unreadable —
+    :func:`orch_hub.sessions.read_snapshot` degrades all three to ``None``) and
+    short for one whose rows parsed only in part. Such a run is in the pack with
+    its record and its events; what is missing is its session summary. So the
+    omission note states what is not covered and leaves the reason open, naming the
+    runs here that carry no session record when there are any.
+
+    Floored at zero: the opposite sign is a different fact (a session summary with
+    no matching entry — a run that died mid-session, or a session log the pack read
+    as truncated), which is not an omission of this record and is not silently
+    netted against one.
     """
     if static_report is None:
         return 0
