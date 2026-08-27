@@ -5,16 +5,21 @@ provider's highest currently-measured window, and fail-toward-deferral for every
 way that read can be unusable (unavailable, stale, figure-less, rolled over, a
 figure measured in an earlier window, a raising reader) — and the dispatcher that
 drains the deferred queue: oldest first, at most one per sweep, spaced from the
-last turn that actually started (manual turns included), each held job carrying
-the bounded machine reason it is still waiting, an unattributable record failed
+last turn *admitted* to spend (manual turns included, and counted from admission
+rather than from the worker's later start stamp), each held job carrying the
+bounded machine reason it is still waiting, an unattributable record failed
 rather than left resident, and the queue-age bound warning once per job rather
-than once per sweep. Every usage snapshot is synthetic; nothing here reads the
-operator's real subscription data or spends a model turn.
+than once per sweep. Plus the two switches, checked against the durable queue a
+restart inherits: a closed subsystem or trigger gate holds every accepted record
+untouched, and reopening both drains it with no recovery step. Every usage
+snapshot is synthetic; nothing here reads the operator's real subscription data
+or spends a model turn.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 from pathlib import Path
 
@@ -481,8 +486,6 @@ def test_an_unattributable_held_job_is_failed_and_the_next_one_runs(tmp_path):
     jobs.enqueue_if_absent(repo(), "2026-08-02-fine")
     # Strip the repo attribution the way a damaged record would have lost it.
     path = cfg.data_dir / "semantic-jobs" / "alpha" / "2026-08-01-orphan" / "job.json"
-    import json
-
     data = json.loads(path.read_text())
     data["repo_path"] = None
     path.write_text(json.dumps(data))
@@ -559,3 +562,154 @@ def test_a_zero_age_bound_surfaces_nothing(tmp_path, caplog):
         dispatcher.sweep()
 
     assert [r for r in caplog.records if "not draining" in r.getMessage()] == []
+
+
+# -- the two switches, against a durable queue --------------------------------
+
+
+def enqueued_queue(tmp_path: Path, tasks: tuple[str, ...]):
+    """A data dir holding already-accepted ``deferred`` records.
+
+    Models what every restart actually finds: the queue outlives the process that
+    accepted it, so the switches a *later* process runs under have to be honored
+    against records nobody is going to re-decide.
+    """
+    cfg, jobs, _, _, clock = stack(tmp_path)
+    for task in tasks:
+        jobs.enqueue_if_absent(repo(), task)
+    return cfg, jobs, clock
+
+
+@pytest.mark.parametrize(
+    "gates, label",
+    [
+        ({"eval_auto": False}, "trigger gate closed: manual-only operation"),
+        ({"evaluation_enabled": False}, "subsystem gate closed: evaluation is inert"),
+    ],
+)
+def test_a_pre_existing_queue_is_never_promoted_while_a_gate_is_closed(
+    tmp_path, gates, label
+):
+    """A durable queue must not outlive the switch that stopped producing it.
+
+    Restart shape: an earlier enabled process accepted the record, this one runs
+    with a gate closed. Promoting it would be an automatic model turn in a
+    deployment that said manual-only — and with the *subsystem* gate closed it is
+    worse than a stray turn, because the evaluator refuses a disabled subsystem
+    and the promotion would settle the record ``failed``, consuming the task's one
+    automatic attempt.
+    """
+    _, jobs, clock = enqueued_queue(tmp_path, (TASK,))
+    cfg = config(tmp_path, **gates)
+    evaluator = FakeEvaluator()
+    reborn_jobs = SemanticJobManager(
+        cfg, evaluator=evaluator, clock=clock, executor=sync_executor
+    )
+    reborn = DeferredDispatcher(
+        cfg,
+        job_manager=reborn_jobs,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        clock=clock,
+    )
+    before = reborn_jobs.get_job(repo(), TASK)
+
+    assert reborn.enabled is False, label
+    assert reborn.sweep() is None
+    assert evaluator.calls == []
+    # Held exactly as it was: nothing walked, nothing written, nothing failed.
+    assert reborn_jobs.get_job(repo(), TASK) == before
+
+
+def test_a_queue_held_by_a_closed_gate_drains_when_both_switches_reopen(tmp_path):
+    """Deferral already means "not now", so reopening needs no recovery step."""
+    _, _, clock = enqueued_queue(tmp_path, (TASK,))
+    off = config(tmp_path, eval_auto=False)
+    evaluator = FakeEvaluator()
+    jobs = SemanticJobManager(
+        off, evaluator=evaluator, clock=clock, executor=sync_executor
+    )
+    DeferredDispatcher(
+        off,
+        job_manager=jobs,
+        gate=gate(off, usage(window(used=1.0)), clock=clock),
+        clock=clock,
+    ).sweep()
+    assert jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
+
+    on = config(tmp_path)
+    reopened = DeferredDispatcher(
+        on,
+        job_manager=SemanticJobManager(
+            on, evaluator=evaluator, clock=clock, executor=sync_executor
+        ),
+        gate=gate(on, usage(window(used=1.0)), clock=clock),
+        clock=clock,
+    )
+
+    assert reopened.sweep() is not None
+    assert evaluator.calls == [(repo(), TASK)]
+
+
+def test_a_closed_gate_never_fails_an_unattributable_record(tmp_path):
+    """The one write a sweep makes to a record it cannot dispatch is gated too."""
+    cfg_on, jobs, clock = enqueued_queue(tmp_path, (TASK,))
+    path = cfg_on.data_dir / "semantic-jobs" / "alpha" / TASK / "job.json"
+    data = json.loads(path.read_text())
+    data["repo_path"] = None
+    path.write_text(json.dumps(data))
+
+    off = config(tmp_path, eval_auto=False)
+    off_jobs = SemanticJobManager(
+        off, evaluator=FakeEvaluator(), clock=clock, executor=sync_executor
+    )
+    DeferredDispatcher(
+        off,
+        job_manager=off_jobs,
+        gate=gate(off, usage(window(used=1.0)), clock=clock),
+        clock=clock,
+    ).sweep()
+
+    assert off_jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
+
+
+# -- spacing spans admission, not just the worker's own start -----------------
+
+
+def test_two_back_to_back_sweeps_promote_only_one_turn(tmp_path):
+    """The spacing gap between an admitted turn and its worker's start stamp.
+
+    A promoted job is persisted ``queued`` and its turn submitted off the lock;
+    ``started_ts`` appears only when that worker flips it to ``running``. A second
+    *sequential* sweep — the resident tick right behind the completion hook's own —
+    lands in between, and spacing measured from ``started_ts`` alone would see no
+    turn at all and promote a second one at once. Not the concurrent herd the
+    single-flight lock refuses: a sequential one, and just as expensive.
+    """
+    held = DeferredExecutor()
+    _, jobs, dispatcher, _, _ = stack(tmp_path, executor=held)  # default 900s spacing
+    jobs.enqueue_if_absent(repo(), "2026-08-01-a")
+    jobs.enqueue_if_absent(repo(), "2026-08-02-b")
+
+    first = dispatcher.sweep()
+    second = dispatcher.sweep()
+
+    assert first is not None and first.task_id == "2026-08-01-a"
+    assert second is None
+    assert len(held.pending) == 1
+    assert jobs.get_job(repo(), "2026-08-02-b").defer_reason == REASON_PACING
+
+
+def test_an_admitted_manual_turn_paces_the_queue_before_it_starts(tmp_path):
+    """Same gap on the manual side, which the queue is also paced against."""
+    held = DeferredExecutor()
+    clock = Clock()
+    _, jobs, dispatcher, _, _ = stack(tmp_path, executor=held, clock=clock)
+    manual = jobs.start_job(repo(), "2026-08-01-manual")
+    assert manual.status == STATUS_QUEUED and manual.started_ts is None
+    jobs.enqueue_if_absent(repo(), TASK)
+
+    assert dispatcher.sweep() is None
+    assert jobs.get_job(repo(), TASK).defer_reason == REASON_PACING
+
+    clock.advance(900)
+    assert dispatcher.sweep() is not None

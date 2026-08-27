@@ -4,9 +4,22 @@ The Operations Overview shows how much of each agent CLI's rate-limit budget is
 spent and when it resets, so an operator can see available agent capacity at a
 glance. This module produces that signal, normalized into the provider-neutral
 :class:`~orch_hub.models.ProviderUsage` / :class:`~orch_hub.models.SubscriptionUsage`
-shapes. It is **strictly read-only and display-only**: it never starts a model
-turn, never consumes a Codex reset credit, never calls a private endpoint, and
-its output feeds no readiness / attention / run / intake decision.
+shapes. It is **strictly read-only**: it never starts a model turn, never
+consumes a Codex reset credit, and never calls a private endpoint. Its output is
+display-only with respect to everything an operator does — it feeds no readiness
+/ attention / run / intake decision, and a failing source degrades one card and
+nothing else.
+
+One consumer reads it as a *decision* rather than a display, and it is worth
+naming here because the rest of this module is written on the assumption that
+nothing does: the automatic Layer 2 evaluation dispatcher
+(:mod:`orch_hub.eval_dispatch`) holds a hub-scheduled ``claude -p`` turn while
+the Claude window it would draw on is near its ceiling. That is the hub declining
+to spend the operator's window on measuring the operator's work — it delays only
+a sidecar the hub scheduled for itself, never anything anyone asked for (a manual
+evaluation is not capacity-gated), and unreadable figures defer rather than
+dispatch, so a broken feed stops the hub's own spending and nothing else.
+:meth:`UsageService.provider_usage` is that consumer's read.
 
 Two providers, two different signal sources — because the hub relates to each CLI
 differently:
@@ -1868,8 +1881,10 @@ class UsageService:
     or broken source degrades only its own card. The combined snapshot is cached
     for :data:`USAGE_CACHE_TTL_SECONDS` to keep rollout scans and store reads off
     a burst of Overview refreshes; :meth:`record_claude_observation` writes a new
-    observation and invalidates the cache. Nothing here gates any operation — it
-    is a display-only sidecar over the two CLIs' own signals.
+    observation and invalidates the cache. Nothing here gates an operation anyone
+    requested — it is a sidecar over the two CLIs' own signals, and the single
+    consumer that reads it as a decision only paces the hub's own automatic
+    Layer 2 turns (module docstring).
 
     ``claude_collector`` is the primary Claude carrier (:class:`ClaudeUsageCollector`)
     and is deliberately NOT default-constructed: a live collector reads the

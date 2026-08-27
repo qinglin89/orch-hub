@@ -75,7 +75,7 @@ of the hub — for the launchd service they live in the plist's
 | `ORCH_HUB_EVAL_EFFORT` | `max` | Reasoning effort for that same Layer 2 turn (`--effort`). Unset/blank means the default. Not validated at startup — an effort the installed `claude` rejects fails that one semantic job, not the service. |
 | `ORCH_HUB_EVAL_RETENTION` | `20` | Per-task cap on retained evaluations (see [Retention](#retention)). `0` disables retention (keep everything); a positive integer is the cap. A negative or non-integer value fails startup. |
 | `ORCH_HUB_EVAL_USAGE_CEILING` | `80` | Subscription utilization (percent) at or above which an **automatic** Layer 2 turn waits instead of running (see [When an automatic Layer 2 turn actually runs](#when-an-automatic-layer-2-turn-actually-runs)). Compared against the most exhausted currently-measured window. Only the automatic path consults it; a manual evaluation is never capacity-gated. A value outside 0-100, or a non-number, fails startup. |
-| `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn that actually started (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
+| `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn admitted to spend (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
 | `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue. Visibility only — it changes no dispatch decision. `0` disables the warning. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
@@ -207,7 +207,8 @@ pushes — that is the corpus quietly shrinking. A manual evaluation pushes on
 both outcomes, as before.
 
 Set `ORCH_HUB_EVAL_AUTO=false` to return to on-demand-only evaluation with the
-subsystem otherwise untouched.
+subsystem otherwise untouched. Any jobs already accepted stay held rather than
+running or failing; see [below](#when-an-automatic-layer-2-turn-actually-runs).
 
 ## When an automatic Layer 2 turn actually runs
 
@@ -232,15 +233,27 @@ Three rules decide, all of them tunable (see
    window. This is deliberately permanent when a usage feed dies: the queue stops
    visibly rather than quietly spending a window nobody can see.
 3. **Spacing between turns.** At most one held job is promoted per
-   `ORCH_HUB_EVAL_DISPATCH_SPACING`, measured from the last turn that actually
-   started (a manual evaluation counts — it draws on the same window). Without
-   this, a queue that accumulated under sustained pressure would become
-   dispatchable *all at once* the moment the window rolled, spending the fresh
-   window's opening capacity exactly when the operator comes back to work.
+   `ORCH_HUB_EVAL_DISPATCH_SPACING`, measured from the last turn *admitted* to
+   spend — a manual evaluation counts, since it draws on the same window, and a
+   turn counts from the moment it was admitted rather than from the moment its
+   worker got going, so two sweeps in quick succession cannot both find "no turn
+   has started yet". Without this, a queue that accumulated under sustained
+   pressure would become dispatchable *all at once* the moment the window rolled,
+   spending the fresh window's opening capacity exactly when the operator comes
+   back to work.
 
 The queue is **durable and never dropped**. A held job survives a hub restart
 untouched — nothing fails it, and the next sweep resumes it — and the oldest held
 job always goes first, so the corpus fills in completion order.
+
+Durable also means it outlives the switches. A queue accepted while automatic
+evaluation was on stays exactly where it is if the hub is restarted with
+`ORCH_HUB_EVAL_AUTO` or `ORCH_HUB_EVAL_ENABLED` off: nothing is promoted (that
+would be a model turn in a deployment that said manual-only) and nothing is
+failed (with the subsystem off, a promotion would settle the record `failed` and
+spend the task's one automatic attempt on a turn that never ran). Turn both back
+on and the next sweep drains what was always there — the switches need no
+recovery step, because "deferred" already means "not now".
 
 **None of this applies to the Layer 2 button.** An operator asking for an
 evaluation now is not the production-side selection this policy exists to remove,

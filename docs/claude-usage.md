@@ -156,9 +156,9 @@ ships one executable and does not carry it — which costs nothing, because the
 Claude card is fed by the utilization cache either way. See
 [installing from a release](release.md).
 
-## It gates nothing
+## It gates nothing you do
 
-Subscription usage is display-only, everywhere:
+Subscription usage never stands between you and your work:
 
 - it never contributes to repo **readiness** or to Needs-attention rows;
 - it never blocks or delays **Start**, **Stop**, run state, or log streaming;
@@ -166,3 +166,27 @@ Subscription usage is display-only, everywhere:
 - a failing or absent source degrades that one card and nothing else.
 
 A quota you are about to exhaust is information for you, not a gate for the hub.
+
+### The one thing that reads it as a decision
+
+Automatic Layer 2 task evaluation is the exception, and it exists to get *out* of
+your way. When a task completes, the hub schedules a semantic evaluation for it —
+one `claude -p` turn, drawing on the same Claude window you are working in. So
+the dispatcher consults these figures before spending it: a turn waits while the
+most exhausted measured window is at or above `ORCH_HUB_EVAL_USAGE_CEILING`
+(default 80%), and successive turns are spaced by
+`ORCH_HUB_EVAL_DISPATCH_SPACING` (default 900s). See
+[When an automatic Layer 2 turn actually runs](evaluation.md#when-an-automatic-layer-2-turn-actually-runs).
+
+The four guarantees above still hold, because this is not a gate on anything you
+asked for:
+
+- it delays only work the **hub scheduled for itself**. The Layer 2 button, and
+  every other manual evaluation path, ignores capacity entirely — that is also
+  the escape hatch if a broken usage feed ever holds the queue.
+- unknown capacity **defers**, never dispatches. A missing, stale, or unreadable
+  figure stops the hub's own spending, not yours.
+- a deferred turn is never dropped: it waits, and the queue drains oldest-first
+  when capacity returns.
+- `ORCH_HUB_EVAL_AUTO=false` removes this reader altogether, and a queue already
+  accepted stays put until you turn it back on.

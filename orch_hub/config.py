@@ -627,3 +627,22 @@ class Config:
     def registry_file(self) -> Path:
         """Fallback registry file used when the mandrel command is unavailable."""
         return self.mandrel_path / ".registry" / "repos.local.json"
+
+    @property
+    def auto_evaluation_enabled(self) -> bool:
+        """Whether the completion-triggered evaluation path may act at all.
+
+        The conjunction of the subsystem gate and the trigger gate, derived here
+        rather than in each consumer because the automatic path is more than one
+        step: the completion hook accepts a job, and a background sweep later
+        turns it into a model turn. Two steps re-deriving the same predicate is
+        exactly how one of them ends up ungated — and the ungated half is the
+        *dispatching* one, so the failure mode is an automatic model turn in a
+        deployment that switched automatic evaluation off.
+
+        Read by :class:`~orch_hub.completion_eval.CompletionEvaluationTrigger` and
+        :class:`~orch_hub.eval_dispatch.DeferredDispatcher`. Every manual
+        evaluation route is unaffected: it is gated by ``evaluation_enabled``
+        alone, which is what "manual-only operation" means.
+        """
+        return self.evaluation_enabled and self.eval_auto

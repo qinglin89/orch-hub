@@ -27,14 +27,22 @@ threshold nobody can tune is a threshold nobody can be wrong about out loud:
    fresh window's opening capacity exactly when the operator returns to work.
    Single-flight prevents double-spending one task, never a herd across tasks.
    So at most one held job is dispatched per ``eval_dispatch_spacing``, measured
-   from the last turn that actually started — manual turns included, since they
-   consume the same window.
+   from the last turn admitted to spend — manual turns included, since they
+   consume the same window, and counting from *admission* rather than from the
+   worker's own start stamp, which is written a moment later and off the lock.
 
 None of it applies to an operator asking for an evaluation now
 (:meth:`orch_hub.semantic_jobs.SemanticJobManager.start_job`), which is both the
 right semantics — this task exists to remove *production-side* selection, and a
 human choosing to look is not that — and the escape hatch when a broken usage
 feed would otherwise hold the queue indefinitely.
+
+All of it is subordinate to the two switches that decide whether the automatic
+path exists at all (``evaluation_enabled`` and ``eval_auto``, jointly
+:attr:`orch_hub.config.Config.auto_evaluation_enabled`). The queue is durable, so
+records accepted by an earlier process outlive it and a sweep that ignored the
+switches would promote them anyway; :meth:`DeferredDispatcher.sweep` therefore
+checks them before anything else and simply holds.
 
 The sweep is driven by the resident run monitor and by the completion hook's own
 off-lock executor, so a completion arriving in a quiet window becomes a turn
@@ -53,7 +61,7 @@ from collections.abc import Callable
 
 from .config import Config
 from .models import PROVIDER_CLAUDE, ProviderUsage, SemanticJob
-from .semantic_jobs import STATUS_DEFERRED, SemanticJobManager
+from .semantic_jobs import STATUS_DEFERRED, STATUS_QUEUED, SemanticJobManager
 from .usage import current_used_percent
 
 _log = logging.getLogger(__name__)
@@ -70,7 +78,7 @@ ceiling hit resolves itself when the window rolls, while an unreadable feed
 resolves itself never and is the operator's problem to fix."""
 
 REASON_PACING = "pacing"
-"""Held because another turn started less than the configured spacing ago."""
+"""Held because another turn was admitted less than the configured spacing ago."""
 
 UNATTRIBUTABLE_REASON = (
     "semantic evaluation abandoned (deferred job carries no repo attribution)"
@@ -109,6 +117,40 @@ def _parse_ts(value: str | None) -> dt.datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def _turn_instant(job: SemanticJob) -> dt.datetime | None:
+    """When this record began drawing on the subscription window, or ``None``.
+
+    ``started_ts`` is the honest answer once a turn is *running*, but it is not
+    written by the step that admits the turn. Both admission paths
+    (:meth:`~orch_hub.semantic_jobs.SemanticJobManager.dispatch_deferred` and
+    :meth:`~orch_hub.semantic_jobs.SemanticJobManager.start_job`) persist
+    ``queued`` under the job-manager lock and then submit the turn *outside* it,
+    and the worker stamps ``started_ts`` when it flips the record to ``running``.
+    Between those two moments a record that has already been admitted to spend
+    carries no start stamp at all.
+
+    Pacing off ``started_ts`` alone therefore leaves a gap the spacing rule exists
+    to close: a second sweep, running after the first released its single-flight
+    lock but before the promoted worker started, sees no start stamp anywhere and
+    promotes another turn immediately. Not the concurrent herd the single-flight
+    lock already refuses — a strictly sequential one, and just as expensive.
+
+    So an admitted-but-not-yet-started turn paces from its admitting write
+    (``updated_ts``, which for a ``queued`` record is exactly that write), until
+    the worker replaces it with the real start. Erring in this direction is
+    deliberate: spacing measured from admission starts at most milliseconds early,
+    while spacing measured from a stamp that does not exist yet starts a second
+    turn. A ``queued`` record whose worker never ran stops constraining once the
+    spacing elapses, the same as a real turn would — and startup reconciliation
+    settles it ``failed`` at the next restart."""
+    started = _parse_ts(job.started_ts)
+    if started is not None:
+        return started
+    if job.status == STATUS_QUEUED:
+        return _parse_ts(job.updated_ts)
+    return None
 
 
 class CapacityGate:
@@ -209,11 +251,42 @@ class DeferredDispatcher:
         self._sweeping = threading.Lock()
         self._stall_logged: set[tuple[str, str, str]] = set()
 
+    @property
+    def enabled(self) -> bool:
+        """Whether the automatic path may promote anything: both gates open.
+
+        The same predicate :class:`~orch_hub.completion_eval.CompletionEvaluationTrigger`
+        checks, read from the one place that derives it
+        (:attr:`orch_hub.config.Config.auto_evaluation_enabled`), because these two
+        halves of the automatic path must never disagree about whether it is on.
+        """
+        return self._config.auto_evaluation_enabled
+
     def sweep(self) -> SemanticJob | None:
         """Dispatch at most one held job; return it, or ``None`` if none started.
 
-        Order matters. Spacing is checked before capacity because it is free and
-        because a capacity read is the one step that can trigger background work
+        Gated first, and this is not symmetry with the trigger — it is the only
+        gate on this half. The deferred queue is *durable*, so the records a hub
+        accepted while automatic evaluation was on outlive the process that
+        accepted them: a hub restarted with ``ORCH_HUB_EVAL_AUTO`` off would
+        otherwise promote them, which is a model turn in the deployment that just
+        said manual-only. With the subsystem gate off it is worse than a stray
+        turn — the evaluator refuses a disabled subsystem, so the promotion settles
+        the record ``failed`` and *consumes* the task's one automatic attempt,
+        turning "evaluation is switched off" into "these tasks have no report and
+        never will".
+
+        So a closed gate holds the queue exactly as it is: nothing walked, nothing
+        written, nothing failed. Deferral is already the state that means "not
+        now", and it survives restarts untouched, so reopening both switches needs
+        no recovery step — the next sweep simply drains what was always there. The
+        gate state is global config, not a per-job fact, so it is deliberately not
+        stamped onto the records as a ``defer_reason``: writing one would churn the
+        whole queue on a config change and then leave every record claiming a
+        reason that is no longer true.
+
+        Order matters after that. Spacing is checked before capacity because it is
+        free and because a capacity read is the one step that can trigger background work
         (the usage service refreshes a stale observation as a side effect of being
         consulted) — asking for that while the answer cannot be acted on anyway is
         wasted. Both checks precede any write, so a sweep that changes nothing is
@@ -226,6 +299,8 @@ class DeferredDispatcher:
         Returns ``None`` immediately when another sweep is already running (see the
         class docstring): declining is correct, not a missed tick.
         """
+        if not self.enabled:
+            return None
         if not self._sweeping.acquire(blocking=False):
             return None
         try:
@@ -276,15 +351,18 @@ class DeferredDispatcher:
     ) -> str | None:
         """``REASON_PACING`` while the previous turn is still inside the spacing.
 
-        "The previous turn" is the newest ``started_ts`` across *all* records, not
+        "The previous turn" is the newest turn instant across *all* records, not
         just automatic ones: a manual evaluation draws on the same window, so
-        pacing after it is the same protection. A record with no parseable start
-        stamp (never dispatched, or corrupt) simply does not constrain anything.
+        pacing after it is the same protection. And "turn instant" is
+        :func:`_turn_instant` rather than ``started_ts``, because a turn already
+        admitted but not yet started has no start stamp and must still pace — see
+        there. A record with no instant at all (never admitted, or corrupt) simply
+        does not constrain anything.
         """
         spacing = self._config.eval_dispatch_spacing
         if spacing <= 0:
             return None
-        starts = [ts for ts in (_parse_ts(job.started_ts) for job in jobs) if ts]
+        starts = [ts for ts in (_turn_instant(job) for job in jobs) if ts]
         if not starts:
             return None
         if (now - max(starts)).total_seconds() < spacing:

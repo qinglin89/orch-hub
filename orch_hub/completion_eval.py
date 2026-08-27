@@ -39,7 +39,10 @@ Two gates and one guard:
 
 - ``Config.evaluation_enabled`` is the subsystem gate (shared with every manual
   path) and ``Config.eval_auto`` is the trigger gate, so automatic evaluation
-  can be switched off while manual generation stays available.
+  can be switched off while manual generation stays available. They gate both
+  halves of the automatic path, not just this one: the job records accepted here
+  are durable, so :class:`~orch_hub.eval_dispatch.DeferredDispatcher` re-checks
+  the same pair before promoting anything an earlier process left queued.
 - The task-level once-guard is
   :meth:`~orch_hub.semantic_jobs.SemanticJobManager.enqueue_if_absent`. The
   completion signal is per *run*, not per task: a task that reaches ``completed``
@@ -126,8 +129,14 @@ class CompletionEvaluationTrigger:
 
         Subordinate by construction — a disabled subsystem has nothing to trigger,
         so ``ORCH_HUB_EVAL_AUTO`` only ever narrows ``ORCH_HUB_EVAL_ENABLED``.
+
+        Derived once in :attr:`orch_hub.config.Config.auto_evaluation_enabled` and
+        read from there by both halves of the automatic path (acceptance here,
+        dispatch in :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep`): the
+        queue is durable, so a gate honored at acceptance but not at dispatch is
+        still a model turn in a hub that switched automatic evaluation off.
         """
-        return self._config.evaluation_enabled and self._config.eval_auto
+        return self._config.auto_evaluation_enabled
 
     def on_task_completed(self, record: RunRecord) -> None:
         """Hook entry: this run just ended and classified ``completed``.

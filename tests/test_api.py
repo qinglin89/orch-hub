@@ -4941,8 +4941,14 @@ def test_the_apps_trigger_honors_both_gates(tmp_path, overrides, expected):
         data_dir=tmp_path / "hub-data",
         **overrides,
     )
+    app = api.create_app(config)
 
-    assert api.create_app(config).state.completion_trigger.enabled is expected
+    assert app.state.completion_trigger.enabled is expected
+    # Both halves of the automatic path, because the queue is durable: the sweep
+    # is wired onto the resident tick unconditionally, so a switch honored only at
+    # acceptance would still promote whatever an earlier enabled process accepted.
+    # What a closed gate then does to a pre-existing queue: tests/test_eval_dispatch.py.
+    assert app.state.eval_dispatcher.enabled is expected
 
 
 def test_an_injected_run_manager_is_never_handed_the_apps_evaluator(
