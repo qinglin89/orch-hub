@@ -18,6 +18,15 @@ the monitor reuses the manager's existing trigger policy and its per-
 *what* it decides. It is deliberately not an event bus and owns no run state:
 ``run.json`` / ``events.jsonl`` persistence stays entirely in the run manager.
 
+It is also the hub's only resident tick, so a second kind of work that needs one
+rides it rather than growing a thread of its own: ``sweeps`` are plain callables
+invoked after each run scan. The automatic evaluation dispatcher uses this to
+retry its deferred queue (a held Layer 2 turn waiting on subscription capacity,
+which nothing else would ever pick back up). The relationship stays the same as
+with the run scan — the monitor decides *when* a sweep runs and nothing about
+what it decides — and each sweep is isolated, so neither can take down the other
+or the thread.
+
 The monitor is started and stopped by the FastAPI application lifecycle
 (:mod:`orch_hub.api`), so it lives exactly as long as the resident service and
 never runs during ordinary unit tests (which build the app without triggering
@@ -28,6 +37,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 _log = logging.getLogger(__name__)
@@ -63,6 +73,16 @@ class RunScanner(Protocol):
     def list_runs(self) -> object: ...
 
 
+PeriodicSweep = Callable[[], object]
+"""Extra work to run on the monitor's tick, after the run scan.
+
+The seam that keeps the hub at one resident thread. A sweep must be cheap when
+there is nothing to do (the deferred-evaluation sweep is one directory walk that
+returns immediately on an empty queue) and must not depend on this interval for
+its own pacing — the monitor's cadence is chosen for push latency and may change
+without asking any sweep's permission."""
+
+
 class RunMonitor:
     """Periodically drive ``scanner.list_runs()`` on a background daemon thread.
 
@@ -72,11 +92,22 @@ class RunMonitor:
     is best-effort: any exception it raises is logged and swallowed so one bad
     scan never kills the thread or the service (notification-delivery failures
     are already isolated inside the run manager, so they never reach here).
+
+    ``sweeps`` are extra periodic callables run after each scan, each isolated
+    the same way and in the given order. The run scan goes first because it is
+    what pushes depend on; a sweep is background upkeep that can wait a tick.
     """
 
-    def __init__(self, scanner: RunScanner, *, interval: float = DEFAULT_INTERVAL):
+    def __init__(
+        self,
+        scanner: RunScanner,
+        *,
+        interval: float = DEFAULT_INTERVAL,
+        sweeps: Sequence[PeriodicSweep] = (),
+    ):
         self._scanner = scanner
         self._interval = interval
+        self._sweeps = tuple(sweeps)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -129,3 +160,10 @@ class RunMonitor:
                 # not kill the loop or the service. The traceback is safe to log —
                 # nothing on this path carries the Bark device-key secret.
                 _log.exception("run monitor scan failed; continuing")
+            for sweep in self._sweeps:
+                # Isolated per sweep, not per tick: one failing sweep must not
+                # cost the others their turn, nor the loop its life.
+                try:
+                    sweep()
+                except Exception:
+                    _log.exception("run monitor sweep failed; continuing")

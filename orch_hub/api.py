@@ -43,6 +43,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .completion_eval import CompletionEvaluationTrigger
+from .eval_dispatch import CapacityGate, DeferredDispatcher
 from .config import TOKEN_ENV, Config
 from .control_dir import (
     DEFAULT_RESPONDER,
@@ -69,7 +70,13 @@ from .intake import (
 )
 from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
-from .models import LaunchSpec, ManagedRepo, repos_payload, tasks_payload
+from .models import (
+    PROVIDER_CLAUDE,
+    LaunchSpec,
+    ManagedRepo,
+    repos_payload,
+    tasks_payload,
+)
 from .monitor import RunMonitor
 from .notifications import build_notifier
 from .orch_config import (
@@ -684,8 +691,26 @@ def create_app(
     # constructor argument, so an injected (test) run manager keeps its own
     # hooks and can never be handed a live evaluator — the same convention the
     # usage-refresh hook already follows.
+    # Automatic Layer 2 turns are gated on observed subscription capacity: the
+    # gate reads the provider the Layer 2 backend actually spends against
+    # (Claude, matching ``ClaudeSemanticBackend``) through the display-only usage
+    # service, and the dispatcher drains the deferred queue at the configured
+    # ceiling/spacing. Both are pure policy over the job store — they persist
+    # nothing of their own — so an injected ``semantic_job_manager`` fake is
+    # driven by the real policy, and an injected usage service supplies the
+    # capacity read without touching the operator's subscription data.
+    capacity_gate = CapacityGate(
+        resolved,
+        usage_reader=lambda: usage.provider_usage(PROVIDER_CLAUDE),
+    )
+    eval_dispatcher = DeferredDispatcher(
+        resolved, job_manager=semantic_jobs, gate=capacity_gate
+    )
     completion_trigger = CompletionEvaluationTrigger(
-        resolved, static_evaluator=static_metrics, job_manager=semantic_jobs
+        resolved,
+        static_evaluator=static_metrics,
+        job_manager=semantic_jobs,
+        dispatcher=eval_dispatcher,
     )
     manager = (
         run_manager
@@ -721,7 +746,10 @@ def create_app(
     # the same repo. Safe here: no request thread exists until the app is served.
     manager.use_admission(admission)
     intake.use_admission(admission)
-    monitor = RunMonitor(manager)
+    # The resident tick also retries the deferred evaluation queue: a job held
+    # for capacity is picked back up by nothing else, and a hub restart resumes
+    # the queue through this sweep rather than through a startup step of its own.
+    monitor = RunMonitor(manager, sweeps=(eval_dispatcher.sweep,))
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
@@ -761,6 +789,9 @@ def create_app(
     # through a run ending, so this is how a test inspects that it exists and how
     # its gates resolved without driving a real orchestrator to completion.
     app.state.completion_trigger = completion_trigger
+    # Same reason as the trigger: the dispatcher is reachable only through a
+    # background tick, so this is how a test drives one sweep deterministically.
+    app.state.eval_dispatcher = eval_dispatcher
 
     @app.exception_handler(RegistryError)
     async def _registry_error(request: Request, exc: RegistryError) -> JSONResponse:

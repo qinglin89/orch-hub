@@ -1,4 +1,4 @@
-"""Async semantic-evaluation job lifecycle: queued / running / completed / failed.
+"""Async semantic-evaluation job lifecycle: deferred / queued / running / completed / failed.
 
 Layer 2 semantic evaluation (:meth:`orch_hub.semantic.SemanticEvaluator.evaluate`)
 is one long model turn. Driven synchronously it leaves the caller — and the
@@ -39,12 +39,29 @@ and the task-id segment — are validated as single safe path components, which 
 what makes the deterministic path containment-safe (and keeps every record on the
 two-level ``<repo-slug>/<task-id>/`` layout the startup reconcile scan walks).
 
+Automatic (completion-triggered) attempts enter one state earlier than an
+operator-driven one. They are accepted as ``deferred``: durably recorded, holding
+the task's duplicate slot, but not yet admitted to a model turn — the automatic
+dispatch policy (:mod:`orch_hub.eval_dispatch`) decides when the subscription
+window can afford one. A deferred record is therefore neither transient nor
+terminal: the startup orphan sweep must leave it alone (nothing is in flight to
+abandon), and only :meth:`SemanticJobManager.dispatch_deferred` promotes it into
+the ordinary ``queued`` -> ``running`` -> terminal path. The manager owns the
+*mechanism*; the policy — a utilization ceiling, a spacing between turns, a bound
+on how long a job may wait — lives outside it, so this module still knows nothing
+about subscription usage.
+
 It also owns the trigger timing for the terminal-outcome push (mirroring how the
 run manager owns run-end pushes and the intake manager owns intake-ready ones):
 one metadata-only notification fires from the finalize that settles a job to
 ``completed``/``failed``, so an operator who started an evaluation and navigated
-away learns the result without keeping the dashboard open. Delivery is isolated —
-a dead Bark backend can never corrupt the job record.
+away learns the result without keeping the dashboard open. One exception, and it
+is about noise rather than isolation: an *automatic* job settling to ``completed``
+pushes nothing. Every completed task now produces one, nobody is waiting on it,
+and a second push per completion would drown the run-end push that is actually
+actionable — while an automatic *failure* still pushes, because that is the
+corpus quietly shrinking. Delivery is isolated — a dead Bark backend can never
+corrupt the job record.
 
 The manager owns **only** job status. The read-only evaluation itself — evidence,
 static metrics, semantic report, retention — stays entirely in
@@ -85,6 +102,7 @@ SEMANTIC_JOB_NAME = "job.json"
 # record (a broken dir that must surface, not hide), distinct from ``failed`` (a
 # legitimate evaluation-failure outcome), and — carrying no repo attribution —
 # never holds a ``(repo, task)`` duplicate slot. Mirrors the intake statuses.
+STATUS_DEFERRED = "deferred"
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
@@ -96,7 +114,13 @@ _TRANSIENT = frozenset({STATUS_QUEUED, STATUS_RUNNING})
 with no live turn (a hub that died mid-turn) is an orphan holding the
 ``(repo, task)`` duplicate slot, reconciled to ``failed`` at startup
 (:meth:`SemanticJobManager.reconcile_orphans`). The duplicate guard and the
-finalize steps key off these."""
+finalize steps key off these.
+
+``deferred`` is deliberately NOT here. A deferred job has no turn to abandon, so
+a restart sweep that failed it would destroy exactly the queue the deferral
+exists to hold — every held evaluation would be lost to the first hub restart,
+which for a corpus that must not be selection-biased is the same silent gap
+automatic triggering was built to close."""
 
 _TERMINAL = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_ERROR})
 """Resting states: a new attempt may overwrite a job in one of these."""
@@ -295,10 +319,21 @@ class SemanticJobManager:
         record for this ``(repo, task)`` is still transient (``queued``/
         ``running``), it is returned as-is and **no** new model turn is launched —
         the scope's "return the existing in-flight job instead of starting
-        another." Otherwise (no record yet, or a terminal one) a fresh ``queued``
-        record overwrites it, is persisted before the turn so an interrupted hub
-        leaves an observable orphan, and the evaluation turn runs off the lock
-        (:meth:`_run_job`). The evaluator identity (backend/model/schema) is
+        another." Otherwise (no record yet, a terminal one, or one the automatic
+        dispatcher is still holding ``deferred``) a fresh ``queued`` record
+        overwrites it, is persisted before the turn so an interrupted hub leaves
+        an observable orphan, and the evaluation turn runs off the lock
+        (:meth:`_run_job`).
+
+        Overriding a ``deferred`` record is the point, not an oversight: the
+        capacity policy exists to keep *mechanical* evaluation out of the window
+        the operator is working in, and an operator asking for this evaluation now
+        is not the production-side selection that policy shapes. So this path
+        never consults utilization — it is also the documented escape hatch when a
+        broken usage feed would otherwise hold the queue indefinitely. The fresh
+        record is stamped ``auto=False``, so a report's provenance still says
+        whether its existence was somebody's choice. The evaluator identity
+        (backend/model/schema) is
         stamped now so the queued/running UI names the model before a report
         exists. An unsafe ``task_id`` raises ``ValueError`` (mapped to 400) before
         any dir is touched. Returns the transient ``queued`` record immediately; a
@@ -314,7 +349,9 @@ class SemanticJobManager:
                 # Duplicate guard: an in-flight job already owns this (repo, task);
                 # hand the caller the same job to poll rather than a second turn.
                 return current
-            record = self._queue_locked(job_dir, repo, task_id)
+            record = self._queue_locked(
+                job_dir, repo, task_id, status=STATUS_QUEUED, auto=False
+            )
         # Run the evaluation off the lock; the transient record is returned now and
         # the turn settles it asynchronously. Submit strictly OUTSIDE the lock: the
         # turn re-acquires it to flip to running / finalize, which a synchronous
@@ -322,28 +359,36 @@ class SemanticJobManager:
         self._submit(lambda: self._run_job(job_dir, record.job_id, repo, task_id))
         return record
 
-    def start_job_if_absent(self, repo: ManagedRepo, task_id: str) -> SemanticJob | None:
-        """Start a job for ``(repo, task_id)`` only if the task has never had one.
+    def enqueue_if_absent(self, repo: ManagedRepo, task_id: str) -> SemanticJob | None:
+        """Accept a job for ``(repo, task_id)`` only if the task has never had one.
 
         The automatic (completion-triggered) counterpart of :meth:`start_job`, and
-        deliberately a *stricter* guard: ``start_job`` is an operator asking for
-        this task to be evaluated now — so it overwrites a terminal record and
-        starts a fresh attempt — while this one exists to make a task's automatic
-        evaluation happen **at most once, ever**. Any existing record (transient,
-        ``completed``, ``failed``, or ``error``) means the task's L2 story is
-        already told or in flight, so this returns ``None`` and starts nothing.
+        it differs from it twice over. It is a *stricter* guard: ``start_job`` is
+        an operator asking for this task to be evaluated now — so it overwrites a
+        resting record and starts a fresh attempt — while this one exists to make a
+        task's automatic evaluation happen **at most once, ever**. Any existing
+        record (deferred, transient, ``completed``, ``failed``, or ``error``) means
+        the task's L2 story is already told, in flight, or queued, so this returns
+        ``None`` and accepts nothing.
+
+        And it *enqueues* rather than starts: the record lands as ``deferred`` and
+        **no turn is submitted here**. Admission is the dispatch policy's decision
+        (:mod:`orch_hub.eval_dispatch`), which weighs the subscription window a
+        mechanical turn would draw on, and it deliberately does not run on this
+        path — the caller is the run manager's end transition, holding its lock,
+        where the only thing that may happen is one small durable write.
 
         The record is the guard, and it has to be: the completion signal driving
         this is per *run*, not per task (a task completed but not archived stays
         launchable, and the close-out-only re-run that follows classifies
         ``completed`` again), so the corpus needs a task-level once-guard rather
         than trusting the signal's cardinality. The one record per ``(repo, task)``
-        this manager already keeps is exactly that: durable across hub restarts,
-        atomically written, and reconciled at startup. Which is also why a
-        ``failed`` record blocks a retry here — recorded, not retried forever; the
-        operator's manual :meth:`start_job` is the retry path.
+        this manager already keeps is exactly that: durable across hub restarts and
+        atomically written. Which is also why a ``failed`` record blocks a retry
+        here — recorded, not retried forever; the operator's manual
+        :meth:`start_job` is the retry path.
 
-        Returns the fresh ``queued`` record when it did start one. An unsafe
+        Returns the fresh ``deferred`` record when it did accept one. An unsafe
         ``task_id`` raises ``ValueError`` like every other public entry.
         """
         _validate_task_id(task_id)
@@ -351,22 +396,33 @@ class SemanticJobManager:
             job_dir = self._job_dir_for(repo.name, task_id)
             if self._load_if_present(job_dir) is not None:
                 return None
-            record = self._queue_locked(job_dir, repo, task_id)
-        # Same off-lock submit contract as start_job (see there).
-        self._submit(lambda: self._run_job(job_dir, record.job_id, repo, task_id))
-        return record
+            return self._queue_locked(
+                job_dir, repo, task_id, status=STATUS_DEFERRED, auto=True
+            )
 
     def _queue_locked(
-        self, job_dir: Path, repo: ManagedRepo, task_id: str
+        self,
+        job_dir: Path,
+        repo: ManagedRepo,
+        task_id: str,
+        *,
+        status: str,
+        auto: bool,
     ) -> SemanticJob:
-        """Persist a fresh ``queued`` record for this attempt; caller holds the lock.
+        """Persist a fresh record for this attempt; caller holds the lock.
 
-        Shared by both start paths so the two guards differ only in *when* they
-        admit an attempt, never in what a queued record looks like. Persisting
-        before the turn is what makes a hub that dies mid-turn leave an observable
-        orphan (reconciled to ``failed`` at startup) rather than a silent gap. The
+        Shared by both start paths so they differ only in *when* they admit an
+        attempt and in which state it starts — never in what an accepted record
+        looks like. Persisting before anything else is what makes a hub that dies
+        leave an observable record (an orphaned turn is reconciled to ``failed`` at
+        startup; a held one simply keeps waiting) rather than a silent gap. The
         evaluator identity (backend/model/schema) is stamped now so the
-        queued/running UI names the model before a report exists.
+        deferred/queued/running UI names the model before a report exists.
+
+        The job id is this attempt's *creation* stamp and is not re-minted when a
+        deferred attempt is later promoted: one acceptance is one attempt however
+        long the policy holds it, and the finalize guards key off the status, not
+        the id's recency.
         """
         job_dir.mkdir(parents=True, exist_ok=True)
         info = self._evaluator.evaluator_info
@@ -377,15 +433,138 @@ class SemanticJobManager:
             repo_name=repo.name,
             repo_path=repo.path,
             task_id=task_id,
-            status=STATUS_QUEUED,
+            status=status,
             backend=info.backend,
             model=info.model,
             schema_version=info.schema_version,
+            auto=auto,
             created_ts=ts,
             updated_ts=ts,
         )
         _write_record(job_dir, record)
         return record
+
+    # -- deferred queue -------------------------------------------------------
+
+    def dispatch_deferred(self, job: SemanticJob) -> SemanticJob | None:
+        """Promote one held ``deferred`` record to ``queued`` and run its turn.
+
+        The one door out of the deferred queue, called by the dispatch policy once
+        it has decided the subscription window can afford this turn. It re-reads
+        the record under the lock and promotes only a record that is *still* the
+        same deferred attempt, so a manual :meth:`start_job` that superseded it
+        while the policy was deciding is never clobbered and never double-run.
+
+        Returns the promoted ``queued`` record, or ``None`` when the record moved
+        on (superseded, already promoted, or gone). ``None`` is a normal outcome,
+        not an error: the caller simply tries the next held job. A record whose
+        repo cannot be reconstructed is refused here rather than dispatched with a
+        guessed target — :meth:`fail_deferred` is how such a record stops being an
+        invisible permanent resident of the queue.
+        """
+        repo = job.managed_repo()
+        if repo is None:
+            return None
+        _validate_task_id(job.task_id)
+        with self._lock:
+            job_dir = self._job_dir_for(job.repo_name, job.task_id)
+            current = self._load_if_present(job_dir)
+            if (
+                current is None
+                or current.status != STATUS_DEFERRED
+                or current.job_id != job.job_id
+            ):
+                return None
+            ts = self._clock().isoformat()
+            record = replace(
+                current,
+                status=STATUS_QUEUED,
+                defer_reason=None,
+                updated_ts=ts,
+            )
+            _write_record(job_dir, record)
+        # Same off-lock submit contract as start_job (see there).
+        self._submit(
+            lambda: self._run_job(job_dir, record.job_id, repo, job.task_id)
+        )
+        return record
+
+    def hold_deferred(self, job: SemanticJob, reason: str) -> SemanticJob | None:
+        """Record *why* a held job is still waiting; a no-op when nothing changed.
+
+        The deferred queue's only operator-facing content. The reason is a bounded
+        machine token chosen by the policy (never operator prose, which would be
+        unanalyzable and would leak repo content into a persisted surface), so a
+        stalled queue can be read — and counted — rather than merely observed to be
+        quiet.
+
+        Writes only when the reason actually differs, because the policy re-decides
+        on every sweep and a queue that is legitimately waiting for hours must not
+        rewrite its own records every 30 seconds. Like :meth:`dispatch_deferred`,
+        it touches only a record that is still the same deferred attempt.
+        """
+        _validate_task_id(job.task_id)
+        with self._lock:
+            job_dir = self._job_dir_for(job.repo_name, job.task_id)
+            current = self._load_if_present(job_dir)
+            if (
+                current is None
+                or current.status != STATUS_DEFERRED
+                or current.job_id != job.job_id
+                or current.defer_reason == reason
+            ):
+                return None
+            ts = self._clock().isoformat()
+            record = replace(current, defer_reason=reason, updated_ts=ts)
+            _write_record(job_dir, record)
+            return record
+
+    def fail_deferred(self, job: SemanticJob, reason: str) -> SemanticJob | None:
+        """Settle an undispatchable held job to ``failed`` (visible, not a silent stall).
+
+        For a deferred record the dispatcher can never act on — one whose persisted
+        repo attribution is gone, so no target can be resolved without guessing.
+        Leaving it deferred would make it a permanent resident of the queue that
+        every sweep skips and no operator has a reason to look at; failing it puts
+        it where every other unrecoverable job outcome already is, and frees the
+        task's slot for a manual retry.
+
+        Notifies like any other fresh failure — it is the corpus losing a report.
+        """
+        _validate_task_id(job.task_id)
+        with self._lock:
+            job_dir = self._job_dir_for(job.repo_name, job.task_id)
+            current = self._load_if_present(job_dir)
+            if (
+                current is None
+                or current.status != STATUS_DEFERRED
+                or current.job_id != job.job_id
+            ):
+                return None
+            ts = self._clock().isoformat()
+            record = replace(
+                current,
+                status=STATUS_FAILED,
+                defer_reason=None,
+                error=_bound_error(reason),
+                ended_ts=ts,
+                updated_ts=ts,
+            )
+            _write_record(job_dir, record)
+            self._emit(semantic_job_notification(record))
+            return record
+
+    def list_jobs(self) -> list[SemanticJob]:
+        """Every persisted job record, one walk of the tree, deterministic order.
+
+        The cross-cutting read: the dispatch policy needs the whole set at once
+        (which jobs are held, and when any turn last started — a manual one
+        consumes the same window as an automatic one), and an operator view of the
+        queue needs the same walk. Reads only; an unreadable record surfaces as its
+        ``error`` record rather than being skipped, so a broken dir cannot hide.
+        """
+        with self._lock:
+            return [_load_record(job_dir) for job_dir in self._job_dirs()]
 
     def _run_job(
         self, job_dir: Path, job_id: str, repo: ManagedRepo, task_id: str
@@ -474,6 +653,14 @@ class SemanticJobManager:
         transient ``queued``/``running`` writes notify nothing. Startup
         reconciliation writes ``failed`` without going through here, so a restart
         sweep — not a fresh outcome the operator is waiting on — stays silent.
+
+        One further silence, and it is a policy rather than a guard: an
+        ``auto`` job settling to ``completed`` notifies nothing. That outcome used
+        to be rare and requested; since evaluation became mechanical it happens on
+        every completed task, carries nothing to act on, and would arrive right
+        behind the run-end push that does. An automatic *failure* still notifies —
+        it is the corpus quietly shrinking, which is exactly what nobody would
+        otherwise notice.
         """
         with self._lock:
             record = self._load_if_present(job_dir)
@@ -498,6 +685,8 @@ class SemanticJobManager:
             _write_record(job_dir, settled)
             # Settled to a terminal state: notify best-effort, off the lock. The
             # guard above returns before this, so no duplicate settle re-notifies.
+            if settled.auto and settled.status == STATUS_COMPLETED:
+                return
             self._emit(semantic_job_notification(settled))
 
     # -- startup reconciliation -----------------------------------------------
@@ -516,6 +705,13 @@ class SemanticJobManager:
         lifespan calls it, mirroring the intake manager's reconciliation); at that
         point every transient record on disk is unambiguously an orphan. It never
         mutates target repo/run state — it only rewrites hub-owned job records.
+
+        ``deferred`` records are untouched, and that is load-bearing rather than
+        incidental: a held job has no abandoned turn to clean up, so failing it
+        would delete the queue on every restart — the deferred queue's whole value
+        is that it survives one. Nothing else needs to happen here for it either;
+        the resident dispatch sweep picks a held job back up on its own schedule,
+        so recovery needs no startup step of its own.
         """
         reconciled: list[SemanticJob] = []
         with self._lock:
@@ -702,6 +898,8 @@ def _load_record(job_dir: Path) -> SemanticJob:
         schema_version=_str_field(data, "schema_version"),
         evaluation_id=_str_field(data, "evaluation_id"),
         error=_str_field(data, "error"),
+        defer_reason=_str_field(data, "defer_reason"),
+        auto=_bool_field(data, "auto"),
         created_ts=_str_field(data, "created_ts"),
         updated_ts=_str_field(data, "updated_ts"),
         started_ts=_str_field(data, "started_ts"),
@@ -723,6 +921,16 @@ def _error_record(job_dir: Path, error: str) -> SemanticJob:
 def _str_field(data: dict, key: str) -> str | None:
     value = data.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def _bool_field(data: dict, key: str) -> bool:
+    """Read a boolean field; anything else (absent, null, malformed) is ``False``.
+
+    ``auto`` is newer than the records already on disk, and every one of those was
+    written by the operator-driven start path — so absent reads as the truth for
+    that cohort rather than as a guess."""
+    value = data.get(key)
+    return value is True
 
 
 def _path_field(data: dict, key: str) -> Path | None:

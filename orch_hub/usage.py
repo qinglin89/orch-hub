@@ -238,6 +238,61 @@ def _remaining(used_percent: float | None) -> float | None:
     return round(max(0.0, min(100.0, 100.0 - used_percent)), 2)
 
 
+def current_used_percent(
+    usage: ProviderUsage, *, now: dt.datetime | None = None
+) -> float | None:
+    """The highest *currently measured* used-percentage across a provider's windows.
+
+    The read a consumer needs when it wants to act on capacity rather than render
+    it, and it is deliberately all-or-nothing: ``None`` means "this provider's
+    utilization is not known right now", and a caller that must fail toward
+    caution treats that exactly like a full window. Everything the display shows
+    as an explicit degraded state collapses to ``None`` here —
+
+    * the provider is unavailable, or carries no windows at all;
+    * the observation is :data:`USAGE_STALE_AFTER_SECONDS` old (``stale``), so the
+      figures are last-observed rather than current;
+    * a window has no ``used_percent`` — an absent figure is not zero usage;
+    * a window's ``resets_at`` has already passed, so no window is open and the
+      retained figure describes a window that has since rolled;
+    * a window's figure was measured in an *earlier* window than the one
+      ``resets_at`` now names (``figure_instant`` behind the boundary, which a
+      percentage-less boundary refresh can produce), so the open window's usage
+      has never actually been observed.
+
+    ANY unusable window makes the whole read unknown, not just that window: a
+    consumer asking "is there room" cannot answer it from the windows that happen
+    to be readable while another is unreadable. When every window is usable the
+    answer is the highest of them, so an exhausted weekly window is not hidden by
+    a fresh five-hour one.
+
+    Display code must not use this — the Overview renders per-window state with
+    its own vocabulary. This exists for the decision path (automatic Layer 2
+    dispatch), which needs one number or an honest unknown.
+
+    One consequence to know before pointing a decision path at a new provider:
+    ``figure_instant`` is only populated by the Claude carriers today, so a Codex
+    snapshot always reads unknown here. That is the fail-closed direction and it
+    is deliberate — a provider whose figures carry no window identity cannot prove
+    they describe the open window — but it means a decision path over Codex must
+    first give its windows that identity rather than relax the rule."""
+    now = now or _utc_now()
+    if not usage.available or usage.stale or not usage.windows:
+        return None
+    highest: float | None = None
+    for window in usage.windows:
+        if window.used_percent is None:
+            return None
+        resets = _parse_iso(window.resets_at)
+        if resets is None or resets <= now:
+            return None
+        figure = _parse_iso(window.figure_instant)
+        if figure is None or abs(resets - figure) > _CLAUDE_WINDOW_IDENTITY_TOLERANCE:
+            return None
+        highest = window.used_percent if highest is None else max(highest, window.used_percent)
+    return highest
+
+
 # -- Codex: read the local rate-limit record ----------------------------------
 
 
@@ -1982,6 +2037,33 @@ class UsageService:
         usage = SubscriptionUsage(providers=tuple(self._read_providers(now)))
         self._cache = (now, usage)
         return usage
+
+    def provider_usage(self, provider: str) -> ProviderUsage:
+        """Read *one* provider's snapshot, fail-soft, bypassing the aggregate cache.
+
+        The aggregate :meth:`get_usage` is the display read: it always touches both
+        providers, and Codex's half scans up to :data:`MAX_ROLLOUT_SCAN` session
+        rollouts. A consumer that only cares about the provider it is about to
+        spend against (the automatic Layer 2 dispatcher, which runs the Claude CLI)
+        should not pay for the other one, so this reads exactly the asked-for
+        provider through the same fail-soft wrapper.
+
+        Uncached on purpose: :meth:`get_usage` caches a whole snapshot for the
+        Overview's polling clients, while this answers a decision that must see the
+        freshest figures the store holds. Both go through the same per-provider
+        readers, so a Claude read still ingests both carriers and still requests a
+        background refresh when the observation has aged past the collector's
+        horizon — the decision path keeps the figures fresh as a side effect of
+        consulting them. An unknown provider key is unavailable, never an error."""
+        now = self._clock()
+        if provider == PROVIDER_CLAUDE:
+            return _safe(PROVIDER_CLAUDE, lambda: self._read_claude(now))
+        if provider == PROVIDER_CODEX:
+            return _safe(
+                PROVIDER_CODEX,
+                lambda: read_codex_usage(self._config.codex_home, now=now),
+            )
+        return ProviderUsage.unavailable(provider, f"unknown usage provider {provider!r}")
 
     def _read_providers(self, now: dt.datetime) -> Iterable[ProviderUsage]:
         """Read every provider, each fail-soft and independent (Claude, then Codex)."""

@@ -74,6 +74,9 @@ of the hub — for the launchd service they live in the plist's
 | `ORCH_HUB_EVAL_MODEL` | `claude-opus-5` | Model the **Layer 2** semantic evaluator drives through the Claude CLI. Only matters when evaluation is enabled and a semantic evaluation is requested; Layer 1 makes no model call. |
 | `ORCH_HUB_EVAL_EFFORT` | `max` | Reasoning effort for that same Layer 2 turn (`--effort`). Unset/blank means the default. Not validated at startup — an effort the installed `claude` rejects fails that one semantic job, not the service. |
 | `ORCH_HUB_EVAL_RETENTION` | `20` | Per-task cap on retained evaluations (see [Retention](#retention)). `0` disables retention (keep everything); a positive integer is the cap. A negative or non-integer value fails startup. |
+| `ORCH_HUB_EVAL_USAGE_CEILING` | `80` | Subscription utilization (percent) at or above which an **automatic** Layer 2 turn waits instead of running (see [When an automatic Layer 2 turn actually runs](#when-an-automatic-layer-2-turn-actually-runs)). Compared against the most exhausted currently-measured window. Only the automatic path consults it; a manual evaluation is never capacity-gated. A value outside 0-100, or a non-number, fails startup. |
+| `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn that actually started (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
+| `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue. Visibility only — it changes no dispatch decision. `0` disables the warning. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
 other change is required — the routes and dashboard controls self-disable.
@@ -148,18 +151,20 @@ What fires, and when:
   read from that run's own frozen run-dir evidence.
 - **Layer 1 needs no queue.** It is deterministic and makes no model call, so
   there is nothing to schedule — it simply runs.
-- **Layer 2 is enqueued** as an ordinary semantic job — the same persisted
-  `queued`/`running`/`completed`/`failed` record a manual Layer 2 creates, with
-  the same single in-flight turn per task and the same push on settling. Cost is
+- **Layer 2 is enqueued, not started.** It becomes an ordinary semantic job —
+  the same persisted per-task record a manual Layer 2 creates — but it lands in a
+  new `deferred` state first, because *when* it may spend a turn is a policy
+  question (see [below](#when-an-automatic-layer-2-turn-actually-runs)). Cost is
   not the concern; contention is: an L2 turn can land in the same subscription
   rate window a dev session needs.
 - **That job record is written before the trigger hands off any work.** A run's
   end is observed exactly once and then settled forever, so the hub records the
-  job first and evaluates afterwards. A hub stopped or crashed before the turn
-  runs therefore leaves a `failed` job at the next startup (*"semantic evaluation
-  abandoned (hub restarted during queued)"*) — visible in the task's Layer 2
-  panel and retryable from its button — instead of a completed task that
-  silently never got a report.
+  job first and decides about the turn afterwards. A hub stopped or crashed
+  before the turn runs therefore still owes that task an evaluation and pays it:
+  a held job is untouched by the startup sweep and picked up by the next dispatch
+  sweep. (A job interrupted *mid-turn* is still settled `failed` at startup —
+  *"semantic evaluation abandoned (hub restarted during queued)"* — visible in the
+  task's Layer 2 panel and retryable from its button.)
 - **A hub that stops mid-transition resumes it, rather than losing the
   completion.** The end write itself is what the trigger sits behind, and it is
   irreversible: nothing re-observes a run that already has an end time. So the
@@ -179,9 +184,9 @@ What fires, and when:
   per *run*, not per task (a task that completes without being archived stays
   launchable, and the close-out-only re-run that follows classifies `completed`
   again), so the durable per-`(repo, task)` job record is the guard. Any existing
-  record — in-flight, completed, or failed — means the automatic path starts
-  nothing. A `failed` job is therefore *recorded*, not retried forever; retrying
-  it is the operator's explicit Layer 2 button.
+  record — held, in-flight, completed, or failed — means the automatic path
+  accepts nothing. A `failed` job is therefore *recorded*, not retried forever;
+  retrying it is the operator's explicit Layer 2 button.
 - Layer 1 is not guarded that way. It is free and deterministic, so a repeated
   completion signal simply produces a fresher deterministic report; only the
   complete Layer 1 + Layer 2 set is ever published to the feed.
@@ -195,8 +200,59 @@ What it can never do:
   those, and their evidence would be near-empty anyway; they are the backfill
   problem, not the trigger's.
 
+One further quiet: an automatic job settling to **completed** sends no push.
+Every completed task now produces one, it carries nothing to act on, and it would
+arrive right behind the run-end push that does. An automatic **failure** still
+pushes — that is the corpus quietly shrinking. A manual evaluation pushes on
+both outcomes, as before.
+
 Set `ORCH_HUB_EVAL_AUTO=false` to return to on-demand-only evaluation with the
 subsystem otherwise untouched.
+
+## When an automatic Layer 2 turn actually runs
+
+An automatically enqueued Layer 2 job starts `deferred` and is promoted to a real
+turn by a background sweep — on the resident 30-second tick, and once immediately
+after the completion that created it, so an uncontended completion still becomes
+a turn within milliseconds.
+
+Three rules decide, all of them tunable (see
+[Configuration](#configuration)) so the policy can change without a code change:
+
+1. **A utilization ceiling.** If the evaluator's subscription provider (Claude,
+   today) reports `ORCH_HUB_EVAL_USAGE_CEILING` percent or more used on its most
+   exhausted currently-measured window, the job waits. One L2 turn measures ~32k
+   input tokens against tasks that consumed several dev sessions of up to 200k
+   context each — under 1% of the work it measures — so the default 80% leaves
+   roughly twenty times the turn's own cost in headroom. The ceiling is not there
+   to make the turn *fit*; it is there so measurement never competes with work in
+   a window the operator has started rationing.
+2. **Unknown capacity waits.** Missing, unavailable, stale, rolled-over, or
+   otherwise unreadable usage defers the job — an unknown window is not an empty
+   window. This is deliberately permanent when a usage feed dies: the queue stops
+   visibly rather than quietly spending a window nobody can see.
+3. **Spacing between turns.** At most one held job is promoted per
+   `ORCH_HUB_EVAL_DISPATCH_SPACING`, measured from the last turn that actually
+   started (a manual evaluation counts — it draws on the same window). Without
+   this, a queue that accumulated under sustained pressure would become
+   dispatchable *all at once* the moment the window rolled, spending the fresh
+   window's opening capacity exactly when the operator comes back to work.
+
+The queue is **durable and never dropped**. A held job survives a hub restart
+untouched — nothing fails it, and the next sweep resumes it — and the oldest held
+job always goes first, so the corpus fills in completion order.
+
+**None of this applies to the Layer 2 button.** An operator asking for an
+evaluation now is not the production-side selection this policy exists to remove,
+so a manual start ignores the ceiling, the spacing, and any held record for that
+task. That is also the escape hatch if a broken usage feed ever holds the queue
+indefinitely.
+
+If a job waits longer than `ORCH_HUB_EVAL_QUEUE_MAX_AGE` (default six hours — one
+full five-hour window plus slack), the hub logs a warning naming the repo, task,
+and reason. It stays a held job, not a failed one; the bound exists so a queue
+that has stopped draining — usually because the usage feed broke, which defers
+forever by design — cannot stay invisible for a week.
 
 ## Retention
 

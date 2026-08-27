@@ -5,17 +5,22 @@ start persists ``queued`` and settles to ``completed`` (linking the fresh
 ``evaluation_id`` and stamping the evaluator identity) or ``failed`` (with a
 bounded diagnostic and no ``evaluation_id``); the duplicate guard reuses an
 in-flight job for the same ``(repo, task)`` instead of launching a second model
-turn; the automatic ``start_job_if_absent`` entry refuses any task that already
-has a record (transient, completed, or failed) so a repeated completion signal
+turn; the automatic ``enqueue_if_absent`` entry accepts a task into the
+``deferred`` queue without spending a turn and refuses any task that already has a
+record (deferred, transient, completed, or failed) so a repeated completion signal
 mints no second report while the operator's manual retry stays open; a terminal
 job is overwritten by a fresh attempt; state reloads from disk
 across manager instances; orphaned transient jobs are reconciled to ``failed`` at
-startup; unsafe task ids fail closed; a corrupt record surfaces as ``error``
+startup while a held ``deferred`` one survives the restart it exists to survive;
+the deferred-queue operations (promote, hold with a bounded reason, fail an
+unattributable record) each act only on the same still-deferred attempt; unsafe
+task ids fail closed; a corrupt record surfaces as ``error``
 without holding the duplicate slot; and the manager writes only under the
 hub-owned ``semantic-jobs/`` subtree. Terminal-outcome notifications are covered
 over a fake notifier (never a real Bark backend): one push per settled job,
 nothing for transient transitions, duplicate settles, or the startup reconcile
-sweep, and delivery failures isolated from the persisted record. One integration
+sweep, and delivery failures isolated from the persisted record; an automatic job
+completing is silent while an automatic failure still pushes. One integration
 test drives a *real* :class:`~orch_hub.semantic.SemanticEvaluator` (fake backend)
 through the manager to confirm the completed job links a real evaluation dir and
 the target repo is untouched. The protected HTTP surfaces live in
@@ -26,6 +31,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -38,6 +44,7 @@ from orch_hub.semantic import SemanticEvaluationError, SemanticEvaluator
 from orch_hub.semantic_jobs import (
     SEMANTIC_JOB_NAME,
     STATUS_COMPLETED,
+    STATUS_DEFERRED,
     STATUS_ERROR,
     STATUS_FAILED,
     STATUS_QUEUED,
@@ -196,6 +203,15 @@ def manager(
     )
 
 
+def dispatch_now(mgr: SemanticJobManager, r: ManagedRepo | None = None, task_id: str = TASK):
+    """Promote the task's held job the way the dispatch policy would.
+
+    The policy itself (ceiling, spacing, unknown-usage deferral) is
+    ``tests/test_eval_dispatch.py``; here it is only the manager's promote seam.
+    """
+    return mgr.dispatch_deferred(mgr.get_job(r or repo(), task_id))
+
+
 def read_job(cfg: Config, repo_name: str, task_id: str) -> dict:
     path = cfg.data_dir / "semantic-jobs" / repo_name / task_id / SEMANTIC_JOB_NAME
     return json.loads(path.read_text(encoding="utf-8"))
@@ -348,28 +364,55 @@ def test_new_attempt_after_terminal_overwrites_single_record(tmp_path):
     assert [p.name for p in task_dir.iterdir()] == [SEMANTIC_JOB_NAME]
 
 
-# -- the automatic (completion-triggered) start path --------------------------
-# ``start_job_if_absent`` is the once-per-task guard the automatic trigger uses:
-# any existing record — transient or terminal — means the task's L2 story is
-# already told or in flight, so it starts nothing and returns None. Stricter than
-# ``start_job``, which is an operator explicitly asking for a fresh attempt.
+# -- the automatic (completion-triggered) accept path --------------------------
+# ``enqueue_if_absent`` is the once-per-task guard the automatic trigger uses:
+# any existing record — held, transient, or terminal — means the task's L2 story
+# is already told, in flight, or queued, so it accepts nothing and returns None.
+# Stricter than ``start_job``, which is an operator explicitly asking for a fresh
+# attempt. It also does not *start* anything: acceptance is durable, admission is
+# the dispatch policy's call.
 
 
-def test_start_if_absent_queues_the_first_attempt(tmp_path):
+def test_enqueue_if_absent_accepts_the_first_attempt_without_spending_a_turn(tmp_path):
     ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-AUTO"))
     mgr = manager(tmp_path, evaluator=ev)
 
-    job = mgr.start_job_if_absent(repo(), TASK)
+    job = mgr.enqueue_if_absent(repo(), TASK)
 
-    assert job is not None and job.status == STATUS_QUEUED
+    assert job is not None and job.status == STATUS_DEFERRED
+    assert job.auto is True
+    # Durably accepted, and no model turn: admission is a separate decision.
+    assert mgr.get_job(repo(), TASK).status == STATUS_DEFERRED
+    assert ev.calls == []
+
+    dispatch_now(mgr)
+
     settled = mgr.get_job(repo(), TASK)
     assert settled.status == STATUS_COMPLETED
     assert settled.evaluation_id == "EVAL-AUTO"
+    assert settled.auto is True  # provenance survives the promotion
     assert ev.calls == [(repo(), TASK)]
 
 
+def test_a_promoted_job_keeps_its_acceptance_identity(tmp_path):
+    """One acceptance is one attempt, however long the policy holds it."""
+    clock = Clock()
+    executor = DeferredExecutor()
+    mgr = manager(tmp_path, clock=clock, executor=executor)
+    accepted = mgr.enqueue_if_absent(repo(), TASK)
+
+    clock.advance(4 * 3600)
+    promoted = dispatch_now(mgr)
+
+    assert promoted is not None
+    assert promoted.job_id == accepted.job_id
+    assert promoted.created_ts == accepted.created_ts
+    assert promoted.status == STATUS_QUEUED
+    assert promoted.defer_reason is None
+
+
 @pytest.mark.parametrize("second_call_is_absent_path", [True, False])
-def test_start_if_absent_refuses_a_task_with_a_completed_record(
+def test_enqueue_if_absent_refuses_a_task_with_a_completed_record(
     tmp_path, second_call_is_absent_path
 ):
     """A repeated completion signal must not mint a second report for one task.
@@ -382,11 +425,12 @@ def test_start_if_absent_refuses_a_task_with_a_completed_record(
     """
     ev = FakeEvaluator()
     mgr = manager(tmp_path, evaluator=ev)
-    first = mgr.start_job_if_absent(repo(), TASK)
+    first = mgr.enqueue_if_absent(repo(), TASK)
+    dispatch_now(mgr)
     assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
 
     if second_call_is_absent_path:
-        assert mgr.start_job_if_absent(repo(), TASK) is None
+        assert mgr.enqueue_if_absent(repo(), TASK) is None
         assert len(ev.calls) == 1  # no second model turn
         assert mgr.get_job(repo(), TASK).job_id == first.job_id
     else:
@@ -395,20 +439,24 @@ def test_start_if_absent_refuses_a_task_with_a_completed_record(
         assert len(ev.calls) == 2  # the manual path is still a fresh attempt
 
 
-def test_start_if_absent_refuses_while_a_job_is_in_flight(tmp_path):
+def test_enqueue_if_absent_refuses_while_a_job_is_held_or_in_flight(tmp_path):
     ev = FakeEvaluator()
     executor = DeferredExecutor()
     mgr = manager(tmp_path, evaluator=ev, executor=executor)
 
-    assert mgr.start_job_if_absent(repo(), TASK) is not None
-    assert mgr.start_job_if_absent(repo(), TASK) is None  # still queued
+    assert mgr.enqueue_if_absent(repo(), TASK) is not None
+    assert mgr.enqueue_if_absent(repo(), TASK) is None  # still held
+    assert executor.pending == []  # acceptance starts nothing
+
+    dispatch_now(mgr)
+    assert mgr.enqueue_if_absent(repo(), TASK) is None  # now queued
 
     assert len(executor.pending) == 1
     executor.run_all()
     assert len(ev.calls) == 1
 
 
-def test_start_if_absent_refuses_after_a_failed_record(tmp_path):
+def test_enqueue_if_absent_refuses_after_a_failed_record(tmp_path):
     """Recorded, not retried forever: the automatic path never re-attempts.
 
     A failed record still holds the task's slot, so the trigger will not spend a
@@ -417,17 +465,18 @@ def test_start_if_absent_refuses_after_a_failed_record(tmp_path):
     ev = FakeEvaluator(error=SemanticEvaluationError("backend down"))
     mgr = manager(tmp_path, evaluator=ev)
 
-    mgr.start_job_if_absent(repo(), TASK)
+    mgr.enqueue_if_absent(repo(), TASK)
+    dispatch_now(mgr)
     assert mgr.get_job(repo(), TASK).status == STATUS_FAILED
 
-    assert mgr.start_job_if_absent(repo(), TASK) is None
+    assert mgr.enqueue_if_absent(repo(), TASK) is None
     assert len(ev.calls) == 1
 
 
-def test_start_if_absent_sees_a_record_written_by_an_earlier_process(tmp_path):
+def test_enqueue_if_absent_sees_a_record_written_by_an_earlier_process(tmp_path):
     """The guard is the persisted record, so it survives a hub restart."""
     mgr = manager(tmp_path)
-    mgr.start_job_if_absent(repo(), TASK)
+    mgr.enqueue_if_absent(repo(), TASK)
 
     fresh_evaluator = FakeEvaluator()
     reborn = SemanticJobManager(
@@ -437,14 +486,102 @@ def test_start_if_absent_sees_a_record_written_by_an_earlier_process(tmp_path):
         executor=sync_executor,
     )
 
-    assert reborn.start_job_if_absent(repo(), TASK) is None
+    assert reborn.enqueue_if_absent(repo(), TASK) is None
     assert fresh_evaluator.calls == []
 
 
-def test_start_if_absent_rejects_an_unsafe_task_id(tmp_path):
+def test_enqueue_if_absent_rejects_an_unsafe_task_id(tmp_path):
     mgr = manager(tmp_path)
     with pytest.raises(ValueError):
-        mgr.start_job_if_absent(repo(), "../evil")
+        mgr.enqueue_if_absent(repo(), "../evil")
+
+
+def test_a_manual_start_overrides_a_held_job(tmp_path):
+    """The documented escape hatch: an operator asking now is never capacity-gated.
+
+    A held job is waiting on a policy over subscription usage. An operator who
+    clicks evaluate is not the production-side selection that policy exists to
+    remove, and a broken usage feed holds the queue forever — so ``start_job``
+    overwrites a ``deferred`` record exactly as it overwrites a terminal one, and
+    stamps the fresh attempt as operator-chosen.
+    """
+    ev = FakeEvaluator()
+    mgr = manager(tmp_path, evaluator=ev)
+    mgr.enqueue_if_absent(repo(), TASK)
+    assert mgr.get_job(repo(), TASK).auto is True
+
+    started = mgr.start_job(repo(), TASK)
+
+    assert started.status == STATUS_QUEUED
+    assert started.auto is False
+    assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
+    assert len(ev.calls) == 1
+
+
+# -- the deferred-queue seams -------------------------------------------------
+# Mechanism only: every one of these acts on the *same still-deferred attempt* or
+# does nothing, so the policy driving them can never clobber a record something
+# else already moved on.
+
+
+def test_holding_records_a_bounded_reason_and_does_not_rewrite_an_unchanged_one(tmp_path):
+    clock = Clock()
+    mgr = manager(tmp_path, clock=clock)
+    job = mgr.enqueue_if_absent(repo(), TASK)
+
+    clock.advance(60)
+    held = mgr.hold_deferred(job, "capacity")
+    assert held is not None and held.defer_reason == "capacity"
+    assert held.status == STATUS_DEFERRED
+    first_update = held.updated_ts
+
+    clock.advance(60)
+    assert mgr.hold_deferred(job, "capacity") is None  # unchanged: no write
+    assert mgr.get_job(repo(), TASK).updated_ts == first_update
+
+    changed = mgr.hold_deferred(job, "pacing")
+    assert changed is not None and changed.defer_reason == "pacing"
+
+
+def test_the_deferred_seams_refuse_a_record_that_moved_on(tmp_path):
+    """A manual attempt that superseded a held job must not be clobbered."""
+    executor = DeferredExecutor()
+    mgr = manager(tmp_path, executor=executor)
+    stale = mgr.enqueue_if_absent(repo(), TASK)
+    mgr.start_job(repo(), TASK)  # supersedes it with a fresh queued attempt
+
+    assert mgr.dispatch_deferred(stale) is None
+    assert mgr.hold_deferred(stale, "capacity") is None
+    assert mgr.fail_deferred(stale, "gone") is None
+    assert mgr.get_job(repo(), TASK).status == STATUS_QUEUED
+
+
+def test_an_unattributable_held_job_is_failed_rather_than_left_in_the_queue(tmp_path):
+    """A record whose repo is gone can never dispatch; it must not stay invisible."""
+    mgr = manager(tmp_path)
+    job = mgr.enqueue_if_absent(repo(), TASK)
+    orphan = replace(job, repo_path=None)
+
+    assert mgr.dispatch_deferred(orphan) is None  # refuses to guess a target
+
+    failed = mgr.fail_deferred(job, "no repo attribution")
+    assert failed is not None and failed.status == STATUS_FAILED
+    assert failed.error == "no repo attribution"
+    assert failed.ended_ts is not None
+    assert mgr.get_job(repo(), TASK).status == STATUS_FAILED
+
+
+def test_list_jobs_walks_every_record_once(tmp_path):
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo("alpha"), TASK)
+    mgr.enqueue_if_absent(repo("beta", Path("/repos/beta")), "2026-08-01-other")
+
+    listed = mgr.list_jobs()
+
+    assert {(j.repo_name, j.task_id, j.status) for j in listed} == {
+        ("alpha", TASK, STATUS_DEFERRED),
+        ("beta", "2026-08-01-other", STATUS_DEFERRED),
+    }
 
 
 # -- failure paths ------------------------------------------------------------
@@ -569,6 +706,32 @@ def test_reconcile_no_tree_is_noop(tmp_path):
     assert mgr.reconcile_orphans() == []
 
 
+def test_reconcile_leaves_a_held_job_in_the_queue_it_exists_to_survive(tmp_path):
+    """The deferred queue's whole value is surviving a restart.
+
+    A held job has no abandoned turn to clean up, so failing it at startup would
+    delete exactly the queue the deferral built — every waiting evaluation lost to
+    the first hub restart, which for a corpus that must not be selection-biased is
+    the silent gap automatic triggering exists to close.
+    """
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo(), TASK)
+    mgr.hold_deferred(mgr.get_job(repo(), TASK), "capacity")
+
+    ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-AFTER-RESTART"))
+    reborn = SemanticJobManager(
+        mgr._config, evaluator=ev, clock=Clock(), executor=sync_executor
+    )
+    assert reborn.reconcile_orphans() == []
+
+    held = reborn.get_job(repo(), TASK)
+    assert held.status == STATUS_DEFERRED
+    assert held.defer_reason == "capacity"
+    # And it is still dispatchable: the restart cost the queue nothing.
+    assert dispatch_now(reborn) is not None
+    assert reborn.get_job(repo(), TASK).evaluation_id == "EVAL-AFTER-RESTART"
+
+
 # -- corrupt record -----------------------------------------------------------
 
 
@@ -604,6 +767,34 @@ def test_completed_job_fires_one_push_linking_the_evaluation(tmp_path):
     assert note.title == "alpha: evaluation completed"
     assert note.group == "alpha"
     assert note.body == f"{TASK}\nreport EVAL-42"
+
+
+def test_an_automatic_completion_is_silent_but_an_automatic_failure_still_pushes(tmp_path):
+    """Routine mechanical success is noise; a shrinking corpus is not.
+
+    Every completed task now produces a semantic job, so pushing each success
+    would put a second, unactionable notification right behind the run-end push
+    that is actionable. A failure is the opposite: nothing else would ever tell
+    the operator a report silently did not happen.
+    """
+    notifier = RecordingNotifier()
+    mgr = manager(tmp_path, evaluator=FakeEvaluator(), notifier=notifier)
+    mgr.enqueue_if_absent(repo(), TASK)
+    dispatch_now(mgr)
+    assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
+    assert notifier.sent == []
+
+    failing = manager(
+        tmp_path,
+        evaluator=FakeEvaluator(error=SemanticEvaluationError("backend down")),
+        notifier=notifier,
+    )
+    other = "2026-08-02-second-task"
+    failing.enqueue_if_absent(repo(), other)
+    dispatch_now(failing, task_id=other)
+
+    assert failing.get_job(repo(), other).status == STATUS_FAILED
+    assert [n.title for n in notifier.sent] == ["alpha: evaluation failed"]
 
 
 def test_failed_job_fires_one_push_without_the_diagnostic(tmp_path):

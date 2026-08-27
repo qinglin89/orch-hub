@@ -48,6 +48,7 @@ from orch_hub.intake import (
 )
 from orch_hub.evaluation import EVIDENCE_NAME, SOURCE_ARCHIVED, EvaluationService
 from orch_hub.models import (
+    PROVIDER_CLAUDE,
     CommitInfo,
     IntakeDraft,
     ManagedRepo,
@@ -4885,6 +4886,45 @@ def test_the_app_wires_completion_triggered_evaluation(tmp_path):
 
     trigger = app.state.completion_trigger
     assert trigger.enabled is True
+
+
+def test_the_app_wires_the_dispatch_policy_onto_the_resident_tick(tmp_path):
+    """A held Layer 2 job is picked back up by nothing else.
+
+    Structural, like the trigger above: the dispatcher exists, it gates on the
+    Claude subscription (the provider the shipped Layer 2 backend spends
+    against), and the resident monitor drives its sweep — which is also what
+    resumes the queue after a restart, so no startup step owns that.
+    """
+    app = api.create_app(eval_config(tmp_path))
+
+    dispatcher = app.state.eval_dispatcher
+    assert dispatcher is not None
+    assert dispatcher._gate.provider == PROVIDER_CLAUDE
+    assert dispatcher.sweep in app.state.run_monitor._sweeps
+
+
+def test_the_dispatch_gate_reads_usage_without_ever_gating_run_control(tmp_path):
+    """Usage is display-only, so a broken feed must hold evaluation and nothing else."""
+    class BrokenUsage:
+        def provider_usage(self, provider):
+            raise OSError("usage store unreadable")
+
+        def get_usage(self):
+            raise OSError("usage store unreadable")
+
+        def request_claude_refresh(self):
+            return None
+
+        def claude_observer(self):
+            return lambda stdout: None
+
+    app = api.create_app(eval_config(tmp_path), usage_service=BrokenUsage())
+
+    # The gate degrades to deferral rather than raising into the caller...
+    assert app.state.eval_dispatcher._gate.check() == "usage-unknown"
+    # ...and one sweep over an empty queue is still a clean no-op.
+    assert app.state.eval_dispatcher.sweep() is None
 
 
 @pytest.mark.parametrize(

@@ -192,6 +192,84 @@ DEFAULT_EVAL_RETENTION = 20
 prune older ones on the next generation. Generous enough for trend analysis over
 a task's evaluation history, bounded enough to avoid unbounded growth."""
 
+EVAL_USAGE_CEILING_ENV = "ORCH_HUB_EVAL_USAGE_CEILING"
+"""Subscription-utilization ceiling above which an automatic Layer 2 turn waits.
+
+Cost is not what makes an automatic semantic evaluation risky; *contention* is.
+One Layer 2 turn is a bounded ``claude -p`` call, but it draws on the same
+subscription rate window a dev session needs, so a turn that fires while the
+operator is rationing the window spends the work budget on measuring the work.
+This is the observed used-percentage (0-100) at or above which the automatic
+dispatcher holds a job in the deferred queue instead of running it; below it,
+the turn is invisible against the window it shares.
+
+Compared against the *highest* currently-measured window of the evaluator's
+provider, so an exhausted weekly window holds a job even while the five-hour one
+is fresh. A malformed or out-of-range value fails loudly rather than silently
+picking a policy. Only the automatic path consults it: an operator asking for an
+evaluation now is not the production-side selection this gate exists to shape."""
+
+DEFAULT_EVAL_USAGE_CEILING = 80.0
+"""Default utilization ceiling for automatic Layer 2 dispatch, in percent.
+
+One Layer 2 turn measures ~32k input tokens against a window that absorbs
+several dev sessions of up to 200k context each — under 1% of the work it
+measures — so 20 points of headroom is roughly twenty times the turn's own cost.
+The ceiling is therefore not sized to make the turn *fit*; it is sized so the
+turn never *competes*: below 80% the operator has not started rationing, and
+above it measurement can wait for the rollover. Keeping it high also matters in
+the other direction — a low ceiling would hold every job until the window rolled
+and then hand the queue a whole backlog at once, recreating the herd the
+dispatch spacing exists to prevent."""
+
+EVAL_DISPATCH_SPACING_ENV = "ORCH_HUB_EVAL_DISPATCH_SPACING"
+"""Minimum seconds between two automatic Layer 2 turns (the rollover-herd guard).
+
+A ceiling plus a queue has a failure mode the ceiling alone does not: under
+sustained pressure the deferred queue accumulates, and the moment the window
+rolls every held job becomes dispatchable at once — spending the fresh window's
+opening capacity exactly when the operator comes back to work. Single-flight
+prevents double-spending one task, not a herd across tasks. The dispatcher
+therefore drains at most one held job per this interval, measured from the last
+turn that actually started (manual turns included — they consume the same
+window). Unset or blank means :data:`DEFAULT_EVAL_DISPATCH_SPACING`; ``0``
+drains as fast as the queue allows; a negative or non-integer value fails
+loudly."""
+
+DEFAULT_EVAL_DISPATCH_SPACING = 900
+"""Default spacing between automatic Layer 2 turns: 15 minutes.
+
+Drains a post-rollover backlog at four turns an hour — roughly four points of
+window budget an hour, a trickle against the fresh window rather than a burst.
+It is also longer than the usage collector's freshness horizon (300s), so the
+capacity read that admits the next turn already reflects the previous one
+instead of deciding on pre-dispatch figures. On an ordinary week completions
+arrive further apart than this, so the spacing binds only during the burst it
+exists for."""
+
+EVAL_QUEUE_MAX_AGE_ENV = "ORCH_HUB_EVAL_QUEUE_MAX_AGE"
+"""Seconds a job may sit in the deferred queue before it is surfaced as stalled.
+
+Deferral is meant to be temporary, and every reason it is not — an exhausted
+weekly window, a usage feed that stopped reporting, a ``claude`` binary that can
+no longer refresh it — looks identical from inside the queue: nothing happens,
+quietly, and the corpus stops growing. Past this age the dispatcher stops
+treating a held job as normal backpressure and says so. It changes no dispatch
+decision; it only bounds how long a stalled queue can stay invisible. Unset or
+blank means :data:`DEFAULT_EVAL_QUEUE_MAX_AGE`; ``0`` disables the bound; a
+negative or non-integer value fails loudly."""
+
+DEFAULT_EVAL_QUEUE_MAX_AGE = 21600
+"""Default deferred-queue age bound: six hours — one full five-hour window plus
+slack.
+
+A job that sat through an entire five-hour window without dispatching did not
+merely lose a busy afternoon: either the weekly window is exhausted or the usage
+signal itself is broken. The second is the likelier and worse failure, because
+unavailable usage defers *forever* by design, so the bound is set short enough to
+reveal it within a working day rather than after a week of silently missing
+reports."""
+
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 
@@ -237,6 +315,50 @@ def _parse_retention(raw: str | None) -> int:
             f"{EVAL_RETENTION_ENV} must be non-negative (0 disables), got {retention}"
         )
     return retention
+
+
+def _parse_percent(raw: str | None, *, default: float, env_name: str) -> float:
+    """Parse a 0-100 percentage env var: unset/blank is ``default``, bad is loud.
+
+    Mirrors :func:`_parse_retention`: a typo in a dispatch threshold must surface
+    at startup, because the quiet failure mode is a policy nobody chose — a
+    ceiling read as ``0`` would hold every automatic evaluation forever, and one
+    read as ``1000`` would disable the gate the operator asked for."""
+    value = (raw or "").strip()
+    if not value:
+        return default
+    try:
+        percent = float(value)
+    except ValueError:
+        raise ValueError(
+            f"{env_name} must be a number between 0 and 100, got {value!r}"
+        ) from None
+    if not 0.0 <= percent <= 100.0:
+        raise ValueError(f"{env_name} must be between 0 and 100, got {percent}")
+    return percent
+
+
+def _parse_seconds(raw: str | None, *, default: int, env_name: str) -> int:
+    """Parse a non-negative seconds env var: unset/blank is ``default``, bad is loud.
+
+    Same contract as :func:`_parse_retention` for the two duration thresholds
+    (dispatch spacing, deferred-queue age bound); ``0`` is a meaningful value for
+    both (no spacing / no age bound) and a negative one is a typo, not a policy."""
+    value = (raw or "").strip()
+    if not value:
+        return default
+    try:
+        seconds = int(value)
+    except ValueError:
+        raise ValueError(
+            f"{env_name} must be a non-negative integer number of seconds,"
+            f" got {value!r}"
+        ) from None
+    if seconds < 0:
+        raise ValueError(
+            f"{env_name} must be non-negative (0 disables), got {seconds}"
+        )
+    return seconds
 
 
 def _parse_port(raw: str | None) -> int:
@@ -378,6 +500,28 @@ class Config:
     is the cap. Only meaningful when evaluation is enabled.
     """
 
+    eval_usage_ceiling: float = DEFAULT_EVAL_USAGE_CEILING
+    """Utilization percent at or above which automatic Layer 2 defers.
+
+    Selected by ``ORCH_HUB_EVAL_USAGE_CEILING``. Read only by the automatic
+    dispatcher, against the evaluator provider's highest currently-measured
+    window; a manual evaluation ignores it entirely.
+    """
+
+    eval_dispatch_spacing: int = DEFAULT_EVAL_DISPATCH_SPACING
+    """Minimum seconds between two automatic Layer 2 turns (herd guard).
+
+    Selected by ``ORCH_HUB_EVAL_DISPATCH_SPACING``; ``0`` drains the deferred
+    queue as fast as capacity allows.
+    """
+
+    eval_queue_max_age: int = DEFAULT_EVAL_QUEUE_MAX_AGE
+    """Seconds after which a still-deferred Layer 2 job is surfaced as stalled.
+
+    Selected by ``ORCH_HUB_EVAL_QUEUE_MAX_AGE``; ``0`` disables the bound. It
+    affects visibility only, never a dispatch decision.
+    """
+
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
@@ -442,6 +586,21 @@ class Config:
             eval_model=(env.get(EVAL_MODEL_ENV) or "").strip() or DEFAULT_EVAL_MODEL,
             eval_effort=(env.get(EVAL_EFFORT_ENV) or "").strip() or DEFAULT_EVAL_EFFORT,
             eval_retention=_parse_retention(env.get(EVAL_RETENTION_ENV)),
+            eval_usage_ceiling=_parse_percent(
+                env.get(EVAL_USAGE_CEILING_ENV),
+                default=DEFAULT_EVAL_USAGE_CEILING,
+                env_name=EVAL_USAGE_CEILING_ENV,
+            ),
+            eval_dispatch_spacing=_parse_seconds(
+                env.get(EVAL_DISPATCH_SPACING_ENV),
+                default=DEFAULT_EVAL_DISPATCH_SPACING,
+                env_name=EVAL_DISPATCH_SPACING_ENV,
+            ),
+            eval_queue_max_age=_parse_seconds(
+                env.get(EVAL_QUEUE_MAX_AGE_ENV),
+                default=DEFAULT_EVAL_QUEUE_MAX_AGE,
+                env_name=EVAL_QUEUE_MAX_AGE_ENV,
+            ),
         )
 
     @property

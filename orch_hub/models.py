@@ -2260,9 +2260,15 @@ class SemanticJob:
     prior terminal one), so this is the *current* attempt's status, not a history.
 
     ``status`` is a semantic-job lifecycle label, deliberately distinct from task
-    frontmatter status, run overlay states, and intake status: ``queued`` (created,
-    not yet started) and ``running`` (the model turn is in flight) are transient;
-    ``completed`` and ``failed`` are terminal. ``backend``/``model``/
+    frontmatter status, run overlay states, and intake status: ``deferred``
+    (accepted, held out of the model turn by the automatic dispatch policy) is a
+    *waiting* state that no restart sweep may fail; ``queued`` (admitted, turn
+    about to start) and ``running`` (the model turn is in flight) are transient;
+    ``completed`` and ``failed`` are terminal. ``defer_reason`` is the bounded
+    machine reason a deferred job is still waiting (never operator prose), and
+    ``auto`` records whether this attempt was produced mechanically by the
+    completion trigger or asked for by an operator — the provenance that says
+    whether a report's existence was a choice. ``backend``/``model``/
     ``schema_version`` are the selected evaluator identity (the
     :class:`SemanticEvaluatorInfo` triple), stamped at creation so the
     queued/running UI shows which model is running before any report exists.
@@ -2283,6 +2289,8 @@ class SemanticJob:
     schema_version: str | None = None
     evaluation_id: str | None = None
     error: str | None = None
+    defer_reason: str | None = None
+    auto: bool = False
     created_ts: str | None = None
     updated_ts: str | None = None
     started_ts: str | None = None
@@ -2316,6 +2324,8 @@ class SemanticJob:
             "schema_version": self.schema_version,
             "evaluation_id": self.evaluation_id,
             "error": self.error,
+            "defer_reason": self.defer_reason,
+            "auto": self.auto,
             "created_ts": self.created_ts,
             "updated_ts": self.updated_ts,
             "started_ts": self.started_ts,

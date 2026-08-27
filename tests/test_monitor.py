@@ -1,7 +1,8 @@
 """Tests for the resident background run monitor.
 
 The monitor's whole job is to call ``RunManager.list_runs()`` on an interval so
-notifications fire without dashboard/API traffic. Cadence, lifecycle,
+notifications fire without dashboard/API traffic, plus any extra ``sweeps`` that
+need the hub's one resident tick. Cadence, lifecycle,
 idempotency, and failure-isolation are tested against a fake scanner (no real
 run state needed); two integration tests drive a real :class:`RunManager` to
 prove the existing notification path — including its per-``(run_id, seq)``
@@ -105,6 +106,57 @@ def test_stop_before_start_is_a_safe_no_op():
     monitor = RunMonitor(RecordingScanner(), interval=0.01)
     monitor.stop()  # must not raise
     assert not monitor.is_running
+
+
+def test_sweeps_run_on_the_same_tick_after_the_scan():
+    # A second kind of periodic work (the deferred-evaluation dispatch sweep)
+    # rides the one resident thread rather than growing another.
+    scanner = RecordingScanner()
+    order: list[str] = []
+    swept = threading.Event()
+
+    def sweep() -> None:
+        order.append("sweep")
+        swept.set()
+
+    original_list_runs = scanner.list_runs
+
+    def scan_and_record():
+        order.append("scan")
+        return original_list_runs()
+
+    scanner.list_runs = scan_and_record
+    monitor = RunMonitor(scanner, interval=0.01, sweeps=(sweep,))
+    monitor.start()
+    try:
+        assert swept.wait(1.0)
+    finally:
+        monitor.stop()
+    # Pushes depend on the run scan; a sweep is upkeep that can wait a tick.
+    assert order[:2] == ["scan", "sweep"]
+
+
+def test_one_failing_sweep_costs_neither_the_others_nor_the_loop():
+    scanner = RecordingScanner()
+    reached = threading.Event()
+    later_calls = []
+
+    def failing_sweep() -> None:
+        raise OSError("job store unreadable")
+
+    def later_sweep() -> None:
+        later_calls.append(True)
+        if len(later_calls) >= 2:
+            reached.set()
+
+    monitor = RunMonitor(
+        scanner, interval=0.01, sweeps=(failing_sweep, later_sweep)
+    )
+    monitor.start()
+    try:
+        assert reached.wait(1.0)  # ran after the failure, and again on a later tick
+    finally:
+        monitor.stop()
 
 
 def test_scan_failure_is_isolated_and_the_loop_survives():

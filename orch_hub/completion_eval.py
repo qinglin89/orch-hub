@@ -15,7 +15,12 @@ The two layers are dispatched differently because they cost differently:
   :class:`~orch_hub.semantic_jobs.SemanticJobManager` — a persisted job record,
   a single in-flight turn per task, a failure recorded rather than retried
   forever. Cost is not the constraint here; contention is: one L2 turn can land
-  inside the same subscription rate window a dev session needs.
+  inside the same subscription rate window a dev session needs. So enqueuing is
+  *acceptance*, not admission: the record lands ``deferred`` and the dispatch
+  policy (:mod:`orch_hub.eval_dispatch`) decides when the window can afford the
+  turn. This module asks for the first sweep immediately, off the lock, so an
+  uncontended completion still becomes a turn within milliseconds; the resident
+  monitor's sweep is what retries a queue the policy is holding.
 
 Accepting a completion is durable **before the hook returns**. The run manager
 settles an end permanently — ``ended_ts`` is persisted and ``_refresh``
@@ -36,7 +41,7 @@ Two gates and one guard:
   path) and ``Config.eval_auto`` is the trigger gate, so automatic evaluation
   can be switched off while manual generation stays available.
 - The task-level once-guard is
-  :meth:`~orch_hub.semantic_jobs.SemanticJobManager.start_job_if_absent`. The
+  :meth:`~orch_hub.semantic_jobs.SemanticJobManager.enqueue_if_absent`. The
   completion signal is per *run*, not per task: a task that reaches ``completed``
   without being archived is still launchable, and the close-out-only re-run that
   follows classifies ``completed`` again. The durable one-record-per-``(repo,
@@ -56,6 +61,7 @@ import threading
 from collections.abc import Callable
 
 from .config import Config
+from .eval_dispatch import DeferredDispatcher
 from .models import ManagedRepo, RunRecord
 from .semantic_jobs import SemanticJobManager
 from .static_metrics import StaticEvaluator
@@ -94,7 +100,8 @@ class CompletionEvaluationTrigger:
     ``Callable[[RunRecord], None]`` hook, so the run manager keeps no evaluation
     import and no evaluation policy — the same seam shape as the display-only
     usage-refresh hook. Collaborators are injectable for tests: ``static_evaluator``
-    is Layer 1, ``job_manager`` owns Layer 2's persisted job lifecycle, and
+    is Layer 1, ``job_manager`` owns Layer 2's persisted job lifecycle,
+    ``dispatcher`` owns when a queued Layer 2 turn may actually spend, and
     ``executor`` decides where the work runs.
     """
 
@@ -104,11 +111,13 @@ class CompletionEvaluationTrigger:
         *,
         static_evaluator: StaticEvaluator,
         job_manager: SemanticJobManager,
+        dispatcher: DeferredDispatcher,
         executor: CompletionExecutor = _thread_executor,
     ):
         self._config = config
         self._static = static_evaluator
         self._jobs = job_manager
+        self._dispatcher = dispatcher
         self._executor = executor
 
     @property
@@ -155,6 +164,14 @@ class CompletionEvaluationTrigger:
         job manager onto its own thread) may now overlap this Layer 1 build rather
         than following it. Both are read-only and unrelated; a redundant concurrent
         evidence build costs less than a completion that is never recorded.
+
+        The enqueued job lands ``deferred``, so a third step follows on the
+        executor: ask the dispatcher to sweep. Whether this task's turn may spend
+        now is a policy question over subscription usage — a file read that can
+        trigger a background refresh — and it has no business on the run manager's
+        lock. Asking here rather than waiting for the resident sweep is what keeps
+        the uncontended case immediate; the sweep is global, so it may well start a
+        different, older job than this one, which is the queue behaving correctly.
         """
         if not self.enabled:
             return
@@ -168,7 +185,29 @@ class CompletionEvaluationTrigger:
             return
         task_id = record.task_id
         self._enqueue_semantic(repo, task_id)
-        self._executor(lambda: self._run_static(repo, task_id))
+        self._executor(lambda: self._dispatch_and_measure(repo, task_id))
+
+    def _dispatch_and_measure(self, repo: ManagedRepo, task_id: str) -> None:
+        """The off-lock half: admit a Layer 2 turn if allowed, then build Layer 1.
+
+        One executor submission rather than two, because the two steps share a
+        thread happily and neither blocks: the sweep only *starts* a turn (the job
+        manager detaches it onto its own executor), so putting it first costs
+        Layer 1 nothing and lets the turn begin while the evidence build runs.
+
+        Each half is isolated from the other. A dispatch policy that cannot read
+        usage, or a job store that cannot be walked, must not cost the task its
+        free deterministic layer; a failing Layer 1 must not stop the queue.
+        """
+        try:
+            self._dispatcher.sweep()
+        except Exception as exc:  # noqa: BLE001 - isolation from run state
+            _log.warning(
+                "automatic semantic dispatch sweep failed (%s): %s",
+                type(exc).__name__,
+                exc,
+            )
+        self._run_static(repo, task_id)
 
     def _run_static(self, repo: ManagedRepo, task_id: str) -> None:
         """Generate the deterministic Layer 1 report off the lock; never raise.
@@ -204,12 +243,12 @@ class CompletionEvaluationTrigger:
     def _enqueue_semantic(self, repo: ManagedRepo, task_id: str) -> None:
         """Durably accept the completion as a Layer 2 job; never raise.
 
-        ``start_job_if_absent`` is both the single-flight guard and the
+        ``enqueue_if_absent`` is both the single-flight guard and the
         once-per-task guard (see its docstring): a second completion signal for the
         same task — the close-out-only re-run, a rescan, a hub restart — finds the
-        record and starts nothing. The job itself then runs asynchronously and
-        settles to ``completed``/``failed`` on its own; a failure there is a
-        recorded job outcome, not an exception here.
+        record and accepts nothing. The job then waits for the dispatch policy,
+        runs asynchronously, and settles to ``completed``/``failed`` on its own; a
+        failure there is a recorded job outcome, not an exception here.
 
         That same record is the only durable trace that the automatic path accepted
         this completion, which is why there is no startup replay to fall back on:
@@ -226,7 +265,7 @@ class CompletionEvaluationTrigger:
         Layer 2, not the hub's run control.
         """
         try:
-            job = self._jobs.start_job_if_absent(repo, task_id)
+            job = self._jobs.enqueue_if_absent(repo, task_id)
         except Exception as exc:  # noqa: BLE001 - isolation from run state
             _log.warning(
                 "automatic semantic job enqueue failed for %s/%s (%s): %s",
@@ -245,7 +284,7 @@ class CompletionEvaluationTrigger:
             )
             return
         _log.info(
-            "automatic semantic job %s queued for %s/%s",
+            "automatic semantic job %s accepted for %s/%s (awaiting dispatch)",
             job.job_id,
             repo.name,
             task_id,
