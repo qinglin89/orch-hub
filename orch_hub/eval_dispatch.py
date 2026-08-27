@@ -100,10 +100,10 @@ An operator surface has to fit on a phone, and the queue's pathological shapes
 are unbounded: a usage feed that died a week ago holds one row per completed task
 since, and ``failed`` records are terminal, so they accumulate for the life of the
 store. Capping the rows keeps the surface readable; keeping ``counts`` a full
-census keeps it honest, which is the half that actually matters here — the whole
-point of automatic evaluation is that the denominator is knowable, so a figure
-that quietly meant "the first twenty" would defeat the feature on its own
-dashboard. ``truncated`` says when the cap bit."""
+census keeps it honest, which is the half that actually matters here — a figure
+that quietly meant "the first twenty" would report a twenty-deep queue as calm,
+which is exactly the silence this surface exists to break. ``truncated`` says when
+the cap bit."""
 
 UNATTRIBUTABLE_REASON = (
     "semantic evaluation abandoned (deferred job carries no repo attribution)"
@@ -495,6 +495,19 @@ def queue_snapshot(
     Hiding the queue while the gate is closed would answer the question with the
     same silence that made it necessary. The gate state travels as
     ``auto_enabled`` instead, so the reader explains rather than omits.
+
+    ``counts`` is one entry per persisted *record* — and the store keeps one
+    record per ``(repo, task)``, holding that task's **latest** attempt. So the
+    census states the queue's attempt lifecycle and deliberately not how many
+    tasks carry a report: :meth:`SemanticJobManager.start_job` overwrites a
+    terminal record for a manual re-run while the completed evaluation it pointed
+    at survives in the task's retained history, so a report followed by a failed
+    retry counts here as ``failed`` (correctly — the queue is what this reports
+    on), and a task completed before automatic evaluation existed contributes no
+    record at all. Report existence has its own authorities (the evaluation tree,
+    the publication feed) that no attempt can overwrite. Consumers must label
+    these figures as the attempt lifecycle they are; presenting ``completed`` as
+    an evaluated-corpus denominator would be wrong in both directions.
 
     ``overdue`` counts held jobs past ``eval_queue_max_age`` — the same jobs, by
     the same rule, that :meth:`DeferredDispatcher._log_stalled` warns about, so the

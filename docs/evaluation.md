@@ -279,11 +279,21 @@ blocked by a stalled evaluation queue; only the measuring has stopped.
 
 It shows:
 
-- **The census.** How many tasks carry a completed report, how many are waiting,
-  how many failed. These counts are over *every* persisted job record and are
-  never truncated — the whole point of evaluating every completed task is that
-  the denominator is knowable, so a figure that quietly meant "the first twenty"
-  would defeat the feature on its own dashboard.
+- **The census** — *the latest attempt per task*: how many completed, how many
+  are waiting, how many failed. These counts are over *every* persisted job
+  record and are never truncated; a figure that quietly meant "the first twenty"
+  would report a twenty-deep queue as calm, which is the silence this section
+  exists to break.
+
+  It counts **attempts, not reports**, and the line says so. The store keeps one
+  record per task holding its latest attempt, and a manual re-run overwrites a
+  terminal one — so a task whose report completed and whose later retry failed
+  counts here as `failed`, while that first report is still there in the task's
+  evaluation history. That is the right answer for a queue view: the retry did
+  fail, and this section reports on the automatic path, not on the corpus. For
+  what a task actually carries, open its evaluation view or the
+  [report feed](#the-global-report-feed); a task completed before automatic
+  evaluation existed has no record here at all.
 - **The outstanding jobs**, oldest first: which task, which repo, how long it has
   waited, and — for a held job — the reason in prose (`capacity`,
   `usage-unknown`, `pacing`). Each row links to that task's evaluation view. The
@@ -750,7 +760,7 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
-| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census plus the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, and whether the trigger gate is open. Read-only — it never dispatches. `404` when disabled. |
+| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, and whether the trigger gate is open. Read-only — it never dispatches. `404` when disabled. |
 | `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
 | `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | One published artifact's [byte-exact persisted content](#verifying-one-artifact-byte-for-byte) for independent digest verification; pruned answers `410`. |

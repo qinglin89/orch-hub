@@ -1691,9 +1691,14 @@ def create_app(
         leaving ``GET /api/evaluation`` the single availability answer.
 
         Shape: ``{"enabled": true, **EvaluationQueueSnapshot}`` — ``counts`` is a
-        complete census by status, while ``entries`` is capped
-        (``truncated`` says when) so one pathological queue cannot return an
-        unbounded page.
+        complete census by status over every persisted record, while ``entries``
+        is capped (``truncated`` says when) so one pathological queue cannot
+        return an unbounded page. The census is over *attempts*, one record per
+        task holding its latest one, not over tasks carrying a report: a manual
+        re-run overwrites a completed record while its report survives in the
+        task's evaluation history (see :class:`~orch_hub.models.EvaluationQueueSnapshot`).
+        A consumer wanting report existence reads the evaluation tree or the
+        report feed below.
         """
         require_evaluation_enabled()
         return {

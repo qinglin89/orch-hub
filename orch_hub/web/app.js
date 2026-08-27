@@ -6190,19 +6190,34 @@
     );
   }
 
-  // The one-line census: the corpus figure first (how many tasks actually carry a
-  // report), then what is outstanding. Zero counts are dropped from the sentence
-  // but never from the payload — a queue with nothing in it should read as calm,
-  // while "0 failed" as a permanent fixture teaches the eye to skip the line that
-  // matters when it stops being 0.
+  // The one-line census, in the same status vocabulary the rows below use, and
+  // labelled with the population it is actually over: one job record per task,
+  // holding that task's LATEST attempt.
+  //
+  // That is deliberately not "how many tasks carry a report", and the two really
+  // do diverge: a manual re-run overwrites the task's terminal record
+  // (SemanticJobManager.start_job) while the completed evaluation that record
+  // pointed at stays in the task's retained evaluation history — so a successful
+  // report followed by a failed retry belongs on this line as `failed`. It is the
+  // queue that is being reported on, not the size of the corpus. Reading it as a
+  // corpus denominator would also be wrong in the other direction: a task
+  // completed before automatic evaluation existed has no record here at all. What
+  // a task actually carries is answered by its evaluation view and by the report
+  // feed, neither of which an attempt can overwrite.
+  //
+  // Zero counts are dropped from the sentence but never from the payload — a queue
+  // with nothing in it should read as calm, while "0 failed" as a permanent
+  // fixture teaches the eye to skip the line that matters when it stops being 0.
+  // `completed` is the exception and stays at 0: it is the scale the other two are
+  // read against, so dropping it would read as a section that forgot to look.
   function evalQueueSummary(counts) {
     const c = counts || {};
     const waiting = (c.deferred || 0) + (c.queued || 0) + (c.running || 0);
-    const parts = [(c.completed || 0) + " evaluated"];
+    const parts = [(c.completed || 0) + " completed"];
     if (waiting) parts.push(waiting + " waiting");
     const failed = (c.failed || 0) + (c.error || 0);
     if (failed) parts.push(failed + " failed");
-    return parts.join(" · ");
+    return "Latest attempt per task: " + parts.join(" · ");
   }
 
   // The Evaluation queue section. Deliberately NO live region on the notes: the

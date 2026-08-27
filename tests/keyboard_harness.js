@@ -4354,8 +4354,8 @@ async function scenarioEvaluationQueue() {
   );
   eq("evalqueue: a disabled subsystem leaves the rest of the overview alone", reposReady(), "1/1");
 
-  // ---- 2) enabled and calm: the section states the corpus figure and says so
-  // plainly when nothing is waiting.
+  // ---- 2) enabled and calm: the section states the census and says so plainly
+  // when nothing is waiting.
   route("GET", "/api/evaluation/queue", queuePayload({
     counts: { deferred: 0, queued: 0, running: 0, completed: 7, failed: 0, error: 0 },
   }));
@@ -4369,7 +4369,11 @@ async function scenarioEvaluationQueue() {
     doc.querySelector(".overview-panels .overview-evalq") === null,
     "the queue section is nested inside .overview-panels"
   );
-  eq("evalqueue: the corpus figure leads the summary", textOf(".evq-summary"), "7 evaluated");
+  // The summary names the population it is over. It counts job records — one per
+  // task, its LATEST attempt — which is not the same set as "tasks carrying a
+  // report" (case 7 pins why), so the line must not read as a corpus denominator.
+  eq("evalqueue: the summary is labelled with the population it counts",
+     textOf(".evq-summary"), "Latest attempt per task: 7 completed");
   check(
     "evalqueue: a calm queue says so rather than showing an empty list",
     (section().textContent || "").indexOf("Nothing waiting") !== -1,
@@ -4390,7 +4394,7 @@ async function scenarioEvaluationQueue() {
   }));
   await navigate("#/overview");
   eq("evalqueue: the summary counts what is waiting and what failed",
-     textOf(".evq-summary"), "7 evaluated · 2 waiting · 1 failed");
+     textOf(".evq-summary"), "Latest attempt per task: 7 completed · 2 waiting · 1 failed");
   eq("evalqueue: one row per outstanding job", doc.querySelectorAll("#view .evq-row").length, 3);
   var firstRow = doc.querySelectorAll("#view .evq-row")[0];
   check(
@@ -4480,7 +4484,30 @@ async function scenarioEvaluationQueue() {
     textOf(".evq-summary")
   );
 
-  // ---- 7) a failed read is an unknown queue, never an empty one.
+  // ---- 7) attempts, not reports. The hub keeps ONE job record per task holding
+  // its latest attempt, and a manual re-run overwrites a completed one while the
+  // report it produced stays in that task's evaluation history. So this payload —
+  // a task whose report completed and whose retry then failed — is a real shape,
+  // and `completed: 0` beside a task that demonstrably carries a report is why
+  // this line may never be labelled as an evaluated-corpus denominator: it would
+  // shrink and regrow with retry state. (The hub-side pin on the same divergence:
+  // tests/test_eval_dispatch.py::test_a_report_outlives_the_record_that_produced_it.)
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 0, queued: 0, running: 0, completed: 0, failed: 1, error: 0 },
+    entries: [{ job: queueJob({ job_id: "job-r", status: "failed", defer_reason: null,
+                                error: "claude backend exited 1" }),
+                age_seconds: 3600, overdue: false }],
+  }));
+  await navigate("#/overview");
+  eq("evalqueue: a failed retry counts as failed, with completed stated at zero",
+     textOf(".evq-summary"), "Latest attempt per task: 0 completed · 1 failed");
+  check(
+    "evalqueue: the summary never claims tasks are 'evaluated'",
+    (section().textContent || "").indexOf("evaluated") === -1,
+    section().textContent
+  );
+
+  // ---- 8) a failed read is an unknown queue, never an empty one.
   routeError("GET", "/api/evaluation/queue", 500, { detail: "job store unreadable" });
   await navigate("#/overview");
   check(

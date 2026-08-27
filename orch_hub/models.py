@@ -2383,11 +2383,26 @@ class EvaluationQueueSnapshot:
     countable.
 
     ``counts`` is a **complete census** by job status over every persisted
-    record, never capped, so the denominator is always honest even when
-    ``entries`` is truncated. Every known status is present (zero-valued when
-    unseen) so a reader can render a stable set of figures, and an unrecognized
-    status from a hand-edited record is counted under its own key rather than
-    silently dropped.
+    record, never capped, so a truncated ``entries`` page can never make the
+    queue look shorter than it is. Every known status is present (zero-valued
+    when unseen) so a reader can render a stable set of figures, and an
+    unrecognized status from a hand-edited record is counted under its own key
+    rather than silently dropped.
+
+    What it counts is **records** — one per ``(repo, task)``, each holding that
+    task's *latest* attempt — and deliberately not "how many tasks carry a
+    report". The two diverge by design:
+    :meth:`~orch_hub.semantic_jobs.SemanticJobManager.start_job` overwrites a
+    task's terminal record for a manual re-run, while the completed evaluation
+    that record pointed at stays in the task's retained evaluation history. So a
+    successful report followed by a failed retry counts here as ``failed``, and
+    correctly — this is the state of the queue, not the size of the corpus. It
+    would understate a corpus in the other direction too: a task completed before
+    automatic evaluation existed has no record here at all. Report existence is
+    answered by the evaluation tree and the publication feed
+    (:mod:`orch_hub.report_catalog`), neither of which an attempt overwrites; a
+    reader of this shape must label its figures as the attempt lifecycle they
+    are.
 
     ``entries`` carries the jobs an operator might act on — everything except
     ``completed``, which is the healthy outcome the counts already report —

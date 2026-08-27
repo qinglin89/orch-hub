@@ -11,9 +11,12 @@ bounded machine reason it is still waiting, an unattributable record failed
 rather than left resident, and the queue-age bound warning once per job rather
 than once per sweep. Plus the two switches, checked against the durable queue a
 restart inherits: a closed subsystem or trigger gate holds every accepted record
-untouched, and reopening both drains it with no recovery step. Every usage
-snapshot is synthetic; nothing here reads the operator's real subscription data
-or spends a model turn.
+untouched, and reopening both drains it with no recovery step. Then the operator
+view ``queue_snapshot`` folds over: a complete census the row cap never shrinks,
+the two-group order, the deferred-only overdue flag, a read that moves nothing —
+and what the census is *not*, pinned from a real completed-then-failed retry.
+Every usage snapshot is synthetic; nothing here reads the operator's real
+subscription data or spends a model turn.
 """
 
 from __future__ import annotations
@@ -26,6 +29,14 @@ from pathlib import Path
 import pytest
 
 from orch_hub.config import Config
+from orch_hub.evaluation import EvaluationService
+from orch_hub.semantic import (
+    SEMANTIC_END,
+    SEMANTIC_START,
+    SemanticEvaluationError,
+    SemanticEvaluator,
+)
+from orch_hub.subprocess_utils import CommandResult
 from orch_hub.eval_dispatch import (
     REASON_CAPACITY,
     REASON_PACING,
@@ -148,6 +159,54 @@ class FakeEvaluator:
     def evaluate(self, r: ManagedRepo, task_id: str) -> SemanticReport:
         self.calls.append((r, task_id))
         return mk_report(f"EVAL-{task_id}")
+
+
+class FlippingBackend:
+    """A real semantic backend seam that succeeds, then fails when told to.
+
+    The two-attempt shape one test needs: a first turn that produces a genuine
+    persisted report, and a retry that fails the way a broken CLI does. Only the
+    ``(info, evaluate, doctor)`` seam, so the evaluation/static/persistence chain
+    above it is the real one.
+    """
+
+    def __init__(self):
+        self.fail = False
+
+    @property
+    def info(self) -> SemanticEvaluatorInfo:
+        return SemanticEvaluatorInfo(
+            backend="claude-cli", model="fake-model", schema_version="1"
+        )
+
+    def evaluate(self, prompt: str, r: ManagedRepo) -> str:
+        if self.fail:
+            raise SemanticEvaluationError("claude backend exited 1")
+        body = json.dumps(
+            {
+                "summary": "clean handoff",
+                "confidence": 0.8,
+                "scores": [
+                    {
+                        "dimension": "handoff_completeness",
+                        "score": 0.9,
+                        "confidence": 0.8,
+                        "rationale": "log complete",
+                    }
+                ],
+                "findings": [],
+                "improvements": [],
+            }
+        )
+        return f"{SEMANTIC_START}\n{body}\n{SEMANTIC_END}"
+
+    def doctor(self):  # pragma: no cover - not exercised here
+        raise NotImplementedError
+
+
+def _git_unavailable(args, **kwargs) -> CommandResult:
+    """No git in the fixture tree; the pack degrades to best-effort, as designed."""
+    return CommandResult(tuple(str(a) for a in args), 128, "", "")
 
 
 def sync_executor(run) -> None:
@@ -720,6 +779,12 @@ def test_an_admitted_manual_turn_paces_the_queue_before_it_starts(tmp_path):
 
 
 # -- the operator view --------------------------------------------------------
+#
+# `queue_snapshot`'s projection. Most of it runs on hand-built records, since the
+# fold is pure; the last test drives the real manager and evaluator instead,
+# because what it pins is a divergence only the real overwrite produces — the
+# census counts each task's latest *attempt*, which is not the set of tasks
+# carrying a report.
 
 
 def job(
@@ -768,7 +833,7 @@ def test_the_census_counts_every_status_including_the_zeroes(tmp_path):
 
 
 def test_an_unknown_status_is_counted_rather_than_dropped(tmp_path):
-    """A hand-edited record must not shrink the denominator silently."""
+    """A hand-edited record must not shrink the census silently."""
     snap = queue_snapshot(config(tmp_path), [job("a", "improvised")], now=NOW)
 
     assert snap.counts["improvised"] == 1
@@ -920,8 +985,8 @@ def test_the_stalled_population_matches_the_dispatchers_own_warning(tmp_path):
 
 
 def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
-    """The cap bounds the page, never the census — a truncated denominator would
-    defeat the whole point of a corpus with a knowable one."""
+    """The cap bounds the page, never the census — a count that quietly meant "the
+    first twenty" would report a twenty-deep queue as calm."""
     records = [
         job(f"t{i:02d}", STATUS_DEFERRED, created=NOW - dt.timedelta(days=1, seconds=i))
         for i in range(5)
@@ -986,3 +1051,77 @@ def test_the_snapshot_reads_the_store_without_moving_it(tmp_path):
     assert [e.job.status for e in snap.entries] == [STATUS_DEFERRED]
     assert path.read_bytes() == before
     assert evaluator.calls == []
+
+
+def test_a_report_outlives_the_record_that_produced_it(tmp_path):
+    """The census counts attempts, not reports, and the two really do diverge.
+
+    One real evaluator, two attempts: the first completes and persists a report,
+    then a manual retry hits a failing backend. The task's single job record is
+    overwritten (``start_job`` does that deliberately — an operator asking again
+    is a fresh attempt), so the census reads ``0 completed · 1 failed`` while the
+    first attempt's ``semantic_report.json`` is still sitting in that task's
+    retained evaluation history, reachable from its evaluation view and, once the
+    task is archived, from the report feed.
+
+    Both facts are correct and they are about different things: the queue's latest
+    attempt failed, and the corpus holds a report for this task. Reading the
+    ``completed`` figure as "tasks carrying a report" conflates them and makes the
+    displayed number shrink and regrow with retry state, which is why nothing in
+    the payload, the docstrings, or the dashboard label claims it — see
+    :func:`orch_hub.eval_dispatch.queue_snapshot`. This test is the pin on that
+    separation, from the real overwrite rather than a hand-built record.
+    """
+    cfg = config(tmp_path)
+    target = tmp_path / "repos" / "alpha"
+    (target / ".ai-tasks").mkdir(parents=True)
+    (target / ".ai-tasks" / f"{TASK}.md").write_text(
+        f"---\nid: {TASK}\nstatus: in_progress\nsession-est: 1/2\nblockers: []\n---\n\n"
+        "# Census honesty\n\n## Goal\ngo\n\n## Scope\n- x\n\n## Acceptance\n- y\n\n"
+        "## Session log\n\n### 2026-08-09 / sid-a / (pending → in_progress)\n"
+        "- Done: work\n- Next: more\n- Open: none\n",
+        encoding="utf-8",
+    )
+    (target / ".ai-tasks" / "index.md").write_text("# Active tasks\n", encoding="utf-8")
+    target_repo = ManagedRepo(
+        name="alpha", path=target, manifest=target / ".ai-deploy-manifest.json"
+    )
+    clock = Clock()
+    backend = FlippingBackend()
+    service = EvaluationService(cfg, git_runner=_git_unavailable, clock=clock)
+    jobs = SemanticJobManager(
+        cfg,
+        evaluator=SemanticEvaluator(
+            cfg, evaluation_service=service, backend=backend, clock=clock
+        ),
+        clock=clock,
+        executor=sync_executor,
+    )
+
+    jobs.start_job(target_repo, TASK)
+    completed = jobs.get_job(target_repo, TASK)
+    assert completed.status == STATUS_COMPLETED
+    report = (
+        cfg.data_dir
+        / "evaluations"
+        / "alpha"
+        / TASK
+        / completed.evaluation_id
+        / "semantic_report.json"
+    )
+    assert report.is_file()
+
+    backend.fail = True
+    clock.advance(3600)
+    jobs.start_job(target_repo, TASK)
+    retried = jobs.get_job(target_repo, TASK)
+
+    assert retried.status == STATUS_FAILED
+    # One record per task, so the completed attempt is gone from the store...
+    snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
+    assert snap.counts[STATUS_COMPLETED] == 0
+    assert snap.counts[STATUS_FAILED] == 1
+    assert [e.job.status for e in snap.entries] == [STATUS_FAILED]
+    # ...while the report that attempt produced is untouched. The failed retry's
+    # cleanup removes only its own reserved dir, never the task's history.
+    assert report.is_file()
