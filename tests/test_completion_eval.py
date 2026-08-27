@@ -47,10 +47,12 @@ from orch_hub.semantic import (
     SemanticEvaluator,
 )
 from orch_hub.semantic_jobs import (
+    SKIP_RUN_OPT_OUT,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
     STATUS_FAILED,
     STATUS_QUEUED,
+    STATUS_SKIPPED,
     SemanticJobManager,
 )
 from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
@@ -87,6 +89,7 @@ def completed_record(
     repo_path: Path | None = REPO_PATH,
     task_id: str = TASK,
     repo_name: str = "alpha",
+    auto_semantic_eval: bool = True,
 ) -> RunRecord:
     """A run record as the manager hands it to the hook: ended, task attributed."""
     return RunRecord(
@@ -97,6 +100,7 @@ def completed_record(
         started_ts=FIXED_TS.isoformat(),
         ended_ts=FIXED_TS.isoformat(),
         exit_code=0,
+        auto_semantic_eval=auto_semantic_eval,
     )
 
 
@@ -122,10 +126,17 @@ class FakeStatic:
 
 
 class FakeJobs:
-    """Stands in for :class:`SemanticJobManager`: the ``enqueue_if_absent`` seam."""
+    """Stands in for :class:`SemanticJobManager`: the two acceptance seams.
+
+    ``calls`` records enqueues and ``skips`` records the opt-out path, kept apart
+    so a test can state which of the two durable records a completion produced —
+    they are mutually exclusive per completion and the whole point of the opt-out
+    is that neither is an absence.
+    """
 
     def __init__(self, *, error: Exception | None = None, already_recorded: bool = False):
         self.calls: list[tuple[ManagedRepo, str]] = []
+        self.skips: list[tuple[ManagedRepo, str, str]] = []
         self._error = error
         self._already_recorded = already_recorded
 
@@ -141,6 +152,24 @@ class FakeJobs:
             repo_path=r.path,
             task_id=task_id,
             status=STATUS_DEFERRED,
+            auto=True,
+        )
+
+    def skip_if_absent(
+        self, r: ManagedRepo, task_id: str, reason: str
+    ) -> SemanticJob | None:
+        self.skips.append((r, task_id, reason))
+        if self._error is not None:
+            raise self._error
+        if self._already_recorded:
+            return None
+        return SemanticJob(
+            job_id="20260809T030000Z",
+            repo_name=r.name,
+            repo_path=r.path,
+            task_id=task_id,
+            status=STATUS_SKIPPED,
+            skip_reason=reason,
             auto=True,
         )
 
@@ -365,6 +394,93 @@ def test_a_task_that_already_has_a_job_record_enqueues_no_second_turn(tmp_path):
     assert len(jobs.calls) == 2  # asked twice
     # Layer 1 is never skipped: it makes no model call, so a repeated completion
     # signal costs nothing and the deterministic layer stays complete.
+    assert len(static.calls) == 2
+
+
+# -- the per-run Layer 2 opt-out ----------------------------------------------
+#
+# One boolean chosen at launch, hub-only, default on. It is admissible only
+# because the skip it produces is a *record*: an opt-out that left nothing behind
+# would re-open, at production time, the same selection automatic evaluation
+# exists to close — and skips do not thin a corpus evenly, they cluster on the
+# expensive, remediation-heavy tail.
+
+
+def test_an_opted_out_run_records_a_skip_instead_of_enqueueing(tmp_path):
+    dispatcher = FakeDispatcher()
+    trig, static, jobs = trigger(tmp_path, dispatcher=dispatcher)
+
+    trig.on_task_completed(completed_record(auto_semantic_eval=False))
+
+    assert jobs.calls == []  # no Layer 2 turn is owed
+    assert [(r.name, t, reason) for r, t, reason in jobs.skips] == [
+        ("alpha", TASK, SKIP_RUN_OPT_OUT)
+    ]
+    # Layer 1 is never skipped: it makes no model call, so declining it would save
+    # nothing and forfeit the whole deterministic layer.
+    assert [(r.name, t) for r, t in static.calls] == [("alpha", TASK)]
+    # The queue is global, so a completion that added nothing to it still frees
+    # capacity for the jobs already waiting.
+    assert dispatcher.sweeps == 1
+
+
+def test_the_skip_is_recorded_before_the_hook_returns(tmp_path):
+    """Same acceptance contract as an enqueue: the completion signal is one-shot.
+
+    A skip that were only *intended* would be indistinguishable, forever after,
+    from a task the trigger never saw — which is the difference between measuring
+    less on purpose and a corpus that cannot state its own denominator.
+    """
+    executor = DeferredExecutor()
+    trig, static, jobs = trigger(tmp_path, executor=executor)
+
+    trig.on_task_completed(completed_record(auto_semantic_eval=False))
+
+    assert len(jobs.skips) == 1  # durable, inline
+    assert static.calls == []  # the slow layer still went to the executor
+    executor.run_all()
+    assert len(static.calls) == 1
+
+
+def test_a_record_with_no_choice_recorded_evaluates(tmp_path):
+    """Default on, including for a run record written before the field existed.
+
+    ``RunRecord`` defaults the field to true and the loader reads an absent one as
+    true, so the pre-field cohort keeps its automatic evaluation instead of being
+    excluded from the corpus by a change nobody made a decision about.
+    """
+    trig, _, jobs = trigger(tmp_path)
+
+    trig.on_task_completed(RunRecord(
+        run_id="20260809T030000Z-alpha-legacy",
+        repo_name="alpha",
+        repo_path=REPO_PATH,
+        task_id=TASK,
+        ended_ts=FIXED_TS.isoformat(),
+    ))
+
+    assert len(jobs.calls) == 1 and jobs.skips == []
+
+
+def test_a_failing_skip_record_costs_only_the_skip(tmp_path):
+    """Isolated exactly like the enqueue path: a broken job store never reaches run state."""
+    jobs = FakeJobs(error=OSError("job store unwritable"))
+    trig, static, _ = trigger(tmp_path, jobs=jobs)
+
+    trig.on_task_completed(completed_record(auto_semantic_eval=False))  # must not raise
+
+    assert len(jobs.skips) == 1
+    assert len(static.calls) == 1
+
+
+def test_an_already_recorded_task_is_not_re_skipped(tmp_path):
+    """The once-per-task guard is the job manager's; the trigger just obeys it."""
+    trig, static, jobs = trigger(tmp_path, jobs=FakeJobs(already_recorded=True))
+
+    trig.on_task_completed(completed_record(auto_semantic_eval=False))
+    trig.on_task_completed(completed_record(auto_semantic_eval=False))
+
+    assert len(jobs.skips) == 2  # asked twice, accepted neither time
     assert len(static.calls) == 2
 
 
@@ -631,6 +747,64 @@ def test_a_second_completed_run_of_the_same_task_spends_no_second_model_turn(tmp
     stored = service.list_evaluations(target, TASK)
     assert sum(1 for s in stored if SEMANTIC_REPORT_NAME in s.artifacts) == 1
     assert sum(1 for s in stored if SEMANTIC_REPORT_NAME not in s.artifacts) == 2
+
+
+def test_a_run_launched_with_the_opt_out_gets_layer_1_and_a_recorded_skip(tmp_path):
+    """End to end, through the real manager: no model turn, and no silent absence."""
+    cfg, service, jobs, manager, spawner = _wire(tmp_path)
+    target = _write_repo(tmp_path)
+
+    manager.start_run(target, TASK, auto_semantic_eval=False)
+    _write_orch_log(target)
+    spawner.procs[0].returncode = 0
+    assert manager.list_runs()[0].state == "completed"
+
+    job = jobs.get_job(target, TASK)
+    assert job.status == STATUS_SKIPPED
+    assert job.skip_reason == SKIP_RUN_OPT_OUT
+    assert job.evaluation_id is None
+    # Layer 1 ran regardless, and no semantic report exists anywhere for this task.
+    stored = service.list_evaluations(target, TASK)
+    assert len(stored) == 1
+    assert set(stored[0].artifacts) == {EVIDENCE_NAME, STATIC_METRICS_NAME}
+
+
+@pytest.mark.parametrize("first_run_evaluates", [True, False])
+def test_the_run_that_completes_the_task_decides_and_a_later_one_cannot_undo_it(
+    tmp_path, first_run_evaluates
+):
+    """Multi-run disagreement, settled by the record rather than by precedence rules.
+
+    A task can complete more than once (it stays launchable until archived, and the
+    close-out-only re-run classifies ``completed`` again), so two runs of one task
+    can carry opposite choices. Whichever completing run writes the record decides,
+    in both directions — and a run that does *not* complete the task never reaches
+    the trigger at all, which is why unchecking the box on session 1 of a
+    three-session task decides nothing.
+    """
+    cfg, service, jobs, manager, spawner = _wire(tmp_path)
+    target = _write_repo(tmp_path)
+
+    manager.start_run(target, TASK, auto_semantic_eval=first_run_evaluates)
+    _write_orch_log(target)
+    spawner.procs[0].returncode = 0
+    manager.list_runs()
+    decided = jobs.get_job(target, TASK)
+
+    # The second completing run disagrees with the first.
+    manager.start_run(target, TASK, auto_semantic_eval=not first_run_evaluates)
+    spawner.procs[1].returncode = 0
+    assert [s.state for s in manager.list_runs()] == ["completed", "completed"]
+
+    settled = jobs.get_job(target, TASK)
+    assert settled.job_id == decided.job_id
+    assert settled.status == (STATUS_COMPLETED if first_run_evaluates else STATUS_SKIPPED)
+    # Exactly one semantic report if the first run wanted one, none if it did not.
+    reports = [
+        s for s in service.list_evaluations(target, TASK)
+        if SEMANTIC_REPORT_NAME in s.artifacts
+    ]
+    assert len(reports) == (1 if first_run_evaluates else 0)
 
 
 def test_a_completion_survives_a_hub_that_stops_before_the_evaluation_runs(tmp_path):

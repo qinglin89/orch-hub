@@ -498,6 +498,7 @@ class RunManager:
         *,
         extra_args: Sequence[str] = (),
         acknowledge_blocked: bool = False,
+        auto_semantic_eval: bool = True,
     ) -> RunRecord:
         """Gate, spawn, and record one orchestrator run for ``repo``/``task_id``.
 
@@ -506,6 +507,15 @@ class RunManager:
         task inventory (frontmatter-authoritative status), then the full
         readiness checker. ``extra_args`` are appended to the orchestrator
         argv (e.g. ``--plan-gate``, ``--backend cc-codex``).
+
+        ``auto_semantic_eval`` is hub-only and is **not** one of them: it never
+        reaches the orchestrator, which parses argv strictly and would abort the
+        launch on an unknown flag. It is persisted on the run record for the
+        completion trigger to read back (:mod:`orch_hub.completion_eval`), exactly
+        the way ``task_status`` is persisted for later readers — false means a
+        completion this run produces records a skipped Layer 2 instead of
+        enqueueing one. Default true, and absent-reads-as-true on load, so every
+        record written before the field existed still evaluates.
 
         Admission comes first for a reason: a confirming intake writes
         ``.ai-tasks/``, so readiness would often refuse the launch with a
@@ -574,6 +584,7 @@ class RunManager:
                 argv=argv,
                 pid=proc.pid,
                 started_ts=started_ts,
+                auto_semantic_eval=auto_semantic_eval,
             )
             _write_record(run_dir, record)
             append_event(
@@ -1604,6 +1615,10 @@ def _write_record(run_dir: Path, record: RunRecord) -> None:
         "started_ts": record.started_ts,
         "ended_ts": record.ended_ts,
         "exit_code": record.exit_code,
+        # The launch-time Layer 2 opt-out, read back by the completion trigger.
+        # Always written, so a record from a hub with this field says what the
+        # operator chose rather than falling back to the default.
+        "auto_semantic_eval": record.auto_semantic_eval,
         # Written true in the same atomic rename that sets ``ended_ts`` and
         # cleared once the end tail has run; see :meth:`RunManager._settle_end`.
         "end_settling": record.end_settling,
@@ -1671,6 +1686,11 @@ def _load_record(run_dir: Path) -> RunRecord:
         started_ts=_str_field(data, "started_ts"),
         ended_ts=_str_field(data, "ended_ts"),
         exit_code=_int_field(data, "exit_code"),
+        # Absent (or non-boolean) means **on**: automatic Layer 2 is the default,
+        # and a record written before this field existed was launched when there
+        # was no way to decline — so every one of them evaluates, which is what
+        # keeps the corpus's denominator from quietly excluding a whole cohort.
+        auto_semantic_eval=_bool_field(data, "auto_semantic_eval", default=True),
         # Absent (or non-boolean) means settled: a record written before this
         # field existed is one no hub can still owe a transition for, so the
         # resume in :meth:`RunManager._refresh` can never reach back into runs
@@ -1705,8 +1725,16 @@ def _int_field(data: dict, key: str) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _bool_field(data: dict, key: str) -> bool:
-    return data.get(key) is True
+def _bool_field(data: dict, key: str, *, default: bool = False) -> bool:
+    """Read a persisted boolean; anything else (absent, null, malformed) is ``default``.
+
+    The default is per-field and load-bearing, not a style choice: ``end_settling``
+    absent means *settled* (false), so a resume can never reach back into runs that
+    ended before it shipped, while ``auto_semantic_eval`` absent means *on* (true),
+    so a pre-field record still gets its automatic evaluation. Each field's
+    reasoning is at its call site in :func:`_load_record`."""
+    value = data.get(key)
+    return default if not isinstance(value, bool) else value
 
 
 def _run_event(

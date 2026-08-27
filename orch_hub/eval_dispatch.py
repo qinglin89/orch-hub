@@ -72,6 +72,7 @@ from .semantic_jobs import (
     STATUS_DEFERRED,
     STATUS_QUEUED,
     STATUS_RUNNING,
+    STATUS_SKIPPED,
     STATUSES,
     SemanticJobManager,
 )
@@ -513,14 +514,29 @@ def queue_snapshot(
     the same rule, that :meth:`DeferredDispatcher._log_stalled` warns about, so the
     dashboard and the service log name one population. A bound of ``0`` disables
     the flag entirely (no job is overdue), matching the config contract.
+
+    ``skipped_by_repo`` folds the tasks that completed and deliberately got no
+    turn (the launch-time Layer 2 opt-out) into a per-repo count. Per repo because
+    that is the shape a thinning corpus actually has — skips cluster on the
+    expensive, remediation-heavy tail rather than spreading evenly — and a count
+    rather than rows because individual rows are the least likely thing anyone
+    scrolls to. Only repos with at least one skip appear: the store knows nothing
+    about repos it holds no record for, so a zero row would be an invention.
+    Skipped records are the second status kept out of ``entries``, alongside
+    ``completed``: both are resting outcomes with nothing to act on, and one row
+    per opted-out task would crowd out the jobs that are genuinely stuck.
     """
     moment = now or _utc_now()
     max_age = config.eval_queue_max_age
     counts: dict[str, int] = {status: 0 for status in STATUSES}
+    skipped_by_repo: dict[str, int] = {}
     pending: list[SemanticJob] = []
     for job in jobs:
         counts[job.status] = counts.get(job.status, 0) + 1
-        if job.status != STATUS_COMPLETED:
+        if job.status == STATUS_SKIPPED:
+            repo_name = job.repo_name or "(unattributed)"
+            skipped_by_repo[repo_name] = skipped_by_repo.get(repo_name, 0) + 1
+        elif job.status != STATUS_COMPLETED:
             pending.append(job)
     # Two groups with opposite senses, so they are sorted apart and concatenated
     # rather than forced into one comparator.
@@ -552,6 +568,12 @@ def queue_snapshot(
         auto_enabled=config.auto_evaluation_enabled,
         queue_max_age_seconds=max_age,
         counts=counts,
+        # Most-skipped first, ties by repo name: the reader is looking for which
+        # repo is thinning, and a deterministic tiebreak keeps the payload stable
+        # across reads of an unchanged store.
+        skipped_by_repo=dict(
+            sorted(skipped_by_repo.items(), key=lambda kv: (-kv[1], kv[0]))
+        ),
         overdue=overdue,
         entries=tuple(entries),
         truncated=len(pending) > len(entries),

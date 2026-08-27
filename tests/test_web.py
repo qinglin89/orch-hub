@@ -407,6 +407,16 @@ def test_launch_dialog_submit_sends_launch_and_keeps_ack():
     assert "launch: launch," in body
 
 
+def test_the_layer_2_opt_out_is_a_body_field_not_a_launch_argument():
+    # The boundary this test exists for: the toggle must reach the hub as a
+    # start-request field and must never join the `launch` selection, which the
+    # server turns into orchestrator argv — an unknown flag aborts every launch.
+    body = app_js()
+    assert "opt-auto-eval" in body
+    assert "auto_semantic_eval: autoSemanticEval," in body
+    assert "launch.auto_semantic_eval" not in body
+
+
 # ---- startup-failure diagnostic (spawn.out) ---------------------------------
 #
 # Session-2 of the launch-options task: a run that exits before writing an

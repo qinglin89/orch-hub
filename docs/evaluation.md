@@ -210,6 +210,43 @@ Set `ORCH_HUB_EVAL_AUTO=false` to return to on-demand-only evaluation with the
 subsystem otherwise untouched. Any jobs already accepted stay held rather than
 running or failing; see [below](#when-an-automatic-layer-2-turn-actually-runs).
 
+### Declining Layer 2 for one run
+
+The launch dialog carries an **Evaluate on completion** checkbox, on by default.
+Unchecking it declines the automatic Layer 2 turn for a task *this run* completes.
+It exists for weeks when the subscription budget has to go to development rather
+than to measuring it — deferral cannot serve that, since it moves spend inside the
+weekly bucket rather than out of it.
+
+Three things bound it, and they are what make it admissible at all:
+
+- **Layer 1 still runs.** It makes no model call, so declining it would save
+  nothing and forfeit the whole deterministic layer.
+- **The skip is a record, not an absence.** The task gets a terminal `skipped` job
+  with a bounded machine reason (`run-opt-out` — never free text, which would be
+  unanalyzable and would leak repo content into a persisted surface). It is
+  counted in the queue census and broken out per repo, so a corpus that is being
+  thinned says so. An opt-out whose entries simply vanished would hand back, at
+  production time, exactly the selection automatic evaluation exists to remove —
+  and skips do not thin a corpus evenly, they cluster on the expensive,
+  remediation-heavy tail.
+- **It never reaches the orchestrator.** The choice rides the start request
+  (`auto_semantic_eval`, beside `acknowledge_blocked`) and is persisted on the run
+  record. It is not orchestrator argv: the orchestrator parses argv strictly and
+  an unknown flag would abort the launch. A run record written before the field
+  existed reads as *on*, so no earlier run is retroactively excluded.
+
+When two runs of one task disagree — a task stays launchable until it is archived,
+so it can complete more than once — the run that **completes the task** writes the
+record and decides, in both directions: a later completing run can neither enqueue
+over a skip nor skip over an accepted job. A run that does not complete the task
+never reaches the trigger, so unchecking the box on session 1 of a three-session
+task decides nothing.
+
+Un-skipping is an operator action, never a mechanical one: the task's Layer 2
+panel still offers the button, and running it produces the report the launch
+declined.
+
 ## When an automatic Layer 2 turn actually runs
 
 An automatically enqueued Layer 2 job starts `deferred` and is promoted to a real
@@ -280,7 +317,7 @@ blocked by a stalled evaluation queue; only the measuring has stopped.
 It shows:
 
 - **The census** — *the latest attempt per task*: how many completed, how many
-  are waiting, how many failed. These counts are over *every* persisted job
+  are waiting, how many failed, how many were skipped. These counts are over *every* persisted job
   record and are never truncated; a figure that quietly meant "the first twenty"
   would report a twenty-deep queue as calm, which is the silence this section
   exists to break.
@@ -294,10 +331,18 @@ It shows:
   what a task actually carries, open its evaluation view or the
   [report feed](#the-global-report-feed); a task completed before automatic
   evaluation existed has no record here at all.
+- **Skips per repo** — the tasks that completed and were deliberately not
+  evaluated, split by repo, because that is the shape a thinning corpus has.
+  Repos with no skipped record are absent rather than shown as zero: the job store
+  knows nothing about repos it holds no record for. Like the rest of the census
+  this counts *current records*, so it is never a share of a repo's tasks.
 - **The outstanding jobs**, oldest first: which task, which repo, how long it has
   waited, and — for a held job — the reason in prose (`capacity`,
   `usage-unknown`, `pacing`). Each row links to that task's evaluation view. The
-  row list *is* capped for readability; when it is, the section says so.
+  row list *is* capped for readability; when it is, the section says so. Skipped
+  and completed jobs are counted but not listed: both are resting outcomes with
+  nothing to act on, and one row per opted-out task would crowd out what is
+  actually stuck.
 - **Why nothing is draining.** Three of the four reasons are on the records
   themselves. The fourth — `ORCH_HUB_EVAL_ENABLED` or `ORCH_HUB_EVAL_AUTO`
   switched off — deliberately leaves no per-record trace (a closed gate is global
@@ -316,7 +361,9 @@ A single task's held state is visible where you would expect it too: the Layer 2
 panel of that task's evaluation view shows a queued-and-waiting job with its
 reason, instead of the "never evaluated" trigger it used to show. The button
 stays available there, relabelled — running it now is the documented way past a
-queue a broken usage feed would otherwise hold indefinitely.
+queue a broken usage feed would otherwise hold indefinitely. A skipped task reads
+the same way: the panel says the run declined the turn, rather than showing the
+never-evaluated trigger, and still offers to run it.
 
 Both surfaces are reads. Opening them never dispatches, holds, or rewrites a job,
 and never consults the usage service (a usage read can trigger a background
@@ -760,7 +807,7 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
-| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, and whether the trigger gate is open. Read-only — it never dispatches. `404` when disabled. |
+| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus a per-repo tally of skipped tasks, the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, and whether the trigger gate is open. Read-only — it never dispatches. `404` when disabled. |
 | `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
 | `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | One published artifact's [byte-exact persisted content](#verifying-one-artifact-byte-for-byte) for independent digest verification; pruned answers `410`. |
@@ -770,7 +817,7 @@ All routes are protected by the bearer token like every non-health route.
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |
 | `POST /api/repos/{repo}/evaluations/{task}/metrics` | Generate evidence + Layer 1 static metrics. |
 | `POST /api/repos/{repo}/evaluations/{task}/semantic/job` | Start or reuse the current async Layer 2 job; duplicate in-flight starts return the same job. |
-| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`deferred`/`queued`/`running`/`completed`/`failed`; `null` when none exists). |
+| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`deferred`/`queued`/`running`/`completed`/`failed`/`skipped`; `null` when none exists). |
 
 When disabled, every route except `GET /api/evaluation` answers `404` with the
 fail-closed reason.

@@ -71,7 +71,11 @@ from orch_hub.semantic import (
     SemanticEvaluationError,
     SemanticEvaluator,
 )
-from orch_hub.semantic_jobs import SEMANTIC_JOB_NAME, SemanticJobManager
+from orch_hub.semantic_jobs import (
+    SEMANTIC_JOB_NAME,
+    SKIP_RUN_OPT_OUT,
+    SemanticJobManager,
+)
 from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from orch_hub.subprocess_utils import CommandResult
 from orch_hub.task_store import STATUS_MISSING
@@ -833,6 +837,30 @@ def test_start_run_blocked_task_requires_acknowledgement(tmp_path, monkeypatch):
     acked = start_a_run(client, repo, acknowledge_blocked=True)
     assert acked["state"] == "active"
     assert len(spawner.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "body, expected",
+    [
+        ({}, True),  # omitted: the default, and the only safe default
+        ({"auto_semantic_eval": True}, True),
+        ({"auto_semantic_eval": False}, False),
+    ],
+)
+def test_start_run_records_the_layer_2_opt_out(tmp_path, monkeypatch, body, expected):
+    """Hub-only, beside ``acknowledge_blocked``: persisted, never orchestrator argv.
+
+    The orchestrator parses argv strictly and would abort a launch on an unknown
+    flag, so this choice can only ride the run record — which is also where the
+    completion trigger reads it back from.
+    """
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+
+    started = start_a_run(client, repo, **body)
+
+    record = manager.get_run(started["run_id"]).record
+    assert record.auto_semantic_eval is expected
+    assert "auto_semantic_eval" not in " ".join(spawner.calls[0]["argv"])
 
 
 def test_start_run_missing_body_fields_is_422(tmp_path, monkeypatch):
@@ -3552,6 +3580,21 @@ def test_evaluation_queue_lists_held_jobs_with_their_reason(tmp_path, monkeypatc
     # tests/test_eval_dispatch.py), so pin it to the real elapsed interval.
     expected = (dt.datetime.now(dt.timezone.utc) - EVAL_CLOCK).total_seconds()
     assert abs(entry["age_seconds"] - expected) < 5
+
+
+def test_evaluation_queue_counts_skips_per_repo(tmp_path, monkeypatch):
+    # The countable half of the launch-time opt-out: a skipped task is a record,
+    # not an absence, and the per-repo split is where a thinning corpus shows up.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    jobs = queue_store(tmp_path)
+    jobs.skip_if_absent(repo, RUN_TASK_ID, SKIP_RUN_OPT_OUT)
+
+    body = client.get("/api/evaluation/queue").json()
+
+    assert body["counts"]["skipped"] == 1
+    assert body["skipped_by_repo"] == {repo.name: 1}
+    # A deliberate resting outcome is counted, never listed among what is stuck.
+    assert body["entries"] == []
 
 
 def test_evaluation_queue_echoes_the_configured_age_bound(tmp_path, monkeypatch):

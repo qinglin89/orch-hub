@@ -1661,6 +1661,72 @@ async function scenarioRunOptions() {
   );
   eq("dialog: a successful launch closes it", dialogD.open, false);
 
+  // The Layer 2 opt-out: a hub-only body field, ON by default, and never part of
+  // the `launch` selection the server turns into orchestrator argv (an unknown
+  // flag would abort every launch).
+  check(
+    "dialog: evaluate-on-completion defaults to on",
+    !!callD && callD.body.auto_semantic_eval === true,
+    callD ? JSON.stringify(callD.body) : "no call"
+  );
+  check(
+    "dialog: it never rides the launch selection",
+    !!callD && callD.body.launch.auto_semantic_eval === undefined,
+    callD ? JSON.stringify(callD.body.launch) : "no call"
+  );
+
+  // Unchecking it declines only the model turn — and the choice reaches the hub,
+  // where the skip is recorded and counted rather than left as a silent absence.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var openE = doc.querySelector(".open-run-options");
+  var dialogE = doc.querySelector(".run-options");
+  pressEnter(openE);
+  await flush();
+  var autoEval = dialogE.querySelector(".opt-auto-eval");
+  check("dialog: the evaluate-on-completion toggle is offered", !!autoEval, "no .opt-auto-eval");
+  eq("dialog: it opens checked", autoEval.checked, true);
+  autoEval.focus();
+  autoEval.checked = false;
+  dispatch(autoEval, new Event("change"));
+  pressEnter(dialogE.querySelector('button[type="submit"]'));
+  await flush();
+  var callE = lastCall("POST", "/api/runs");
+  check(
+    "dialog: unchecking it posts the opt-out",
+    !!callE && callE.body.auto_semantic_eval === false,
+    callE ? JSON.stringify(callE.body) : "no call"
+  );
+
+  // Reopening offers the defaults again: one dialog's choice must not become the
+  // standing policy for the next launch. Exercised through Cancel rather than
+  // through a launch, deliberately — a successful launch re-renders the whole view
+  // and would hand back fresh markup no matter what the reopen path did, so only
+  // the dismissed-and-reopened dialog actually tests the reset.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  var openF = doc.querySelector(".open-run-options");
+  var dialogF = doc.querySelector(".run-options");
+  pressEnter(openF);
+  await flush();
+  var autoEvalF = dialogF.querySelector(".opt-auto-eval");
+  var planGateF = dialogF.querySelector(".opt-plan-gate");
+  autoEvalF.checked = false;
+  planGateF.checked = true;
+  pressEnter(dialogF.querySelector(".cancel-run-options"));
+  eq("dialog: Cancel closed it before relaunching", dialogF.open, false);
+  pressEnter(openF);
+  await flush();
+  eq(
+    "dialog: a reopened dialog restores the evaluation default",
+    dialogF.querySelector(".opt-auto-eval").checked,
+    true
+  );
+  eq(
+    "dialog: and the plan-gate default",
+    dialogF.querySelector(".opt-plan-gate").checked,
+    false
+  );
+  pressEscape();
+
   // Custom is per role: only the Custom role becomes editable, the other keeps
   // its read-only preset value, and the query asks for the OTHER role's profile
   // while the custom one resolves inherited — which is what its fields seed from.
@@ -2540,6 +2606,49 @@ async function scenarioTaskEval() {
   check(
     "eval: an unknown hold reason renders verbatim rather than vanishing",
     (doc.querySelector(".eval-sem-status") || {}).textContent.indexOf("solar-flare") !== -1,
+    (doc.querySelector(".eval-sem-status") || {}).textContent
+  );
+
+  // A SKIPPED job is the fifth state, and the one the corpus's honesty rests on:
+  // this task completed and was deliberately not evaluated. It must not read as
+  // "never evaluated" either — that is a different fact (nobody asked yet) and
+  // rendering it here would make the opt-out exactly the silent absence it is only
+  // admissible for not being.
+  route("GET", jobPath, {
+    job: jobRecord({ status: "skipped", auto: true, skip_reason: "run-opt-out" }),
+  });
+  var timersBeforeSkip = pendingTimers();
+  await navigate(evalPath);
+  check(
+    "eval: a skipped job shows a skipped state, not the idle trigger",
+    !!doc.querySelector(".eval-sem-skipped"),
+    "no skipped panel for a skipped job"
+  );
+  check(
+    "eval: the skipped state names what declined the turn",
+    (doc.querySelector(".eval-sem-status") || {}).textContent.indexOf(
+      "its run was launched with automatic Layer 2 turned off"
+    ) !== -1,
+    (doc.querySelector(".eval-sem-status") || {}).textContent
+  );
+  check(
+    "eval: a skipped task can still be evaluated on request",
+    !!doc.querySelector(".eval-sem-skipped .eval-sem-btn"),
+    "no trigger offered beside a skipped job"
+  );
+  check(
+    // Nothing is in flight, so there is nothing to poll for.
+    "eval: a skipped job is not polled",
+    pendingTimers() <= timersBeforeSkip,
+    "a skipped job scheduled a poll timer"
+  );
+  route("GET", jobPath, {
+    job: jobRecord({ status: "skipped", auto: true, skip_reason: "budget-freeze" }),
+  });
+  await navigate(evalPath);
+  check(
+    "eval: an unknown skip reason renders verbatim rather than vanishing",
+    (doc.querySelector(".eval-sem-status") || {}).textContent.indexOf("budget-freeze") !== -1,
     (doc.querySelector(".eval-sem-status") || {}).textContent
   );
 
@@ -4317,7 +4426,11 @@ async function scenarioEvaluationQueue() {
       enabled: true,
       auto_enabled: true,
       queue_max_age_seconds: 21600,
-      counts: { deferred: 0, queued: 0, running: 0, completed: 0, failed: 0, error: 0 },
+      counts: {
+        deferred: 0, queued: 0, running: 0, completed: 0,
+        failed: 0, skipped: 0, error: 0,
+      },
+      skipped_by_repo: {},
       overdue: 0,
       entries: [],
       truncated: false,
@@ -4429,6 +4542,40 @@ async function scenarioEvaluationQueue() {
   // creates no Needs attention row and moves no operational figure.
   eq("evalqueue: it creates no Needs attention row", doc.querySelectorAll("#view .attn").length, 0);
   eq("evalqueue: it does not disturb the repos-ready metric", reposReady(), "1/1");
+
+  // ---- 3b) skips: the countable half of the launch-time Layer 2 opt-out. A
+  // skipped task is a record, not an absence — that is the whole condition on
+  // which declining a turn is admissible — and the per-repo split is the shape a
+  // thinning corpus actually has, since skips cluster on the expensive,
+  // remediation-heavy tail rather than spreading evenly.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: {
+      deferred: 0, queued: 0, running: 0, completed: 7,
+      failed: 0, skipped: 4, error: 0,
+    },
+    skipped_by_repo: { beta: 3, alpha: 1 },
+  }));
+  await navigate("#/overview");
+  eq("evalqueue: skips join the census line",
+     textOf(".evq-summary"), "Latest attempt per task: 7 completed · 4 skipped");
+  eq("evalqueue: and are broken down per repo, server-ordered",
+     textOf("#view .overview-evalq .evq-skips"),
+     "Layer 2 declined at launch: beta 3 · alpha 1.");
+  eq("evalqueue: a skip is counted, never listed among what is stuck",
+     doc.querySelectorAll("#view .evq-row").length, 0);
+  // A store with no skips says nothing about them: only repos holding a skipped
+  // record can be named, so a zero line would be an invention.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: {
+      deferred: 0, queued: 0, running: 0, completed: 7,
+      failed: 0, skipped: 0, error: 0,
+    },
+  }));
+  await navigate("#/overview");
+  eq("evalqueue: no skips means no skip line at all",
+     textOf(".evq-summary"), "Latest attempt per task: 7 completed");
+  eq("evalqueue: and no per-repo breakdown",
+     doc.querySelectorAll("#view .overview-evalq .evq-skips").length, 0);
 
   // ---- 4) overdue: the bound is the hub's configured threshold, rendered from
   // the payload rather than a literal this client would have to keep in sync.

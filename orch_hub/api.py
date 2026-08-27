@@ -338,6 +338,13 @@ class StartRunRequest(BaseModel):
     like ``GET /api/repos/{repo_id}/tasks``). ``acknowledge_blocked`` opts into
     launching a ``blocked`` task despite the §5.4 resume caveat.
 
+    ``auto_semantic_eval`` (default true) is the second hub-only field beside it:
+    false declines the automatic Layer 2 semantic evaluation for a task this run
+    completes, which is then recorded as a terminal ``skipped`` job rather than
+    left as an absence. Hub-only is a hard constraint, not a convenience — it must
+    never become orchestrator argv, which is parsed strictly and would abort the
+    launch on an unknown flag. Layer 1 is unaffected: it makes no model call.
+
     Launch arguments come from exactly one of two mutually exclusive paths: the
     structured ``launch`` mode selector (server-built argv, the dashboard path) or
     the legacy raw ``extra_args`` list appended verbatim (preserved for existing
@@ -350,6 +357,7 @@ class StartRunRequest(BaseModel):
     launch: LaunchRequest | None = None
     extra_args: list[str] = Field(default_factory=list)
     acknowledge_blocked: bool = False
+    auto_semantic_eval: bool = True
 
 
 class AnswerRequest(BaseModel):
@@ -1178,6 +1186,7 @@ def create_app(
             req.task_id,
             extra_args=extra_args,
             acknowledge_blocked=req.acknowledge_blocked,
+            auto_semantic_eval=req.auto_semantic_eval,
         )
         return manager.get_run(record.run_id).to_dict()
 

@@ -101,6 +101,19 @@
   const deferReasonText = (reason) =>
     reason ? DEFER_REASON_TEXT[reason] || reason : "waiting for capacity";
 
+  // `skipped` is the fifth state: a task that completed and deliberately got no
+  // model turn, because its run was launched with automatic Layer 2 declined. It
+  // is a record rather than an absence so the corpus's missing entries stay
+  // countable — which is the whole condition on which the opt-out is admissible —
+  // so it must never render as "never evaluated" either. Bounded machine tokens,
+  // mirroring SKIP_REASONS in orch_hub/semantic_jobs.py; an unknown one falls
+  // through verbatim for the same reason as above.
+  const SKIP_REASON_TEXT = {
+    "run-opt-out": "its run was launched with automatic Layer 2 turned off",
+  };
+  const skipReasonText = (reason) =>
+    reason ? SKIP_REASON_TEXT[reason] || reason : "the run declined it";
+
   // ---- token storage ----
   const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
   function setToken(value) {
@@ -1798,10 +1811,14 @@
     // `dev_mode`/`review_mode`; the server turns it into argv via
     // build_launch_args, so the per-role/backend rules live in one tested place.
     // The plan-gate toggle is orthogonal to the role selections and stays
-    // available in every mode. The blocked-task acknowledgement moves inside
-    // the dialog, so it is confirmed together with the launch. Only one options
-    // dialog is on the page at a time, so fixed field ids are safe; the modal is
-    // named by its own heading through aria-labelledby.
+    // available in every mode. The evaluate-on-completion toggle sits beside it
+    // but is a different kind of field: plan-gate becomes orchestrator argv, while
+    // this one is hub-only (`auto_semantic_eval` on the start request, persisted on
+    // the run record) and must never reach the orchestrator, which parses argv
+    // strictly and would abort the launch on an unknown flag. The blocked-task
+    // acknowledgement moves inside the dialog, so it is confirmed together with
+    // the launch. Only one options dialog is on the page at a time, so fixed field
+    // ids are safe; the modal is named by its own heading through aria-labelledby.
     return (
       head +
       `<button type="button" class="open-run-options">Start run…</button>
@@ -1833,6 +1850,11 @@
             <span>Plan-gate: every dev session first proposes its goal and plan
             and blocks for confirmation before implementing (orchestrator
             default: off).</span></label>
+          <label class="opt-toggle"><input type="checkbox" class="opt-auto-eval" checked />
+            <span>Evaluate on completion: if this run finishes the task, queue its
+            automatic Layer 2 semantic report (default: on). Unchecking declines
+            only the model turn — the free Layer 1 metrics still run, and the skip
+            is recorded and counted rather than leaving a silent gap.</span></label>
           ${ack}
           <div class="control-actions">
             <button type="submit">Launch run</button>
@@ -1938,6 +1960,12 @@
       });
       const backendSel = form.querySelector(".opt-backend");
       if (backendSel) backendSel.value = "";
+      // Both toggles reset with the dialog: a reopened dialog offers the defaults
+      // (plan-gate off, evaluation on), never the previous launch's choices.
+      const planGate = form.querySelector(".opt-plan-gate");
+      if (planGate) planGate.checked = false;
+      const autoEval = form.querySelector(".opt-auto-eval");
+      if (autoEval) autoEval.checked = true;
       launchCfg = {
         repo: form.dataset.repo,
         dev: "default",
@@ -2661,6 +2689,10 @@
     const ackBox = form.querySelector(".ack-blocked");
     const acknowledgeBlocked =
       form.dataset.blocked === "1" ? !!(ackBox && ackBox.checked) : false;
+    // Default ON when the control is missing for any reason: the server default is
+    // on too, and a UI accident must not silently thin the evaluated corpus.
+    const autoEvalBox = form.querySelector(".opt-auto-eval");
+    const autoSemanticEval = autoEvalBox ? !!autoEvalBox.checked : true;
     statusEl.textContent = "";
     statusEl.classList.remove("error-text");
     const launch = buildLaunchPayload(form, statusEl);
@@ -2677,6 +2709,7 @@
           task_id: form.dataset.task,
           launch: launch,
           acknowledge_blocked: acknowledgeBlocked,
+          auto_semantic_eval: autoSemanticEval,
         },
       });
       if (dialog && dialog.open) closeRunOptions(dialog);
@@ -4163,6 +4196,26 @@
         ${evalSemTrigger("Run semantic evaluation now…", unavailable, doctor)}`;
   }
 
+  // The terminal-`skipped` panel content: this task completed and deliberately got
+  // no model turn, because its run was launched with automatic Layer 2 declined.
+  // Like the held branch, it exists so the page cannot read "never evaluated" for a
+  // task whose Layer 2 story is already told — here the story is that somebody
+  // declined it, which is a different fact from nobody having asked yet, and the
+  // one this surface must state if the skip is to be countable rather than silent.
+  //
+  // The trigger stays offered, and asking undoes the skip in the only direction
+  // that matters: it produces the report the launch declined, so the corpus gains
+  // an entry. Not polled, for the same reason the held branch is not — nothing is
+  // in flight to poll for.
+  function evalSemSkipped(job, unavailable, doctor) {
+    return `<span class="control-status eval-sem-status" role="status">Automatic
+          semantic evaluation was skipped for this task because ${escapeHtml(
+            skipReasonText(job && job.skip_reason)
+          )}. The deterministic Layer 1 metrics above ran anyway. Run it now to
+          evaluate it after all.</span>
+        ${evalSemTrigger("Run semantic evaluation…", unavailable, doctor)}`;
+  }
+
   // The terminal-failed (or corrupt-record `error`) panel content: the bounded
   // backend diagnostic — never full prompt text or unbounded model output, the
   // manager caps it — plus a Retry that re-POSTs the job (a fresh attempt is
@@ -4184,6 +4237,7 @@
   // action region is state-driven by the current async job: a transient job shows
   // the running panel (survives reload); a deferred job shows why it is held plus
   // a run-now override; a failed/error job shows the bounded diagnostic + Retry;
+  // a skipped job shows who declined it plus the same trigger;
   // no job or a completed one shows the idle trigger. All of them share one
   // `.eval-actions` wrapper with a state modifier so the layout is a single
   // (never nested) flex container.
@@ -4202,6 +4256,11 @@
       // settled, and emphatically not "no job".
       modifier = " eval-sem-held";
       actions = evalSemHeld(job, unavailable, doctor);
+    } else if (status === "skipped") {
+      // Declined at launch and recorded — neither owed nor attempted, and
+      // emphatically not "no job".
+      modifier = " eval-sem-skipped";
+      actions = evalSemSkipped(job, unavailable, doctor);
     } else if (status === "failed" || status === "error") {
       modifier = " eval-sem-failed";
       actions = evalSemFailed(job, unavailable, doctor);
@@ -6217,7 +6276,28 @@
     if (waiting) parts.push(waiting + " waiting");
     const failed = (c.failed || 0) + (c.error || 0);
     if (failed) parts.push(failed + " failed");
+    // A skipped record is the one census entry that is not an attempt at all — a
+    // task that completed and was deliberately not evaluated. It belongs on this
+    // line all the same: the count is exactly what makes the opt-out admissible,
+    // and a figure only reachable by opening tasks one at a time is not a count.
+    if (c.skipped) parts.push(c.skipped + " skipped");
     return "Latest attempt per task: " + parts.join(" · ");
+  }
+
+  // The per-repo split of that skipped figure, because the shape of a thinning
+  // corpus is per repo — skips cluster on the expensive, remediation-heavy tail
+  // rather than spreading evenly. Server-ordered (most skipped first); only repos
+  // holding at least one skipped record appear, since the store knows nothing
+  // about the ones it has no record for. Named by cause, and never as a share of
+  // the repo's tasks: like every other figure here it counts current records.
+  function evalQueueSkips(byRepo) {
+    const names = Object.keys(byRepo || {});
+    if (!names.length) return "";
+    return (
+      `<p class="evq-note evq-skips muted">Layer 2 declined at launch: ` +
+      escapeHtml(names.map((n) => n + " " + byRepo[n]).join(" · ")) +
+      `.</p>`
+    );
   }
 
   // The Evaluation queue section. Deliberately NO live region on the notes: the
@@ -6267,6 +6347,7 @@
     return (
       head +
       `<p class="evq-summary">${escapeHtml(evalQueueSummary(queue.counts))}</p>` +
+      evalQueueSkips(queue.skipped_by_repo) +
       notes.join("") +
       rows +
       foot

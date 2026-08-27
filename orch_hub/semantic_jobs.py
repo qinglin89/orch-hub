@@ -1,4 +1,4 @@
-"""Async semantic-evaluation job lifecycle: deferred / queued / running / completed / failed.
+"""Async semantic-evaluation job lifecycle: deferred / queued / running / settled.
 
 Layer 2 semantic evaluation (:meth:`orch_hub.semantic.SemanticEvaluator.evaluate`)
 is one long model turn. Driven synchronously it leaves the caller — and the
@@ -38,6 +38,12 @@ job record only points at it). Both path components — the slugged repo segment
 and the task-id segment — are validated as single safe path components, which is
 what makes the deterministic path containment-safe (and keeps every record on the
 two-level ``<repo-slug>/<task-id>/`` layout the startup reconcile scan walks).
+
+A completion the operator opted out of Layer 2 for is the one record that never
+becomes an attempt: it is written straight to a terminal ``skipped``
+(:meth:`SemanticJobManager.skip_if_absent`), carrying a bounded machine reason, so
+the corpus's missing entries are countable instead of invisible. Layer 1 is never
+skipped — it makes no model call.
 
 Automatic (completion-triggered) attempts enter one state earlier than an
 operator-driven one. They are accepted as ``deferred``: durably recorded, holding
@@ -98,15 +104,18 @@ SEMANTIC_JOB_NAME = "job.json"
 """The persisted job record, one per ``<repo-slug>/<task-id>/`` dir."""
 
 # Lifecycle statuses. The transient pair brackets an in-flight evaluation turn;
-# the terminal pair is a resting outcome. ``error`` is reserved for an unreadable
+# the terminal set is a resting outcome. ``error`` is reserved for an unreadable
 # record (a broken dir that must surface, not hide), distinct from ``failed`` (a
 # legitimate evaluation-failure outcome), and — carrying no repo attribution —
-# never holds a ``(repo, task)`` duplicate slot. Mirrors the intake statuses.
+# never holds a ``(repo, task)`` duplicate slot. ``skipped`` is the one terminal
+# state reached without an attempt: a completed task whose run declined the model
+# turn. Mirrors the intake statuses.
 STATUS_DEFERRED = "deferred"
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+STATUS_SKIPPED = "skipped"
 STATUS_ERROR = "error"
 
 STATUSES = (
@@ -115,6 +124,7 @@ STATUSES = (
     STATUS_RUNNING,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_SKIPPED,
     STATUS_ERROR,
 )
 """Every status a record may hold, in lifecycle order.
@@ -126,6 +136,20 @@ failed" and "no jobs are held" are exactly the figures worth stating — so the
 enumeration has to be declared rather than discovered. Ordered because a reader
 renders it in this order; a new status is appended where it belongs in the
 lifecycle, and every counting surface picks it up without being edited."""
+
+SKIP_RUN_OPT_OUT = "run-opt-out"
+"""Skipped because the run that completed the task was launched with the Layer 2
+opt-out (``RunRecord.auto_semantic_eval`` false)."""
+
+SKIP_REASONS = frozenset({SKIP_RUN_OPT_OUT})
+"""The closed vocabulary a ``skipped`` record's reason may hold.
+
+Closed, and enforced at the one entry point (:meth:`SemanticJobManager.skip_if_absent`
+raises on anything else), because the whole admissibility of the opt-out rests on
+the skip being *countable*: free text — operator prose especially — is
+unanalyzable, leaks repo content into a persisted surface, and invites recording a
+rationalization that is itself the bias this task exists to remove. A new skip
+cause is a new token here, added deliberately."""
 
 _TRANSIENT = frozenset({STATUS_QUEUED, STATUS_RUNNING})
 """In-flight states that bracket an evaluation turn. A persisted transient record
@@ -140,8 +164,17 @@ exists to hold — every held evaluation would be lost to the first hub restart,
 which for a corpus that must not be selection-biased is the same silent gap
 automatic triggering was built to close."""
 
-_TERMINAL = frozenset({STATUS_COMPLETED, STATUS_FAILED, STATUS_ERROR})
-"""Resting states: a new attempt may overwrite a job in one of these."""
+_TERMINAL = frozenset(
+    {STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_ERROR}
+)
+"""Resting states: a new attempt may overwrite a job in one of these.
+
+``skipped`` belongs here, and overwritable is the right reading of it: an
+operator who later asks for this task's evaluation (:meth:`start_job`) gets one,
+and the corpus gains the report the skip declined. What must not happen is the
+*automatic* path silently reversing it, and that is prevented by the
+once-per-task guard the skip record itself is (:meth:`skip_if_absent` /
+:meth:`enqueue_if_absent` both refuse against any existing record)."""
 
 _JOB_ID_TS = "%Y%m%dT%H%M%SZ"
 """Job-id stamp format (matches the run/eval id stamps). The id is the attempt's
@@ -343,10 +376,12 @@ class SemanticJobManager:
         an observable orphan, and the evaluation turn runs off the lock
         (:meth:`_run_job`).
 
-        Overriding a ``deferred`` record is the point, not an oversight: the
-        capacity policy exists to keep *mechanical* evaluation out of the window
-        the operator is working in, and an operator asking for this evaluation now
-        is not the production-side selection that policy shapes. So this path
+        Overriding a ``deferred`` or ``skipped`` record is the point, not an
+        oversight: the capacity policy and the launch-time opt-out both exist to
+        keep *mechanical* evaluation out of the window the operator is working in,
+        and an operator asking for this evaluation now is not the production-side
+        selection either of them shapes — asking undoes a skip by producing the
+        report it declined, which is the corpus gaining an entry, not losing one. So this path
         never consults utilization — it is also the documented escape hatch when a
         broken usage feed would otherwise hold the queue indefinitely. The fresh
         record is stamped ``auto=False``, so a report's provenance still says
@@ -385,9 +420,9 @@ class SemanticJobManager:
         an operator asking for this task to be evaluated now — so it overwrites a
         resting record and starts a fresh attempt — while this one exists to make a
         task's automatic evaluation happen **at most once, ever**. Any existing
-        record (deferred, transient, ``completed``, ``failed``, or ``error``) means
-        the task's L2 story is already told, in flight, or queued, so this returns
-        ``None`` and accepts nothing.
+        record (deferred, transient, ``completed``, ``failed``, ``skipped``, or
+        ``error``) means the task's L2 story is already told, in flight, queued, or
+        deliberately declined, so this returns ``None`` and accepts nothing.
 
         And it *enqueues* rather than starts: the record lands as ``deferred`` and
         **no turn is submitted here**. Admission is the dispatch policy's decision
@@ -418,6 +453,54 @@ class SemanticJobManager:
                 job_dir, repo, task_id, status=STATUS_DEFERRED, auto=True
             )
 
+    def skip_if_absent(
+        self, repo: ManagedRepo, task_id: str, reason: str
+    ) -> SemanticJob | None:
+        """Record that ``(repo, task_id)`` completed and gets **no** model turn.
+
+        The opt-out's counterpart to :meth:`enqueue_if_absent`, and deliberately
+        its exact twin: same once-per-task guard (any existing record wins and
+        this accepts nothing), same durable one-record-per-``(repo, task)`` write,
+        same inline O(1) cost on the completion path. The only difference is where
+        the record comes to rest — terminal ``skipped`` with a bounded reason,
+        instead of ``deferred`` awaiting a turn.
+
+        That symmetry is the point rather than a convenience. A skip has to be a
+        *record*: an operator may choose to spend a week's subscription budget on
+        development instead of on measuring it, but a corpus whose missing entries
+        left no trace would be a corpus that lies about its own denominator — and
+        skips do not thin it evenly, they cluster on the expensive,
+        remediation-heavy tail. So the skip lands in the same store, is counted by
+        the same census, and is guarded by the same record.
+
+        The guard also settles what happens when a multi-run task's runs disagree:
+        whichever run *completes the task* writes first and decides, and the other
+        direction is refused identically — a later completing run cannot enqueue
+        over a skip, and cannot skip over an accepted job. A run that does not
+        complete the task never reaches this path at all, which is why unchecking
+        the box on session 1 of a three-session task decides nothing.
+
+        ``reason`` must be one of :data:`SKIP_REASONS`; anything else raises
+        ``ValueError`` rather than being persisted, so the vocabulary cannot drift
+        into free text. No notification: unlike a failure, a skip is exactly what
+        the operator asked for.
+        """
+        if reason not in SKIP_REASONS:
+            raise ValueError(f"unknown semantic-job skip reason: {reason!r}")
+        _validate_task_id(task_id)
+        with self._lock:
+            job_dir = self._job_dir_for(repo.name, task_id)
+            if self._load_if_present(job_dir) is not None:
+                return None
+            return self._queue_locked(
+                job_dir,
+                repo,
+                task_id,
+                status=STATUS_SKIPPED,
+                auto=True,
+                skip_reason=reason,
+            )
+
     def _queue_locked(
         self,
         job_dir: Path,
@@ -426,6 +509,7 @@ class SemanticJobManager:
         *,
         status: str,
         auto: bool,
+        skip_reason: str | None = None,
     ) -> SemanticJob:
         """Persist a fresh record for this attempt; caller holds the lock.
 
@@ -441,6 +525,13 @@ class SemanticJobManager:
         deferred attempt is later promoted: one acceptance is one attempt however
         long the policy holds it, and the finalize guards key off the status, not
         the id's recency.
+
+        A record created directly in a terminal state (a ``skipped`` one — the only
+        outcome reachable without an attempt) gets its ``ended_ts`` here, since
+        nothing later will settle it; ``started_ts`` stays ``None`` because no turn
+        ever began. It carries the evaluator identity like every other record: the
+        useful reading of a skip is which evaluator's denominator lost this task,
+        and stamping it keeps one record shape rather than two.
         """
         job_dir.mkdir(parents=True, exist_ok=True)
         info = self._evaluator.evaluator_info
@@ -455,9 +546,11 @@ class SemanticJobManager:
             backend=info.backend,
             model=info.model,
             schema_version=info.schema_version,
+            skip_reason=skip_reason,
             auto=auto,
             created_ts=ts,
             updated_ts=ts,
+            ended_ts=ts if status in _TERMINAL else None,
         )
         _write_record(job_dir, record)
         return record
@@ -917,6 +1010,7 @@ def _load_record(job_dir: Path) -> SemanticJob:
         evaluation_id=_str_field(data, "evaluation_id"),
         error=_str_field(data, "error"),
         defer_reason=_str_field(data, "defer_reason"),
+        skip_reason=_str_field(data, "skip_reason"),
         auto=_bool_field(data, "auto"),
         created_ts=_str_field(data, "created_ts"),
         updated_ts=_str_field(data, "updated_ts"),

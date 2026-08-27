@@ -262,6 +262,15 @@ class RunRecord:
     unreadable ``run.json``, so a broken dir cannot hide a run. Stubs carry
     ``None`` placeholders for the unknown fields.
 
+    ``auto_semantic_eval`` is the launch-time opt-out for this run's automatic
+    Layer 2: ``False`` means a completion this run produces enqueues no semantic
+    turn and records a terminal ``skipped`` job instead (Layer 1 still runs — it
+    makes no model call, so skipping it would save nothing and forfeit the whole
+    deterministic layer). Hub-owned by construction: it never reaches the
+    orchestrator, which parses argv strictly and would abort a launch on an
+    unknown flag. Absent from a persisted record means **on**, so every run
+    written before the field existed still evaluates.
+
     ``end_settling`` is the second half of the end write: ``ended_ts`` settles a
     run permanently (the manager never revisits it), but the work that end
     *triggers* — the evidence settles, the notification, the completion handed
@@ -288,6 +297,7 @@ class RunRecord:
     started_ts: str | None = None
     ended_ts: str | None = None
     exit_code: int | None = None
+    auto_semantic_eval: bool = True
     end_settling: bool = False
     error: str | None = None
 
@@ -2264,11 +2274,22 @@ class SemanticJob:
     (accepted, held out of the model turn by the automatic dispatch policy) is a
     *waiting* state that no restart sweep may fail; ``queued`` (admitted, turn
     about to start) and ``running`` (the model turn is in flight) are transient;
-    ``completed`` and ``failed`` are terminal. ``defer_reason`` is the bounded
-    machine reason a deferred job is still waiting (never operator prose), and
-    ``auto`` records whether this attempt was produced mechanically by the
-    completion trigger or asked for by an operator — the provenance that says
-    whether a report's existence was a choice. ``backend``/``model``/
+    ``completed``, ``failed``, and ``skipped`` are terminal. ``defer_reason``
+    is the bounded machine reason a deferred job is still waiting (never operator
+    prose), and ``auto`` records whether this attempt was produced mechanically by
+    the completion trigger or asked for by an operator — the provenance that says
+    whether a report's existence was a choice. ``skip_reason`` is the bounded
+    machine token on a ``skipped`` record — a task that completed and deliberately
+    got no model turn, because its run was launched with the Layer 2 opt-out
+    (``RunRecord.auto_semantic_eval``). The skip is a record rather than an
+    absence on purpose: an opt-out that left nothing behind would re-open, at
+    production time, exactly the selection automatic evaluation exists to close.
+    The vocabulary is closed (:data:`orch_hub.semantic_jobs.SKIP_REASONS`) and
+    never operator prose, which is unanalyzable, leaks repo content into a
+    persisted surface, and invites recording the rationalization that is itself
+    the bias. All three reason fields are mutually exclusive per record and answer
+    different questions: why a *waiting* job waits, why an *attempt* failed, and
+    why no attempt was made. ``backend``/``model``/
     ``schema_version`` are the selected evaluator identity (the
     :class:`SemanticEvaluatorInfo` triple), stamped at creation so the
     queued/running UI shows which model is running before any report exists.
@@ -2290,6 +2311,7 @@ class SemanticJob:
     evaluation_id: str | None = None
     error: str | None = None
     defer_reason: str | None = None
+    skip_reason: str | None = None
     auto: bool = False
     created_ts: str | None = None
     updated_ts: str | None = None
@@ -2325,6 +2347,7 @@ class SemanticJob:
             "evaluation_id": self.evaluation_id,
             "error": self.error,
             "defer_reason": self.defer_reason,
+            "skip_reason": self.skip_reason,
             "auto": self.auto,
             "created_ts": self.created_ts,
             "updated_ts": self.updated_ts,
@@ -2405,12 +2428,26 @@ class EvaluationQueueSnapshot:
     are.
 
     ``entries`` carries the jobs an operator might act on — everything except
-    ``completed``, which is the healthy outcome the counts already report —
-    ordered the way the queue itself is: waiting jobs oldest-first (the
+    ``completed`` and ``skipped``, the two resting outcomes the counts already
+    report (one healthy, one deliberate) — ordered the way the queue itself is: waiting jobs oldest-first (the
     dispatcher's own promotion order), then settled failures newest-first. It is
     capped at :data:`orch_hub.eval_dispatch.QUEUE_ENTRY_LIMIT`, with ``truncated``
     saying so, because a surface that silently shows the first N reads as "this
     is everything".
+
+    ``skipped_by_repo`` is the one figure the flat census cannot carry: a
+    per-repo tally of records resting at ``skipped``, i.e. completed tasks whose
+    run was launched with the Layer 2 opt-out. It is per repo because that is
+    where a shrinking corpus shows up as a pattern rather than as scattered rows —
+    skips cluster on the expensive, remediation-heavy tail — and it is a *count*
+    because individual rows are the least likely thing anyone scrolls to. Skipped
+    records are deliberately absent from ``entries``: they are a resting,
+    intentional outcome with nothing to act on, and one row per opted-out task
+    would crowd out the jobs that are genuinely stuck. Like every other figure
+    here it is over *records*, one per ``(repo, task)`` holding that task's latest
+    attempt — so it is the count of tasks currently resting at skipped, never a
+    share of that repo's tasks and never a lifetime total (a manual evaluation
+    overwrites a skipped record like any other terminal one).
 
     ``auto_enabled`` and ``queue_max_age_seconds`` are the two pieces of *config*
     a queue reader cannot infer from records. The first is the fourth reason a
@@ -2424,6 +2461,7 @@ class EvaluationQueueSnapshot:
     auto_enabled: bool = False
     queue_max_age_seconds: int = 0
     counts: Mapping[str, int] = field(default_factory=dict)
+    skipped_by_repo: Mapping[str, int] = field(default_factory=dict)
     overdue: int = 0
     entries: tuple[EvaluationQueueEntry, ...] = ()
     truncated: bool = False
@@ -2433,6 +2471,7 @@ class EvaluationQueueSnapshot:
             "auto_enabled": self.auto_enabled,
             "queue_max_age_seconds": self.queue_max_age_seconds,
             "counts": dict(self.counts),
+            "skipped_by_repo": dict(self.skipped_by_repo),
             "overdue": self.overdue,
             "entries": [entry.to_dict() for entry in self.entries],
             "truncated": self.truncated,

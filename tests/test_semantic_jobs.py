@@ -498,6 +498,141 @@ def test_enqueue_if_absent_rejects_an_unsafe_task_id(tmp_path):
         mgr.enqueue_if_absent(repo(), "../evil")
 
 
+# ``skip_if_absent`` is the opt-out twin of the above: same once-per-task guard,
+# same durable write, but the record comes to rest terminal instead of waiting for
+# a turn. A skip has to leave a record — an opt-out whose entries simply vanished
+# would give back, at production time, the selection automatic evaluation exists
+# to remove, and on the dimension (quota spend) that makes skips cluster on the
+# expensive tail rather than thinning a corpus evenly.
+
+
+def test_skip_if_absent_records_a_terminal_skip_without_a_turn(tmp_path):
+    ev = FakeEvaluator()
+    mgr = manager(tmp_path, evaluator=ev)
+
+    job = mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+
+    assert job is not None
+    assert job.status == semantic_jobs.STATUS_SKIPPED
+    assert job.skip_reason == semantic_jobs.SKIP_RUN_OPT_OUT
+    assert job.auto is True  # produced mechanically, like every completion record
+    assert job.started_ts is None  # no turn ever began
+    assert job.ended_ts == job.created_ts  # nothing later will settle it
+    assert ev.calls == []
+    # Durable and reloadable, in the same store as every other record.
+    assert mgr.get_job(repo(), TASK).status == semantic_jobs.STATUS_SKIPPED
+    assert read_job(mgr._config, "alpha", TASK)["skip_reason"] == "run-opt-out"
+
+
+def test_a_skip_carries_the_evaluator_identity_it_declined(tmp_path):
+    """Which evaluator's denominator lost this task is the useful reading."""
+    mgr = manager(tmp_path, evaluator=FakeEvaluator())
+
+    job = mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+
+    assert (job.backend, job.model, job.schema_version) == ("fake", "fake-model", "1")
+
+
+def test_a_skip_reason_outside_the_closed_vocabulary_is_refused(tmp_path):
+    """The count is the point; free text would make it unanalyzable.
+
+    Operator prose especially: it leaks repo content into a persisted surface and
+    invites recording the rationalization that is itself the bias.
+    """
+    mgr = manager(tmp_path)
+
+    with pytest.raises(ValueError):
+        mgr.skip_if_absent(repo(), TASK, "we were busy this week")
+
+    assert mgr.find_job(repo(), TASK) is None  # nothing persisted
+
+
+def test_a_skip_is_not_pushed(tmp_path):
+    """A failure is the corpus shrinking unexpectedly; a skip is what was asked for."""
+    notifier = RecordingNotifier()
+    mgr = manager(tmp_path, notifier=notifier)
+
+    mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+
+    assert notifier.sent == []
+
+
+@pytest.mark.parametrize(
+    "seed",
+    ["deferred", "queued", "completed", "failed", "skipped"],
+)
+def test_skip_if_absent_refuses_any_task_that_already_has_a_record(tmp_path, seed):
+    """Whichever run completes the task first writes the record and decides.
+
+    The same guard in both directions is what keeps a multi-run task from being
+    decided twice: the box on a session that does not finish the task never
+    reaches this path at all, and a later completing run cannot overwrite what the
+    first one settled.
+    """
+    executor = DeferredExecutor()
+    ev = FakeEvaluator(
+        error=SemanticEvaluationError("backend down") if seed == "failed" else None
+    )
+    mgr = manager(tmp_path, evaluator=ev, executor=executor)
+    if seed == "skipped":
+        mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+    else:
+        mgr.enqueue_if_absent(repo(), TASK)
+        if seed != "deferred":
+            dispatch_now(mgr)
+        if seed in ("completed", "failed"):
+            executor.run_all()
+    before = read_job(mgr._config, "alpha", TASK)
+
+    assert mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT) is None
+    assert read_job(mgr._config, "alpha", TASK) == before
+
+
+def test_enqueue_if_absent_refuses_a_task_already_recorded_as_skipped(tmp_path):
+    """The reverse direction of the same guard: a later run cannot silently undo it.
+
+    Un-skipping is an operator decision (``start_job``), never a mechanical one —
+    otherwise a second completing run of the same task would quietly reverse the
+    first one's choice.
+    """
+    ev = FakeEvaluator()
+    mgr = manager(tmp_path, evaluator=ev)
+    mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+
+    assert mgr.enqueue_if_absent(repo(), TASK) is None
+    assert mgr.get_job(repo(), TASK).status == semantic_jobs.STATUS_SKIPPED
+    assert ev.calls == []
+
+
+def test_an_operator_can_still_evaluate_a_skipped_task(tmp_path):
+    """Asking undoes a skip in the only direction that matters: a report exists.
+
+    That is the corpus gaining an entry, not losing one, so the manual path treats
+    a skipped record like any other terminal one.
+    """
+    ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-AFTER-SKIP"))
+    mgr = manager(tmp_path, evaluator=ev)
+    mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+
+    job = mgr.start_job(repo(), TASK)
+
+    assert job.auto is False  # somebody chose this one
+    settled = mgr.get_job(repo(), TASK)
+    assert settled.status == STATUS_COMPLETED
+    assert settled.evaluation_id == "EVAL-AFTER-SKIP"
+    assert settled.skip_reason is None  # a fresh attempt, not an annotated skip
+
+
+def test_the_startup_sweep_leaves_a_skipped_record_alone(tmp_path):
+    """It is terminal: there is no abandoned turn to settle."""
+    mgr = manager(tmp_path)
+    mgr.skip_if_absent(repo(), TASK, semantic_jobs.SKIP_RUN_OPT_OUT)
+    before = read_job(mgr._config, "alpha", TASK)
+
+    assert mgr.reconcile_orphans() == []
+    assert read_job(mgr._config, "alpha", TASK) == before
+
+
 def test_a_manual_start_overrides_a_held_job(tmp_path):
     """The documented escape hatch: an operator asking now is never capacity-gated.
 

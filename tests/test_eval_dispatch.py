@@ -55,12 +55,14 @@ from orch_hub.models import (
     UsageWindow,
 )
 from orch_hub.semantic_jobs import (
+    SKIP_RUN_OPT_OUT,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
     STATUS_ERROR,
     STATUS_FAILED,
     STATUS_QUEUED,
     STATUS_RUNNING,
+    STATUS_SKIPPED,
     SemanticJobManager,
 )
 
@@ -491,6 +493,23 @@ def test_pacing_counts_a_manual_turn_too(tmp_path):
     assert dispatcher.sweep() is not None
 
 
+def test_a_skipped_task_does_not_pace_the_queue(tmp_path):
+    """A skip spends nothing, so it must not hold back the jobs that would.
+
+    Otherwise a week of opted-out completions would pace the queue as if each one
+    had drawn on the window — starving exactly the tasks the operator did want
+    measured, on the strength of turns that never happened.
+    """
+    clock = Clock()
+    _, jobs, dispatcher, _, _ = stack(tmp_path, clock=clock, eval_dispatch_spacing=900)
+    jobs.skip_if_absent(repo(), "2026-08-01-declined", SKIP_RUN_OPT_OUT)
+    clock.advance(60)
+    jobs.enqueue_if_absent(repo(), TASK)
+
+    assert dispatcher.sweep() is not None
+    assert jobs.get_job(repo(), TASK).status != STATUS_DEFERRED
+
+
 def test_zero_spacing_drains_as_fast_as_capacity_allows(tmp_path):
     _, jobs, dispatcher, evaluator, _ = stack(tmp_path, eval_dispatch_spacing=0)
     jobs.enqueue_if_absent(repo(), "2026-08-01-a")
@@ -828,8 +847,72 @@ def test_the_census_counts_every_status_including_the_zeroes(tmp_path):
         STATUS_RUNNING: 0,
         STATUS_COMPLETED: 2,
         STATUS_FAILED: 0,
+        STATUS_SKIPPED: 0,
         STATUS_ERROR: 0,
     }
+
+
+def test_a_skipped_task_is_counted_and_broken_down_per_repo(tmp_path):
+    """The count is what makes the launch-time opt-out admissible at all.
+
+    An opt-out whose entries left no countable trace would hand back, at
+    production time, exactly the selection automatic evaluation exists to remove.
+    Per repo because that is the shape a thinning corpus has — skips cluster on the
+    expensive, remediation-heavy tail rather than spreading evenly.
+    """
+    snap = queue_snapshot(
+        config(tmp_path),
+        [
+            job("a", STATUS_SKIPPED, repo_name="alpha"),
+            job("b", STATUS_SKIPPED, repo_name="beta"),
+            job("c", STATUS_SKIPPED, repo_name="beta"),
+            job("d", STATUS_COMPLETED, repo_name="beta"),
+        ],
+        now=NOW,
+    )
+
+    assert snap.counts[STATUS_SKIPPED] == 3
+    # Most-skipped first, so the repo losing the most reports leads.
+    assert list(snap.skipped_by_repo.items()) == [("beta", 2), ("alpha", 1)]
+
+
+def test_skipped_records_stay_out_of_the_actionable_rows(tmp_path):
+    """A deliberate resting outcome has nothing to act on, and there can be many.
+
+    One row per opted-out task would crowd out the jobs that are genuinely stuck —
+    the question this list exists to answer.
+    """
+    snap = queue_snapshot(
+        config(tmp_path),
+        [job(f"s{i}", STATUS_SKIPPED) for i in range(30)]
+        + [job("held", STATUS_DEFERRED)],
+        now=NOW,
+    )
+
+    assert [e.job.task_id for e in snap.entries] == ["held"]
+    assert snap.truncated is False  # the skips are not a truncated page, they are counted
+    assert snap.counts[STATUS_SKIPPED] == 30
+
+
+def test_a_store_with_no_skips_states_nothing_per_repo(tmp_path):
+    """Only repos holding a skipped record appear: a zero row would be an invention.
+
+    The job store knows nothing about repos it has no record for, so it cannot
+    honestly render "0 skipped" for them.
+    """
+    snap = queue_snapshot(
+        config(tmp_path), [job("a", STATUS_COMPLETED), job("b", STATUS_DEFERRED)], now=NOW
+    )
+
+    assert snap.skipped_by_repo == {}
+    assert snap.counts[STATUS_SKIPPED] == 0  # the census still states the zero
+
+
+def test_a_skip_with_no_repo_attribution_is_still_counted(tmp_path):
+    """An unreadable record must not shrink the tally silently."""
+    snap = queue_snapshot(config(tmp_path), [job("a", STATUS_SKIPPED, repo_name="")], now=NOW)
+
+    assert snap.skipped_by_repo == {"(unattributed)": 1}
 
 
 def test_an_unknown_status_is_counted_rather_than_dropped(tmp_path):

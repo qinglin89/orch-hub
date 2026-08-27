@@ -35,6 +35,20 @@ settles to ``failed``, which is a recorded outcome. A hub that dies before it
 would have left a silent gap in the one corpus whose entire point is that it has
 none.
 
+One further axis, orthogonal to both gates: the launch-time Layer 2 opt-out
+(``RunRecord.auto_semantic_eval``, chosen per run and hub-only — it never reaches
+the orchestrator). It exists for weeks when the subscription budget has to go to
+development rather than to measuring it; deferral cannot serve that need, since it
+moves spend *inside* the weekly bucket rather than out of it. But it re-opens, at
+production time, the same selection this module exists to close — and on the
+dimension that makes skips cluster on the expensive, remediation-heavy tail rather
+than thinning the corpus evenly. It is therefore admissible only as a *recorded*
+skip: the task gets a terminal ``skipped`` job record with a bounded machine
+reason, keyed by task like every other record, so an operator who wants less
+measurement gets it while nobody gets a corpus that lies about its own
+denominator. Layer 1 is never skipped: it makes no model call, so declining it
+would save nothing and forfeit the whole deterministic layer.
+
 Two gates and one guard:
 
 - ``Config.evaluation_enabled`` is the subsystem gate (shared with every manual
@@ -66,7 +80,7 @@ from collections.abc import Callable
 from .config import Config
 from .eval_dispatch import DeferredDispatcher
 from .models import ManagedRepo, RunRecord
-from .semantic_jobs import SemanticJobManager
+from .semantic_jobs import SKIP_RUN_OPT_OUT, SemanticJobManager
 from .static_metrics import StaticEvaluator
 
 _log = logging.getLogger(__name__)
@@ -155,6 +169,13 @@ class CompletionEvaluationTrigger:
         there is nothing to evaluate and an evaluation keyed by a wrong
         ``(repo, task)`` would be worse than none.
 
+        Then the run's own launch-time Layer 2 choice decides which durable record
+        this completion lands: an accepted job to be dispatched, or a terminal
+        ``skipped`` one. Both are written the same way, at the same point, through
+        the same once-per-task guard — which is what settles the multi-run question
+        the record could otherwise only be ambiguous about (see
+        :meth:`~orch_hub.semantic_jobs.SemanticJobManager.skip_if_absent`).
+
         Then the ordering that matters: **Layer 2 is enqueued inline, Layer 1 is
         dispatched.** The completion signal is one-shot and already settled when
         this runs, so the automatic path has to accept it durably before returning
@@ -193,7 +214,10 @@ class CompletionEvaluationTrigger:
             )
             return
         task_id = record.task_id
-        self._enqueue_semantic(repo, task_id)
+        if record.auto_semantic_eval:
+            self._enqueue_semantic(repo, task_id)
+        else:
+            self._skip_semantic(repo, task_id)
         self._executor(lambda: self._dispatch_and_measure(repo, task_id))
 
     def _dispatch_and_measure(self, repo: ManagedRepo, task_id: str) -> None:
@@ -247,6 +271,51 @@ class CompletionEvaluationTrigger:
             repo.name,
             task_id,
             report.evaluation_id,
+        )
+
+    def _skip_semantic(self, repo: ManagedRepo, task_id: str) -> None:
+        """Durably record that this completion gets no Layer 2 turn; never raise.
+
+        The opt-out half of the same acceptance step :meth:`_enqueue_semantic` is,
+        and it runs at the same point for the same reason: the completion signal is
+        one-shot and already settled, so a skip that was only *intended* would be
+        indistinguishable, forever after, from a task the trigger never saw. That
+        is the whole difference between an operator choosing to measure less and a
+        corpus that cannot state its own denominator.
+
+        ``skip_if_absent`` carries the identical once-per-task guard, so the two
+        paths cannot fight over a task across runs: whichever run completes the
+        task first writes the record and decides, and neither an accepted job nor a
+        skip can overwrite the other. A run that never completes the task never
+        reaches here, which is why the box on a mid-task session decides nothing.
+
+        Layer 1 is untouched by this branch — it runs for a skipped task exactly as
+        for an evaluated one.
+        """
+        try:
+            job = self._jobs.skip_if_absent(repo, task_id, SKIP_RUN_OPT_OUT)
+        except Exception as exc:  # noqa: BLE001 - isolation from run state
+            _log.warning(
+                "automatic semantic skip record failed for %s/%s (%s): %s",
+                repo.name,
+                task_id,
+                type(exc).__name__,
+                exc,
+            )
+            return
+        if job is None:
+            _log.info(
+                "automatic semantic skip not recorded for %s/%s:"
+                " the task already has a job record",
+                repo.name,
+                task_id,
+            )
+            return
+        _log.info(
+            "automatic semantic evaluation skipped for %s/%s (%s)",
+            repo.name,
+            task_id,
+            job.skip_reason,
         )
 
     def _enqueue_semantic(self, repo: ManagedRepo, task_id: str) -> None:
