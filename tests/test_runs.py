@@ -2033,6 +2033,99 @@ def test_a_resumed_tail_keeps_the_sessions_snapshot_it_already_wrote(tmp_path):
     assert read_snapshot(run_dir).sessions == before.sessions
 
 
+def test_a_tail_interrupted_before_the_entries_settle_still_settles_them(
+    tmp_path, monkeypatch
+):
+    """Settling reads the run's own final parse, not a log the outage removed.
+
+    The hub wrote ``sessions.json``, then died before settling the entries that
+    same parse accounts for, and the repo-side log was cleaned while it was down.
+    A resumed tail re-reading *that* would get an empty parse — and settling is
+    silent when it finds nothing to settle, so the mark would clear and the
+    completion be announced carrying no session id for a session the run's own
+    durable snapshot could still name.
+    """
+    repo = make_repo(tmp_path)
+    manager, spawner, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    run_dir = manager.runs_dir / record.run_id
+    write_orch_log(repo, ORCH_LOG_LINES[:4])  # review session open, sid=(pending)
+    clock.tick(11 * 60 + 30)
+    manager.list_runs()  # the live scan records the entry; its sid is not knowable yet
+    assert read_task_snapshots(run_dir).for_sid("rev1") is None
+
+    log = write_orch_log(repo, ORCH_LOG_LINES)  # the end line reveals sid=rev1
+    monkeypatch.setattr("orch_hub.runs.settle_snapshots", die)
+    end_run(spawner, 0)
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+    assert len(read_snapshot(run_dir).sessions) == 2  # the parse is already durable
+    assert read_task_snapshots(run_dir).for_sid("rev1") is None  # its entries are not
+
+    monkeypatch.undo()
+    log.unlink()  # the repo-side log is cleaned while the hub is down
+
+    settled: list = []
+    manager_b, _, _ = make_manager(
+        tmp_path,
+        task_completed_hook=lambda _record: settled.append(
+            read_task_snapshots(run_dir)
+        ),
+    )
+    assert only_status(manager_b).state == "completed"
+
+    # Settled *before* the sidecar looked, which is the whole ordering contract:
+    # an evidence pack built here can reach this session's captured entry file.
+    assert len(settled) == 1
+    entry = settled[0].for_sid("rev1")
+    assert entry is not None and entry.index == 1
+    # And the session no scan ever saw is accounted for in the same pass.
+    assert [item.index for item in settled[0].snapshots] == [0, 1]
+
+
+def test_a_tail_that_lost_its_snapshot_settles_from_the_runs_own_capture(
+    tmp_path, monkeypatch
+):
+    """Interrupted one step earlier, the fallback is still run-owned.
+
+    ``spawn.out`` is this run's stdout capture — written by the run, into its own
+    dir, never touched again — and the orchestrator prints its whole marker
+    stream to stdout as well as to the log. So a tail that died before
+    ``sessions.json`` landed still has a durable parse once the repo-side log is
+    gone, and settles from it rather than from nothing. Same run-owned rule
+    :meth:`RunManager._classify_end` follows.
+    """
+    repo = make_repo(tmp_path)
+    manager, spawner, clock = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    run_dir = manager.runs_dir / record.run_id
+    (run_dir / "spawn.out").write_text(
+        "".join(line + "\n" for line in ORCH_LOG_LINES), encoding="utf-8"
+    )
+    write_orch_log(repo, ORCH_LOG_LINES[:4])
+    clock.tick(11 * 60 + 30)
+    manager.list_runs()
+
+    log = write_orch_log(repo, ORCH_LOG_LINES)
+    monkeypatch.setattr("orch_hub.runs.write_snapshot", die)
+    end_run(spawner, 0)
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+    assert read_snapshot(run_dir) is None  # nothing durable landed for this run
+
+    monkeypatch.undo()
+    log.unlink()
+
+    seen: list[RunRecord] = []
+    manager_b, _, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    assert only_status(manager_b).state == "completed"
+
+    assert len(read_snapshot(run_dir).sessions) == 2
+    entry = read_task_snapshots(run_dir).for_sid("rev1")
+    assert entry is not None and entry.index == 1
+    assert [r.run_id for r in seen] == [record.run_id]
+
+
 def test_a_tail_interrupted_before_the_protocol_check_resumes_it_uncompared(
     tmp_path, monkeypatch
 ):

@@ -1073,11 +1073,12 @@ class RunManager:
         into run state) and safe to reach twice, because a resumed tail cannot
         know how far the interrupted one got:
 
-        - the sessions snapshot is not re-derived when one already exists — the
-          repo-side log it parses may have been cleaned since, and an empty parse
-          would overwrite a good snapshot with nothing;
+        - the sessions snapshot is not re-derived from the repo-side log, which
+          may have been cleaned since; a resumed tail reads what the run itself
+          left behind and keeps an existing snapshot as written;
         - settling task snapshots re-derives nothing already recorded and writes
-          only when it has something to add;
+          only when it has something to add — and it settles against the parse
+          above, not a second read of that same removable log;
         - the protocol end check is keyed on having run at all, so a second look
           is a no-op — and a resumed first look is explicitly *unobserved*
           (below), since it now compares the deployment at an unbounded lag;
@@ -1101,11 +1102,13 @@ class RunManager:
         # Snapshot the parsed per-session summary once, now that the process has
         # exited and its log is complete, so the summary survives later cleanup of
         # the repo-side log. Written a single time per run — a resumed tail keeps
-        # what is already there — and fully isolated.
-        self._snapshot_sessions(run_dir, record, resumed=resumed)
+        # what is already there — and fully isolated. The parse it hands back is
+        # the run's final one, and everything below settles from *it* rather than
+        # re-reading a log a resumed tail may no longer have.
+        sessions = self._snapshot_sessions(run_dir, record, resumed=resumed)
         # Same moment, same isolation: settle any session-entry task snapshot still
         # keyed by a bracket whose sid the log revealed only at its end line.
-        self._settle_task_snapshots(run_dir, record)
+        self._settle_task_snapshots(run_dir, record, sessions)
         # And the last point the deployed protocol can still be compared against
         # what this run captured at launch — a redeployment or an edit from here
         # on is after the run, not during it.
@@ -1210,30 +1213,51 @@ class RunManager:
 
     def _snapshot_sessions(
         self, run_dir: Path, record: RunRecord, *, resumed: bool = False
-    ) -> None:
+    ) -> SessionsSnapshot:
         """Persist the run's per-session summary at the live->ended transition.
+
+        Returns that summary, because it is the run's *final* parse and the rest
+        of the tail settles from it (:meth:`_settle_task_snapshots`) rather than
+        reading the log a second time. One parse, one source — and on a resumed
+        tail the only source still guaranteed to exist.
 
         Isolation is the invariant, mirroring :meth:`_emit`: a parse or IO failure
         here must never propagate into run state. The log is read once (a bounded
         streaming scan) and the snapshot written atomically; on any failure the run
         still ends cleanly with no snapshot, and an ended run with no snapshot
-        falls back to a live parse on read (:meth:`read_sessions`).
+        falls back to a live parse on read (:meth:`read_sessions`). A write that
+        fails still hands its parse down: the bytes are lost, the facts are not.
 
-        A ``resumed`` tail (:meth:`_settle_end`) keeps an existing snapshot instead
-        of re-deriving it. The source it parses is the *repo-side* log, which by
-        then may have been cleaned or rotated — and :func:`read_live` reports an
-        absent log as an empty snapshot, not an error, so re-deriving could
-        silently replace a complete summary with nothing. There is no such risk on
-        the observed transition: nothing writes this artifact before it.
+        A ``resumed`` tail (:meth:`_settle_end`) never touches the *repo-side*
+        log. By then it may have been cleaned or rotated, and :func:`read_live`
+        reports an absent log as an empty snapshot rather than an error — so
+        re-deriving from it could silently replace a complete summary with
+        nothing, and hand that same nothing to everything settling below. It reads
+        what this run itself left behind instead (:func:`read_run_owned`:
+        ``sessions.json``, then the permanent ``spawn.out`` capture), which is the
+        run-owned rule :meth:`_classify_end` already follows, for the same reason.
+        An existing snapshot is kept exactly as written — this artifact is written
+        once per run — while a tail interrupted before it landed still gets one.
+        There is no such risk on the observed transition: the log is complete and
+        nothing writes this artifact before it.
         """
-        if resumed and read_snapshot(run_dir) is not None:
-            return
         try:
-            write_snapshot(run_dir, read_live(record))
+            if resumed:
+                sessions = read_run_owned(run_dir, record)
+                if read_snapshot(run_dir) is not None:
+                    return sessions
+            else:
+                sessions = read_live(record)
         except Exception:
             # Never let snapshotting touch run state; a missing snapshot is a
             # graceful degradation, not an error. Log only the (non-secret) run id.
+            _log.warning("session parse failed for run %s", record.run_id)
+            return SessionsSnapshot()
+        try:
+            write_snapshot(run_dir, sessions)
+        except Exception:
             _log.warning("session snapshot failed for run %s", record.run_id)
+        return sessions
 
     def _capture_task_entries(self, statuses: Sequence[RunStatus]) -> None:
         """Capture each live run's session-entry task file (caller holds no lock).
@@ -1267,7 +1291,9 @@ class RunManager:
             except Exception:
                 _log.warning("task-file snapshot failed for run %s", record.run_id)
 
-    def _settle_task_snapshots(self, run_dir: Path, record: RunRecord) -> None:
+    def _settle_task_snapshots(
+        self, run_dir: Path, record: RunRecord, sessions: SessionsSnapshot
+    ) -> None:
         """Close out the run's task snapshots at its end: sids, and what was missed.
 
         The end transition is the last point the whole log is available *and* the
@@ -1278,9 +1304,18 @@ class RunManager:
         miss because no later scan can. Isolated exactly like
         :meth:`_snapshot_sessions`: an unsettled entry keeps its bracket position
         and is still readable, so a failure costs a join key, not state.
+
+        ``sessions`` is the run's final parse, handed down from
+        :meth:`_snapshot_sessions` — the same one persisted as ``sessions.json`` —
+        rather than read here. That is not tidiness. Settling is silent when it
+        finds nothing to settle, so a resumed tail re-reading a repo-side log the
+        outage removed would clear the still-settling mark having settled nothing,
+        then announce the completion anyway — and the evidence built from it would
+        carry no session id for an entry this run captured *exactly*, leaving that
+        session indistinguishable downstream from one with no entry file at all.
         """
         try:
-            settle_snapshots(run_dir, read_live(record), now=self._clock())
+            settle_snapshots(run_dir, sessions, now=self._clock())
         except Exception:
             _log.warning("task-snapshot settle failed for run %s", record.run_id)
 

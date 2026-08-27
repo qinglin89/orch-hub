@@ -412,12 +412,18 @@ def _write_repo(tmp_path: Path) -> ManagedRepo:
     )
 
 
-def _write_orch_log(target: ManagedRepo, stamp: str = "20260809T030000Z") -> None:
+def _write_orch_log(
+    target: ManagedRepo,
+    stamp: str = "20260809T030000Z",
+    lines: list[str] | None = None,
+) -> Path:
     log_dir = target.path / ".mandrel" / "orchestrator" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
-    (log_dir / f"{stamp}-{TASK}.log").write_text(
-        "".join(line + "\n" for line in COMPLETING_LOG), encoding="utf-8"
+    path = log_dir / f"{stamp}-{TASK}.log"
+    path.write_text(
+        "".join(line + "\n" for line in (lines or COMPLETING_LOG)), encoding="utf-8"
     )
+    return path
 
 
 def _snapshot_tree(root: Path) -> dict[str, bytes]:
@@ -463,13 +469,15 @@ def _stack(cfg: Config, *, executor=sync_executor) -> Stack:
     return Stack(service, static, semantic, jobs, trig)
 
 
-def _run_manager(cfg: Config, *, hook, spawner: FakeSpawner | None = None) -> RunManager:
+def _run_manager(
+    cfg: Config, *, hook, spawner: FakeSpawner | None = None, clock=None
+) -> RunManager:
     return RunManager(
         cfg,
         readiness_checker=lambda r, c: ReadinessReport((ReadinessCheck("all", True, "ok"),)),
         spawner=spawner if spawner is not None else FakeSpawner(),
         pid_probe=lambda pid: False,
-        clock=lambda: FIXED_TS,
+        clock=clock if clock is not None else (lambda: FIXED_TS),
         task_completed_hook=hook,
     )
 
@@ -637,3 +645,71 @@ def test_a_hub_that_dies_before_the_job_record_still_evaluates_the_task(tmp_path
     restarted.list_runs()
     assert fresh.jobs.get_job(target, TASK).job_id == job.job_id
     assert len(fresh.service.list_evaluations(target, TASK)) == 2
+
+
+def test_a_resumed_tail_hands_over_settled_entry_evidence(tmp_path, monkeypatch):
+    """A tail resumed after the repo-side log is gone still evaluates settled evidence.
+
+    A session-entry snapshot is keyed by bracket position until the log names the
+    session on that bracket's *end* line, which only the end transition can
+    settle. Interrupt the tail between the sessions snapshot and that settle,
+    clean the repo-side log while the hub is down, and a resumed tail re-reading
+    the log would settle nothing — silently, since settling is a no-op when it
+    finds nothing — clear the still-settling mark, and announce a completion
+    whose evidence cannot name the session it captured exactly. It settles from
+    the run's own durable parse instead.
+    """
+    cfg = config(tmp_path)
+    spawner = FakeSpawner()
+    target = _write_repo(tmp_path)
+    # Launch at the log's own start stamp, then scan inside the review session's
+    # entry window — a fixed clock would refuse the capture as observed too late.
+    at = [FIXED_TS]
+    manager = _run_manager(
+        cfg, hook=lambda record: None, spawner=spawner, clock=lambda: at[0]
+    )
+    manager.start_run(target, TASK)
+
+    # A live scan captures the open review session's entry file — while its sid
+    # is still `(pending)`, which is the join the end transition owes it.
+    log = _write_orch_log(target, lines=COMPLETING_LOG[:4])
+    at[0] = FIXED_TS + dt.timedelta(seconds=11 * 60 + 30)
+    assert manager.list_runs()[0].state == "active"
+
+    class Interrupt(BaseException):
+        """A hub dying: nothing on the end tail catches BaseException."""
+
+    log = _write_orch_log(target)  # the end line reveals sid=rev1
+    monkeypatch.setattr(
+        "orch_hub.runs.settle_snapshots",
+        lambda *a, **k: (_ for _ in ()).throw(Interrupt("killed mid-tail")),
+    )
+    spawner.procs[0].returncode = 0
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+
+    monkeypatch.undo()
+    log.unlink()  # the repo-side log is cleaned while the hub is down
+
+    fresh = _stack(cfg)
+    restarted = _run_manager(cfg, hook=fresh.trigger.on_task_completed)
+    assert [s.state for s in restarted.list_runs()] == ["completed"]
+
+    job = fresh.jobs.get_job(target, TASK)
+    assert job.status == STATUS_COMPLETED
+    evidence = json.loads(
+        (
+            cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
+            / EVIDENCE_NAME
+        ).read_text(encoding="utf-8")
+    )
+    entries = evidence["runs"][0]["task_snapshots"]["snapshots"]
+    # Both sessions accounted for, and the captured one joined to its real sid —
+    # the evidence the pack's entry fidelity is computed from.
+    assert [(e["index"], e["sid"]) for e in entries] == [(0, "dev1"), (1, "rev1")]
+    assert entries[1]["present"] and not entries[1]["truncated"]
+    # The counts beside it are what the pack's fidelity signal is computed from;
+    # the sid above is what lets a consumer reach those captured bytes at all.
+    assert evidence["summary"]["task_entry_sessions"] == 2
+    assert evidence["summary"]["task_entries_exact"] == 1
+    assert evidence["summary"]["task_entry_fidelity"] == "partial"

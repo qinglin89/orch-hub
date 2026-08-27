@@ -167,11 +167,14 @@ What fires, and when:
   end-transition work still owed, and a second clears the mark once that work has
   run. A run found ended with the mark still set belongs to a hub that stopped
   inside the transition, and the next status scan finishes it: the evidence
-  settles, then the completion is handed over as usual. Only runs a hub with this
-  marker actually ended can be resumed, so nothing reaches back into already
-  archived history. The run-end push and the usage refresh are *not* replayed —
-  they describe a moment that has passed — and the audit trail keeps exactly one
-  `run_ended` event.
+  settles, then the completion is handed over as usual. Settling on resume reads
+  only what that run left in its own directory — its session snapshot, or the
+  stdout capture behind it — never the orchestrator log in the repo, which the
+  outage may have taken away; so a cleaned log costs a resumed run's evidence
+  nothing. Only runs a hub with this marker actually ended can be resumed, so
+  nothing reaches back into already archived history. The run-end push and the
+  usage refresh are *not* replayed — they describe a moment that has passed — and
+  the audit trail keeps exactly one `run_ended` event.
 - **A task gets at most one automatic Layer 2, ever.** The completion signal is
   per *run*, not per task (a task that completes without being archived stays
   launchable, and the close-out-only re-run that follows classifies `completed`
