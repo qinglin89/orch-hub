@@ -733,6 +733,15 @@ function flush() {
 // within the same drain (else a chained poll would spin forever) — it lands in a
 // new slot and only fires on the next runTimers(). Null out fired slots like
 // clearTimeout so setTimeout's 1-based ids stay stable.
+// How many timers are currently scheduled. Fired and cleared slots are nulled,
+// so this counts live work only — enough to prove a view did (or did not) start a
+// poll without firing anything and disturbing the page under test.
+function pendingTimers() {
+  var n = 0;
+  for (var i = 0; i < TIMERS.length; i++) if (TIMERS[i]) n++;
+  return n;
+}
+
 function runTimers() {
   var snapshot = [];
   for (var i = 0; i < TIMERS.length; i++)
@@ -2342,7 +2351,7 @@ async function scenarioTaskEval() {
     var base = {
       job_id: "job-1", repo_name: REPO, task_id: TASK, status: "queued",
       backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1",
-      evaluation_id: null, error: null,
+      evaluation_id: null, error: null, defer_reason: null, auto: false,
       created_ts: "2026-07-20T08:00:00Z", updated_ts: "2026-07-20T08:00:00Z",
       started_ts: null, ended_ts: null,
     };
@@ -2483,6 +2492,57 @@ async function scenarioTaskEval() {
     pickOpt && pickOpt.textContent.indexOf("claude-opus-4-8") !== -1,
     "picker option text: " + (pickOpt && pickOpt.textContent)
   );
+  // A DEFERRED job is neither in flight nor settled: the completion trigger has
+  // already accepted this task and the dispatch policy is holding the turn. Before
+  // this branch existed it fell through to the idle trigger, so the page read
+  // "never evaluated" for a task the corpus already owes a report — the exact
+  // absence automatic evaluation exists to remove. The manual override stays
+  // offered, relabelled, because it is the documented escape from a queue a broken
+  // usage feed would otherwise hold forever.
+  route("GET", jobPath, {
+    job: jobRecord({ status: "deferred", auto: true, defer_reason: "capacity" }),
+  });
+  var timersBeforeHeld = pendingTimers();
+  await navigate(evalPath);
+  check(
+    "eval: a deferred job shows a held state, not the idle trigger",
+    !!doc.querySelector(".eval-sem-held"),
+    "no held panel for a deferred job"
+  );
+  check(
+    "eval: the held state explains why the turn is waiting",
+    (doc.querySelector(".eval-sem-status") || {}).textContent &&
+      doc.querySelector(".eval-sem-status").textContent.indexOf(
+        "subscription capacity is at the configured ceiling"
+      ) !== -1,
+    "the hold reason was not rendered: " +
+      (doc.querySelector(".eval-sem-status") || {}).textContent
+  );
+  var heldBtn = doc.querySelector(".eval-sem-held .eval-sem-btn");
+  check(
+    "eval: the held state still offers the manual override",
+    !!heldBtn && heldBtn.textContent.indexOf("now") !== -1,
+    "no run-now override: " + (heldBtn && heldBtn.textContent)
+  );
+  check(
+    // Navigation tears down handles (so the count may drop), but it must not
+    // schedule a new one: a 3-second poll against an hours-scale wait is pure burn.
+    "eval: a held job is not polled (a hold is an hours-scale wait)",
+    pendingTimers() <= timersBeforeHeld,
+    "a deferred job scheduled a poll timer"
+  );
+  // An unrecognized reason token still renders — the hub may name a hold this
+  // client has not learned yet, and a silent blank is the worst answer.
+  route("GET", jobPath, {
+    job: jobRecord({ status: "deferred", auto: true, defer_reason: "solar-flare" }),
+  });
+  await navigate(evalPath);
+  check(
+    "eval: an unknown hold reason renders verbatim rather than vanishing",
+    (doc.querySelector(".eval-sem-status") || {}).textContent.indexOf("solar-flare") !== -1,
+    (doc.querySelector(".eval-sem-status") || {}).textContent
+  );
+
   // A FAILED job never silently returns to the idle view: the view shows a clear
   // failed state with the bounded backend diagnostic and a Retry that re-posts the
   // job. This state is read from the persisted job, so it survives a fresh load.
@@ -4229,6 +4289,214 @@ async function scenarioLiveRunReadiness() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// Evaluation queue: the display-only Overview section over /api/evaluation/queue.
+//
+// Automatic Layer 2 evaluation removes production-side selection from the
+// evaluated corpus, which makes every way it can stop working silent: a queue held
+// by a dead usage feed, a failed turn, and a switch left off all look like nothing
+// happening. These checks pin that each of those states is legible at a glance and
+// distinguishable from the others, that a failed read never reads as an empty
+// queue, that the overdue bound comes from the hub's configuration rather than a
+// literal in the client, and that none of it touches readiness or attention.
+async function scenarioEvaluationQueue() {
+  installRoutes({ waiting: false });
+  var QUEUE_TASK = "2026-08-01-held-task";
+  var queueJob = function (over) {
+    var base = {
+      job_id: "job-q", repo_name: REPO, task_id: QUEUE_TASK, status: "deferred",
+      backend: "claude-cli", model: "claude-opus-4-8", schema_version: "1",
+      evaluation_id: null, error: null, defer_reason: "capacity", auto: true,
+      created_ts: "2026-08-01T08:00:00Z", updated_ts: "2026-08-01T08:00:00Z",
+      started_ts: null, ended_ts: null,
+    };
+    for (var k in over) base[k] = over[k];
+    return base;
+  };
+  var queuePayload = function (over) {
+    var base = {
+      enabled: true,
+      auto_enabled: true,
+      queue_max_age_seconds: 21600,
+      counts: { deferred: 0, queued: 0, running: 0, completed: 0, failed: 0, error: 0 },
+      overdue: 0,
+      entries: [],
+      truncated: false,
+    };
+    for (var k in over) base[k] = over[k];
+    return base;
+  };
+  var section = function () {
+    return doc.querySelector("#view .overview-evalq");
+  };
+  var textOf = function (sel) {
+    var el = doc.querySelector(sel);
+    return el ? el.textContent.trim() : null;
+  };
+  var reposReady = function () {
+    var tiles = doc.querySelectorAll("#view .metric");
+    for (var i = 0; i < tiles.length; i++) {
+      var label = tiles[i].querySelector(".metric-label");
+      if (label && label.textContent.trim() === "repos ready")
+        return (tiles[i].querySelector(".metric-value") || {}).textContent;
+    }
+    return null;
+  };
+
+  // ---- 1) the subsystem is off (404, like every evaluation route but
+  // availability) → render nothing at all. A permanent "disabled" notice on the
+  // landing screen is noise about a deliberate configuration. installRoutes
+  // registers no queue route, so this is the default state.
+  await navigate("#/overview");
+  check(
+    "evalqueue: a disabled subsystem renders no queue section",
+    section() === null,
+    "the queue section rendered with evaluation disabled"
+  );
+  eq("evalqueue: a disabled subsystem leaves the rest of the overview alone", reposReady(), "1/1");
+
+  // ---- 2) enabled and calm: the section states the corpus figure and says so
+  // plainly when nothing is waiting.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 0, queued: 0, running: 0, completed: 7, failed: 0, error: 0 },
+  }));
+  await navigate("#/overview");
+  check("evalqueue: the section renders when evaluation is on", !!section(), "no .overview-evalq");
+  eq("evalqueue: the section names itself", textOf("#view .overview-evalq h2"), "Evaluation queue");
+  // Its OWN section, like Subscription usage: an unmeasured corpus is not a
+  // blocked run, so it never lays out as an operational panel.
+  check(
+    "evalqueue: the section sits outside the operational panels grid",
+    doc.querySelector(".overview-panels .overview-evalq") === null,
+    "the queue section is nested inside .overview-panels"
+  );
+  eq("evalqueue: the corpus figure leads the summary", textOf(".evq-summary"), "7 evaluated");
+  check(
+    "evalqueue: a calm queue says so rather than showing an empty list",
+    (section().textContent || "").indexOf("Nothing waiting") !== -1,
+    section().textContent
+  );
+
+  // ---- 3) held jobs: what is owed, and why.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 2, queued: 0, running: 0, completed: 7, failed: 1, error: 0 },
+    entries: [
+      { job: queueJob({}), age_seconds: 5400, overdue: false },
+      { job: queueJob({ job_id: "job-r", task_id: "2026-08-02-other", defer_reason: "pacing" }),
+        age_seconds: 600, overdue: false },
+      { job: queueJob({ job_id: "job-f", task_id: "2026-08-03-broken", status: "failed",
+                        defer_reason: null, error: "claude backend exited 1" }),
+        age_seconds: 90000, overdue: false },
+    ],
+  }));
+  await navigate("#/overview");
+  eq("evalqueue: the summary counts what is waiting and what failed",
+     textOf(".evq-summary"), "7 evaluated · 2 waiting · 1 failed");
+  eq("evalqueue: one row per outstanding job", doc.querySelectorAll("#view .evq-row").length, 3);
+  var firstRow = doc.querySelectorAll("#view .evq-row")[0];
+  check(
+    "evalqueue: a row names its task",
+    (firstRow.textContent || "").indexOf(QUEUE_TASK) !== -1,
+    firstRow.textContent
+  );
+  check(
+    "evalqueue: a held row explains the hold in prose",
+    (firstRow.textContent || "").indexOf("subscription capacity is at the configured ceiling") !== -1,
+    firstRow.textContent
+  );
+  check(
+    "evalqueue: a held row shows how long it has waited",
+    (firstRow.textContent || "").indexOf("waiting 1h 30m") !== -1,
+    firstRow.textContent
+  );
+  check(
+    "evalqueue: a row links to that task's evaluation view",
+    (firstRow.querySelector("a") || {}).getAttribute &&
+      firstRow.querySelector("a").getAttribute("href") ===
+        "#/evaluations/" + REPO + "/" + QUEUE_TASK,
+    firstRow.querySelector("a") && firstRow.querySelector("a").getAttribute("href")
+  );
+  var failedRow = doc.querySelectorAll("#view .evq-row")[2];
+  check(
+    "evalqueue: a failed row shows its bounded diagnostic",
+    (failedRow.textContent || "").indexOf("exited 1") !== -1,
+    failedRow.textContent
+  );
+  // Display-only, exactly like capacity: a stalled queue blocks no work, so it
+  // creates no Needs attention row and moves no operational figure.
+  eq("evalqueue: it creates no Needs attention row", doc.querySelectorAll("#view .attn").length, 0);
+  eq("evalqueue: it does not disturb the repos-ready metric", reposReady(), "1/1");
+
+  // ---- 4) overdue: the bound is the hub's configured threshold, rendered from
+  // the payload rather than a literal this client would have to keep in sync.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 1, queued: 0, running: 0, completed: 7, failed: 0, error: 0 },
+    queue_max_age_seconds: 1800,
+    overdue: 1,
+    entries: [{ job: queueJob({}), age_seconds: 9000, overdue: true }],
+  }));
+  await navigate("#/overview");
+  check(
+    "evalqueue: an overdue job is flagged on its row",
+    !!doc.querySelector("#view .evq-row.evq-overdue"),
+    "no overdue row marker"
+  );
+  check(
+    "evalqueue: the stall note renders the configured bound, not a literal",
+    (section().textContent || "").indexOf("waited longer than 30m") !== -1,
+    section().textContent
+  );
+
+  // ---- 5) both switches closed: the one reason a queue sits still that leaves
+  // no trace on the records, so it can only come from the config echo.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    auto_enabled: false,
+    counts: { deferred: 3, queued: 0, running: 0, completed: 7, failed: 0, error: 0 },
+    entries: [{ job: queueJob({}), age_seconds: 600, overdue: false }],
+  }));
+  await navigate("#/overview");
+  check(
+    "evalqueue: a closed trigger gate is named as the reason nothing drains",
+    (section().textContent || "").indexOf("ORCH_HUB_EVAL_AUTO") !== -1,
+    section().textContent
+  );
+  eq("evalqueue: the held records are still shown beside the closed gate",
+     doc.querySelectorAll("#view .evq-row").length, 1);
+
+  // ---- 6) a truncated page must not read as "this is everything".
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 40, queued: 0, running: 0, completed: 7, failed: 0, error: 0 },
+    entries: [{ job: queueJob({}), age_seconds: 600, overdue: false }],
+    truncated: true,
+  }));
+  await navigate("#/overview");
+  check(
+    "evalqueue: a truncated list says the counts above are complete",
+    (section().textContent || "").indexOf("counts above are complete") !== -1,
+    section().textContent
+  );
+  check(
+    "evalqueue: the complete census still reports every held job",
+    (textOf(".evq-summary") || "").indexOf("40 waiting") !== -1,
+    textOf(".evq-summary")
+  );
+
+  // ---- 7) a failed read is an unknown queue, never an empty one.
+  routeError("GET", "/api/evaluation/queue", 500, { detail: "job store unreadable" });
+  await navigate("#/overview");
+  check(
+    "evalqueue: a failed read renders unavailable, not an empty queue",
+    !!section() && (section().textContent || "").indexOf("unavailable") !== -1,
+    section() && section().textContent
+  );
+  check(
+    "evalqueue: a failed read leaves the other overview panels alone",
+    reposReady() === "1/1" && !!doc.querySelector("#view .overview-panels"),
+    "a queue read failure damaged the operational panels"
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 // Subscription usage: the display-only Overview capacity section over /api/usage.
 // Drives the available, high-usage, numeric-limit, unknown-window, unavailable,
 // stale, and source-failure paths — pinning percent-first rendering, explicit
@@ -4917,6 +5185,7 @@ async function scenarioRepoAdmission() {
     await scenarioLiveRunReadiness();
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();
+    await scenarioEvaluationQueue();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

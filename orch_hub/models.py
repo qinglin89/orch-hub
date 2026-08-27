@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -2330,6 +2330,97 @@ class SemanticJob:
             "updated_ts": self.updated_ts,
             "started_ts": self.started_ts,
             "ended_ts": self.ended_ts,
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationQueueEntry:
+    """One semantic job as the operator's queue view shows it.
+
+    A :class:`SemanticJob` plus the two facts a queue reader needs and the record
+    itself cannot state: how long it has been waiting, and whether that wait has
+    passed the configured bound (``ORCH_HUB_EVAL_QUEUE_MAX_AGE``). Both are
+    derived at read time against a clock, never persisted — the record is the
+    truth and this is a projection of it, so a config change re-renders rather
+    than migrating anything.
+
+    ``age_seconds`` is measured from ``created_ts`` (when the completion was
+    accepted, not when a turn started) because that is the interval the corpus
+    cares about: how long a completed task has gone unmeasured. It is ``None``
+    for a record whose stamp will not parse, which reads as "cannot say" rather
+    than as zero.
+
+    ``overdue`` is deliberately narrow: it flags a **deferred** job past the
+    bound and nothing else, matching exactly what
+    :meth:`orch_hub.eval_dispatch.DeferredDispatcher._log_stalled` warns about,
+    so the dashboard and the service log never disagree about which jobs are
+    stalled. A ``queued``/``running`` job that has hung is a different failure
+    with its own recovery (restart reconciliation settles it), and giving one
+    threshold two meanings is how a threshold stops meaning anything.
+    """
+
+    job: SemanticJob
+    age_seconds: int | None = None
+    overdue: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "job": self.job.to_dict(),
+            "age_seconds": self.age_seconds,
+            "overdue": self.overdue,
+        }
+
+
+@dataclass(frozen=True)
+class EvaluationQueueSnapshot:
+    """The cross-repo state of automatic Layer 2 evaluation, for one read.
+
+    Automatic evaluation exists to remove production-side selection from the
+    evaluated corpus, which makes its own failure modes quiet by construction: a
+    queue that stops draining, a job that fails, or a switch left off all look
+    identical from outside — nothing happens, and the corpus simply stops
+    growing. Nobody notices an absence. This is the shape that makes the absence
+    countable.
+
+    ``counts`` is a **complete census** by job status over every persisted
+    record, never capped, so the denominator is always honest even when
+    ``entries`` is truncated. Every known status is present (zero-valued when
+    unseen) so a reader can render a stable set of figures, and an unrecognized
+    status from a hand-edited record is counted under its own key rather than
+    silently dropped.
+
+    ``entries`` carries the jobs an operator might act on — everything except
+    ``completed``, which is the healthy outcome the counts already report —
+    ordered the way the queue itself is: waiting jobs oldest-first (the
+    dispatcher's own promotion order), then settled failures newest-first. It is
+    capped at :data:`orch_hub.eval_dispatch.QUEUE_ENTRY_LIMIT`, with ``truncated``
+    saying so, because a surface that silently shows the first N reads as "this
+    is everything".
+
+    ``auto_enabled`` and ``queue_max_age_seconds`` are the two pieces of *config*
+    a queue reader cannot infer from records. The first is the fourth reason a
+    queue can sit still — both switches closed holds every deferred job with no
+    per-record trace, deliberately (see
+    :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep`) — and the second is
+    the bound ``overdue`` was measured against, so the reader renders the real
+    threshold instead of a literal that drifts from it.
+    """
+
+    auto_enabled: bool = False
+    queue_max_age_seconds: int = 0
+    counts: Mapping[str, int] = field(default_factory=dict)
+    overdue: int = 0
+    entries: tuple[EvaluationQueueEntry, ...] = ()
+    truncated: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "auto_enabled": self.auto_enabled,
+            "queue_max_age_seconds": self.queue_max_age_seconds,
+            "counts": dict(self.counts),
+            "overdue": self.overdue,
+            "entries": [entry.to_dict() for entry in self.entries],
+            "truncated": self.truncated,
         }
 
 

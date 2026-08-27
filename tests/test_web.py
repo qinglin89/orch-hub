@@ -2516,6 +2516,88 @@ def test_report_feed_styles_are_present():
         assert selector in css, selector
 
 
+# ---- evaluation queue on overview ---------------------------------------------
+#      (2026-08-09-completion-triggered-evaluation, session-2-cont)
+#
+# The Overview gains a second independent, display-only section over
+# GET /api/evaluation/queue: the cross-repo state of automatic Layer 2 evaluation.
+# Its whole reason to exist is that the automatic path fails silently — a held
+# queue, a failed turn, and a switch left off all look like nothing happening — so
+# these pin the served-asset wiring and the boundaries that keep it display-only.
+# Rendering/state behaviour is verified by the jsc harness
+# (tests/keyboard_harness.js, scenarioEvaluationQueue).
+
+
+def test_overview_evaluation_queue_is_a_seventh_best_effort_source():
+    body = app_js()
+    assert '"/api/evaluation/queue"' in body
+    assert "evaluationQueuePanel" in body
+    # Its own reader, not overviewSource: this is the one panel that must tell a
+    # 404 (evaluation switched off — nothing to show) from a failed read (unknown,
+    # and an unknown queue must never render as an empty one).
+    assert "overviewEvalQueue" in body
+    assert "err.status === 404" in body
+    assert "Evaluation queue is unavailable." in body
+
+
+def test_overview_evaluation_queue_is_display_only():
+    body = app_js()
+    # Its own section heading, painted OUTSIDE the overview-panels grid: an
+    # unmeasured corpus is not a blocked run, so it never lays out as an
+    # operational panel and never becomes a Needs attention row.
+    assert "Evaluation queue" in body
+    assert "overview-evalq" in body
+    assert "evaluationQueuePanel(data.evalQueue)" in body
+
+
+def test_overview_evaluation_queue_explains_every_way_it_can_stall():
+    body = app_js()
+    # The three record-borne reasons, mapped from the hub's bounded machine tokens
+    # (orch_hub/eval_dispatch.py) with an unknown token falling through verbatim.
+    assert "DEFER_REASON_TEXT" in body
+    for token in ("capacity", "usage-unknown", "pacing"):
+        assert token in body, token
+    # The fourth reason leaves no trace on the records by design, so it can only
+    # render from the payload's config echo.
+    assert "queue.auto_enabled" in body
+    assert "ORCH_HUB_EVAL_AUTO" in body
+    # The overdue bound is the hub's configured threshold, never a client literal.
+    assert "queue.queue_max_age_seconds" in body
+    # A capped page must not read as "this is everything".
+    assert "queue.truncated" in body
+    assert "counts above are complete" in body
+
+
+def test_task_evaluation_view_renders_a_held_layer_2_job():
+    body = app_js()
+    # A deferred job is accepted and durably owed, not absent: without its own
+    # branch it fell through to the idle trigger and the page read "never
+    # evaluated" for a task the corpus already owes a report.
+    assert 'status === "deferred"' in body
+    assert "evalSemHeld" in body
+    assert "eval-sem-held" in body
+    # The manual override stays offered — it is the documented escape from a queue
+    # a broken usage feed would otherwise hold forever.
+    assert "Run semantic evaluation now…" in body
+
+
+def test_overview_evaluation_queue_styles():
+    css = styles_css()
+    for selector in (
+        ".evq-summary",
+        ".evq-rows",
+        ".evq-row",
+        ".evq-state",
+        ".evq-meta",
+        ".evq-flag",
+    ):
+        assert selector in css, selector
+    # An overdue held job uses the same left-accent idiom the task cards use for a
+    # run signal, warn-coloured — nothing here is an error state.
+    assert ".evq-row.evq-overdue > a" in css
+    assert ".evq-warn" in css
+
+
 def test_shell_assets_resolve_through_the_runtime_resource_root():
     # In a compiled release the first-party modules have no on-disk source file,
     # so `Path(__file__).parent / "web"` would address nothing. The shell assets

@@ -109,6 +109,24 @@ STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
 STATUS_ERROR = "error"
 
+STATUSES = (
+    STATUS_DEFERRED,
+    STATUS_QUEUED,
+    STATUS_RUNNING,
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_ERROR,
+)
+"""Every status a record may hold, in lifecycle order.
+
+Exists for the census an operator surface takes over the whole store
+(:func:`orch_hub.eval_dispatch.queue_snapshot`): a count keyed only by the
+statuses actually *observed* silently omits the interesting zeroes — "no jobs
+failed" and "no jobs are held" are exactly the figures worth stating — so the
+enumeration has to be declared rather than discovered. Ordered because a reader
+renders it in this order; a new status is appended where it belongs in the
+lifecycle, and every counting surface picks it up without being edited."""
+
 _TRANSIENT = frozenset({STATUS_QUEUED, STATUS_RUNNING})
 """In-flight states that bracket an evaluation turn. A persisted transient record
 with no live turn (a hub that died mid-turn) is an orphan holding the

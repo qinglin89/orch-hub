@@ -947,6 +947,106 @@ code {
   }
 }
 
+/* ---- evaluation queue (automatic Layer 2 visibility) ---- */
+
+/* Its own section below the operational panels, on the same footing as the
+   capacity cards: an unmeasured corpus is not a blocked run, so nothing here
+   borrows the attention/activity vocabulary. Rows are a compact stack even on
+   wide screens — the list is short by design and reads as a queue, not a grid. */
+.evq-summary {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 10px;
+}
+
+.evq-note {
+  font-size: 12px;
+  margin: 0 0 8px;
+}
+
+/* A held/stalled explanation. Warn-coloured to draw the eye, deliberately not
+   error-coloured: nothing is broken for the operator's work — only the
+   measurement of it has stopped. */
+.evq-warn {
+  color: var(--warn-fg);
+}
+
+.evq-rows {
+  gap: 6px;
+}
+
+.evq-row > a {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-2);
+  text-decoration: none;
+  color: inherit;
+}
+
+/* An overdue (past ORCH_HUB_EVAL_QUEUE_MAX_AGE) held job: the same left-accent
+   idiom the task cards use for a run signal, so "this one has been sitting" is
+   readable before any text is. */
+.evq-row.evq-overdue > a {
+  border-left: 3px solid var(--warn-fg);
+}
+
+.evq-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* The lifecycle status as a console marker, not a badge pill: it is a state
+   word, and the row's meaning already comes from the section it sits in. */
+.evq-state {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+  flex: 0 0 auto;
+}
+
+.evq-state.deferred,
+.evq-state.queued {
+  color: var(--warn-fg);
+}
+
+.evq-state.running {
+  color: var(--run-fg);
+}
+
+.evq-state.failed,
+.evq-state.error {
+  color: var(--bad-fg);
+}
+
+.evq-task {
+  font-family: var(--mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.evq-meta {
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.evq-flag {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--warn-fg);
+  align-self: flex-start;
+}
+
 /* ---- subscription usage (agent capacity) ---- */
 
 /* Display-only capacity cards, one per provider, in their own section below the

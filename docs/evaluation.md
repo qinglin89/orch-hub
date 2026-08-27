@@ -76,7 +76,7 @@ of the hub — for the launchd service they live in the plist's
 | `ORCH_HUB_EVAL_RETENTION` | `20` | Per-task cap on retained evaluations (see [Retention](#retention)). `0` disables retention (keep everything); a positive integer is the cap. A negative or non-integer value fails startup. |
 | `ORCH_HUB_EVAL_USAGE_CEILING` | `80` | Subscription utilization (percent) at or above which an **automatic** Layer 2 turn waits instead of running (see [When an automatic Layer 2 turn actually runs](#when-an-automatic-layer-2-turn-actually-runs)). Compared against the most exhausted currently-measured window. Only the automatic path consults it; a manual evaluation is never capacity-gated. A value outside 0-100, or a non-number, fails startup. |
 | `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn admitted to spend (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
-| `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue. Visibility only — it changes no dispatch decision. `0` disables the warning. A negative or non-integer value fails startup. |
+| `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue and flags it on the dashboard (see [Seeing the queue](#seeing-the-queue)). Visibility only — it changes no dispatch decision. `0` disables the flag. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
 other change is required — the routes and dashboard controls self-disable.
@@ -266,6 +266,51 @@ full five-hour window plus slack), the hub logs a warning naming the repo, task,
 and reason. It stays a held job, not a failed one; the bound exists so a queue
 that has stopped draining — usually because the usage feed broke, which defers
 forever by design — cannot stay invisible for a week.
+
+## Seeing the queue
+
+A log line is enough only if someone is reading the log. Automatic evaluation's
+failure modes are all *absences* — a queue nobody drains, a turn that failed, a
+switch left off — and an absence is exactly what nobody notices. So the state of
+the automatic path is a section on the dashboard's Operations Overview, on the
+same footing as Subscription usage: its own block below the operational panels,
+display-only, never a **Needs attention** row and never a gate. Nothing is
+blocked by a stalled evaluation queue; only the measuring has stopped.
+
+It shows:
+
+- **The census.** How many tasks carry a completed report, how many are waiting,
+  how many failed. These counts are over *every* persisted job record and are
+  never truncated — the whole point of evaluating every completed task is that
+  the denominator is knowable, so a figure that quietly meant "the first twenty"
+  would defeat the feature on its own dashboard.
+- **The outstanding jobs**, oldest first: which task, which repo, how long it has
+  waited, and — for a held job — the reason in prose (`capacity`,
+  `usage-unknown`, `pacing`). Each row links to that task's evaluation view. The
+  row list *is* capped for readability; when it is, the section says so.
+- **Why nothing is draining.** Three of the four reasons are on the records
+  themselves. The fourth — `ORCH_HUB_EVAL_ENABLED` or `ORCH_HUB_EVAL_AUTO`
+  switched off — deliberately leaves no per-record trace (a closed gate is global
+  config, not a fact about a job, and stamping it would churn the whole queue on
+  a config change), so the section names it from configuration instead.
+- **A stall flag** on any held job past `ORCH_HUB_EVAL_QUEUE_MAX_AGE`, with the
+  bound spelled out. It is the same population the service log warns about, by
+  the same rule, so the two never disagree.
+
+A read failure renders as *unavailable* rather than an empty queue — an unknown
+queue is not a calm one — and it degrades only this section. With
+`ORCH_HUB_EVAL_ENABLED` falsy the section is absent entirely: there is no queue,
+and a permanent "disabled" notice about a deliberate configuration is noise.
+
+A single task's held state is visible where you would expect it too: the Layer 2
+panel of that task's evaluation view shows a queued-and-waiting job with its
+reason, instead of the "never evaluated" trigger it used to show. The button
+stays available there, relabelled — running it now is the documented way past a
+queue a broken usage feed would otherwise hold indefinitely.
+
+Both surfaces are reads. Opening them never dispatches, holds, or rewrites a job,
+and never consults the usage service (a usage read can trigger a background
+refresh, which a passive dashboard poll has no business causing).
 
 ## Retention
 
@@ -705,6 +750,7 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
+| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census plus the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, and whether the trigger gate is open. Read-only — it never dispatches. `404` when disabled. |
 | `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
 | `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | One published artifact's [byte-exact persisted content](#verifying-one-artifact-byte-for-byte) for independent digest verification; pruned answers `410`. |
@@ -714,7 +760,7 @@ All routes are protected by the bearer token like every non-health route.
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |
 | `POST /api/repos/{repo}/evaluations/{task}/metrics` | Generate evidence + Layer 1 static metrics. |
 | `POST /api/repos/{repo}/evaluations/{task}/semantic/job` | Start or reuse the current async Layer 2 job; duplicate in-flight starts return the same job. |
-| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`queued`/`running`/`completed`/`failed`; `null` when none exists). |
+| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`deferred`/`queued`/`running`/`completed`/`failed`; `null` when none exists). |
 
 When disabled, every route except `GET /api/evaluation` answers `404` with the
 fail-closed reason.

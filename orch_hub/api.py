@@ -43,7 +43,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .completion_eval import CompletionEvaluationTrigger
-from .eval_dispatch import CapacityGate, DeferredDispatcher
+from .eval_dispatch import CapacityGate, DeferredDispatcher, queue_snapshot
 from .config import TOKEN_ENV, Config
 from .control_dir import (
     DEFAULT_RESPONDER,
@@ -1662,6 +1662,44 @@ def create_app(
         """
         require_evaluation_enabled()
         return {"enabled": True, "semantic": semantic.doctor().to_dict()}
+
+    @app.get("/api/evaluation/queue")
+    def evaluation_queue() -> dict:
+        """Report the cross-repo state of automatic Layer 2 evaluation.
+
+        The counterpart to every other evaluation route, which is scoped to one
+        ``(repo, task)``: right for asking "how did this task go?", useless for
+        the question automatic evaluation creates — "is the corpus still filling?"
+        Its failure modes are silent by construction (a queue that stops draining,
+        a turn that failed, a switch left off all look like nothing happening), and
+        answering them by opening tasks one at a time means never asking. So this
+        is one walk of the semantic-job store folded into a census plus the jobs
+        still owed a turn, which the Overview renders as a display-only section.
+
+        Read-only and cheap: it lists persisted records and reads config. It does
+        **not** sweep, dispatch, publish, or consult the usage service — asking
+        about the queue must never move it, and a usage read has side effects (it
+        can trigger a background refresh) that a passive dashboard poll has no
+        business causing.
+
+        Deliberately **not** gated on ``ORCH_HUB_EVAL_AUTO``: a closed trigger gate
+        is one of the four reasons the queue can sit still, and it is the only one
+        that leaves no trace on the records, so it travels in the payload as
+        ``auto_enabled`` rather than hiding the queue that proves it. The subsystem
+        gate is a different matter — with evaluation off there is no queue to
+        report — so this 404s while disabled like every other evaluation route,
+        leaving ``GET /api/evaluation`` the single availability answer.
+
+        Shape: ``{"enabled": true, **EvaluationQueueSnapshot}`` — ``counts`` is a
+        complete census by status, while ``entries`` is capped
+        (``truncated`` says when) so one pathological queue cannot return an
+        unbounded page.
+        """
+        require_evaluation_enabled()
+        return {
+            "enabled": True,
+            **queue_snapshot(resolved, semantic_jobs.list_jobs()).to_dict(),
+        }
 
     # -- global report feed ----------------------------------------------------
     #

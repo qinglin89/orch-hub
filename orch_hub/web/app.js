@@ -83,6 +83,23 @@
   // evaluation the view then selects; `error` (a corrupt job record) is handled as
   // terminal/idle-with-retry like `failed`.
   const SEMANTIC_JOB_TRANSIENT = new Set(["queued", "running"]);
+  // `deferred` is a fourth state, and neither transient nor terminal: the job is
+  // accepted and durably owed, held out of a model turn by the automatic dispatch
+  // policy. It must not be polled (a hold is an hours-scale wait) and must never
+  // render as "no job" (the corpus already owes this task a report).
+  //
+  // Its bounded machine reason, as prose. Mirrors the REASON_* constants in
+  // orch_hub/eval_dispatch.py; both the per-task evaluation view and the Overview
+  // queue section read this map so a hold is named identically wherever it shows.
+  // An unknown token falls through verbatim rather than vanishing, so a reason
+  // added on the hub is visible here before this map learns about it.
+  const DEFER_REASON_TEXT = {
+    capacity: "subscription capacity is at the configured ceiling",
+    "usage-unknown": "subscription usage could not be read",
+    pacing: "another evaluation turn ran recently",
+  };
+  const deferReasonText = (reason) =>
+    reason ? DEFER_REASON_TEXT[reason] || reason : "waiting for capacity";
 
   // ---- token storage ----
   const getToken = () => localStorage.getItem(TOKEN_KEY) || "";
@@ -4123,6 +4140,29 @@
           )}</span></span>`;
   }
 
+  // The held (`deferred`) panel content: this task's automatic Layer 2 is already
+  // accepted and durably queued — it is waiting for the dispatch policy, not for
+  // an operator. Without this branch a held job falls through to the idle trigger
+  // and the page reads "never evaluated", which is exactly backwards: it hides
+  // that the corpus already owes this task a report, and invites a manual turn
+  // that duplicates one already scheduled.
+  //
+  // The trigger is still offered, relabelled, because a manual evaluation is the
+  // documented escape hatch from a queue a broken usage feed would otherwise hold
+  // forever (it is ungated by design — a human choosing to look is not the
+  // production-side selection automatic evaluation removes). No polling: a held
+  // job waits on capacity, which is an hours-scale wait, so a 3-second poll would
+  // burn the page for no news.
+  function evalSemHeld(job, unavailable, doctor) {
+    const reason = job && job.defer_reason ? deferReasonText(job.defer_reason) : "";
+    return `<span class="control-status eval-sem-status" role="status">This task is
+          queued for automatic semantic evaluation and is waiting${
+            reason ? " because " + escapeHtml(reason) : ""
+          }. It starts on its own when the policy allows; this page will not update
+          itself. Run it now to skip the wait.</span>
+        ${evalSemTrigger("Run semantic evaluation now…", unavailable, doctor)}`;
+  }
+
   // The terminal-failed (or corrupt-record `error`) panel content: the bounded
   // backend diagnostic — never full prompt text or unbounded model output, the
   // manager caps it — plus a Retry that re-POSTs the job (a fresh attempt is
@@ -4142,10 +4182,11 @@
   // model (a real cost, and slow) but is a read-only analysis bounded to the
   // persisted evidence — not an orchestrator run, and it mutates nothing. Its
   // action region is state-driven by the current async job: a transient job shows
-  // the running panel (survives reload); a failed/error job shows the bounded
-  // diagnostic + Retry; no job or a completed one shows the idle trigger. All three
-  // share one `.eval-actions` wrapper with a state modifier so the layout is a
-  // single (never nested) flex container.
+  // the running panel (survives reload); a deferred job shows why it is held plus
+  // a run-now override; a failed/error job shows the bounded diagnostic + Retry;
+  // no job or a completed one shows the idle trigger. All of them share one
+  // `.eval-actions` wrapper with a state modifier so the layout is a single
+  // (never nested) flex container.
   function evalSemanticSection(doctor, job) {
     const unavailable = !!(doctor && doctor.available === false);
     const status = job ? job.status : null;
@@ -4156,6 +4197,11 @@
       // show its live state rather than the (now moot) start control.
       modifier = " eval-sem-running";
       actions = evalSemRunning(job);
+    } else if (status === "deferred") {
+      // Accepted and owed, held by the dispatch policy — neither in flight nor
+      // settled, and emphatically not "no job".
+      modifier = " eval-sem-held";
+      actions = evalSemHeld(job, unavailable, doctor);
     } else if (status === "failed" || status === "error") {
       modifier = " eval-sem-failed";
       actions = evalSemFailed(job, unavailable, doctor);
@@ -6082,6 +6128,136 @@
     );
   }
 
+  // ---- evaluation queue (automatic Layer 2 visibility) ----
+  //
+  // Automatic evaluation exists so the evaluated corpus is not a product of
+  // operator judgment. That makes its own failure modes silent by construction: a
+  // queue held by a dead usage feed, a job that failed, and a switch left off all
+  // look identical from outside — nothing happens, and the corpus quietly stops
+  // filling. A selection-free corpus nobody can tell has stalled is worth no more
+  // than the judgment-selected one it replaced, so this section exists to make the
+  // absence countable at a glance, on the screen the operator already lands on.
+  //
+  // Display-only, exactly like Subscription usage: it never creates a Needs
+  // attention row and never touches readiness, run state, or launch/intake gates
+  // (a stalled evaluation queue is not an operational problem — nothing is
+  // blocked, only unmeasured). Its own section, outside the operational grid.
+
+  // Fetch the queue, distinguishing "the evaluation subsystem is off" (404, like
+  // every other evaluation route) from "the read failed" (null). They render
+  // differently on purpose: a disabled subsystem is a deliberate configuration
+  // with no queue to show, while a failed read is an unknown that must not read as
+  // an empty queue. A 401 still rethrows to the shared login gate.
+  async function overviewEvalQueue() {
+    try {
+      return await api("/api/evaluation/queue");
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      if (err instanceof ApiError && err.status === 404) return { disabled: true };
+      return null;
+    }
+  }
+
+  // One queue row: which task, what state, how long, and — for a held job — why.
+  // The whole row links to that task's evaluation view, where the full diagnostic
+  // and the manual override live, so "which task is stuck" is one tap from the
+  // landing screen instead of a walk through run history.
+  function evalQueueRow(entry) {
+    const job = entry.job || {};
+    const status = job.status || "unknown";
+    const held = status === "deferred";
+    const age =
+      entry.age_seconds === null || entry.age_seconds === undefined
+        ? ""
+        : fmtDuration(entry.age_seconds);
+    const bits = [];
+    if (held) bits.push(deferReasonText(job.defer_reason));
+    else if (status === "failed" || status === "error")
+      bits.push(job.error || "the evaluation failed");
+    if (age) bits.push((held || status === "queued" ? "waiting " : "") + age);
+    return (
+      `<li class="evq-row${entry.overdue ? " evq-overdue" : ""}">` +
+      `<a href="${escapeHtml(evalHash(job.repo_name || "", job.task_id || ""))}">` +
+      `<span class="evq-line">` +
+      `<span class="evq-state ${escapeHtml(status)}">${escapeHtml(status)}</span>` +
+      `<span class="evq-task task-id">${escapeHtml(job.task_id || "?")}</span>` +
+      `</span>` +
+      `<span class="evq-meta muted">${escapeHtml(
+        [job.repo_name || "", bits.join(" · ")].filter(Boolean).join(" — ")
+      )}</span>` +
+      (entry.overdue ? `<span class="evq-flag">stalled</span>` : "") +
+      `</a></li>`
+    );
+  }
+
+  // The one-line census: the corpus figure first (how many tasks actually carry a
+  // report), then what is outstanding. Zero counts are dropped from the sentence
+  // but never from the payload — a queue with nothing in it should read as calm,
+  // while "0 failed" as a permanent fixture teaches the eye to skip the line that
+  // matters when it stops being 0.
+  function evalQueueSummary(counts) {
+    const c = counts || {};
+    const waiting = (c.deferred || 0) + (c.queued || 0) + (c.running || 0);
+    const parts = [(c.completed || 0) + " evaluated"];
+    if (waiting) parts.push(waiting + " waiting");
+    const failed = (c.failed || 0) + (c.error || 0);
+    if (failed) parts.push(failed + " failed");
+    return parts.join(" · ");
+  }
+
+  // The Evaluation queue section. Deliberately NO live region on the notes: the
+  // Overview repaints #overview-body on a 15-second tick, and a role="status"
+  // element re-inserted each tick is re-announced each tick. These are standing
+  // facts under a heading, not updates responding to an action — the same reason
+  // the Subscription usage cards carry no role either.
+  //
+  // `queue` is the /api/evaluation/queue payload,
+  // `{disabled:true}` when the subsystem is off (render nothing — there is no
+  // queue, and a permanent "disabled" notice on the landing screen is noise), or
+  // null when the read failed (render the unavailable state — an unknown queue is
+  // not an empty one).
+  function evaluationQueuePanel(queue) {
+    if (queue && queue.disabled) return "";
+    const head = `<section class="section overview-evalq"><h2>Evaluation queue</h2>`;
+    const foot = `</section>`;
+    if (queue === null)
+      return head + `<p class="muted">Evaluation queue is unavailable.</p>` + foot;
+    const notes = [];
+    // The fourth reason a queue sits still, and the only one that leaves no trace
+    // on the records: the hub deliberately does not stamp a defer_reason for a
+    // closed gate (it is global config, not a per-job fact), so it can only be
+    // explained from the payload's own config echo.
+    if (!queue.auto_enabled)
+      notes.push(
+        `<p class="evq-note evq-warn">Automatic evaluation is off
+         (ORCH_HUB_EVAL_AUTO). Held jobs stay queued until it is switched back on.</p>`
+      );
+    if (queue.overdue)
+      notes.push(
+        `<p class="evq-note evq-warn">${escapeHtml(
+          queue.overdue +
+            (queue.overdue === 1 ? " job has" : " jobs have") +
+            " waited longer than " +
+            fmtDuration(queue.queue_max_age_seconds) +
+            "; the queue is not draining."
+        )}</p>`
+      );
+    const entries = queue.entries || [];
+    const rows = entries.length
+      ? `<ul class="list evq-rows">${entries.map(evalQueueRow).join("")}</ul>` +
+        (queue.truncated
+          ? `<p class="evq-note muted">Showing the first ${entries.length}; the counts above are complete.</p>`
+          : "")
+      : `<p class="muted">Nothing waiting.</p>`;
+    return (
+      head +
+      `<p class="evq-summary">${escapeHtml(evalQueueSummary(queue.counts))}</p>` +
+      notes.join("") +
+      rows +
+      foot
+    );
+  }
+
   // ---- overview data + paint + bounded refresh ----
   //
   // renderOverview is split into loadOverview (fetch+normalize) and paintOverview
@@ -6094,15 +6270,26 @@
   // but empty. overviewSource swallows non-401 errors to null, so Promise.all
   // only rejects on a 401 (api() already re-gated; the caller returns).
   async function loadOverview() {
-    const [reposData, tasksData, runsData, escData, historyData, usageData] =
-      await Promise.all([
-        overviewSource("/api/repos"),
-        overviewSource("/api/tasks"),
-        overviewSource("/api/runs"),
-        overviewSource("/api/escalations"),
-        overviewSource("/api/history/runs?limit=" + OVERVIEW_HISTORY_LIMIT),
-        overviewSource("/api/usage"),
-      ]);
+    const [
+      reposData,
+      tasksData,
+      runsData,
+      escData,
+      historyData,
+      usageData,
+      queueData,
+    ] = await Promise.all([
+      overviewSource("/api/repos"),
+      overviewSource("/api/tasks"),
+      overviewSource("/api/runs"),
+      overviewSource("/api/escalations"),
+      overviewSource("/api/history/runs?limit=" + OVERVIEW_HISTORY_LIMIT),
+      overviewSource("/api/usage"),
+      // Its own reader, not overviewSource: this is the one panel that has to
+      // tell a 404 (evaluation switched off — nothing to show) apart from a
+      // failed read (unknown — must not read as an empty queue).
+      overviewEvalQueue(),
+    ]);
     return {
       repos: reposData ? reposData.repos || [] : null,
       taskRepos: tasksData ? tasksData.repos || [] : null,
@@ -6112,6 +6299,9 @@
       // The whole /api/usage payload is `{providers:[...]}`; a failed fetch is
       // null (this section only). [] = loaded but no providers reported.
       usage: usageData ? usageData.providers || [] : null,
+      // The whole queue payload (null = read failed, {disabled:true} = subsystem
+      // off), passed through so the panel can distinguish the two.
+      evalQueue: queueData,
     };
   }
 
@@ -6138,7 +6328,11 @@
       // Its own section AFTER the operational grid: display-only capacity, kept
       // clear of the attention/activity/outcomes flow so quota never reads as
       // health. A failed usage source degrades only this section.
-      subscriptionUsagePanel(data.usage);
+      subscriptionUsagePanel(data.usage) +
+      // Same footing as capacity and for the same reason: display-only, its own
+      // section after the operational grid, so an unmeasured corpus never reads as
+      // a blocked run. A disabled subsystem renders nothing at all.
+      evaluationQueuePanel(data.evalQueue);
   }
 
   // True when focus sits on something inside the repaintable Overview body. A

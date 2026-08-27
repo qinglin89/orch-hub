@@ -32,10 +32,12 @@ from orch_hub.eval_dispatch import (
     REASON_USAGE_UNKNOWN,
     CapacityGate,
     DeferredDispatcher,
+    queue_snapshot,
 )
 from orch_hub.models import (
     PROVIDER_CLAUDE,
     ManagedRepo,
+    SemanticJob,
     ProviderUsage,
     SemanticEvaluatorInfo,
     SemanticReport,
@@ -44,8 +46,10 @@ from orch_hub.models import (
 from orch_hub.semantic_jobs import (
     STATUS_COMPLETED,
     STATUS_DEFERRED,
+    STATUS_ERROR,
     STATUS_FAILED,
     STATUS_QUEUED,
+    STATUS_RUNNING,
     SemanticJobManager,
 )
 
@@ -713,3 +717,272 @@ def test_an_admitted_manual_turn_paces_the_queue_before_it_starts(tmp_path):
 
     clock.advance(900)
     assert dispatcher.sweep() is not None
+
+
+# -- the operator view --------------------------------------------------------
+
+
+def job(
+    task_id: str,
+    status: str,
+    *,
+    created: dt.datetime | None = None,
+    updated: dt.datetime | None = None,
+    repo_name: str = "alpha",
+    **fields,
+) -> SemanticJob:
+    """One persisted-shaped record, without going through the manager."""
+    return SemanticJob(
+        job_id="J-" + task_id,
+        repo_name=repo_name,
+        repo_path=REPO_PATH,
+        task_id=task_id,
+        status=status,
+        created_ts=(created or NOW).isoformat(),
+        updated_ts=(updated or created or NOW).isoformat(),
+        **fields,
+    )
+
+
+def test_the_census_counts_every_status_including_the_zeroes(tmp_path):
+    """A count keyed only on observed statuses hides the figures worth stating.
+
+    "Nothing is held" and "nothing failed" are the reassuring readings; if they
+    are simply absent from the payload a reader cannot tell them from a surface
+    that forgot to look.
+    """
+    snap = queue_snapshot(
+        config(tmp_path),
+        [job("a", STATUS_COMPLETED), job("b", STATUS_COMPLETED), job("c", STATUS_DEFERRED)],
+        now=NOW,
+    )
+
+    assert snap.counts == {
+        STATUS_DEFERRED: 1,
+        STATUS_QUEUED: 0,
+        STATUS_RUNNING: 0,
+        STATUS_COMPLETED: 2,
+        STATUS_FAILED: 0,
+        STATUS_ERROR: 0,
+    }
+
+
+def test_an_unknown_status_is_counted_rather_than_dropped(tmp_path):
+    """A hand-edited record must not shrink the denominator silently."""
+    snap = queue_snapshot(config(tmp_path), [job("a", "improvised")], now=NOW)
+
+    assert snap.counts["improvised"] == 1
+    assert len(snap.entries) == 1
+
+
+def test_completed_jobs_are_counted_but_not_listed(tmp_path):
+    """The healthy outcome is a figure, not a row; rows are what may need action."""
+    snap = queue_snapshot(
+        config(tmp_path), [job("a", STATUS_COMPLETED), job("b", STATUS_FAILED)], now=NOW
+    )
+
+    assert snap.counts[STATUS_COMPLETED] == 1
+    assert [e.job.task_id for e in snap.entries] == ["b"]
+
+
+def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
+    """Two groups with opposite senses: a queue, then a log.
+
+    The waiting group is shown in the dispatcher's own promotion order, so the
+    top row is what actually runs next; the settled group leads with the newest
+    failure, which is the one still worth reading.
+    """
+    older = NOW - dt.timedelta(hours=3)
+    newer = NOW - dt.timedelta(hours=1)
+    snap = queue_snapshot(
+        config(tmp_path),
+        [
+            job("fail-old", STATUS_FAILED, created=older, updated=older),
+            job("held-new", STATUS_DEFERRED, created=newer),
+            job("running", STATUS_RUNNING, created=newer),
+            job("fail-new", STATUS_FAILED, created=older, updated=newer),
+            job("held-old", STATUS_DEFERRED, created=older),
+        ],
+        now=NOW,
+    )
+
+    assert [e.job.task_id for e in snap.entries] == [
+        "held-old",
+        "held-new",
+        "running",
+        "fail-new",
+        "fail-old",
+    ]
+
+
+def test_the_age_is_measured_from_acceptance_not_from_a_turn(tmp_path):
+    """How long the task has gone unmeasured, which is the corpus's question."""
+    snap = queue_snapshot(
+        config(tmp_path),
+        [job("a", STATUS_DEFERRED, created=NOW - dt.timedelta(hours=2))],
+        now=NOW,
+    )
+
+    assert snap.entries[0].age_seconds == 7200
+
+
+def test_an_unparseable_stamp_reads_as_unknown_age_not_zero(tmp_path):
+    record = SemanticJob(
+        job_id="J",
+        repo_name="alpha",
+        repo_path=REPO_PATH,
+        task_id="a",
+        status=STATUS_DEFERRED,
+        created_ts="not-a-timestamp",
+    )
+    snap = queue_snapshot(config(tmp_path), [record], now=NOW)
+
+    assert snap.entries[0].age_seconds is None
+    assert snap.entries[0].overdue is False
+    assert snap.overdue == 0
+
+
+def test_the_overdue_flag_comes_from_the_configured_bound(tmp_path):
+    """The threshold is configuration, and the flag is measured against it."""
+    cfg = config(tmp_path, eval_queue_max_age=3600)
+    records = [
+        job("young", STATUS_DEFERRED, created=NOW - dt.timedelta(seconds=3599)),
+        job("old", STATUS_DEFERRED, created=NOW - dt.timedelta(seconds=3600)),
+    ]
+
+    snap = queue_snapshot(cfg, records, now=NOW)
+
+    assert snap.queue_max_age_seconds == 3600
+    assert snap.overdue == 1
+    assert {e.job.task_id: e.overdue for e in snap.entries} == {
+        "young": False,
+        "old": True,
+    }
+
+
+def test_a_disabled_bound_flags_nothing(tmp_path):
+    """``0`` disables the bound, per the config contract — not "everything is overdue"."""
+    cfg = config(tmp_path, eval_queue_max_age=0)
+    snap = queue_snapshot(
+        cfg, [job("a", STATUS_DEFERRED, created=NOW - dt.timedelta(days=30))], now=NOW
+    )
+
+    assert snap.overdue == 0
+    assert snap.entries[0].overdue is False
+
+
+def test_only_held_jobs_can_be_overdue(tmp_path):
+    """The bound has exactly one meaning, shared with the dispatcher's own warning.
+
+    A hung ``queued``/``running`` turn is a different failure with its own
+    recovery (restart reconciliation settles it), so it renders its age without
+    borrowing the stalled-queue flag.
+    """
+    cfg = config(tmp_path, eval_queue_max_age=60)
+    stale = NOW - dt.timedelta(days=1)
+    snap = queue_snapshot(
+        cfg,
+        [
+            job("q", STATUS_QUEUED, created=stale),
+            job("r", STATUS_RUNNING, created=stale),
+            job("f", STATUS_FAILED, created=stale),
+            job("d", STATUS_DEFERRED, created=stale),
+        ],
+        now=NOW,
+    )
+
+    assert snap.overdue == 1
+    assert {e.job.task_id for e in snap.entries if e.overdue} == {"d"}
+
+
+def test_the_stalled_population_matches_the_dispatchers_own_warning(tmp_path):
+    """One population, two surfaces: the dashboard and the log must not disagree."""
+    clock = Clock()
+    cfg, jobs, dispatcher, _, _ = stack(
+        tmp_path,
+        clock=clock,
+        snapshot=usage(window(used=99.0)),  # held on capacity
+        eval_queue_max_age=3600,
+    )
+    jobs.enqueue_if_absent(repo(), "2026-08-01-old")
+    clock.advance(3600)
+    jobs.enqueue_if_absent(repo(), "2026-08-02-new")
+    clock.advance(1)
+    dispatcher.sweep()
+
+    warned = {
+        task_id for (_repo, task_id, _job_id) in dispatcher._stall_logged
+    }
+    snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
+
+    assert warned == {"2026-08-01-old"}
+    assert {e.job.task_id for e in snap.entries if e.overdue} == warned
+
+
+def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
+    """The cap bounds the page, never the census — a truncated denominator would
+    defeat the whole point of a corpus with a knowable one."""
+    records = [
+        job(f"t{i:02d}", STATUS_DEFERRED, created=NOW - dt.timedelta(days=1, seconds=i))
+        for i in range(5)
+    ]
+
+    snap = queue_snapshot(config(tmp_path), records, now=NOW, limit=2)
+
+    assert len(snap.entries) == 2
+    assert snap.truncated is True
+    assert snap.counts[STATUS_DEFERRED] == 5
+    assert snap.overdue == 5  # counted over every held job, not just the shown ones
+    assert [e.job.task_id for e in snap.entries] == ["t04", "t03"]  # oldest first
+
+
+def test_an_uncapped_page_is_not_marked_truncated(tmp_path):
+    snap = queue_snapshot(config(tmp_path), [job("a", STATUS_DEFERRED)], now=NOW)
+
+    assert snap.truncated is False
+    assert len(snap.entries) == 1
+
+
+def test_the_view_reports_a_closed_gate_rather_than_hiding_the_queue(tmp_path):
+    """A reader asking why nothing drains must see the held records AND the switch.
+
+    A closed gate leaves no trace on the records by design (it is global config,
+    not a per-job fact), so it can only be explained from the config echo — and
+    hiding the queue while the gate is closed would answer the question with the
+    same silence that prompted it.
+    """
+    records = [job("a", STATUS_DEFERRED)]
+    for cfg in (
+        config(tmp_path, eval_auto=False),
+        config(tmp_path, evaluation_enabled=False),
+    ):
+        snap = queue_snapshot(cfg, records, now=NOW)
+        assert snap.auto_enabled is False
+        assert [e.job.task_id for e in snap.entries] == ["a"]
+
+    assert queue_snapshot(config(tmp_path), records, now=NOW).auto_enabled is True
+
+
+def test_an_empty_store_is_a_calm_snapshot_not_an_error(tmp_path):
+    snap = queue_snapshot(config(tmp_path), [], now=NOW)
+
+    assert snap.entries == ()
+    assert snap.overdue == 0
+    assert snap.truncated is False
+    assert set(snap.counts.values()) == {0}
+
+
+def test_the_snapshot_reads_the_store_without_moving_it(tmp_path):
+    """Asking about the queue must never dispatch, hold, or rewrite a record."""
+    cfg, jobs, _dispatcher, evaluator, clock = stack(
+        tmp_path, snapshot=usage(window(used=99.0))
+    )
+    jobs.enqueue_if_absent(repo(), TASK)
+    path = jobs.jobs_dir / "alpha" / TASK / "job.json"
+    before = path.read_bytes()
+
+    snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
+
+    assert [e.job.status for e in snap.entries] == [STATUS_DEFERRED]
+    assert path.read_bytes() == before
+    assert evaluator.calls == []

@@ -60,8 +60,21 @@ import threading
 from collections.abc import Callable
 
 from .config import Config
-from .models import PROVIDER_CLAUDE, ProviderUsage, SemanticJob
-from .semantic_jobs import STATUS_DEFERRED, STATUS_QUEUED, SemanticJobManager
+from .models import (
+    PROVIDER_CLAUDE,
+    EvaluationQueueEntry,
+    EvaluationQueueSnapshot,
+    ProviderUsage,
+    SemanticJob,
+)
+from .semantic_jobs import (
+    STATUS_COMPLETED,
+    STATUS_DEFERRED,
+    STATUS_QUEUED,
+    STATUS_RUNNING,
+    STATUSES,
+    SemanticJobManager,
+)
 from .usage import current_used_percent
 
 _log = logging.getLogger(__name__)
@@ -79,6 +92,18 @@ resolves itself never and is the operator's problem to fix."""
 
 REASON_PACING = "pacing"
 """Held because another turn was admitted less than the configured spacing ago."""
+
+QUEUE_ENTRY_LIMIT = 20
+"""Ceiling on the rows :func:`queue_snapshot` returns (counts stay complete).
+
+An operator surface has to fit on a phone, and the queue's pathological shapes
+are unbounded: a usage feed that died a week ago holds one row per completed task
+since, and ``failed`` records are terminal, so they accumulate for the life of the
+store. Capping the rows keeps the surface readable; keeping ``counts`` a full
+census keeps it honest, which is the half that actually matters here — the whole
+point of automatic evaluation is that the denominator is knowable, so a figure
+that quietly meant "the first twenty" would defeat the feature on its own
+dashboard. ``truncated`` says when the cap bit."""
 
 UNATTRIBUTABLE_REASON = (
     "semantic evaluation abandoned (deferred job carries no repo attribution)"
@@ -415,3 +440,106 @@ class DeferredDispatcher:
                 age / 3600.0,
                 job.defer_reason or "unknown",
             )
+
+
+# -- operator view -------------------------------------------------------------
+#
+# Everything above decides; this reports. The split matters because the automatic
+# path's failure modes are *silent by construction*: a held queue, a failed turn,
+# and a switch left off are indistinguishable from outside — nothing happens, and
+# the corpus stops growing. A selection-free corpus that nobody can tell has
+# stopped filling is worth no more than the judgment-selected one it replaced.
+
+
+_WAITING_ORDER = (STATUS_DEFERRED, STATUS_QUEUED, STATUS_RUNNING)
+"""Statuses whose jobs are still owed a turn, in the order a reader wants them.
+
+They lead the queue view, and within it a held job precedes an admitted one:
+"what is stuck" is the question this surface exists to answer, and an admitted
+turn is already answering itself."""
+
+
+def _waiting_key(job: SemanticJob) -> tuple:
+    """Oldest-first within the waiting group — the dispatcher's own promotion
+    order, so the top of the view is what actually runs next."""
+    return (
+        _WAITING_ORDER.index(job.status),
+        job.created_ts or "",
+        job.repo_name,
+        job.task_id,
+    )
+
+
+def _settled_key(job: SemanticJob) -> tuple:
+    """Newest-first within the settled group (note the reverse sort at the call
+    site): a settled record is a log entry, and the newest failure is the one
+    still worth reading — an old one has either been superseded by a fresh
+    attempt or is part of a pattern the counts already state."""
+    return (job.updated_ts or job.ended_ts or job.created_ts or "", job.repo_name, job.task_id)
+
+
+def queue_snapshot(
+    config: Config,
+    jobs: list[SemanticJob],
+    *,
+    now: dt.datetime | None = None,
+    limit: int = QUEUE_ENTRY_LIMIT,
+) -> EvaluationQueueSnapshot:
+    """Fold every persisted job into the cross-repo view of the automatic path.
+
+    Pure: takes the records (one :meth:`SemanticJobManager.list_jobs` walk) and a
+    clock, reads three config values, and returns a projection. It holds no state,
+    writes nothing, and — unlike :meth:`DeferredDispatcher.sweep` — is deliberately
+    **not** gated on ``auto_evaluation_enabled``: a reader asking why nothing is
+    draining must be able to see the held records *and* that the switch is off.
+    Hiding the queue while the gate is closed would answer the question with the
+    same silence that made it necessary. The gate state travels as
+    ``auto_enabled`` instead, so the reader explains rather than omits.
+
+    ``overdue`` counts held jobs past ``eval_queue_max_age`` — the same jobs, by
+    the same rule, that :meth:`DeferredDispatcher._log_stalled` warns about, so the
+    dashboard and the service log name one population. A bound of ``0`` disables
+    the flag entirely (no job is overdue), matching the config contract.
+    """
+    moment = now or _utc_now()
+    max_age = config.eval_queue_max_age
+    counts: dict[str, int] = {status: 0 for status in STATUSES}
+    pending: list[SemanticJob] = []
+    for job in jobs:
+        counts[job.status] = counts.get(job.status, 0) + 1
+        if job.status != STATUS_COMPLETED:
+            pending.append(job)
+    # Two groups with opposite senses, so they are sorted apart and concatenated
+    # rather than forced into one comparator.
+    pending = sorted(
+        (job for job in pending if job.status in _WAITING_ORDER), key=_waiting_key
+    ) + sorted(
+        (job for job in pending if job.status not in _WAITING_ORDER),
+        key=_settled_key,
+        reverse=True,
+    )
+    entries = []
+    overdue = 0
+    for job in pending:
+        created = _parse_ts(job.created_ts)
+        age = int((moment - created).total_seconds()) if created is not None else None
+        stalled = (
+            job.status == STATUS_DEFERRED
+            and max_age > 0
+            and age is not None
+            and age >= max_age
+        )
+        if stalled:
+            overdue += 1
+        if len(entries) < max(limit, 0):
+            entries.append(
+                EvaluationQueueEntry(job=job, age_seconds=age, overdue=stalled)
+            )
+    return EvaluationQueueSnapshot(
+        auto_enabled=config.auto_evaluation_enabled,
+        queue_max_age_seconds=max_age,
+        counts=counts,
+        overdue=overdue,
+        entries=tuple(entries),
+        truncated=len(pending) > len(entries),
+    )

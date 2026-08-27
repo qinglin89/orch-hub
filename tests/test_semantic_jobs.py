@@ -36,6 +36,7 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub import semantic_jobs
 from orch_hub.config import Config
 from orch_hub.evaluation import EvaluationService
 from orch_hub.models import ManagedRepo, SemanticEvaluatorInfo, SemanticReport
@@ -49,6 +50,7 @@ from orch_hub.semantic_jobs import (
     STATUS_FAILED,
     STATUS_QUEUED,
     STATUS_RUNNING,
+    STATUSES,
     SemanticJobManager,
     UnknownSemanticJobError,
     _ERROR_MAX_CHARS,
@@ -1009,3 +1011,22 @@ def test_manager_drives_real_evaluator_links_evaluation_and_leaves_repo_intact(t
     assert job.backend == "claude-cli"
     # The target repo is byte-identical: the async wrapper adds no repo mutation.
     assert snapshot_tree(target_repo.path) == before
+
+
+def test_the_status_enumeration_covers_every_declared_status():
+    """A new status must join ``STATUSES`` or it drops out of every census.
+
+    The operator's queue surface counts by status over this tuple precisely so
+    that the uninteresting zeroes ("nothing failed", "nothing is held") are
+    stated rather than inferred from an absence. A status the tuple has not
+    learned about would be counted only where it happens to occur, which is the
+    silent shrinking denominator automatic evaluation exists to prevent.
+    """
+    declared = {
+        value
+        for name, value in vars(semantic_jobs).items()
+        if name.startswith("STATUS_") and isinstance(value, str)
+    }
+
+    assert set(STATUSES) == declared
+    assert len(STATUSES) == len(declared)  # no duplicates

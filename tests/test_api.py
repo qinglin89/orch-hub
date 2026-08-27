@@ -3238,12 +3238,13 @@ def test_recovered_overlap_refuses_revise_and_confirm_but_allows_cancel(
 EVAL_CLOCK = dt.datetime(2026, 7, 22, 9, 0, 0, tzinfo=dt.timezone.utc)
 
 
-def eval_config(tmp_path: Path, *, enabled: bool = True) -> Config:
+def eval_config(tmp_path: Path, *, enabled: bool = True, **overrides) -> Config:
     return Config(
         mandrel_path=tmp_path / "mandrel",
         token=TOKEN,
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=enabled,
+        **overrides,
     )
 
 
@@ -3333,9 +3334,10 @@ def make_eval_client(
     records=None,
     semantic_backend=None,
     semantic_job_executor=None,
+    **config_overrides,
 ) -> tuple[TestClient, EvaluationService, StaticEvaluator, SemanticEvaluator, ManagedRepo]:
     repo = repo if repo is not None else make_run_repo(tmp_path)
-    config = eval_config(tmp_path, enabled=enabled)
+    config = eval_config(tmp_path, enabled=enabled, **config_overrides)
     loader = lambda cfg: list(records or [])
     service = EvaluationService(
         config, record_loader=loader, git_runner=fake_eval_git, clock=lambda: EVAL_CLOCK
@@ -3491,6 +3493,114 @@ def test_evaluation_doctor_requires_auth(tmp_path, monkeypatch):
     del client.headers["Authorization"]
     resp = client.get("/api/evaluation/doctor")
     assert resp.status_code == 401
+
+
+# -- queue (automatic Layer 2 visibility) --------------------------------------
+
+
+def queue_store(tmp_path, **overrides) -> SemanticJobManager:
+    """A job manager over the same data dir the eval client uses, so a test can
+    seed persisted records without going through an HTTP start."""
+    return SemanticJobManager(
+        eval_config(tmp_path, **overrides),
+        evaluator=SemanticEvaluator(
+            eval_config(tmp_path, **overrides),
+            evaluation_service=EvaluationService(
+                eval_config(tmp_path, **overrides),
+                record_loader=lambda cfg: [],
+                git_runner=fake_eval_git,
+                clock=lambda: EVAL_CLOCK,
+            ),
+            backend=FakeSemanticBackend(),
+            clock=lambda: EVAL_CLOCK,
+        ),
+        clock=lambda: EVAL_CLOCK,
+        executor=lambda run: None,  # never run a turn from a seeding helper
+    )
+
+
+def test_evaluation_queue_reports_a_calm_empty_store(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+
+    body = client.get("/api/evaluation/queue").json()
+
+    assert body["enabled"] is True
+    assert body["auto_enabled"] is True
+    assert body["entries"] == []
+    assert body["overdue"] == 0
+    assert body["truncated"] is False
+    assert set(body["counts"].values()) == {0}
+
+
+def test_evaluation_queue_lists_held_jobs_with_their_reason(tmp_path, monkeypatch):
+    # The cross-repo question no per-task route answers: what is owed and why.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    jobs = queue_store(tmp_path)
+    jobs.enqueue_if_absent(repo, RUN_TASK_ID)
+    jobs.hold_deferred(jobs.get_job(repo, RUN_TASK_ID), "capacity")
+
+    body = client.get("/api/evaluation/queue").json()
+
+    assert body["counts"]["deferred"] == 1
+    assert len(body["entries"]) == 1
+    entry = body["entries"][0]
+    assert entry["job"]["task_id"] == RUN_TASK_ID
+    assert entry["job"]["status"] == "deferred"
+    assert entry["job"]["defer_reason"] == "capacity"
+    # Age is measured live against the record's own acceptance stamp (the route
+    # takes no injected clock — the arithmetic itself is unit-tested in
+    # tests/test_eval_dispatch.py), so pin it to the real elapsed interval.
+    expected = (dt.datetime.now(dt.timezone.utc) - EVAL_CLOCK).total_seconds()
+    assert abs(entry["age_seconds"] - expected) < 5
+
+
+def test_evaluation_queue_echoes_the_configured_age_bound(tmp_path, monkeypatch):
+    # The dashboard renders the real threshold rather than a literal of its own,
+    # so tuning the hub's bound moves the surface with it.
+    client, *_ = make_eval_client(tmp_path, monkeypatch, eval_queue_max_age=1800)
+
+    assert client.get("/api/evaluation/queue").json()["queue_max_age_seconds"] == 1800
+
+
+def test_evaluation_queue_reports_a_closed_trigger_gate(tmp_path, monkeypatch):
+    # Not gated on ORCH_HUB_EVAL_AUTO: a closed trigger gate is the one reason a
+    # queue sits still that leaves no trace on the records, so it travels in the
+    # payload instead of hiding the records that prove it.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch, eval_auto=False)
+    queue_store(tmp_path, eval_auto=False).enqueue_if_absent(repo, RUN_TASK_ID)
+
+    body = client.get("/api/evaluation/queue").json()
+
+    assert body["auto_enabled"] is False
+    assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
+
+
+def test_evaluation_queue_reading_it_does_not_dispatch_anything(tmp_path, monkeypatch):
+    # Asking about the queue must never move it.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    jobs = queue_store(tmp_path)
+    jobs.enqueue_if_absent(repo, RUN_TASK_ID)
+    record = jobs.jobs_dir / repo.name / RUN_TASK_ID / "job.json"
+    before = record.read_bytes()
+
+    assert client.get("/api/evaluation/queue").status_code == 200
+
+    assert record.read_bytes() == before
+
+
+def test_evaluation_queue_disabled_is_404(tmp_path, monkeypatch):
+    # With the subsystem off there is no queue; GET /api/evaluation stays the one
+    # route that answers while disabled.
+    client, *_ = make_eval_client(tmp_path, monkeypatch, enabled=False)
+
+    assert client.get("/api/evaluation/queue").status_code == 404
+
+
+def test_evaluation_queue_requires_auth(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    del client.headers["Authorization"]
+
+    assert client.get("/api/evaluation/queue").status_code == 401
 
 
 # -- generate / list / fetch ---------------------------------------------------
