@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+verified-against: 39eda85d7efd91d1191f40b6c616ea660323d776
 ---
 
 # Features: Semantic Evaluation and Report Feed
@@ -46,8 +46,12 @@ Implemented behavior:
   computed independently from what the pack carries: snippets ground
   `ai_freshness_utility`; the ordered trace grounds semantic-schema-v2
   `retrieval_effectiveness` and `rediscovery_risk`. Missing or partial parts
-  remain omitted or lower confidence rather than failing; unobserved sessions
-  are missing evidence, never bad behavior. Raw logs stay out.
+  remain omitted or lower confidence rather than failing. A positive task-file
+  work-entry minus dev-session-evidence gap is likewise an explicit coverage
+  omission with a flat confidence cost; it states only this record's reach and
+  leaves outside-hub work versus absent/incomplete session summaries as possible
+  causes. Unobserved sessions are missing evidence, never bad behavior. Raw logs
+  stay out.
 - Reports stamp `input_evidence_schema` and `input_entry_fidelity`; confidence
   comparisons must remain within one evidence-schema cohort, and replay cases
   can distinguish exact, partial, and reconstructed session-entry inputs.

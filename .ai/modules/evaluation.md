@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+verified-against: 39eda85d7efd91d1191f40b6c616ea660323d776
 ---
 
 # Modules: Task Evaluation Layers
@@ -118,7 +118,11 @@ from what the pack actually carries: snippets make `ai_freshness_utility`
 assessable, while the read trace grounds semantic-schema-v2
 `retrieval_effectiveness` and `rediscovery_risk`. Missing, unobserved, or
 partially lost read evidence lowers confidence rather than becoming bad session
-behavior. Raw orchestrator/spawn logs stay out of the prompt.
+behavior. A positive `protocol.work_entry_count - runs.dev_session_count` gap is
+also an omission and flat confidence penalty; it is a session-evidence coverage
+measure, not proof that work ran outside the hub, because a missing or short
+`sessions.json` produces the same gap. Raw orchestrator/spawn logs stay out of
+the prompt.
 
 The report parser requires sentinel-wrapped JSON, stamps task/evaluation
 provenance itself (including the evidence-pack schema cohort and session-entry
