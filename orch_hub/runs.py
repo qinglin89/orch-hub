@@ -421,6 +421,13 @@ class RunManager:
     usage sidecar is never imported here) and is isolated exactly like
     notification delivery: it must return promptly and its failure can never
     touch run state.
+
+    ``task_completed_hook`` is the same kind of seam for the evaluation sidecar:
+    a plain ``Callable[[RunRecord], None]`` (no evaluation import here either)
+    called once per run, at the live->ended transition, and only when that end
+    classifies as ``completed``. The manager decides *when* a task finished — it
+    is the only thing holding that run's frozen evidence — and holds no opinion
+    about what evaluating one means.
     """
 
     def __init__(
@@ -435,6 +442,7 @@ class RunManager:
         notifier: Notifier | None = None,
         notify_dispatch: NotifyDispatch = _thread_dispatch,
         usage_refresh: Callable[[], None] | None = None,
+        task_completed_hook: Callable[[RunRecord], None] | None = None,
         admission: RepoAdmission | None = None,
     ):
         self._config = config
@@ -446,6 +454,7 @@ class RunManager:
         self._notifier = notifier
         self._notify_dispatch = notify_dispatch
         self._usage_refresh = usage_refresh
+        self._task_completed_hook = task_completed_hook
         self._lock = threading.Lock()
         self._procs: dict[str, ProcessHandle] = {}
         # In-memory (run_id, seq) set of questions already pushed, so a pending
@@ -1050,7 +1059,39 @@ class RunManager:
         # asking for — and asking here, rather than on a timer, means the figures
         # are current whether or not anybody has the Overview open.
         self._request_usage_refresh(updated.run_id)
+        # Last, and only for a run that finished its task: hand the completion to
+        # the evaluation sidecar. It sits *after* the three settles above by
+        # necessity, not habit — evidence built before them would see unsettled
+        # session ids / entry-task files and an unpublished protocol identity, and
+        # would record a downgraded pack rather than wait. After the usage refresh
+        # by preference: that request is already in flight when the sidecar looks
+        # at capacity.
+        if state == STATE_COMPLETED:
+            self._announce_task_completed(updated)
         return updated
+
+    def _announce_task_completed(self, record: RunRecord) -> None:
+        """Tell the evaluation sidecar this run finished its task; never raise.
+
+        Isolated exactly like :meth:`_emit` and :meth:`_request_usage_refresh`, and
+        for the same reason: the run is already persisted and classified, so a
+        sidecar that is broken, disabled, or absent must leave run state, readiness,
+        attention, and the launch/intake gates untouched. The hook is expected to
+        return promptly — it owns the decision to detach its own (slow) work, so
+        that policy lives in one place instead of being duplicated here.
+
+        Fires once per run because ``_refresh`` reaches this branch once per run
+        (settled records return early). Once per *run* is not once per task: a task
+        can complete without being archived and stay launchable, so the sidecar
+        owns the task-level guard.
+        """
+        hook = self._task_completed_hook
+        if hook is None:
+            return
+        try:
+            hook(record)
+        except Exception:
+            _log.warning("task-completion hook failed for run %s", record.run_id)
 
     def _request_usage_refresh(self, run_id: str) -> None:
         """Ask the usage sidecar to refresh, best-effort; never raise into run state.

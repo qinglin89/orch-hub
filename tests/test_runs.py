@@ -165,6 +165,7 @@ def make_manager(
     clock: FakeClock | None = None,
     notifier=None,
     usage_refresh=None,
+    task_completed_hook=None,
 ) -> tuple[RunManager, FakeSpawner, FakeClock]:
     spawner = spawner if spawner is not None else FakeSpawner()
     clock = clock if clock is not None else FakeClock()
@@ -180,6 +181,7 @@ def make_manager(
         # assertions are deterministic; it is only invoked when a notifier is set.
         notify_dispatch=lambda deliver: deliver(),
         usage_refresh=usage_refresh,
+        task_completed_hook=task_completed_hook,
     )
     return manager, spawner, clock
 
@@ -1703,6 +1705,168 @@ def test_no_usage_hook_configured_is_a_silent_no_op(tmp_path):
     end_run(spawner, 0)
 
     assert only_status(manager).state == "ended"
+
+
+# -- task-completion hook at the terminal transition -------------------------------
+# The evaluation sidecar's seam: a plain Callable[[RunRecord], None] fired once per
+# run, only when that run's own frozen evidence classifies it 'completed'. Isolated
+# exactly like notification delivery and the usage refresh — the run is already
+# persisted, so a broken sidecar can never touch run state.
+
+
+def completing_log() -> list[str]:
+    """Orchestrator log whose last bracket says the task completed and archived."""
+    return list(ORCH_LOG_LINES)
+
+
+def test_a_completed_run_announces_its_task(tmp_path):
+    repo = make_repo(tmp_path)
+    seen: list[RunRecord] = []
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    manager.list_runs()  # still live -> nothing completed yet
+    assert seen == []
+
+    end_run(spawner, 0)
+    manager.list_runs()  # the live->ended transition
+
+    assert [r.run_id for r in seen] == [record.run_id]
+    # The record carries the attribution the sidecar needs to reach the task.
+    assert seen[0].task_id == TASK_ID
+    assert seen[0].managed_repo().path == repo.path
+
+
+@pytest.mark.parametrize(
+    "log_lines, exit_code, expected_state",
+    [
+        # Exited 0 with no completion evidence at all (e.g. a --once session).
+        ([], 0, "ended"),
+        # Ended mid-task: the final bracket carries an interim status.
+        (ORCH_LOG_LINES[:3], 0, "ended"),
+        # Crashed: no completion evidence, nonzero exit.
+        ([], 1, "error"),
+    ],
+)
+def test_an_end_that_is_not_a_completion_announces_nothing(
+    tmp_path, log_lines, exit_code, expected_state
+):
+    repo = make_repo(tmp_path)
+    seen: list[RunRecord] = []
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    manager.start_run(repo, TASK_ID)
+    if log_lines:
+        write_orch_log(repo, log_lines)
+
+    end_run(spawner, exit_code)
+
+    assert only_status(manager).state == expected_state
+    assert seen == []
+
+
+def test_a_stopped_run_announces_nothing(tmp_path):
+    repo = make_repo(tmp_path)
+    seen: list[RunRecord] = []
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    record = manager.start_run(repo, TASK_ID)
+    manager.stop_run(record.run_id)
+
+    end_run(spawner, 0)
+
+    assert only_status(manager).state == "stopped"
+    assert seen == []
+
+
+def test_completion_is_announced_exactly_once_across_rescans(tmp_path):
+    repo = make_repo(tmp_path)
+    seen: list[RunRecord] = []
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+    manager.list_runs()  # transition observed here
+    manager.list_runs()  # settled record: no re-announce
+    manager.get_run(record.run_id)
+    manager.recent_runs(limit=10)
+    manager.history_page()
+
+    assert len(seen) == 1
+
+
+def test_completion_hook_failure_does_not_corrupt_run_state(tmp_path):
+    repo = make_repo(tmp_path)
+
+    def boom(record: RunRecord) -> None:
+        raise RuntimeError("evaluation sidecar exploded")
+
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=boom)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+    status = only_status(manager)  # must not raise despite the hook failing
+
+    assert status.state == "completed"
+    data = read_record(manager, record.run_id)
+    assert data["ended_ts"] is not None
+    assert data["exit_code"] == 0
+    events = read_events(manager.runs_dir / record.run_id)
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_RUN_ENDED]
+
+
+def test_no_completion_hook_configured_is_a_silent_no_op(tmp_path):
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)  # task_completed_hook=None
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+
+    assert only_status(manager).state == "completed"
+
+
+def test_completion_is_announced_after_the_run_settles_its_evidence(tmp_path):
+    """Evidence must be settled before the sidecar looks at it.
+
+    The sessions snapshot, session-entry task snapshots, and the protocol
+    identity are all written at this same transition. A hook that fired first
+    would build an evidence pack against unsettled artifacts and record a
+    downgraded pack rather than wait for one that exists moments later.
+    """
+    repo = make_repo(tmp_path)
+    observed: dict = {}
+    manager, spawner, _ = make_manager(
+        tmp_path,
+        task_completed_hook=lambda record: observed.update(
+            sessions=read_snapshot(manager.runs_dir / record.run_id) is not None,
+            effective_config=(
+                manager.runs_dir / record.run_id / "effective_config.json"
+            ).is_file(),
+            ended_persisted=json.loads(
+                (manager.runs_dir / record.run_id / "run.json").read_text(
+                    encoding="utf-8"
+                )
+            )["ended_ts"]
+            is not None,
+        ),
+    )
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(
+        repo,
+        completing_log()
+        + ['[03:00:00] effective-config: {"schema_version": 1, "profile": "x"}'],
+    )
+
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    assert observed == {
+        "sessions": True,
+        "effective_config": True,
+        "ended_persisted": True,
+    }
 
 
 # -- pending-question notifications ----------------------------------------------

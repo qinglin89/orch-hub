@@ -4872,3 +4872,68 @@ def test_evaluation_routes_require_auth(tmp_path, monkeypatch):
     assert unauthed.get(
         f"/api/repos/r/evaluations/{RUN_TASK_ID}/semantic/job"
     ).status_code == 401
+
+
+# -- completion-triggered evaluation wiring ------------------------------------
+
+
+def test_the_app_wires_completion_triggered_evaluation(tmp_path):
+    # The trigger is reachable only through a run ending, so assert the wiring
+    # structurally: the app builds one and both gates resolve on. What it then
+    # does with a completed run is covered end-to-end in tests/test_completion_eval.py.
+    app = api.create_app(eval_config(tmp_path))
+
+    trigger = app.state.completion_trigger
+    assert trigger.enabled is True
+
+
+@pytest.mark.parametrize(
+    "overrides, expected",
+    [
+        ({"evaluation_enabled": False}, False),  # subsystem off: nothing to trigger
+        ({"eval_auto": False}, False),  # trigger off: manual-only operation
+    ],
+)
+def test_the_apps_trigger_honors_both_gates(tmp_path, overrides, expected):
+    config = Config(
+        mandrel_path=tmp_path / "mandrel",
+        token=TOKEN,
+        data_dir=tmp_path / "hub-data",
+        **overrides,
+    )
+
+    assert api.create_app(config).state.completion_trigger.enabled is expected
+
+
+def test_an_injected_run_manager_is_never_handed_the_apps_evaluator(
+    tmp_path, monkeypatch
+):
+    """A hermetic run test must not acquire a live evaluator by being wired here.
+
+    The hook is a constructor argument (the usage-refresh convention), so an
+    injected manager keeps whatever hooks it was built with — here, none. A run
+    that ends completed under it therefore writes no evaluation artifacts, while
+    the app still exposes a trigger for its own manager.
+    """
+    repo = make_run_repo(tmp_path)
+    manager, spawner = make_run_manager(tmp_path)
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    app = api.create_app(eval_config(tmp_path), run_manager=manager)
+    client = TestClient(app)
+    client.headers["Authorization"] = f"Bearer {TOKEN}"
+
+    run_id = start_a_run(client, repo)["run_id"]
+    write_run_log(
+        manager,
+        run_id,
+        [
+            "[03:00:10] --- dev session start: sid=dev1 backend=claude:x@max status_before=in_progress",
+            "[03:15:00] --- dev session end: sid=dev1 status=completed+archived",
+        ],
+    )
+    spawner.procs[0].returncode = 0
+
+    assert client.get(f"/api/runs/{run_id}").json()["state"] == "completed"
+    assert app.state.completion_trigger is not None
+    assert not (tmp_path / "hub-data" / "evaluations").exists()
+    assert not (tmp_path / "hub-data" / "semantic-jobs").exists()

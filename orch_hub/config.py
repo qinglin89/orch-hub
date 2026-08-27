@@ -125,6 +125,26 @@ or blank means the default; an unrecognized value fails loudly (like a malformed
 DEFAULT_EVAL_ENABLED = True
 """Task evaluation is enabled by default (local use); disable it explicitly."""
 
+EVAL_AUTO_ENV = "ORCH_HUB_EVAL_AUTO"
+"""Environment variable gating *automatic* evaluation of completed tasks.
+
+The trigger gate, orthogonal to :data:`EVAL_ENABLED_ENV` (the subsystem gate):
+with it on, a run whose end classifies as ``completed`` evaluates its task
+without operator action, so the evaluated corpus is mechanical rather than a
+product of which tasks felt worth measuring. Turning it off leaves the whole
+evaluation subsystem — routes, dashboard controls, manual generation — intact and
+returns it to on-demand-only operation; turning the *subsystem* off disables this
+too, since there is nothing to trigger. Falsy tokens disable, unset/blank means
+the default, an unrecognized value fails loudly."""
+
+DEFAULT_EVAL_AUTO = True
+"""Automatic completion-triggered evaluation is on by default.
+
+The point of the trigger is that nobody decides which completed tasks get a
+report; a default of *off* would leave that selection with the operator, which is
+the bias the trigger exists to remove. Opting out is explicit and per-deployment
+(``ORCH_HUB_EVAL_AUTO=false``)."""
+
 EVAL_MODEL_ENV = "ORCH_HUB_EVAL_MODEL"
 """Environment variable selecting the model for the semantic task evaluator.
 
@@ -320,6 +340,16 @@ class Config:
     and disable — hence a real boolean, not a nullable value.
     """
 
+    eval_auto: bool = DEFAULT_EVAL_AUTO
+    """Whether a completed task is evaluated automatically (``ORCH_HUB_EVAL_AUTO``).
+
+    The trigger gate: independent of ``evaluation_enabled`` so manual-only
+    operation stays available without removing the subsystem, and subordinate to
+    it because a disabled subsystem has nothing to trigger. Only the
+    completion-triggered path reads it — every manual generation route is
+    unaffected.
+    """
+
     eval_model: str = DEFAULT_EVAL_MODEL
     """Model id for the semantic task evaluator's Claude CLI backend.
 
@@ -403,6 +433,11 @@ class Config:
                 env.get(EVAL_ENABLED_ENV),
                 default=DEFAULT_EVAL_ENABLED,
                 env_name=EVAL_ENABLED_ENV,
+            ),
+            eval_auto=_parse_bool(
+                env.get(EVAL_AUTO_ENV),
+                default=DEFAULT_EVAL_AUTO,
+                env_name=EVAL_AUTO_ENV,
             ),
             eval_model=(env.get(EVAL_MODEL_ENV) or "").strip() or DEFAULT_EVAL_MODEL,
             eval_effort=(env.get(EVAL_EFFORT_ENV) or "").strip() or DEFAULT_EVAL_EFFORT,

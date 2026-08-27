@@ -42,6 +42,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
+from .completion_eval import CompletionEvaluationTrigger
 from .config import TOKEN_ENV, Config
 from .control_dir import (
     DEFAULT_RESPONDER,
@@ -554,6 +555,14 @@ def create_app(
     blind to the other subsystem, which admits exactly the overlap this exists to
     prevent. The chosen coordinator is exposed on ``app.state.repo_admission``.
 
+    A :class:`~orch_hub.completion_eval.CompletionEvaluationTrigger` over the
+    static evaluator and semantic-job manager is wired into the app-built run
+    manager as its ``task_completed_hook``, so a run that finishes its task is
+    evaluated without operator action (``ORCH_HUB_EVAL_AUTO`` switches that off
+    independently of the subsystem gate). An injected ``run_manager`` keeps its
+    own hooks — the usage-refresh convention — so a hermetic run test is never
+    handed a live evaluator.
+
     ``report_catalog`` is the single :class:`~orch_hub.report_catalog.ReportCatalog`
     the global report feed publishes through. The default semantic evaluator is
     wired to it, so every completed L1+L2 report of an archived task is appended
@@ -596,39 +605,6 @@ def create_app(
         else UsageService(resolved, claude_collector=ClaudeUsageCollector())
     )
     claude_usage_observer = usage.claude_observer()
-    manager = (
-        run_manager
-        if run_manager is not None
-        else RunManager(
-            resolved,
-            notifier=build_notifier(resolved),
-            usage_refresh=usage.request_claude_refresh,
-            admission=admission,
-        )
-    )
-    intake = (
-        intake_manager
-        if intake_manager is not None
-        else IntakeManager(
-            resolved,
-            agent=ClaudeIntakeAgent(
-                model=resolved.intake_model,
-                effort=resolved.intake_effort,
-                usage_observer=claude_usage_observer,
-            ),
-            notifier=build_notifier(resolved),
-            admission=admission,
-        )
-    )
-    # Realize the single-coordinator invariant unconditionally, whatever mix of
-    # injected and app-built managers arrived: a manager built above is already on
-    # ``admission`` (this re-registers its probe, which is idempotent), and an
-    # injected one that brought a different coordinator is moved onto this one.
-    # Without this, two independently injected managers each keep a coordinator
-    # whose peer probe is unbound, and the app admits a live run and an intake for
-    # the same repo. Safe here: no request thread exists until the app is served.
-    manager.use_admission(admission)
-    intake.use_admission(admission)
     # Optional task-evaluation subsystem (gated by ``Config.evaluation_enabled``).
     # The global report feed's durable catalog comes first, because both the
     # semantic evaluator (which publishes to it) and retention (which must not
@@ -696,6 +672,55 @@ def create_app(
             resolved, evaluator=semantic, notifier=build_notifier(resolved)
         )
     )
+    # The completion trigger closes the evaluation loop: a run that finishes its
+    # task gets Layer 1 immediately and a Layer 2 job enqueued, so the evaluated
+    # corpus is mechanical rather than a selection of the tasks that felt worth
+    # measuring. It is built over the two layers above — inject a fake
+    # ``static_evaluator``/``semantic_job_manager`` and the trigger drives the
+    # fakes — and gates itself on ``ORCH_HUB_EVAL_AUTO`` (plus the subsystem
+    # gate), so it is constructed unconditionally like every other evaluation
+    # collaborator and simply does nothing when off. This is also why the whole
+    # evaluation stack is built *above* the run manager: the hook is a
+    # constructor argument, so an injected (test) run manager keeps its own
+    # hooks and can never be handed a live evaluator — the same convention the
+    # usage-refresh hook already follows.
+    completion_trigger = CompletionEvaluationTrigger(
+        resolved, static_evaluator=static_metrics, job_manager=semantic_jobs
+    )
+    manager = (
+        run_manager
+        if run_manager is not None
+        else RunManager(
+            resolved,
+            notifier=build_notifier(resolved),
+            usage_refresh=usage.request_claude_refresh,
+            task_completed_hook=completion_trigger.on_task_completed,
+            admission=admission,
+        )
+    )
+    intake = (
+        intake_manager
+        if intake_manager is not None
+        else IntakeManager(
+            resolved,
+            agent=ClaudeIntakeAgent(
+                model=resolved.intake_model,
+                effort=resolved.intake_effort,
+                usage_observer=claude_usage_observer,
+            ),
+            notifier=build_notifier(resolved),
+            admission=admission,
+        )
+    )
+    # Realize the single-coordinator invariant unconditionally, whatever mix of
+    # injected and app-built managers arrived: a manager built above is already on
+    # ``admission`` (this re-registers its probe, which is idempotent), and an
+    # injected one that brought a different coordinator is moved onto this one.
+    # Without this, two independently injected managers each keep a coordinator
+    # whose peer probe is unbound, and the app admits a live run and an intake for
+    # the same repo. Safe here: no request thread exists until the app is served.
+    manager.use_admission(admission)
+    intake.use_admission(admission)
     monitor = RunMonitor(manager)
 
     @asynccontextmanager
@@ -732,6 +757,10 @@ def create_app(
     )
     app.state.run_monitor = monitor
     app.state.repo_admission = admission
+    # Exposed like the monitor and the coordinator: the trigger is reachable only
+    # through a run ending, so this is how a test inspects that it exists and how
+    # its gates resolved without driving a real orchestrator to completion.
+    app.state.completion_trigger = completion_trigger
 
     @app.exception_handler(RegistryError)
     async def _registry_error(request: Request, exc: RegistryError) -> JSONResponse:

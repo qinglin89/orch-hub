@@ -25,6 +25,7 @@ from orch_hub.config import (
     DEFAULT_EVAL_RETENTION,
     DEFAULT_INTAKE_EFFORT,
     DEFAULT_INTAKE_MODEL,
+    EVAL_AUTO_ENV,
     EVAL_EFFORT_ENV,
     EVAL_ENABLED_ENV,
     EVAL_MODEL_ENV,
@@ -299,6 +300,34 @@ def test_evaluation_enabled_malformed_is_explicit_error():
     # A typo'd gate must fail at startup, not silently guess on/off.
     with pytest.raises(ValueError, match=EVAL_ENABLED_ENV):
         _configured_from_env({EVAL_ENABLED_ENV: "maybe"})
+
+
+def test_eval_auto_defaults_to_true():
+    # Automatic completion-triggered evaluation is on by default: a default of
+    # off would leave the "which tasks get measured" selection with the operator,
+    # which is exactly the bias the trigger removes.
+    assert _configured_from_env().eval_auto is True
+    assert Config(mandrel_path=Path("/root/mandrel")).eval_auto is True
+
+
+def test_eval_auto_is_independent_of_the_subsystem_gate():
+    # Manual-only operation: automatic triggering off, subsystem (and every
+    # manual route) untouched.
+    cfg = _configured_from_env({EVAL_AUTO_ENV: "false"})
+    assert cfg.eval_auto is False and cfg.evaluation_enabled is True
+
+
+def test_eval_auto_tokens_and_blank():
+    for token in ("0", "false", "no", "off", "FALSE", " Off "):
+        assert _configured_from_env({EVAL_AUTO_ENV: token}).eval_auto is False
+    for token in ("1", "true", "yes", "on", " On "):
+        assert _configured_from_env({EVAL_AUTO_ENV: token}).eval_auto is True
+    assert _configured_from_env({EVAL_AUTO_ENV: "   "}).eval_auto is True
+
+
+def test_eval_auto_malformed_is_explicit_error():
+    with pytest.raises(ValueError, match=EVAL_AUTO_ENV):
+        _configured_from_env({EVAL_AUTO_ENV: "sometimes"})
 
 
 def test_eval_model_defaults_and_overrides():

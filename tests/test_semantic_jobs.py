@@ -5,7 +5,10 @@ start persists ``queued`` and settles to ``completed`` (linking the fresh
 ``evaluation_id`` and stamping the evaluator identity) or ``failed`` (with a
 bounded diagnostic and no ``evaluation_id``); the duplicate guard reuses an
 in-flight job for the same ``(repo, task)`` instead of launching a second model
-turn; a terminal job is overwritten by a fresh attempt; state reloads from disk
+turn; the automatic ``start_job_if_absent`` entry refuses any task that already
+has a record (transient, completed, or failed) so a repeated completion signal
+mints no second report while the operator's manual retry stays open; a terminal
+job is overwritten by a fresh attempt; state reloads from disk
 across manager instances; orphaned transient jobs are reconciled to ``failed`` at
 startup; unsafe task ids fail closed; a corrupt record surfaces as ``error``
 without holding the duplicate slot; and the manager writes only under the
@@ -343,6 +346,105 @@ def test_new_attempt_after_terminal_overwrites_single_record(tmp_path):
     # Still exactly one record dir for this (repo, task) — the attempt overwrote it.
     task_dir = mgr._config.data_dir / "semantic-jobs" / "alpha" / TASK
     assert [p.name for p in task_dir.iterdir()] == [SEMANTIC_JOB_NAME]
+
+
+# -- the automatic (completion-triggered) start path --------------------------
+# ``start_job_if_absent`` is the once-per-task guard the automatic trigger uses:
+# any existing record — transient or terminal — means the task's L2 story is
+# already told or in flight, so it starts nothing and returns None. Stricter than
+# ``start_job``, which is an operator explicitly asking for a fresh attempt.
+
+
+def test_start_if_absent_queues_the_first_attempt(tmp_path):
+    ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-AUTO"))
+    mgr = manager(tmp_path, evaluator=ev)
+
+    job = mgr.start_job_if_absent(repo(), TASK)
+
+    assert job is not None and job.status == STATUS_QUEUED
+    settled = mgr.get_job(repo(), TASK)
+    assert settled.status == STATUS_COMPLETED
+    assert settled.evaluation_id == "EVAL-AUTO"
+    assert ev.calls == [(repo(), TASK)]
+
+
+@pytest.mark.parametrize("second_call_is_absent_path", [True, False])
+def test_start_if_absent_refuses_a_task_with_a_completed_record(
+    tmp_path, second_call_is_absent_path
+):
+    """A repeated completion signal must not mint a second report for one task.
+
+    The signal is per run, not per task: a task that completes without being
+    archived stays launchable, and the close-out-only re-run that follows
+    classifies ``completed`` again. The durable record is the guard — and the
+    operator's ``start_job`` deliberately still overwrites it (the parametrized
+    control), so a manual re-run remains possible.
+    """
+    ev = FakeEvaluator()
+    mgr = manager(tmp_path, evaluator=ev)
+    first = mgr.start_job_if_absent(repo(), TASK)
+    assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
+
+    if second_call_is_absent_path:
+        assert mgr.start_job_if_absent(repo(), TASK) is None
+        assert len(ev.calls) == 1  # no second model turn
+        assert mgr.get_job(repo(), TASK).job_id == first.job_id
+    else:
+        again = mgr.start_job(repo(), TASK)
+        assert again is not None
+        assert len(ev.calls) == 2  # the manual path is still a fresh attempt
+
+
+def test_start_if_absent_refuses_while_a_job_is_in_flight(tmp_path):
+    ev = FakeEvaluator()
+    executor = DeferredExecutor()
+    mgr = manager(tmp_path, evaluator=ev, executor=executor)
+
+    assert mgr.start_job_if_absent(repo(), TASK) is not None
+    assert mgr.start_job_if_absent(repo(), TASK) is None  # still queued
+
+    assert len(executor.pending) == 1
+    executor.run_all()
+    assert len(ev.calls) == 1
+
+
+def test_start_if_absent_refuses_after_a_failed_record(tmp_path):
+    """Recorded, not retried forever: the automatic path never re-attempts.
+
+    A failed record still holds the task's slot, so the trigger will not spend a
+    second turn on it; retrying is the operator's explicit ``start_job``.
+    """
+    ev = FakeEvaluator(error=SemanticEvaluationError("backend down"))
+    mgr = manager(tmp_path, evaluator=ev)
+
+    mgr.start_job_if_absent(repo(), TASK)
+    assert mgr.get_job(repo(), TASK).status == STATUS_FAILED
+
+    assert mgr.start_job_if_absent(repo(), TASK) is None
+    assert len(ev.calls) == 1
+
+
+def test_start_if_absent_sees_a_record_written_by_an_earlier_process(tmp_path):
+    """The guard is the persisted record, so it survives a hub restart."""
+    mgr = manager(tmp_path)
+    mgr.start_job_if_absent(repo(), TASK)
+
+    fresh_evaluator = FakeEvaluator()
+    reborn = SemanticJobManager(
+        mgr._config,
+        evaluator=fresh_evaluator,
+        clock=Clock(),
+        executor=sync_executor,
+    )
+
+    assert reborn.start_job_if_absent(repo(), TASK) is None
+    assert fresh_evaluator.calls == []
+
+
+def test_start_if_absent_rejects_an_unsafe_task_id(tmp_path):
+    mgr = manager(tmp_path)
+    with pytest.raises(ValueError):
+        mgr.start_job_if_absent(repo(), "../evil")
 
 
 # -- failure paths ------------------------------------------------------------

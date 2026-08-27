@@ -20,7 +20,10 @@ layers over the same bounded evidence:
 | 1 | Static metrics | Free, instant, no model | Deterministic protocol/reliability/handoff/estimate/knowledge scores computed from the task file and run history. |
 | 2 | Semantic evaluation | A model call (real cost, slow) | A Claude model's judgment of what a deterministic check cannot see — knowledge-signal density, handoff/decision-trace completeness, acceptance coverage, protocol soft-failures — with scored axes, findings, and suggested improvements. |
 
-Both are generated on demand and persisted as hub-owned artifacts under
+Both run automatically when a task reaches `completed`
+([Automatic evaluation](#automatic-evaluation-of-completed-tasks)), and both can
+also be generated on demand at any time. Either way they are persisted as
+hub-owned artifacts under
 `<ORCH_HUB_DATA_DIR>/evaluations/<repo>/<task>/<evaluation-id>/`. Nothing under
 a managed target repo is written. A completed Layer 1 + Layer 2 report of an
 archived task is additionally published to a cross-repo
@@ -67,6 +70,7 @@ of the hub — for the launchd service they live in the plist's
 | Variable | Default | Purpose |
 |---|---|---|
 | `ORCH_HUB_EVAL_ENABLED` | `true` (enabled) | Master switch. A falsy token (`0`/`false`/`no`/`off`, case-insensitive) disables the whole subsystem. Unset/blank means the default; an unrecognized value fails startup rather than guessing. |
+| `ORCH_HUB_EVAL_AUTO` | `true` (on) | Whether a task that reaches `completed` is evaluated automatically (see [Automatic evaluation](#automatic-evaluation-of-completed-tasks)). Falsy disables *only* the trigger — every manual route, control, and artifact stays exactly as it was. Subordinate to `ORCH_HUB_EVAL_ENABLED`: a disabled subsystem has nothing to trigger. |
 | `ORCH_HUB_EVAL_MODEL` | `claude-opus-5` | Model the **Layer 2** semantic evaluator drives through the Claude CLI. Only matters when evaluation is enabled and a semantic evaluation is requested; Layer 1 makes no model call. |
 | `ORCH_HUB_EVAL_EFFORT` | `max` | Reasoning effort for that same Layer 2 turn (`--effort`). Unset/blank means the default. Not validated at startup — an effort the installed `claude` rejects fails that one semantic job, not the service. |
 | `ORCH_HUB_EVAL_RETENTION` | `20` | Per-task cap on retained evaluations (see [Retention](#retention)). `0` disables retention (keep everything); a positive integer is the cap. A negative or non-integer value fails startup. |
@@ -128,6 +132,49 @@ describes a task that was better understood and better estimated than it was at
 the time. Runs that ended before this capture existed stay `reconstructed`;
 nothing backfills them, and the marker is there so work built on those reports
 can weight them accordingly.
+
+## Automatic evaluation of completed tasks
+
+By default nobody decides which completed tasks get a report: when a run's own
+evidence says it finished its task, the hub evaluates that task on the spot.
+This exists to keep the evaluated corpus from being *selected* — an operator who
+evaluates the tasks that felt problematic produces a corpus that cannot support
+recurrence or base-rate claims, however carefully it is later consumed.
+
+What fires, and when:
+
+- The trigger is the run manager's live→ended transition, and only for a run
+  whose end classifies **completed** — the same verdict the dashboard shows,
+  read from that run's own frozen run-dir evidence.
+- **Layer 1 runs immediately.** It is deterministic and makes no model call, so
+  there is nothing to schedule.
+- **Layer 2 is enqueued** as an ordinary semantic job — the same persisted
+  `queued`/`running`/`completed`/`failed` record a manual Layer 2 creates, with
+  the same single in-flight turn per task and the same push on settling. Cost is
+  not the concern; contention is: an L2 turn can land in the same subscription
+  rate window a dev session needs.
+- **A task gets at most one automatic Layer 2, ever.** The completion signal is
+  per *run*, not per task (a task that completes without being archived stays
+  launchable, and the close-out-only re-run that follows classifies `completed`
+  again), so the durable per-`(repo, task)` job record is the guard. Any existing
+  record — in-flight, completed, or failed — means the automatic path starts
+  nothing. A `failed` job is therefore *recorded*, not retried forever; retrying
+  it is the operator's explicit Layer 2 button.
+- Layer 1 is not guarded that way. It is free and deterministic, so a repeated
+  completion signal simply produces a fresher deterministic report; only the
+  complete Layer 1 + Layer 2 set is ever published to the feed.
+
+What it can never do:
+
+- Change run state, readiness, attention, or a launch/intake gate. It runs after
+  the ending run is already persisted, off the run manager's thread, and every
+  failure is logged and dropped.
+- Reach a task that completed **outside** a hub run. There is no signal for
+  those, and their evidence would be near-empty anyway; they are the backfill
+  problem, not the trigger's.
+
+Set `ORCH_HUB_EVAL_AUTO=false` to return to on-demand-only evaluation with the
+subsystem otherwise untouched.
 
 ## Retention
 

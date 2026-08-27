@@ -249,6 +249,11 @@ class SemanticJobManager:
     (:meth:`_finalize`) — and ``notify_dispatch`` runs each delivery off the lock
     so a hung backend cannot stall a finalize.
 
+    Two start paths share one record and differ only in what they admit:
+    :meth:`start_job` is an operator asking for an evaluation now (it overwrites a
+    terminal record with a fresh attempt), and :meth:`start_job_if_absent` is the
+    completion trigger asking for one at most once ever (any existing record wins).
+
     Concurrency: :meth:`start_job` gates and persists the transient ``queued``
     status under the lock, returns that transient record, then runs the turn off
     the lock (:meth:`_run_job` flips it to ``running``, drives the evaluation, and
@@ -309,28 +314,77 @@ class SemanticJobManager:
                 # Duplicate guard: an in-flight job already owns this (repo, task);
                 # hand the caller the same job to poll rather than a second turn.
                 return current
-            job_dir.mkdir(parents=True, exist_ok=True)
-            info = self._evaluator.evaluator_info
-            job_id = self._clock().strftime(_JOB_ID_TS)
-            ts = self._clock().isoformat()
-            record = SemanticJob(
-                job_id=job_id,
-                repo_name=repo.name,
-                repo_path=repo.path,
-                task_id=task_id,
-                status=STATUS_QUEUED,
-                backend=info.backend,
-                model=info.model,
-                schema_version=info.schema_version,
-                created_ts=ts,
-                updated_ts=ts,
-            )
-            _write_record(job_dir, record)
+            record = self._queue_locked(job_dir, repo, task_id)
         # Run the evaluation off the lock; the transient record is returned now and
         # the turn settles it asynchronously. Submit strictly OUTSIDE the lock: the
         # turn re-acquires it to flip to running / finalize, which a synchronous
         # executor would deadlock on the non-reentrant lock.
-        self._submit(lambda: self._run_job(job_dir, job_id, repo, task_id))
+        self._submit(lambda: self._run_job(job_dir, record.job_id, repo, task_id))
+        return record
+
+    def start_job_if_absent(self, repo: ManagedRepo, task_id: str) -> SemanticJob | None:
+        """Start a job for ``(repo, task_id)`` only if the task has never had one.
+
+        The automatic (completion-triggered) counterpart of :meth:`start_job`, and
+        deliberately a *stricter* guard: ``start_job`` is an operator asking for
+        this task to be evaluated now — so it overwrites a terminal record and
+        starts a fresh attempt — while this one exists to make a task's automatic
+        evaluation happen **at most once, ever**. Any existing record (transient,
+        ``completed``, ``failed``, or ``error``) means the task's L2 story is
+        already told or in flight, so this returns ``None`` and starts nothing.
+
+        The record is the guard, and it has to be: the completion signal driving
+        this is per *run*, not per task (a task completed but not archived stays
+        launchable, and the close-out-only re-run that follows classifies
+        ``completed`` again), so the corpus needs a task-level once-guard rather
+        than trusting the signal's cardinality. The one record per ``(repo, task)``
+        this manager already keeps is exactly that: durable across hub restarts,
+        atomically written, and reconciled at startup. Which is also why a
+        ``failed`` record blocks a retry here — recorded, not retried forever; the
+        operator's manual :meth:`start_job` is the retry path.
+
+        Returns the fresh ``queued`` record when it did start one. An unsafe
+        ``task_id`` raises ``ValueError`` like every other public entry.
+        """
+        _validate_task_id(task_id)
+        with self._lock:
+            job_dir = self._job_dir_for(repo.name, task_id)
+            if self._load_if_present(job_dir) is not None:
+                return None
+            record = self._queue_locked(job_dir, repo, task_id)
+        # Same off-lock submit contract as start_job (see there).
+        self._submit(lambda: self._run_job(job_dir, record.job_id, repo, task_id))
+        return record
+
+    def _queue_locked(
+        self, job_dir: Path, repo: ManagedRepo, task_id: str
+    ) -> SemanticJob:
+        """Persist a fresh ``queued`` record for this attempt; caller holds the lock.
+
+        Shared by both start paths so the two guards differ only in *when* they
+        admit an attempt, never in what a queued record looks like. Persisting
+        before the turn is what makes a hub that dies mid-turn leave an observable
+        orphan (reconciled to ``failed`` at startup) rather than a silent gap. The
+        evaluator identity (backend/model/schema) is stamped now so the
+        queued/running UI names the model before a report exists.
+        """
+        job_dir.mkdir(parents=True, exist_ok=True)
+        info = self._evaluator.evaluator_info
+        job_id = self._clock().strftime(_JOB_ID_TS)
+        ts = self._clock().isoformat()
+        record = SemanticJob(
+            job_id=job_id,
+            repo_name=repo.name,
+            repo_path=repo.path,
+            task_id=task_id,
+            status=STATUS_QUEUED,
+            backend=info.backend,
+            model=info.model,
+            schema_version=info.schema_version,
+            created_ts=ts,
+            updated_ts=ts,
+        )
+        _write_record(job_dir, record)
         return record
 
     def _run_job(
