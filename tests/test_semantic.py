@@ -18,6 +18,7 @@ import datetime as dt
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,8 @@ from orch_hub.models import (
     SemanticFinding,
     SemanticReport,
     SemanticScore,
+    SessionsSnapshot,
+    SessionSummary,
 )
 from orch_hub.report_catalog import ReportCatalog
 from orch_hub.session_reads import (
@@ -71,12 +74,19 @@ from orch_hub.semantic import (
     SemanticRunResult,
     _UnavailableSemanticBackend,
     _default_which,
+    _degradation_warnings,
     build_prompt,
     build_semantic_evidence,
     parse_report,
     render_report_md,
 )
-from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
+from orch_hub.static_metrics import (
+    DEV_ROLE,
+    REVIEW_ROLE,
+    SESSION_KIND,
+    STATIC_METRICS_NAME,
+    StaticEvaluator,
+)
 from orch_hub.subprocess_utils import CommandResult
 
 TASK = "2026-07-22-semantic-task-evaluator"
@@ -101,7 +111,8 @@ def target(*, present: bool = True, source: str | None = SOURCE_ACTIVE) -> Evalu
     )
 
 
-def run_ev(run_id: str = "r1", *, log: LogSnapshot | None = None, warnings=()) -> RunEvidence:
+def run_ev(run_id: str = "r1", *, log: LogSnapshot | None = None, warnings=(),
+           sessions: SessionsSnapshot | None = None) -> RunEvidence:
     record = RunRecord(
         run_id=run_id,
         repo_name="alpha",
@@ -111,7 +122,8 @@ def run_ev(run_id: str = "r1", *, log: LogSnapshot | None = None, warnings=()) -
         ended_ts=END,
         exit_code=0,
     )
-    return RunEvidence(record=record, log=log, warnings=tuple(warnings))
+    return RunEvidence(record=record, log=log, sessions=sessions,
+                       warnings=tuple(warnings))
 
 
 def pack(*runs: RunEvidence, tgt=None, warnings=(), git=None, ai=None,
@@ -167,8 +179,14 @@ def ai_diff(text: str | None = "diff --git a/.ai/map.md b/.ai/map.md\n+row\n", *
 
 class StubStatic:
     """Stand-in for a computed `StaticMetricsReport`: `build_semantic_evidence`
-    only ever calls `to_dict()` on it, and these tests care about the `.ai/` part
-    of the confidence math, not the static report's contents."""
+    calls `to_dict()` on it and reads the two session-coverage counts, and these
+    tests care about the `.ai/` part of the confidence math, not the static
+    report's contents. Both counts are zero, so the stub reports a fully observed
+    task and adds nothing to the omissions — the coverage tests build a real
+    report through `StaticEvaluator` instead."""
+
+    protocol = SimpleNamespace(work_entry_count=0)
+    runs = SimpleNamespace(dev_session_count=0)
 
     def to_dict(self) -> dict:
         return {"scores": []}
@@ -974,6 +992,199 @@ def test_prompt_never_carries_transcript_text_only_the_rollup():
     for line in section.strip().splitlines():
         assert len(line) < 200, line  # rollup lines are short and structured
     assert "content" not in section and "assistant" not in section
+
+
+# -- session coverage (work sessions this hub never ran) ----------------------
+# The one discrepancy the evidence *displays* without explaining: the static
+# metrics put `protocol.work_entry_count` and `runs.dev_session_count` side by
+# side, and a task whose dev work happened outside a hub run leaves no artifact to
+# report missing — the omissions list is built from artifacts the hub knows it
+# failed to produce, so nothing in it can name work it never saw. These cover the
+# gap being derived from exactly those two numbers, worded as this record's reach,
+# and priced like the other partial-input degradations.
+
+
+def log_entries(work: int, review: int = 0) -> str:
+    """`work` work entries and `review` review entries, in log order."""
+    entries = [
+        f"### 2026-07-20 / sid-w{i} / (in_progress → in_progress)\n"
+        f"- Done: slice {i}\n- Next: more\n- Open: none\n"
+        for i in range(1, work + 1)
+    ]
+    entries += [
+        f"### 2026-07-20 / sid-r{i} / review of sid-w{i} / (in_progress → in_progress)\n"
+        f"- Verdict: pass\n- Group: sid-w{i}\n- Findings: none\n"
+        for i in range(1, review + 1)
+    ]
+    return "\n".join(entries)
+
+
+def task_file(work: int, review: int = 0) -> str:
+    """A task file whose session log holds exactly `work` work entries — the number
+    `protocol.work_entry_count` reports, and the only part of the file these tests
+    depend on."""
+    return f"""---
+id: {TASK}
+status: in_progress
+session-est: {work}/{work}
+blockers: []
+claimed-by: sid-w{work}@2026-07-20T10:00:00Z
+---
+
+# A task
+
+## Goal
+Do it.
+
+## Scope
+- one
+
+## Acceptance
+- done
+
+## Session log
+
+{log_entries(work, review)}"""
+
+
+def sessions(dev: int, review: int = 0) -> SessionsSnapshot:
+    """One run's observed session brackets, as the run's `sessions.json` carries
+    them (the source of `runs.dev_session_count`)."""
+    return SessionsSnapshot(sessions=tuple(
+        [SessionSummary(role=DEV_ROLE, kind=SESSION_KIND, turns=1) for _ in range(dev)]
+        + [SessionSummary(role=REVIEW_ROLE, kind=SESSION_KIND, turns=1) for _ in range(review)]
+    ))
+
+
+def coverage_pack(work: int, *, dev: int, review_entries: int = 0, review: int = 0):
+    """A pack for a task file with `work` work entries whose runs observed `dev` dev
+    sessions, plus the real static report over it (the two counts the evaluator is
+    shown come from that report, so the tests read them from there too)."""
+    p = pack(
+        *([run_ev(sessions=sessions(dev, review))] if dev or review else []),
+        tgt=target_with(task_file(work, review_entries)),
+    )
+    static = StaticEvaluator(
+        Config(mandrel_path=Path("/mandrel"), data_dir=Path("/hub-data")),
+        clock=lambda: FIXED_TS,
+    ).build_report(p)
+    return p, static
+
+
+def target_with(content: str) -> EvaluationTarget:
+    return EvaluationTarget(
+        repo_name="alpha",
+        repo_path=REPO_PATH,
+        task_id=TASK,
+        source=SOURCE_ACTIVE,
+        present=True,
+        content=content,
+    )
+
+
+def coverage_omissions(evidence: SemanticEvidence) -> list[str]:
+    return [o for o in evidence.omissions if o.startswith("session coverage")]
+
+
+def test_evidence_records_the_work_sessions_this_hub_never_ran():
+    # The shape already in the wild: 4 work entries, 2 of them observed as hub dev
+    # sessions. The static report shows both numbers; nothing else said what the
+    # difference between them means.
+    p, static = coverage_pack(4, dev=2)
+
+    evidence = build_semantic_evidence(p, static_report=static)
+
+    assert static.protocol.work_entry_count == 4
+    assert static.runs.dev_session_count == 2
+    assert evidence.unobserved_work_sessions == 2
+    note, = coverage_omissions(evidence)
+    assert "covers 2 of the task file's 4 work session(s)" in note
+
+
+def test_the_coverage_omission_attributes_the_gap_to_the_record_not_the_task():
+    # The whole point of the note: the reading it must deny is the one the model
+    # would otherwise reach for — two work entries with no run evidence read as a
+    # handoff defect. It says what this hub did not see, never what the task did.
+    p, static = coverage_pack(4, dev=2)
+
+    note, = coverage_omissions(build_semantic_evidence(p, static_report=static))
+
+    assert "left no run record here" in note
+    assert "the shortfall is the reach of this record, not work the task skipped" in note
+
+
+def test_the_coverage_omission_reaches_the_prompt_with_the_other_omissions():
+    p, static = coverage_pack(4, dev=2)
+
+    prompt = build_prompt(build_semantic_evidence(p, static_report=static))
+    section = prompt.split("== EVIDENCE OMISSIONS")[1]
+
+    assert "covers 2 of the task file's 4 work session(s)" in section
+    # ...under the rule that already covers every other omission, so no second rule
+    # about coverage had to be written into the prompt.
+    assert "treat the omissions as reduced certainty, NOT as defects" in prompt
+
+
+def test_full_session_coverage_records_no_omission():
+    # 2 work + 2 review entries against a run that observed 2 dev + 2 review
+    # sessions. The comparison is work-to-dev, not entries-to-sessions: a review
+    # entry is not a dev session and must not fill a work session's place.
+    p, static = coverage_pack(2, dev=2, review_entries=2, review=2)
+
+    evidence = build_semantic_evidence(p, static_report=static)
+
+    assert static.protocol.entry_count == 4 and static.protocol.work_entry_count == 2
+    assert evidence.unobserved_work_sessions == 0
+    assert coverage_omissions(evidence) == []
+
+
+def test_a_pack_with_no_runs_reports_every_work_session_unobserved():
+    # A task run entirely outside this hub: there is no run record to be missing,
+    # which is exactly why the artifact-derived omissions cannot name it.
+    p, static = coverage_pack(3, dev=0)
+
+    evidence = build_semantic_evidence(p, static_report=static)
+
+    assert evidence.unobserved_work_sessions == 3
+    note, = coverage_omissions(evidence)
+    assert "covers 0 of the task file's 3 work session(s)" in note
+
+
+def test_more_observed_sessions_than_work_entries_is_not_a_coverage_gap():
+    # The opposite sign is a different fact (a session that wrote no entry), not an
+    # omission of this record, and is not silently netted against one.
+    p, static = coverage_pack(1, dev=2)
+
+    evidence = build_semantic_evidence(p, static_report=static)
+
+    assert evidence.unobserved_work_sessions == 0
+    assert coverage_omissions(evidence) == []
+
+
+def test_coverage_is_not_claimed_without_a_static_report():
+    # The counts come from the report the model is shown; with no report there is
+    # nothing to compare, and its absence is already recorded and charged.
+    p, _ = coverage_pack(4, dev=2)
+
+    evidence = build_semantic_evidence(p, static_report=None)
+
+    assert evidence.unobserved_work_sessions == 0
+    assert coverage_omissions(evidence) == []
+    assert any("static metrics unavailable" in o for o in evidence.omissions)
+
+
+def test_unobserved_work_sessions_lower_confidence_like_the_other_omissions():
+    # Same pack shape, same warnings, same `.ai/` availability — only the coverage
+    # differs, so the delta is exactly this omission's documented cost.
+    covered, static_covered = coverage_pack(2, dev=2)
+    partial, static_partial = coverage_pack(4, dev=2)
+
+    full = build_semantic_evidence(covered, static_report=static_covered)
+    thin = build_semantic_evidence(partial, static_report=static_partial)
+
+    assert thin.confidence_penalty() - full.confidence_penalty() == pytest.approx(0.10)
+    # ...and the report carries the reason a reader would need to see it.
+    assert any(w.startswith("session coverage") for w in _degradation_warnings(thin))
 
 
 # -- envelope parse / schema validation ---------------------------------------

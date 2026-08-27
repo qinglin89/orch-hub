@@ -1240,6 +1240,35 @@ def test_estimate_not_assessable_without_session_est():
     assert se.score is None and se.confidence == 0.0
 
 
+# -- run evidence stays out of the task-file axes -----------------------------
+
+
+def test_task_file_axes_do_not_move_with_how_much_the_hub_observed():
+    # The task file is the protocol record, and a session run outside this hub
+    # still wrote a real one: `_score_protocol`/`_score_handoff`/`_score_estimate`
+    # take only `ProtocolMetrics`, so the same file scores the same whether the hub
+    # observed its sessions or none of them. Layer 2 is told about that gap through
+    # the semantic evidence's omissions (`orch_hub.semantic`); the deterministic
+    # layer must stay blind to it, or an unobserved task would be scored down for
+    # where it ran.
+    observed = report_of(
+        COMPLETED,
+        run_ev(ended_ts=END, exit_code=0, sessions=snapshot(
+            session(), session(), session(REVIEW_ROLE), session(REVIEW_ROLE))),
+        source=SOURCE_ARCHIVED,
+    )
+    unobserved = report_of(COMPLETED, source=SOURCE_ARCHIVED)
+
+    # The two counts the semantic layer compares really do differ...
+    assert observed.runs.dev_session_count == 2
+    assert unobserved.runs.dev_session_count == 0
+    assert observed.protocol.work_entry_count == unobserved.protocol.work_entry_count == 2
+    # ...and none of the task-file axes notices.
+    assert observed.protocol == unobserved.protocol
+    for name in (SCORE_PROTOCOL, SCORE_HANDOFF, SCORE_ESTIMATE):
+        assert score(observed, name) == score(unobserved, name), name
+
+
 # -- knowledge score (close-out / prefetch / repeated warnings) ---------------
 
 
