@@ -338,6 +338,8 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
         "started_ts": clock.now.isoformat(),
         "ended_ts": None,
         "exit_code": None,
+        # The end-tail marker: false for a run that has not ended.
+        "end_settling": False,
     }
     assert not list(run_dir.glob("*.tmp"))
 
@@ -1867,6 +1869,205 @@ def test_completion_is_announced_after_the_run_settles_its_evidence(tmp_path):
         "effective_config": True,
         "ended_persisted": True,
     }
+
+
+# -- two-phase end: an interrupted transition -----------------------------------
+
+
+class Interrupt(BaseException):
+    """A hub dying mid-transition: nothing on the end tail catches BaseException."""
+
+
+def die(*_args, **_kwargs):
+    raise Interrupt("hub killed mid-transition")
+
+
+def test_the_end_write_marks_the_transition_owed_until_its_tail_runs(tmp_path):
+    """``ended_ts`` and "the tail still owed" land in one atomic write.
+
+    They have to: ``ended_ts`` is irreversible (nothing re-observes a run that
+    carries one), while everything the end triggers happens afterwards in other
+    files. Marking the debt in the same rename is what makes an interrupted
+    transition recoverable instead of invisible.
+    """
+    repo = make_repo(tmp_path)
+    owed: list[bool] = []
+    manager, spawner, _ = make_manager(
+        tmp_path,
+        task_completed_hook=lambda record: owed.append(
+            read_record(manager, record.run_id)["end_settling"]
+        ),
+    )
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+    manager.list_runs()
+
+    assert owed == [True]  # owed while the tail runs...
+    assert read_record(manager, record.run_id)["end_settling"] is False  # ...paid after
+
+
+def test_an_interrupted_end_tail_is_resumed_by_a_restarted_hub(tmp_path):
+    """The completion outlives the process that observed it."""
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=die)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+
+    data = read_record(manager, record.run_id)
+    assert data["ended_ts"] is not None  # the end is already permanent
+    assert data["end_settling"] is True  # and its tail is on record as owed
+
+    seen: list[RunRecord] = []
+    manager_b, _, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    assert only_status(manager_b).state == "completed"
+
+    assert [r.run_id for r in seen] == [record.run_id]
+    assert read_record(manager_b, record.run_id)["end_settling"] is False
+    # One end, one audit event: the resumed tail replays work, not history.
+    events = read_events(manager.runs_dir / record.run_id)
+    assert [event.kind for event in events] == [KIND_RUN_STARTED, KIND_RUN_ENDED]
+    # And it is settled for good now.
+    manager_b.list_runs()
+    assert len(seen) == 1
+
+
+def test_a_run_that_ended_before_the_marker_existed_is_never_resumed(tmp_path):
+    """The cohort bound: no marker means settled, so history is never replayed.
+
+    Without it, "ended run whose tail we cannot prove ran" would match every run
+    that ever ended — the whole archived backlog would be announced on the first
+    scan after this shipped.
+    """
+    repo = make_repo(tmp_path)
+    seen: list[RunRecord] = []
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+    end_run(spawner, 0)
+    manager.list_runs()
+    assert len(seen) == 1
+
+    # Rewrite the record the way a hub without this field left it: ended, unmarked.
+    run_json = manager.runs_dir / record.run_id / "run.json"
+    data = json.loads(run_json.read_text(encoding="utf-8"))
+    del data["end_settling"]
+    run_json.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    before = run_json.read_bytes()
+
+    manager_b, _, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    assert only_status(manager_b).state == "completed"
+
+    assert len(seen) == 1  # never announced again
+    assert run_json.read_bytes() == before  # and never rewritten
+
+
+def test_a_resumed_tail_replays_the_completion_but_not_the_display_only_work(tmp_path):
+    """A push about a run that ended before the hub restarted is stale, not news.
+
+    The notification and the usage refresh belong to the observed moment and fire
+    there or not at all. The completion is replayed because it is the only step
+    whose absence is permanent — a hole in a corpus whose point is having none.
+    """
+    repo = make_repo(tmp_path)
+    notifier = RecordingNotifier()
+    refreshed: list[int] = []
+    manager, spawner, _ = make_manager(
+        tmp_path,
+        notifier=notifier,
+        usage_refresh=lambda: refreshed.append(1),
+        task_completed_hook=die,
+    )
+    manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+    assert len(notifier.notifications) == 1  # both already fired, before the hook
+    assert refreshed == [1]
+
+    resumed_notifier = RecordingNotifier()
+    seen: list[RunRecord] = []
+    manager_b, _, _ = make_manager(
+        tmp_path,
+        notifier=resumed_notifier,
+        usage_refresh=lambda: refreshed.append(2),
+        task_completed_hook=seen.append,
+    )
+    manager_b.list_runs()
+
+    assert len(seen) == 1
+    assert resumed_notifier.notifications == []
+    assert refreshed == [1]
+
+
+def test_a_resumed_tail_keeps_the_sessions_snapshot_it_already_wrote(tmp_path):
+    """Re-deriving would read a repo-side log that may not exist any more.
+
+    :func:`read_live` reports an absent log as an *empty* snapshot rather than an
+    error, so a blind re-derivation would replace a complete summary with nothing.
+    """
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=die)
+    record = manager.start_run(repo, TASK_ID)
+    log = write_orch_log(repo, completing_log())
+
+    end_run(spawner, 0)
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+    run_dir = manager.runs_dir / record.run_id
+    before = read_snapshot(run_dir)
+    assert len(before.sessions) == 2
+
+    log.unlink()  # the repo-side log is cleaned while the hub is down
+
+    manager_b, _, _ = make_manager(tmp_path)
+    manager_b.list_runs()
+
+    assert read_snapshot(run_dir).sessions == before.sessions
+
+
+def test_a_tail_interrupted_before_the_protocol_check_resumes_it_uncompared(
+    tmp_path, monkeypatch
+):
+    """A resumed first look is the same unbounded lag as an end observed late.
+
+    The hub saw this run exit, then stopped before comparing the deployment. What
+    it finds now cannot separate a mid-run redeployment from any since, so the
+    run records that its end could not be compared rather than a verdict it
+    cannot support — and still hands over its completion.
+    """
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    seen: list[RunRecord] = []
+    manager, spawner, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    record = manager.start_run(repo, TASK_ID)
+    write_orch_log(repo, completing_log())
+    # Die inside the tail, before the protocol check rather than after it.
+    monkeypatch.setattr("orch_hub.runs.settle_snapshots", die)
+
+    end_run(spawner, 0)
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+    run_dir = manager.runs_dir / record.run_id
+    assert read_protocol(run_dir).checked_ts is None  # never looked
+    assert seen == []  # never announced
+
+    monkeypatch.undo()
+    manager_b, _, _ = make_manager(tmp_path, task_completed_hook=seen.append)
+    manager_b.list_runs()
+
+    snapshot = read_protocol(run_dir)
+    assert snapshot.checked_ts is not None  # the one look this run gets
+    assert snapshot.stability == STABILITY_UNVERIFIED
+    assert snapshot.verified_revision is None  # publishes nothing, truthfully
+    assert [r.run_id for r in seen] == [record.run_id]
 
 
 # -- pending-question notifications ----------------------------------------------

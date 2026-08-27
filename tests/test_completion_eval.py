@@ -584,3 +584,56 @@ def test_a_completion_survives_a_hub_that_stops_before_the_evaluation_runs(tmp_p
     settled = fresh.jobs.get_job(target, TASK)
     assert settled.status == STATUS_FAILED
     assert "hub restarted" in (settled.error or "")
+
+
+def test_a_hub_that_dies_before_the_job_record_still_evaluates_the_task(tmp_path):
+    """The window between the irreversible end write and durable acceptance.
+
+    ``run.json`` gets ``ended_ts`` first — and nothing re-observes a run that
+    carries one — while the job record is written by the hook several settles
+    later. A process that died in between used to leave *nothing*: the restarted
+    manager returned early for the already-ended run, no record existed for the
+    startup sweep to reconcile, and the task left the corpus with no trace that
+    it had ever completed. The end is two-phase now, so the restarted hub resumes
+    the interrupted tail instead. Interrupting here is the real thing rather than
+    a held executor: this dies *before* Layer 2 is enqueued at all.
+    """
+    cfg = config(tmp_path)
+    spawner = FakeSpawner()
+
+    class Interrupt(BaseException):
+        """A hub dying: nothing on the end tail catches BaseException."""
+
+    def dying_hook(record: RunRecord) -> None:
+        raise Interrupt("killed between the end write and the job record")
+
+    manager = _run_manager(cfg, hook=dying_hook, spawner=spawner)
+    target = _write_repo(tmp_path)
+    record = manager.start_run(target, TASK)
+    _write_orch_log(target)
+    spawner.procs[0].returncode = 0
+    with pytest.raises(Interrupt):
+        manager.list_runs()
+
+    # The end is already permanent, and nothing anywhere has accepted it.
+    run_json = cfg.data_dir / "runs" / record.run_id / "run.json"
+    assert json.loads(run_json.read_text(encoding="utf-8"))["ended_ts"] is not None
+    assert not (cfg.data_dir / "semantic-jobs" / "alpha" / TASK / "job.json").exists()
+
+    # Restart: fresh managers, same data dir, same run records.
+    fresh = _stack(cfg)
+    restarted = _run_manager(cfg, hook=fresh.trigger.on_task_completed)
+    assert [s.state for s in restarted.list_runs()] == ["completed"]
+
+    # The completion is durable and fully evaluated — both layers, no operator.
+    job = fresh.jobs.get_job(target, TASK)
+    assert job.status == STATUS_COMPLETED and job.evaluation_id
+    semantic_dir = cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
+    assert (semantic_dir / SEMANTIC_REPORT_NAME).is_file()
+    stored = fresh.service.list_evaluations(target, TASK)
+    assert len(stored) == 2  # the resumed tail ran the whole announcement
+
+    # Settled for good: rescanning spends no second turn.
+    restarted.list_runs()
+    assert fresh.jobs.get_job(target, TASK).job_id == job.job_id
+    assert len(fresh.service.list_evaluations(target, TASK)) == 2

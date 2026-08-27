@@ -160,6 +160,18 @@ What fires, and when:
   abandoned (hub restarted during queued)"*) — visible in the task's Layer 2
   panel and retryable from its button — instead of a completed task that
   silently never got a report.
+- **A hub that stops mid-transition resumes it, rather than losing the
+  completion.** The end write itself is what the trigger sits behind, and it is
+  irreversible: nothing re-observes a run that already has an end time. So the
+  end is written in two phases — one atomic write marks the run ended *and* its
+  end-transition work still owed, and a second clears the mark once that work has
+  run. A run found ended with the mark still set belongs to a hub that stopped
+  inside the transition, and the next status scan finishes it: the evidence
+  settles, then the completion is handed over as usual. Only runs a hub with this
+  marker actually ended can be resumed, so nothing reaches back into already
+  archived history. The run-end push and the usage refresh are *not* replayed —
+  they describe a moment that has passed — and the audit trail keeps exactly one
+  `run_ended` event.
 - **A task gets at most one automatic Layer 2, ever.** The completion signal is
   per *run*, not per task (a task that completes without being archived stays
   launchable, and the close-out-only re-run that follows classifies `completed`

@@ -427,7 +427,10 @@ class RunManager:
     called once per run, at the live->ended transition, and only when that end
     classifies as ``completed``. The manager decides *when* a task finished — it
     is the only thing holding that run's frozen evidence — and holds no opinion
-    about what evaluating one means.
+    about what evaluating one means. "Once per run" is at-least-once across a
+    hub that stops inside that transition: the run's end tail is resumed on the
+    next scan (:meth:`_settle_end`), and the sidecar owns whatever guard makes a
+    second announcement of one completion harmless.
     """
 
     def __init__(
@@ -1004,9 +1007,29 @@ class RunManager:
         return run_dir
 
     def _refresh(self, run_dir: Path, record: RunRecord) -> RunRecord:
-        """Observe process end once and persist it; no-op on settled records."""
-        if record.error or record.ended_ts is not None:
+        """Observe process end once and persist it; resume an interrupted end.
+
+        Two phases, because the end write and the work the end triggers are in
+        different files and cannot be one atomic act. Phase one is the single
+        atomic ``run.json`` rename that sets ``ended_ts`` *and* marks the end
+        still settling; phase two is :meth:`_settle_end`, which runs the tail and
+        clears the mark. A record that comes back ended and still marked is one
+        this manager promised a tail it never delivered — a hub stopped mid
+        transition — so the tail is resumed rather than lost. Every other settled
+        record is a no-op, exactly as before.
+
+        This matters because ``ended_ts`` is irreversible: nothing re-observes a
+        run once it carries one. Before the mark, everything the tail owns —
+        notably the completion handed to the evaluation sidecar, whose whole
+        point is a corpus with no silent gaps — was reachable only from a live
+        process that had already made the end permanent.
+        """
+        if record.error:
             return record
+        if record.ended_ts is not None:
+            if not record.end_settling:
+                return record
+            return self._settle_end(run_dir, record, resumed=True)
         proc = self._procs.get(record.run_id)
         if proc is not None:
             exit_code = proc.poll()
@@ -1014,14 +1037,19 @@ class RunManager:
                 return record
             self._procs.pop(record.run_id)
             updated = replace(
-                record, exit_code=exit_code, ended_ts=self._clock().isoformat()
+                record,
+                exit_code=exit_code,
+                ended_ts=self._clock().isoformat(),
+                end_settling=True,
             )
         elif record.pid is not None and self._pid_probe(record.pid):
             return record
         else:
             # Ended while this manager was not the parent (hub restart):
             # the exit status is unrecoverable, only the end itself is known.
-            updated = replace(record, ended_ts=self._clock().isoformat())
+            updated = replace(
+                record, ended_ts=self._clock().isoformat(), end_settling=True
+            )
         _write_record(run_dir, updated)
         append_event(
             run_dir,
@@ -1032,33 +1060,71 @@ class RunManager:
                 exit_code=updated.exit_code,
             ),
         )
+        return self._settle_end(run_dir, updated, resumed=False)
+
+    def _settle_end(
+        self, run_dir: Path, record: RunRecord, *, resumed: bool
+    ) -> RunRecord:
+        """Run the end tail once, then clear the still-settling mark.
+
+        Reached either straight from the observed transition or, after a hub
+        stopped inside it, from the resume in :meth:`_refresh`. Every step is
+        individually isolated (a failure is logged and dropped, never propagated
+        into run state) and safe to reach twice, because a resumed tail cannot
+        know how far the interrupted one got:
+
+        - the sessions snapshot is not re-derived when one already exists — the
+          repo-side log it parses may have been cleaned since, and an empty parse
+          would overwrite a good snapshot with nothing;
+        - settling task snapshots re-derives nothing already recorded and writes
+          only when it has something to add;
+        - the protocol end check is keyed on having run at all, so a second look
+          is a no-op — and a resumed first look is explicitly *unobserved*
+          (below), since it now compares the deployment at an unbounded lag;
+        - the effective-config snapshot writes only what it parses, and its
+          fallback source (``spawn.out``) is run-owned and permanent.
+
+        The notification and the usage refresh are *not* replayed. Both are
+        display-only and about a moment that has passed: a push saying a run just
+        ended is stale by however long the hub was down, and the quota reading it
+        would ask for is stale by the same amount. They fire at the observed
+        transition or not at all, which is the contract they already had. The
+        completion announcement is replayed, because it is the only step whose
+        product is durable and whose absence is a permanent hole in the corpus.
+
+        The mark is cleared once the tail has *run*, not once it has succeeded.
+        Each step already records its own failure, and a mark that survived
+        failure would turn this into a retry loop driven by the 30s status scan
+        rather than a two-phase commit — retried forever is exactly what the
+        evaluation sidecar's persisted-job contract rejects.
+        """
         # Snapshot the parsed per-session summary once, now that the process has
         # exited and its log is complete, so the summary survives later cleanup of
-        # the repo-side log. Like the notification below, it runs a single time per
-        # run (settled records return early above) and is fully isolated.
-        self._snapshot_sessions(run_dir, updated)
+        # the repo-side log. Written a single time per run — a resumed tail keeps
+        # what is already there — and fully isolated.
+        self._snapshot_sessions(run_dir, record, resumed=resumed)
         # Same moment, same isolation: settle any session-entry task snapshot still
         # keyed by a bracket whose sid the log revealed only at its end line.
-        self._settle_task_snapshots(run_dir, updated)
+        self._settle_task_snapshots(run_dir, record)
         # And the last point the deployed protocol can still be compared against
         # what this run captured at launch — a redeployment or an edit from here
         # on is after the run, not during it.
-        self._settle_protocol(run_dir, updated)
+        self._settle_protocol(run_dir, record, resumed=resumed)
         # Snapshot the run's authoritative effective-config line the same way, so
         # run history retains what actually launched even after the repo-side log
         # is cleaned; also isolated (a parse/IO failure never touches run state).
-        self._snapshot_effective_config(run_dir, updated)
-        # Fire exactly once, at the live->ended transition (this branch runs a
-        # single time per run; settled records return early above). Classify
-        # here so the notification carries the same completed/stopped/error/ended
-        # verdict the dashboard shows.
-        state, detail = self._classify_end(run_dir, updated)
-        self._emit(run_end_notification(updated, state, detail))
-        # Same once-per-run transition: the run has just stopped spending agent
-        # subscription quota, so this is when a refreshed usage reading is worth
-        # asking for — and asking here, rather than on a timer, means the figures
-        # are current whether or not anybody has the Overview open.
-        self._request_usage_refresh(updated.run_id)
+        self._snapshot_effective_config(run_dir, record)
+        # Classify from the run's own frozen evidence, so the notification carries
+        # the same completed/stopped/error/ended verdict the dashboard shows.
+        state, detail = self._classify_end(run_dir, record)
+        if not resumed:
+            # Fire exactly once, at the observed live->ended transition.
+            self._emit(run_end_notification(record, state, detail))
+            # Same once-per-run transition: the run has just stopped spending
+            # agent subscription quota, so this is when a refreshed usage reading
+            # is worth asking for — and asking here, rather than on a timer, means
+            # the figures are current whether or not anybody has the Overview open.
+            self._request_usage_refresh(record.run_id)
         # Last, and only for a run that finished its task: hand the completion to
         # the evaluation sidecar. It sits *after* the three settles above by
         # necessity, not habit — evidence built before them would see unsettled
@@ -1067,8 +1133,10 @@ class RunManager:
         # by preference: that request is already in flight when the sidecar looks
         # at capacity.
         if state == STATE_COMPLETED:
-            self._announce_task_completed(updated)
-        return updated
+            self._announce_task_completed(record)
+        settled = replace(record, end_settling=False)
+        _write_record(run_dir, settled)
+        return settled
 
     def _announce_task_completed(self, record: RunRecord) -> None:
         """Tell the evaluation sidecar this run finished its task; never raise.
@@ -1080,10 +1148,12 @@ class RunManager:
         return promptly — it owns the decision to detach its own (slow) work, so
         that policy lives in one place instead of being duplicated here.
 
-        Fires once per run because ``_refresh`` reaches this branch once per run
-        (settled records return early). Once per *run* is not once per task: a task
-        can complete without being archived and stay launchable, so the sidecar
-        owns the task-level guard.
+        Fires once per run because ``_refresh`` reaches this branch once per run —
+        or twice, for the one run whose tail a stopped hub had to resume
+        (:meth:`_settle_end`), where announcing again is strictly better than
+        never. Once per *run* is not once per task either: a task can complete
+        without being archived and stay launchable. Both are why the sidecar, not
+        this, owns the task-level guard.
         """
         hook = self._task_completed_hook
         if hook is None:
@@ -1138,7 +1208,9 @@ class RunManager:
         """
         return read_effective_config_snapshot(run_dir)
 
-    def _snapshot_sessions(self, run_dir: Path, record: RunRecord) -> None:
+    def _snapshot_sessions(
+        self, run_dir: Path, record: RunRecord, *, resumed: bool = False
+    ) -> None:
         """Persist the run's per-session summary at the live->ended transition.
 
         Isolation is the invariant, mirroring :meth:`_emit`: a parse or IO failure
@@ -1146,7 +1218,16 @@ class RunManager:
         streaming scan) and the snapshot written atomically; on any failure the run
         still ends cleanly with no snapshot, and an ended run with no snapshot
         falls back to a live parse on read (:meth:`read_sessions`).
+
+        A ``resumed`` tail (:meth:`_settle_end`) keeps an existing snapshot instead
+        of re-deriving it. The source it parses is the *repo-side* log, which by
+        then may have been cleaned or rotated — and :func:`read_live` reports an
+        absent log as an empty snapshot, not an error, so re-deriving could
+        silently replace a complete summary with nothing. There is no such risk on
+        the observed transition: nothing writes this artifact before it.
         """
+        if resumed and read_snapshot(run_dir) is not None:
+            return
         try:
             write_snapshot(run_dir, read_live(record))
         except Exception:
@@ -1225,7 +1306,9 @@ class RunManager:
                 snapshot.detail,
             )
 
-    def _settle_protocol(self, run_dir: Path, record: RunRecord) -> None:
+    def _settle_protocol(
+        self, run_dir: Path, record: RunRecord, *, resumed: bool = False
+    ) -> None:
         """Record the end-of-run deployment check for this run.
 
         Two comparisons behind one call (:func:`settle_protocol`): the deployment
@@ -1249,6 +1332,14 @@ class RunManager:
         moment is not the run's end but merely the first scan after it — an
         unbounded lag, in which a differing deployment says nothing about the run.
         The module records that rather than a verdict it cannot support.
+
+        A ``resumed`` tail is the same unbounded lag reached the other way: the
+        hub saw this run exit, then stopped before comparing, and is looking now.
+        Whatever it finds cannot separate a mid-run redeployment from any since,
+        so a resumed first look records an uncompared end rather than a verdict —
+        even though the run's own exit was observed. (A resumed *second* look
+        settles nothing at all: the module keys "already ran" on the check having
+        happened, not on its verdict.)
         """
         if record.repo_path is None:
             return
@@ -1257,7 +1348,7 @@ class RunManager:
                 run_dir,
                 record.repo_path,
                 now=self._clock(),
-                end_observed=record.exit_code is not None,
+                end_observed=record.exit_code is not None and not resumed,
             )
             if settled is not None and settled.stability == STABILITY_DRIFTED:
                 # The one verdict worth an operator's attention as it happens: a
@@ -1478,6 +1569,9 @@ def _write_record(run_dir: Path, record: RunRecord) -> None:
         "started_ts": record.started_ts,
         "ended_ts": record.ended_ts,
         "exit_code": record.exit_code,
+        # Written true in the same atomic rename that sets ``ended_ts`` and
+        # cleared once the end tail has run; see :meth:`RunManager._settle_end`.
+        "end_settling": record.end_settling,
     }
     path = run_dir / RUN_RECORD_NAME
     tmp = path.with_name(path.name + ".tmp")
@@ -1542,6 +1636,11 @@ def _load_record(run_dir: Path) -> RunRecord:
         started_ts=_str_field(data, "started_ts"),
         ended_ts=_str_field(data, "ended_ts"),
         exit_code=_int_field(data, "exit_code"),
+        # Absent (or non-boolean) means settled: a record written before this
+        # field existed is one no hub can still owe a transition for, so the
+        # resume in :meth:`RunManager._refresh` can never reach back into runs
+        # that ended before it shipped.
+        end_settling=_bool_field(data, "end_settling"),
     )
 
 
@@ -1569,6 +1668,10 @@ def _path_field(data: dict, key: str) -> Path | None:
 def _int_field(data: dict, key: str) -> int | None:
     value = data.get(key)
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _bool_field(data: dict, key: str) -> bool:
+    return data.get(key) is True
 
 
 def _run_event(

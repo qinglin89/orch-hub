@@ -261,6 +261,18 @@ class RunRecord:
     ``error`` is never persisted: it is set only on stub records built from an
     unreadable ``run.json``, so a broken dir cannot hide a run. Stubs carry
     ``None`` placeholders for the unknown fields.
+
+    ``end_settling`` is the second half of the end write: ``ended_ts`` settles a
+    run permanently (the manager never revisits it), but the work that end
+    *triggers* — the evidence settles, the notification, the completion handed
+    to the evaluation sidecar — happens after it and is not in the same file. So
+    the end is written in two phases: this flag goes true in the same atomic
+    write that sets ``ended_ts``, and false once that tail has run. A record
+    found ended with it still true belongs to a hub that stopped mid-transition,
+    and the tail is resumed. Absent means false, which is what bounds the resume
+    to runs a hub with this field actually ended — a record written before it
+    existed is settled by definition and never replayed. Internal like
+    ``control_dir``/``argv``: it stays in ``run.json``.
     """
 
     run_id: str
@@ -276,6 +288,7 @@ class RunRecord:
     started_ts: str | None = None
     ended_ts: str | None = None
     exit_code: int | None = None
+    end_settling: bool = False
     error: str | None = None
 
     def managed_repo(self) -> ManagedRepo | None:
