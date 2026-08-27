@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features
@@ -17,7 +17,7 @@ below.
 | Auth and private access | implemented | fail-closed bearer middleware; Tailscale-only exposure | core.md |
 | Task evaluation foundation | implemented | bounded read-only evidence packs for active/archived tasks | evaluation.md |
 | Task static metrics | implemented | deterministic Layer 1 score report beside the evidence pack | evaluation.md |
-| Task semantic evaluator | implemented | async model-judged Layer 2 reports via isolated Claude CLI | evaluation-reporting.md |
+| Task semantic evaluator | implemented | completion-triggered L1 + capacity-held async Layer 2 with recorded opt-out | evaluation-reporting.md |
 | Global evaluation report feed | implemented | append-only cross-repo publication catalog + verified reads | evaluation-reporting.md |
 | Run lifecycle | implemented | admission-gated orchestrator subprocess start/stop/reattach | run-control.md |
 | Control-dir file channel | implemented | question/answer/stop file adapter | run-control.md |
@@ -25,7 +25,7 @@ below.
 | Log viewing | implemented | bounded tails + SSE streaming located from run records | run-observability.md |
 | Run history and audit | implemented | per-run metadata events, paged history, persisted snapshots | run-observability.md |
 | Mobile dashboard | implemented | mobile-first SPA over the protected APIs | dashboard.md, dashboard-views.md |
-| Agent subscription usage | implemented | display-only Claude/Codex capacity; never gates | usage.md |
+| Agent subscription usage | implemented | Claude/Codex capacity display; automatic-L2 pacing is the sole policy consumer | usage.md |
 | Notifications | implemented | best-effort Bark pushes (questions, run end, intake, semantic jobs) | ops.md |
 | Launchd service | implemented | resident macOS service packaging + ops CLI | ops.md |
 | Compiled release delivery | implemented | source-minimized darwin-arm64 runtime + versioned install/rollback + immutable artifact publication | ops.md |
@@ -38,7 +38,7 @@ below.
 |---|---|
 | core.md | Repo discovery/readiness, task inventory, HTTP foundation, auth/private access |
 | evaluation.md | Task evaluation foundation, task static metrics (Layer 1) |
-| evaluation-reporting.md | Task semantic evaluator (Layer 2), global evaluation report feed |
+| evaluation-reporting.md | Automatic completion evaluation, semantic evaluator (Layer 2), queue/skip visibility, global report feed |
 | run-control.md | Run lifecycle, control-dir channel, question relay |
 | run-observability.md | Log viewing, run history/audit |
 | dashboard.md | Mobile dashboard shell, theme, responsiveness, accessibility, Overview, route infrastructure |

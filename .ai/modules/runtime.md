@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-26
-verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules: Runtime
@@ -56,8 +56,10 @@ prepends common user agent-CLI locations (`~/.local/bin`, `~/.claude/local`,
 `~/.npm-global/bin`, `~/.cargo/bin`) while preserving the inherited environment
 and baseline macOS paths. `run.json` is the source of truth,
 stores launch-time task frontmatter status plus the internal `spawn_out` path,
-and is rewritten atomically; in-memory `Popen` handles exist only to capture
-exit codes for runs that end while the hub process is alive. `load_records`
+the hub-only default-true `auto_semantic_eval` completion choice, and is rewritten
+atomically; the choice never becomes orchestrator argv and absent legacy values
+load true. In-memory `Popen` handles exist only to capture exit codes for runs
+that end while the hub process is alive. `load_records`
 returns `(run_dir, RunRecord)` pairs without refresh, pid probing, or writes for
 historical/evaluation consumers that must not mutate run state.
 
@@ -115,6 +117,10 @@ The same once-only live-to-ended branch invokes an optional plain
 `usage_refresh` callable after persistence/notification classification. The
 app supplies `UsageService.request_claude_refresh`, which returns immediately;
 hook failures are logged by run id and cannot alter run state.
+The same settled terminal tail invokes an optional task-completion hook for a
+`completed` classification only after session/task/protocol/config snapshots.
+The two-phase `end_settling` record marker resumes an interrupted tail entirely
+from run-owned evidence; completion-hook failure is isolated from run outcome.
 
 ## Orchestrator Launch Config
 
@@ -148,12 +154,14 @@ display/history data, not launch-preview validation.
 Location: `orch_hub/monitor.py`
 
 Responsibility: run one resident daemon thread that periodically calls a
-scanner's `list_runs()` method, normally the app's single `RunManager`, so
-run-ended notifications, pending-question notifications, and terminal usage
-refresh requests fire without dashboard/API polling. `RunMonitor.start()` and
+scanner's `list_runs()` method plus configured sweeps, normally the app's single
+`RunManager` and automatic-evaluation dispatcher, so run-ended notifications,
+pending-question notifications, terminal usage refresh requests, and deferred
+Layer 2 retry happen without dashboard/API polling. `RunMonitor.start()` and
 `stop()` are idempotent; `stop()` uses a bounded join, and scan failures are
 logged and swallowed so the service keeps running. The default interval is 30
 seconds and intentionally not an environment setting.
 
-The monitor owns no run state, event state, notification formatting, or
-de-duplication; it only schedules the existing run-manager status scan.
+The monitor owns no run/evaluation state, event state, notification formatting,
+or de-duplication; it only schedules the existing run-manager status scan and
+isolated sweeps.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Architecture: Core Flows
@@ -85,14 +85,24 @@ creation, listing, artifact reads/writes, cleanup, and retention all open every
 repo/task/evaluation segment beneath it no-follow and act relative to contained
 descriptors; linked interior state is damage, never a source/target of bytes or
 an alias for ordinary pruning.
-`SemanticJobManager` stores one current job per `(repo, task)` under
-`<ORCH_HUB_DATA_DIR>/semantic-jobs/`, returns the existing transient job
-instead of starting a duplicate model call, and reconciles restart-orphaned
-transient jobs to failed. A fresh completed/failed settlement emits one
-metadata-only notification through isolated dispatch after persistence;
-startup reconciliation stays silent. The dashboard doctor-gates the semantic
-trigger, polls persisted job state, and keeps raw artifacts behind
-Copy/Download.
+After a run's terminal session/task/protocol snapshots settle, a completed
+classification invokes an isolated sidecar trigger. With evaluation and its
+automatic gate enabled, it accepts exactly one durable task-level outcome
+inline, then builds free Layer 1 metrics and asks the global dispatcher to sweep
+off the run-manager lock. The run's persisted `auto_semantic_eval` choice
+defaults true for legacy records; false writes terminal `skipped` with the
+closed `run-opt-out` reason, while true writes `deferred`. Later completing runs
+cannot overwrite either outcome; manual evaluation may replace a resting
+record. `SemanticJobManager` keeps the one current record per `(repo, task)`
+under `<ORCH_HUB_DATA_DIR>/semantic-jobs/` and reconciles restart-orphaned
+transient jobs to failed. `DeferredDispatcher` admits at most one held job per
+configured spacing only when current provider usage is fresh, attributable,
+and below the configured ceiling; uncertainty defers. Automatic L2 completion
+is quiet, while automatic failure notifies. Protected queue readback exposes an
+uncapped latest-attempt census, overdue/actionable rows, gate state, and the
+per-repo skipped tally without dispatching. The dashboard doctor-gates manual
+semantic actions, renders deferred/skipped/failed/current state, and keeps raw
+artifacts behind Copy/Download.
 
 Global report publication: a coherent durable L1+L2 evaluation whose task is
 archived → semantic-completion hook or deterministic startup reconciliation →
@@ -134,7 +144,8 @@ replace old figures. Legacy stores self-heal, and partial merges do not overstat
 freshness. The stream-json observer remains a boundary-only fallback on verified
 versions. Protected `GET /api/usage` returns both providers fail-soft;
 missing/stale/failed sources never feed attention, readiness, run state, or
-launch/intake gates.
+launch/intake gates. The separate automatic-L2 dispatcher is the only policy
+consumer and treats those states as deferral, never as available capacity.
 
 Release production: a pinned standalone ARM64 CPython plus the project sources
 and resources enter a PyInstaller onedir build. The producer audits the

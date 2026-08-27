@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules
@@ -34,7 +34,9 @@ Full responsibilities live in the detail files below.
 | Session read evidence | `orch_hub/session_reads.py` | bounded transcript-derived prefetch facts and ordered `.ai/` read traces |
 | Static metrics | `orch_hub/static_metrics.py` | deterministic six-axis metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation incl. retrieval effectiveness; backend isolation; doctor |
-| Semantic jobs | `orch_hub/semantic_jobs.py` | persisted async job status; duplicate guard; orphan reconciliation |
+| Completion evaluation | `orch_hub/completion_eval.py` | isolated completed-task trigger; durable enqueue/skip; off-lock Layer 1 |
+| Evaluation dispatch | `orch_hub/eval_dispatch.py` | usage/spacing-gated deferred queue; operator snapshot |
+| Semantic jobs | `orch_hub/semantic_jobs.py` | one latest job/outcome per task; once-guard, skip, orphan reconciliation |
 | Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained bundle + byte-exact artifact reads |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
 | StatusLine writer | `orch_hub/statusline.py` | legacy optional statusLine fallback feeding the usage sink |
@@ -42,7 +44,7 @@ Full responsibilities live in the detail files below.
 | Intake agent | `orch_hub/intake_agent.py` | Claude CLI `/intake-task` backend with envelopes/resume |
 | Run manager | `orch_hub/runs.py` | subprocess lifecycle/state/stop; per-repo serialization; terminal side-effect hooks |
 | Orchestrator launch config | `orch_hub/orch_config.py` | `--print-config` query/parse; split/legacy argv; config snapshots |
-| Run monitor | `orch_hub/monitor.py` | resident status scanner for proactive notifications |
+| Run monitor | `orch_hub/monitor.py` | resident status scanner plus isolated retry sweeps |
 | History | `orch_hub/history.py` | per-run JSONL event storage/readback |
 | Control dir | `orch_hub/control_dir.py` | question/answer/stop file-channel handling |
 | Logs | `orch_hub/logs.py` | log location, bounded tails, SSE frames |
@@ -61,7 +63,7 @@ Full responsibilities live in the detail files below.
 | File | Contains |
 |---|---|
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
-| evaluation.md | Evaluation foundation, AI snapshot evidence, static metrics, semantic evaluator, semantic jobs |
+| evaluation.md | Evaluation foundation, AI snapshot/static/semantic layers, completion trigger, semantic jobs, capacity dispatch |
 | report-catalog.md | Global report catalog publication |
 | usage.md | Subscription usage collection, statusLine writer |
 | intake.md | Intake manager, intake agent |

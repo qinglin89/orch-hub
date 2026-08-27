@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-26
-verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules: Runtime I/O and Observability
@@ -135,5 +135,6 @@ and the orchestrator log. Intake-ready and semantic-job payloads carry only
 bounded identity/status metadata; semantic failures never include the backend
 diagnostic/model output. The module does not decide when notifications fire;
 `RunManager` owns live-run trigger policy, `IntakeManager` owns intake trigger
-policy, `SemanticJobManager` owns fresh terminal-job trigger policy, and the CLI
-sends probes directly so failures affect only the command exit code.
+policy, `SemanticJobManager` owns fresh terminal-job trigger policy (manual
+outcomes and automatic failures notify; automatic success and skip are quiet),
+and the CLI sends probes directly so failures affect only the command exit code.

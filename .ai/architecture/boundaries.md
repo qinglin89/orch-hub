@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Architecture: Ownership and Boundaries
@@ -18,8 +18,9 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
+| Semantic job records | `<ORCH_HUB_DATA_DIR>/semantic-jobs/` | one latest attempt/outcome per `(repo, task)`; durable automatic queue and task-level skip census |
 | Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; confirmed repair may remove only identity-preserving redundant/torn bytes after a durable non-overwriting backup; consumers decide protocol evolution |
-| Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback; never gates |
+| Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only except automatic-L2 pacing; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
 | Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
 | Startup diagnostics | hub-owned run dir capture | scoped to the persisted run record |
@@ -49,9 +50,12 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 - Semantic evaluation owns model-judged reports over bounded evidence plus
   static metrics; read isolation is enforced in the backend, not by prompt
   alone.
-- Semantic jobs own Layer 2 job state, duplicate in-flight prevention,
-  failed/retryable diagnostics, and completed `evaluation_id` linkage — not
-  evaluation evidence or target state.
+- Completion evaluation owns the isolated run-end sidecar trigger: immediate
+  Layer 1 work plus durable Layer 2 enqueue/skip acceptance after run evidence
+  settles; it cannot change run state, readiness, attention, or admission.
+- Semantic jobs own the one-record-per-task Layer 2 lifecycle, task-level
+  once-guard, capacity-held queue, bounded skip/failure reasons, and completed
+  `evaluation_id` linkage — not evaluation evidence or target state.
 - Report catalog owns cross-repo publication identity/order, reconciliation,
   provenance/hash manifests, bundle containment, byte-exact artifact
   verification reads, publication-debt retention protection, and explicit local
@@ -67,11 +71,12 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 - History stores run/answer-audit metadata; it does not decide event timing.
 - Logs are located from run records only; callers never pass local paths.
 - Notification delivery is isolated from run/intake state persistence.
-- Usage collection owns only display capacity data; it may run the Claude CLI's
+- Usage collection owns capacity data; it may run the Claude CLI's
   local `/usage` command only with per-turn zero-model accounting, but never
   starts a model turn, directly opens provider endpoints/credentials, scrapes
   UI, spends reset credits, or influences readiness/attention/run/intake
-  decisions.
+  decisions. Its only policy consumer is automatic Layer 2 dispatch, which
+  defers on unknown/stale/high usage; manual turns remain ungated.
 - API, CLI, dashboard, launchd, and future bot surfaces stay adapters over
   shared services.
 - Runtime resource lookup is the only source/frozen filesystem abstraction;

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-18
-verified-against: a940ab3d617554803dca9f69e59596cc4ce56315
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules: Web UI Views
@@ -48,9 +48,12 @@ generations. Custom queries that role as inherited while retaining the other
 role's named profile, then keeps same-agent edits in local dialog state. Query
 failure, `split_profiles=false`, or an unavailable named profile fails closed
 with a visible reason. Submit posts split `dev_mode`/`review_mode` launch data
-inside `{repo_id, task_id, acknowledge_blocked, launch}`, including a complete
+inside `{repo_id, task_id, acknowledge_blocked, auto_semantic_eval, launch}`,
+including a complete
 agent/model/effort tuple for every Custom cc-codex role; backend and plan-gate
-remain orthogonal.
+remain orthogonal. The hub-only Evaluate-on-completion toggle defaults true and
+resets with every dialog open; false declines only automatic Layer 2 when this
+run completes the task and never joins the launch argv selection.
 Stop posts to `POST /api/runs/{run_id}/stop`; while a live run record carries
 `stop_requested`, the Stop control renders disabled as "Stop requested" from
 server state so reloads and other devices do not re-enable it. Launch refusal UI
@@ -128,9 +131,11 @@ history payload rather than by one list request per task group. Generate posts
 mutating target task or run state. Run semantic
 evaluation posts `/semantic/job`, reads the persisted current job on every view
 load, replaces the trigger with a running panel for `queued`/`running`, polls via
-a single chained timeout torn down on navigation, shows `failed`/`error`
-diagnostics with Retry, and selects the completed job's `evaluation_id` so the
-fresh semantic report paints. A best-effort `GET /api/evaluation/doctor` probe
+a single chained timeout torn down on navigation, shows `deferred` with its
+capacity reason, `skipped` with its bounded decline reason and manual override,
+or `failed`/`error` diagnostics with Retry, and selects the completed job's
+`evaluation_id` so the fresh semantic report paints. A best-effort
+`GET /api/evaluation/doctor` probe
 disables only the Layer 2 start/retry trigger when the semantic backend is
 unavailable while keeping Layer 1 usable; a failed probe degrades to the default
 enabled trigger. Semantic reports render evaluator provenance, per-axis

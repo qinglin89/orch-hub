@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # APIs: Internal — Core and Usage
@@ -92,9 +92,11 @@ StatusLine/stream figure parsers accept only verified
 serializes store writes, asynchronously requests refresh when its stored Claude
 observation is older than the collector horizon, aggregates behind a 30s cache,
 and returns fail-soft unavailable snapshots. The app gives the same request
-callable to `RunManager` for terminal transitions. All usage data is
-display-only and must not affect readiness, attention, run state, launch, or
-intake.
+callable to `RunManager` for terminal transitions.
+`provider_usage(provider)` exposes the raw normalized provider object to the
+automatic-L2 capacity gate; missing/stale/current-window ambiguity means defer.
+No usage data may affect readiness, attention, run state, launch, or intake, and
+manual semantic evaluation remains ungated.
 
 ## API Conventions
 

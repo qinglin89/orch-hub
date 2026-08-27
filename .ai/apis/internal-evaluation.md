@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # APIs: Internal — Evaluation Chain
@@ -126,6 +126,39 @@ trusting prompt instructions. It accepts an optional usage observer called with
 stdout after the turn returns; observer failures are swallowed so usage
 bookkeeping cannot change semantic-evaluation outcomes.
 
+## Automatic Completion And Semantic Jobs
+
+Input: a completed `RunRecord`, config gates, persisted provider usage, or a
+manual managed-repo/task start.
+
+Output: immediate deterministic Layer 1 artifacts plus one durable current
+`SemanticJob` per `(repo, task)`; `EvaluationQueueSnapshot` for cross-repo
+operator readback.
+
+Behavior: `CompletionEvaluationTrigger` runs only when both evaluation gates
+are open and only after the run manager has settled terminal evidence. It writes
+the task-level Layer 2 decision inline, then asks `DeferredDispatcher.sweep`
+and runs `StaticEvaluator.generate_metrics` through its executor; all failures
+are isolated from run state. A default-true `RunRecord.auto_semantic_eval`
+enqueues `deferred`; false writes terminal `skipped` with closed reason
+`run-opt-out`. Both paths refuse any existing task record, so the first
+completing run decides in both directions; pre-field run records evaluate.
+
+`SemanticJobManager.enqueue_if_absent` accepts automatic work without starting
+it. `skip_if_absent` records no-turn terminal state; `start_job` is the manual,
+usage-ungated override for deferred/skipped/resting outcomes. Queued/running
+turns retain single-flight behavior, restart orphan reconciliation, bounded
+failure diagnostics, and completed `evaluation_id` linkage. Automatic success
+is notification-quiet; automatic failure notifies; skips never notify or pace.
+
+`DeferredDispatcher` serializes sweeps, preserves held jobs across restarts,
+checks both automatic gates, and promotes at most the oldest eligible job. Its
+`CapacityGate` requires fresh, current, attributable provider windows below
+`eval_usage_ceiling`; unknown/stale data defers. Admission timestamps (including
+manual queued turns) enforce `eval_dispatch_spacing`, preventing rollover herds.
+`queue_snapshot` is read-only: uncapped latest-attempt counts, per-repo skipped
+counts, configured gate/age state, and capped actionable rows.
+
 ## Global Report Catalog
 
 Input: config/data dir, managed repo + exact task/evaluation identity for live
@@ -162,4 +195,3 @@ provenance comes from the persisted pack aggregate and serializes atomically as
 `provenance.protocol.effective_revision` plus `deploy_lock_hash`; current target
 deployment state is never consulted at catalog or API time, and legacy
 revision-only records read back unavailable.
-

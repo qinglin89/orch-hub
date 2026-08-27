@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-26
-verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Run Control
@@ -27,7 +27,8 @@ APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
 
 Implemented behavior:
 
-- `RunManager.start_run(repo, task_id, extra_args=(), acknowledge_blocked=False)`
+- `RunManager.start_run(repo, task_id, extra_args=(), acknowledge_blocked=False,
+  auto_semantic_eval=True)`
   gates launches fail-closed: no non-terminal intake through shared repo
   admission, same-repo live run, task inventory/status from `list_repo_tasks`,
   then readiness from `check_readiness`.
@@ -77,8 +78,10 @@ Implemented behavior:
   structured `launch`.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
   it persists the internal `spawn_out` path so reattached runs and pre-field
-  records can still surface startup diagnostics. In-memory `Popen` handles only
-  capture exit codes while the hub is the parent process.
+  records can still surface startup diagnostics. It also persists the hub-only
+  Layer 2 completion choice; absent or malformed legacy values read true. The
+  choice never joins orchestrator argv. In-memory `Popen` handles only capture
+  exit codes while the hub is the parent process.
 - Reattach scans run dirs and probes pid liveness. If a run ended while the hub
   was down, `ended_ts` is persisted with `exit_code=None`.
 - Live status is `active` or `waiting` based on pending control-dir questions
@@ -90,6 +93,10 @@ Implemented behavior:
   keep `stop_requested=false`.
 - `stop_run` writes `stop.flag` through `control_dir.request_stop` and refuses
   unknown, broken, or already-ended runs.
+- An observed `completed` transition invokes the optional task-completion hook
+  only after session/task/protocol/effective-config settles. `end_settling`
+  makes an interrupted tail resumable from run-owned evidence; the hook is
+  isolated and cannot alter the persisted run outcome.
 - HTTP run routes resolve repos through registry discovery, return serialized
   `RunStatus` payloads including the live-only `stop_requested` overlay, expose
   start/list/get/stop behavior, and map launch/run manager errors to 4xx JSON

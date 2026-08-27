@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Task Evaluation
@@ -152,6 +152,11 @@ Implemented behavior:
 - `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` runs a fresh
   deterministic evidence+static refresh and returns the new report; the detail
   route can later read the paired `evidence` and `static_metrics` artifacts.
+- A hub-observed task completion automatically runs the same
+  `generate_metrics` path off the run-manager lock, regardless of the run's
+  Layer 2 opt-out. Layer 1 is deliberately per completion signal rather than
+  task-once: repeats produce fresher free L1-only dirs, while publication still
+  requires a complete L1+L2 artifact set.
 - The dashboard renders deterministic Layer 1 reports as distinct from Layer 2
   semantic reports and offers raw JSON only through copy/download affordances
   rather than inline log/evidence display.
@@ -160,4 +165,3 @@ Implemented behavior:
 - Tests cover run/session rollups, protocol parsing, score axes, partial
   evidence behavior, persistence, disabled mode, and prior protocol
   false-negative regressions.
-

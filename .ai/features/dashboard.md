@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-24
-verified-against: 3779a5d5ac7b2dd74f669990a25dc318e24f54f8
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Mobile Dashboard — Shell and Infrastructure
@@ -66,8 +66,9 @@ Implemented behavior:
 - The Operations Overview is the default authenticated landing route
   (`#/overview`). It remains client-side over existing protected APIs,
   parallel-fetching repos, tasks, live runs, escalations, run history, and
-  subscription usage into summary metrics, prioritized attention items, current
-  activity, recent outcomes, and display-only agent capacity. Waiting questions,
+  subscription usage, and the evaluation queue into summary metrics, prioritized
+  attention items, current activity, recent outcomes, and sidecar capacity/state.
+  Waiting questions,
   display-readiness failures, housekeeping, live runs, and ended runs deep-link
   to existing task/repo/log views.
 - Overview fetches are per-source best-effort: non-401 failures degrade only
@@ -84,6 +85,12 @@ Implemented behavior:
   It is display-only: source failures degrade only that section, never create
   Needs attention items, and never affect readiness, run state, or run/intake
   gates.
+- The Overview Evaluation queue section independently polls protected
+  `GET /api/evaluation/queue` and renders the complete latest-attempt census,
+  held-gate/overdue explanations, capped actionable rows, and per-repo skipped
+  tally. Evaluation-disabled hides the section; read failure renders unavailable
+  without disturbing repo/activity/usage panels. Its route-scoped refresh shares
+  the Overview cancellation/generation guards and creates no Attention rows.
 - Route generation is the stale-view ownership guard: router bumps it on every
   entry; routed handlers, `rerender`, and intake action success/error paths
   capture before their own await/POST and skip stale paints, landing, error

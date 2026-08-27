@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules: Task Evaluation Layers
@@ -141,11 +141,35 @@ a gated `GET /api/evaluation/doctor` readiness route.
 
 `SemanticJobManager` in `orch_hub/semantic_jobs.py` persists one current
 `job.json` per `(repo, task)` under
-`<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`, returns existing
-`queued`/`running` jobs to prevent duplicate model calls, runs
-`SemanticEvaluator.evaluate` off-lock/off-thread, reconciles orphaned transient
-jobs to failed on startup, and links completed jobs to the fresh
-`evaluation_id`. A guarded fresh completion/failure finalizer emits one
-metadata-only notification through isolated manager-owned dispatch; startup
-orphan reconciliation stays silent. The old synchronous `POST /semantic` route
-is retired.
+`<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`. Manual `start_job` returns
+existing queued/running work and overwrites deferred or terminal state;
+automatic `enqueue_if_absent`/`skip_if_absent` refuses any existing task record,
+which is the durable once-per-task guard. Automatic attempts begin `deferred`;
+terminal `skipped` carries only a closed machine reason and no turn timestamps.
+The manager runs admitted turns off-lock/off-thread, reconciles only orphaned
+queued/running jobs to failed on startup, and links completed jobs to the fresh
+`evaluation_id`. Automatic success is notification-quiet; automatic failure and
+manual outcomes notify through isolated dispatch. The old synchronous
+`POST /semantic` route is retired.
+
+## Completion Evaluation Trigger
+
+`CompletionEvaluationTrigger` in `orch_hub/completion_eval.py` is the isolated
+sidecar hook for a run classified completed after terminal evidence settles.
+When both evaluation gates are open it durably enqueues or skips Layer 2 inline,
+based on persisted default-true `RunRecord.auto_semantic_eval`, then runs the
+global dispatch sweep and Layer 1 generation through an executor. Each half
+swallows/logs its own failures and cannot alter run state, readiness, attention,
+or admission. Repeated completing runs regenerate free Layer 1 but cannot
+replace the first task-level Layer 2 record.
+
+## Automatic Evaluation Dispatch
+
+`CapacityGate` and `DeferredDispatcher` in `orch_hub/eval_dispatch.py` own policy
+over the mechanism above. A serialized sweep checks both automatic gates,
+durable spacing since the latest queued/running admission (manual included), and
+fresh attributable provider usage below the configurable ceiling, then promotes
+at most the oldest deferred job. Unknown/stale usage defers; held jobs survive
+restart and are retried by the resident monitor. `queue_snapshot` folds the same
+store into an uncapped latest-attempt census, per-repo skip tally, overdue count,
+and capped actionable rows without moving the queue.

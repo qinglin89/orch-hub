@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-26
-verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Operations Surfaces
@@ -15,8 +15,7 @@ Status: implemented
 
 Description: Notify when a pending question is first observed, when a run
 reaches a terminal state, when an intake draft/revision is ready for review,
-and when a semantic-evaluation job freshly completes or fails. Bark is the v1
-backend.
+and for actionable semantic outcomes. Bark is the v1 backend.
 
 Modules: notifications, config, runs, intake, semantic_jobs, monitor, launchd,
 api, cli.
@@ -38,8 +37,9 @@ Implemented behavior:
   `SemanticJobManager` with `build_notifier(config)`. Production delivery uses
   manager-owned daemon-thread dispatch; tests can inject synchronous dispatch.
 - The FastAPI lifespan starts a resident `RunMonitor` over the app's
-  `RunManager`; it calls `list_runs()` on a 30s interval, is created without
-  starting a thread at app construction, and stops cleanly on shutdown.
+  `RunManager` plus registered sweeps; it calls them on a 30s interval, is
+  created without starting a thread at app construction, and stops cleanly on
+  shutdown. Automatic evaluation uses one sweep to retry held jobs.
 - `RunManager._emit` wraps backend delivery so every failure is best-effort:
   exceptions are swallowed after logging only exception type and notification
   title, and run/control-dir/history state is unchanged.
@@ -61,11 +61,13 @@ Implemented behavior:
   emit. A `None` notifier is a no-op and backend failures are swallowed without
   changing `intake.json` or `events.jsonl`.
 - Semantic-job notifications fire exactly once from `SemanticJobManager`'s
-  guarded fresh `completed`/`failed` finalizer after `job.json` is persisted.
-  Payloads carry only repo, task id, outcome, and the completed evaluation id;
-  backend diagnostics/model output stay out. Queued/running/error records,
-  duplicate settles, and restart orphan reconciliation do not emit. A `None`
-  notifier is a no-op and backend failures cannot change the settled job record.
+  guarded fresh finalizer after `job.json` is persisted. Manual completed/failed
+  outcomes notify; automatic completion is quiet because the run-end push just
+  fired, while automatic failure still notifies because the corpus shrank
+  unexpectedly. Payloads carry only repo, task id, outcome, and completed
+  evaluation id; backend diagnostics/model output stay out. Deferred/queued/
+  running/skipped/error records, duplicate settles, and restart reconciliation
+  do not emit. Delivery failure cannot change the settled job record.
 - API/dashboard reads still refresh run status, but they are no longer required
   for timely pushes because the resident monitor drives the same status path.
 - Launchd deploy/update surface `ORCH_HUB_BARK_URL` into the installed plist,

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Semantic Evaluation and Report Feed
@@ -16,15 +16,18 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics,
-evaluation, config, models, notifications, api, cli, web.
+Modules: completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot,
+session_reads, static_metrics, evaluation, usage, runs, monitor, config, models,
+notifications, api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`,
-`SemanticJobManager`; protected `POST`/`GET`
+`CompletionEvaluationTrigger`, `DeferredDispatcher`, `SemanticJobManager`;
+protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`,
-`GET /api/evaluation/doctor`, CLI `orch-hub eval doctor`, dashboard Layer 2
-controls, and evaluation detail readback of `semantic_report` and `report.md`.
+`GET /api/evaluation/doctor`, `GET /api/evaluation/queue`, `POST /api/runs`
+`auto_semantic_eval`, CLI `orch-hub eval doctor`, dashboard Layer 2 controls,
+and evaluation detail readback of `semantic_report` and `report.md`.
 
 Implemented behavior:
 
@@ -59,11 +62,39 @@ Implemented behavior:
   backend/model/schema identity distinguishes comparable reports and is surfaced
   in dashboard history picker labels.
 - `SemanticJobManager` persists one current job per `(repo, task)` under
-  `<data_dir>/semantic-jobs/`, prevents duplicate in-flight model calls, marks
-  restart-orphaned transient jobs failed, and links completed jobs to the fresh
-  `evaluation_id`. Fresh completed/failed finalizers emit one metadata-only,
-  best-effort push after persistence; transient/error states, duplicate settles,
-  and restart orphan reconciliation stay silent.
+  `<data_dir>/semantic-jobs/`. Manual starts reuse transient turns and overwrite
+  resting records; automatic enqueue/skip refuses any existing record, giving a
+  durable once-per-task guard across repeated completing runs. Lifecycle is
+  `deferred` → `queued` → `running` → `completed|failed`, plus terminal
+  `skipped` (no turn) and `error` (unreadable record). Restart reconciliation
+  fails only orphaned queued/running turns; held/skipped records survive.
+- Every hub-observed run completion triggers evaluation after session, task, and
+  deployed-protocol evidence settles. Layer 2 acceptance is an inline durable
+  enqueue or skip; Layer 1 and the global dispatch sweep run off the run-manager
+  lock. Failures are logged/recorded and cannot change run state, readiness,
+  attention, or launch/intake admission. Completions outside hub runs remain a
+  separate reconstructed backfill population.
+- Automatic Layer 2 is gated independently by `ORCH_HUB_EVAL_AUTO` and enters
+  `deferred`. `DeferredDispatcher` admits at most one oldest job per configured
+  spacing only below the configured provider-usage ceiling; missing, stale,
+  boundary-less, or otherwise unknown usage defers. The resident monitor retries
+  automatically; both evaluation gates hold the durable queue closed.
+- `ORCH_HUB_EVAL_USAGE_CEILING` defaults 80%, dispatch spacing defaults 900s,
+  and the queue warning age defaults 21600s. Spacing uses queued admission (and
+  counts manual turns), so executor latency cannot admit a herd after rollover.
+- `auto_semantic_eval` is a default-true hub-only per-run launch field, persisted
+  in `run.json`; absent legacy values read true and it never reaches orchestrator
+  argv. False still generates Layer 1 but writes terminal `skipped` with closed
+  reason `run-opt-out`. The first completing run's task record wins in both
+  directions; a manual semantic start may later replace the skip.
+- `GET /api/evaluation/queue` is a read-only cross-repo latest-attempt census
+  plus overdue/actionable rows, automatic-gate state, and a most-skipped-first
+  per-repo tally. Completed/skipped records stay out of the capped action rows;
+  unknown statuses remain counted.
+- Fresh manual completed/failed finalizers notify. Automatic completion is quiet
+  to avoid duplicating the run-end push; automatic failure still notifies because
+  the measured corpus shrank unexpectedly. Skip, transient/error states,
+  duplicate settles, and startup orphan reconciliation stay silent.
 - Backend/model failures or non-conforming output remove the reserved evaluation
   dir and surface as persisted failed jobs with bounded diagnostics; disabled
   mode still fails closed at service/API boundaries.

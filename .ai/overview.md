@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Project Overview
@@ -27,8 +27,9 @@ read/write orchestrator question, answer, and stop files, launch/list/stop/
 reattach orchestrator subprocess runs with per-repo serialization, answer
 waiting questions remotely, retrieve or stream run logs, persist run lifecycle
 plus answer-audit metadata, serve the dashboard, push Bark notifications for
-pending questions, terminal run states, and intake drafts/revisions ready for
-review, and fresh completed/failed semantic-evaluation jobs, and run a confirmed
+pending questions, terminal run states, intake drafts/revisions ready for
+review, manual semantic-evaluation outcomes, and automatic semantic failures,
+and run a confirmed
 remote intake loop that drafts a task before writing it to the target repo,
 generate bounded read-only task evidence packs
 under the hub data dir for active or archived tasks, compute deterministic
@@ -37,7 +38,10 @@ static reports as
 `static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
 CLI semantic evaluator through persisted async job records that prevent
 duplicate in-flight model calls and link completed jobs to `semantic_report.json`
-plus `report.md`, and expose evaluation evidence/static/semantic artifacts
+plus `report.md`, mechanically evaluate hub-observed task completions with
+immediate Layer 1 and capacity-deferred Layer 2, retain one durable latest
+Layer 2 outcome per task (including a countable per-run opt-out), and expose
+evaluation evidence/static/semantic artifacts
 through protected HTTP routes. Complete L1+L2 reports for archived tasks are
 published to one append-only, globally ordered catalog with stable keys,
 cursor-paged discovery, contained bundle export, and byte-exact per-artifact
@@ -57,13 +61,15 @@ a stored window's reset boundary without creating a window or changing figures;
 no verified stream carries a used-percentage. Rolled-over windows render as no
 active window rather than presenting retained figures as current. Missing,
 stale, or failing data is explicit display state that never affects readiness,
-attention, run state, or launch/intake gates. The dashboard renders the
+attention, run state, or launch/intake gates; it only holds automatic Layer 2
+dispatch. The dashboard renders the
 task-evaluation sidecar with
 Layer 1 static metrics, doctor-gated Layer 2 semantic job
-running/failed/completed controls/report rendering, history model/version
+deferred/running/skipped/failed/completed controls/report rendering, history model/version
 comparison, and artifact copy/download affordances; later slices add IM bot
-control. A central report view preserves the catalog's global publication order
-and links back to existing per-task detail.
+control. Overview shows the automatic evaluation queue's latest-attempt census,
+overdue/actionable work, and per-repo skip tally. A central report view preserves
+the catalog's global publication order and links back to existing per-task detail.
 
 ## Users
 
@@ -84,9 +90,10 @@ and links back to existing per-task detail.
 - Surface orchestrator human input requests remotely, collect answers, and deliver them back through the implemented control-dir file channel.
 - Stream or tail orchestrator logs to the dashboard.
 - Persist run lifecycle, stop request, and answer-audit metadata for later inspection without duplicating human answer text into history.
-- Push mobile notifications for pending questions, terminal run states, and
-  intake drafts/revisions ready for review, and fresh completed/failed
-  semantic-evaluation jobs via Bark when `ORCH_HUB_BARK_URL` is configured.
+- Push mobile notifications for pending questions, terminal run states, intake
+  drafts/revisions ready for review, manual semantic-evaluation outcomes, and
+  automatic semantic failures via Bark when `ORCH_HUB_BARK_URL` is configured;
+  routine automatic semantic success and recorded skips stay quiet.
 - Draft, revise, confirm, or cancel new task proposals remotely while keeping
   target repo `.ai-tasks/` files unchanged until explicit confirmation.
 - Generate bounded, read-only evidence packs for active or archived tasks from
@@ -104,11 +111,18 @@ and links back to existing per-task detail.
   evidence-grounded rediscovery risk, while invoking Claude CLI from an isolated
   empty cwd with tools disabled so reports are reproducible from persisted
   artifacts and cannot read target repo files outside the prompt.
-- Show Claude and Codex subscription usage as display-only capacity data:
+- Evaluate every task completion observed through a hub run: generate Layer 1
+  off the run lock and durably hold Layer 2 until fresh subscription usage is
+  below the configured ceiling and spacing permits one turn. The default-on
+  per-run choice is hub-only; declining it records terminal `skipped` and never
+  reaches orchestrator argv.
+- Show Claude and Codex subscription usage as display capacity data:
   provider windows, used/remaining percentages, reset time, freshness, and
   unavailable/stale reasons, without starting model turns, directly opening
   credentials/provider endpoints, scraping UI, consuming reset credits, or
-  influencing operational gates. Codex is local rollout data; Claude's primary
+  influencing readiness, attention, run state, launch, or intake gates. Its
+  sole scheduling consumer is automatic Layer 2, which defers on unknown/stale/
+  high usage. Codex is local rollout data; Claude's primary
   carrier is the CLI's whitelisted structured utilization cache, refreshed by
   its local `/usage` command only when the turn reports zero model activity.
   The opt-in statusLine sink remains compatible, and percentage-less 2.1.220

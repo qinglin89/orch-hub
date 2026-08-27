@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules: Web UI
@@ -67,8 +67,9 @@ the live generation and still paint. Feature-owned cancellation handles remain
 responsible for streams, intake polling, and Overview refresh.
 
 The Overview route (`#/overview`) aggregates protected repo/task/run/
-escalation/history/usage payloads into summary metrics, prioritized attention,
-live activity, recent outcomes, and a separate Subscription usage section; each
+escalation/history/usage/evaluation-queue payloads into summary metrics,
+prioritized attention, live activity, recent outcomes, and separate Subscription
+usage/Evaluation queue sections; each
 non-401 source failure degrades only its panel/section, and its chained
 background refresh is registered before the initial load so router teardown
 cancels stale paints and polling after navigation. Its repos ready metric and
@@ -77,4 +78,7 @@ views: raw-ready, or active/waiting live run with `git_clean` as the sole raw
 failure. Subscription usage cards show Claude/Codex provider windows,
 used/remaining percentages, reset time, plan, freshness/stale and unavailable
 states, and aggregate reset-credit availability, but never create attention
-items or affect readiness/run/intake gates.
+items or affect readiness/run/intake gates. The evaluation section shows the
+complete latest-attempt census, global gate/overdue state, capped actionable
+rows, and per-repo skip tally; disabled hides it and read failure degrades only
+that section.

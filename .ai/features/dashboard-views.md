@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -64,7 +64,10 @@ Implemented behavior:
   profiles remain visibly disabled. Submit posts split
   `dev_mode`/`review_mode` launch data, including the complete agent/model/effort
   tuple for each Custom cc-codex role, while shared backend and plan-gate remain
-  orthogonal. Stop posts to
+  orthogonal. Evaluate-on-completion is a separate hub-only checkbox: it defaults
+  on and resets on every dialog open; false declines only automatic Layer 2 for
+  a task this run completes, still runs Layer 1, records/counts the skip, and
+  never joins orchestrator argv. Stop posts to
   `POST /api/runs/{run_id}/stop`. `blocked` tasks require explicit
   acknowledgement; stale/raced starts render the backend 409 response.
 - Start is hidden or replaced with an explanation when the dashboard already
@@ -140,8 +143,9 @@ Implemented behavior:
   model judgments. Generate posts `/metrics`; Run semantic evaluation posts
   `/semantic/job`, reads persisted job state on every load, replaces the trigger
   with a running panel while `queued`/`running`, polls with navigation teardown,
-  shows bounded failed/error diagnostics with Retry, and selects the completed
-  job's `evaluation_id` so the fresh semantic report paints.
+  shows capacity-held `deferred`, recorded `skipped`, and bounded failed/error
+  states with a manual run/retry escape, and selects the completed job's
+  `evaluation_id` so the fresh semantic report paints.
   The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
   semantic backend disables only the Layer 2 trigger with an explanation while
   Layer 1 stays usable. Semantic reports render evaluator provenance including

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-14
-verified-against: 3bed60ab286b522f11ee0c6382855dfcf3101500
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # APIs: HTTP — Task Evaluation
@@ -25,6 +25,21 @@ Cross-cutting auth/app behavior: `http-core.md`.
 - Disabled behavior: enabled-gated like action routes; disabled returns 404.
 - Boundary: used by dashboard/CLI smoke checks only; never gates Start/Stop,
   run history, logs, or control-dir answers.
+
+## `GET /api/evaluation/queue`
+
+- Purpose: read the cross-repo automatic Layer 2 queue without dispatching,
+  reading usage, or triggering any refresh.
+- Shape: `{"enabled":true,"auto_enabled":bool,
+  "queue_max_age_seconds":int,"counts":object,"skipped_by_repo":object,
+  "overdue":int,"entries":array,"truncated":bool}`.
+  `counts` is the uncapped complete latest-attempt census (known zeroes included,
+  unknown statuses retained); `skipped_by_repo` counts current terminal skips;
+  `entries` is capped actionable deferred/queued/running/failed/error state with
+  live age/overdue projection. Completed and skipped are resting outcomes and
+  never consume action rows.
+- Gate: protected and evaluation-enabled; deliberately not hidden when
+  `ORCH_HUB_EVAL_AUTO=false`, because `auto_enabled:false` explains a held queue.
 
 ## `GET /api/evaluation/reports`
 
@@ -146,10 +161,12 @@ Cross-cutting auth/app behavior: `http-core.md`.
   `SemanticEvaluator.evaluate` off-thread. The evaluator writes only hub-owned
   evidence/static/semantic/Markdown artifacts; backend/schema failures settle the
   job to `failed` with a bounded diagnostic and leave no partial evaluation.
-- Shape: HTTP 201 `{"job": SemanticJob}`. `queued`/`running` jobs carry
-  evaluator identity; `completed` carries `evaluation_id`; `failed` carries
-  bounded `error`. A duplicate start while the job is in flight returns the
-  existing job and starts no second model call.
+- Shape: HTTP 201 `{"job": SemanticJob}`. `deferred`, `queued`, `running`, and
+  terminal `skipped` jobs carry evaluator identity; `completed` carries
+  `evaluation_id`; `failed` carries bounded `error`; `skipped` carries bounded
+  `skip_reason`. A manual start overrides deferred/skipped/other terminal state,
+  while a duplicate queued/running start returns the existing job and starts no
+  second model call.
 - Errors: unknown repo returns 404; unsafe repo/task segments return 400;
   disabled returns 404.
 
@@ -157,8 +174,9 @@ Cross-cutting auth/app behavior: `http-core.md`.
 
 - Purpose: read the current semantic-evaluation job state for page load and
   polling.
-- Shape: HTTP 200 `{"job": SemanticJob|null}`; `null` means the task has never
-  had a semantic job.
+- Shape: HTTP 200 `{"job": SemanticJob|null}`; states are `deferred`, `queued`,
+  `running`, `completed`, `failed`, `skipped`, or surfaced corrupt-record
+  `error`; `null` means the task has never had a semantic-job record.
 - Errors: unknown repo returns 404; unsafe repo/task segments return 400;
   disabled returns 404. Corrupt job records surface as terminal `error` jobs
   rather than hiding broken state.

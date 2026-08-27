@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-26
-verified-against: 0c72a56457e9fddbb1e1c1166e34ffb5c324ef60
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # APIs: Internal — Runtime
@@ -68,7 +68,8 @@ so the manager records failed intakes.
 
 ## Run Manager
 
-Input: repo id, task id, start flags.
+Input: repo id, task id, orchestrator start flags, blocked acknowledgement, and
+the hub-only default-true automatic-semantic-evaluation choice.
 
 Output: `RunRecord` from `start_run`, `RunStatus` from list/get operations,
 read-only `(run_dir, RunRecord)` records from `load_records`, and idempotent
@@ -85,11 +86,16 @@ fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
 deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
 an explicit subprocess `PATH` for user-installed agent CLIs, persists
 `run.json` with launch-time task status and the internal `spawn_out` path,
-appends `run_started`, and records stdout/stderr in `spawn.out`.
+the `auto_semantic_eval` choice, appends `run_started`, and records stdout/stderr
+in `spawn.out`. The choice never reaches orchestrator argv; absent/non-boolean
+legacy values load true.
 `list_runs` and `get_run` refresh
 live/end state and support reattach from disk by pid probe; observed ends append
 `run_ended`, fire the isolated terminal notification path, and invoke an
-optional plain `usage_refresh` callable once after persistence. `stop_run`
+optional plain `usage_refresh` callable once after persistence. A completed end
+invokes an optional task-completion hook only after session/task/protocol/config
+settlement; the two-phase `end_settling` marker resumes an interrupted tail from
+run-owned evidence. Hook failures cannot change run state. `stop_run`
 delegates to `control_dir.request_stop`, appends
 `stop_requested` only on the first idempotent write, and refuses ended or
 broken runs so a post-mortem flag cannot rewrite end classification.

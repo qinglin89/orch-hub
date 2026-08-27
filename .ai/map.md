@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Project Map
@@ -17,9 +17,9 @@ behavior and rationale stay in the owning doc.
 | Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads |
 | Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v18 evidence packs; unanimous protocol identity; hub-owned artifacts; descriptor containment |
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
-| Task semantic evaluator | semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, config, models, notifications, api, cli, web | evidence-bounded Layer 2; semantic-schema-v2; persisted async jobs; isolated Claude CLI |
+| Task semantic evaluator | completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | evidence-bounded Layer 2; completion-triggered L1; durable capacity-held L2; recorded skip; isolated backend |
 | Global evaluation report feed | report_catalog, protocol_provenance, evaluation, semantic, task_store, models, api, cli, web | append-only catalog; seq + report_key identity; reconciliation; verify/repair CLI; consumers decide evolution |
-| Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, web, docs | display-only fail-soft; cache-primary Claude; model-free refresh; never gates |
+| Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, eval_dispatch, web, docs | fail-soft display; cache-primary Claude; model-free refresh; automatic-L2 pacing only |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | thin routes over shared helpers; only health + shell public |
 | Control-dir file channel | control_dir, models | file-channel only; atomic answers; idempotent stop.flag |
 | Run lifecycle | admission, runs, intake, orch_config, sessions, task_snapshots, protocol_provenance, api, config, control_dir, models, readiness, task_store | admission before readiness; per-repo serialization; detached launch; pre-spawn protocol capture + observed-end recheck |
@@ -41,7 +41,7 @@ behavior and rationale stay in the owning doc.
 | Task inventory | `GET /api/tasks`; `GET /api/repos/{repo_id}/tasks[/{task_id}]` |
 | Task evaluation foundation | internal `EvaluationService`; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; `POST .../evidence`; batched state in `GET /api/history/runs`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | internal `StaticEvaluator`; `POST .../evaluations/{task_id}/metrics`; detail readback; dashboard Layer 1 |
-| Task semantic evaluator | internal `SemanticEvaluator` + `SemanticJobManager`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; CLI `orch-hub eval doctor`; report readback |
+| Task semantic evaluator | internal `CompletionEvaluationTrigger` + `DeferredDispatcher` + `SemanticEvaluator` + `SemanticJobManager`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `GET /api/evaluation/queue`; `POST /api/runs` opt-out; CLI `orch-hub eval doctor`; report readback |
 | Global evaluation report feed | internal `ReportCatalog`; CLI `orch-hub eval catalog verify\|repair [--json] [--confirm]`; `GET /api/evaluation/reports[?after=<seq>&limit=<n>]`; `GET /api/evaluation/reports/{report_key}[/artifacts/{name}]`; dashboard `#/reports` |
 | Agent subscription usage | internal `UsageService` + collectors/parsers; legacy `orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage` |
 | HTTP API foundation | public shell routes; `GET /api/health`; all protected data APIs; `orch-hub-api` |
@@ -91,11 +91,13 @@ behavior and rationale stay in the owning doc.
 | session_reads | bounded transcript prefetch facts + ordered read traces |
 | static_metrics | deterministic Layer 1 scores; `static_metrics.json` |
 | semantic | evidence-bounded Layer 2 reports; backend isolation; doctor |
-| semantic_jobs | persisted async jobs; duplicate guard; orphan reconciliation |
+| completion_eval | isolated run-completion trigger; durable enqueue/skip + off-lock Layer 1 |
+| eval_dispatch | capacity/spacing policy; deferred queue sweep; queue projection |
+| semantic_jobs | persisted async/latest-outcome records; task once-guard; skip; orphan reconciliation |
 | report_catalog | append-only publication feed; audit/repair; retention guard |
 | usage | Claude cache/CLI + Codex rollout collection; fail-soft merge |
 | statusline | legacy optional statusLine fallback wrapper |
-| monitor | resident run-status scan for proactive notifications |
+| monitor | resident run-status scan plus isolated retry sweeps |
 | history | per-run JSONL events; metadata only |
 | control_dir | question/answer/stop file mechanics |
 | logs | run-record log location/tails/streams |

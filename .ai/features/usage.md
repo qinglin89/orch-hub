@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Features: Agent Subscription Usage
@@ -13,7 +13,8 @@ Display-only Claude/Codex capacity. Dashboard rendering details:
 Status: implemented
 
 Description: Display provider-aware Claude and Codex subscription capacity on
-the Operations Overview without conflating quota with repo health or run state.
+the Operations Overview without conflating quota with repo health or run state;
+automatic Layer 2 dispatch is the sole scheduling consumer.
 
 Modules: usage, statusline, runs, models, config, api, intake_agent, semantic,
 web, docs.
@@ -70,3 +71,9 @@ Implemented behavior:
   predates its start reads usage unknown. Source failures degrade only this
   section and never create Needs attention rows or affect readiness, run state,
   launch, or intake gates.
+- `UsageService.provider_usage(provider)` supplies the automatic-evaluation
+  capacity gate with raw window identity/freshness. Missing, stale, rolled-over,
+  boundary-less, or partly unreadable windows defer; the highest current used
+  percentage must stay below the configured ceiling. This pacing exception does
+  not affect display payloads, readiness, attention, run state, launch, intake,
+  or operator-started semantic turns.

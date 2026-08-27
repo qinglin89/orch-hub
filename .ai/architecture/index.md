@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Architecture
@@ -101,6 +101,9 @@ archives.
 - Hub-owned run dirs stay outside target repo working trees.
 - Hub-owned evaluation artifacts stay outside target trees and do not mutate
   task/run/protocol state.
+- Every hub-observed completed task mechanically produces Layer 1 and a durable
+  task-level Layer 2 outcome. Automatic Layer 2 waits on capacity; a per-run
+  opt-out records `skipped` rather than creating an invisible absence.
 - Global report entries are append-only and uniquely ordered; retained or pruned
   artifact state is reported explicitly, and publication never decides protocol
   evolution.
@@ -116,8 +119,9 @@ archives.
 - Notification delivery must never corrupt run, intake, history, or
   control-dir state.
 - Bark URLs embed device-key secrets and must not be logged.
-- Subscription usage is display-only: unavailable/stale data is shown as such,
-  never as zero usage, never as a launch or health gate.
+- Subscription usage is never a launch or health gate. Unavailable/stale data
+  is shown as such, never as zero; only automatic Layer 2 dispatch consumes it
+  as a fail-toward-deferral scheduling signal.
 - Claude usage requires no statusLine setup. A legacy statusLine hook remains
   operator-installed; orch-hub never edits `~/.claude/**`, and the wrapper
   preserves the operator's visible statusline behavior.

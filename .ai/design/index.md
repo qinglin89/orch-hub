@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Design Principles and Decisions
@@ -22,8 +22,10 @@ verified-against: c7fbcf08b005bfe0a06f6a3614923646a51e3595
 - Publication boundary: orch-hub durably publishes complete archived-task
   evaluation artifacts, identity, hashes, and provenance; downstream consumers
   alone interpret them, decide protocol evolution, and create improvement work.
-- Display-only capacity: agent subscription usage is an operator signal, not a
-  readiness, attention, run-state, launch, or intake gate.
+- Display-only capacity: agent subscription usage is not readiness, attention,
+  run-state, launch, or intake policy. The sole scheduling exception is the
+  automatic Layer 2 sidecar: unknown/stale/high usage holds its durable queue;
+  manual evaluation remains ungated.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Cross-kind repo admission: a live run and a non-terminal hub-driven intake
   cannot share a repo; admission is atomic and distinct from readiness.

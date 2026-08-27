@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-21
-verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
+last-updated: 2026-08-27
+verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 ---
 
 # Modules: Core
@@ -65,7 +65,10 @@ Responsibility: require `ORCH_HUB_MANDREL_PATH` (with
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
 `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
-`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_CLAUDE_HOME`, `ORCH_HUB_CODEX_HOME`, and
+`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_EVAL_AUTO`,
+`ORCH_HUB_EVAL_USAGE_CEILING`, `ORCH_HUB_EVAL_DISPATCH_SPACING`,
+`ORCH_HUB_EVAL_QUEUE_MAX_AGE`, `ORCH_HUB_CLAUDE_HOME`,
+`ORCH_HUB_CODEX_HOME`, and
 derived Claude transcript, Mandrel executable, and registry file paths. The
 Mandrel checkout has no portable default; a process without either current or
 legacy path configuration fails with actionable guidance.
@@ -90,7 +93,10 @@ defaults to `claude-opus-5`; `ORCH_HUB_EVAL_EFFORT` selects its reasoning
 effort and defaults to `max`. Blank/unset uses either default so the backend is
 constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
 to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
-values raise `ValueError`. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
+values raise `ValueError`. `ORCH_HUB_EVAL_AUTO` independently defaults true.
+The automatic Layer 2 policy defaults are an 80% ceiling, 900-second admission
+spacing, and a 21600-second queue-warning age; values are validated config, not
+dispatcher literals. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
 used only for read-only subscription-usage scans of Codex session rollouts.
 `ORCH_HUB_CLAUDE_HOME` defaults to `~/.claude`; evaluation derives its
 `projects/` transcript root from it for bounded session-read evidence.
@@ -102,7 +108,8 @@ Location: `orch_hub/models.py`
 Responsibility: define stable data shapes for managed repos, readiness reports,
 commit metadata, housekeeping marker state, task inventory, control-dir
 questions, run state, run history, intake state, evaluation target/run links,
-static-metrics reports, semantic reports, and semantic evaluator doctor output.
+static-metrics reports, semantic reports/jobs/queue snapshots, and semantic
+evaluator doctor output.
 `UsageWindow`, `UsageCredits`, `ProviderUsage`, and `SubscriptionUsage`
 normalize Claude/Codex subscription-capacity display data; omitted provider
 fields stay `None` rather than zero so unavailable data cannot masquerade as
