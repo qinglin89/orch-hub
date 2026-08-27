@@ -146,13 +146,20 @@ What fires, and when:
 - The trigger is the run manager's live→ended transition, and only for a run
   whose end classifies **completed** — the same verdict the dashboard shows,
   read from that run's own frozen run-dir evidence.
-- **Layer 1 runs immediately.** It is deterministic and makes no model call, so
-  there is nothing to schedule.
+- **Layer 1 needs no queue.** It is deterministic and makes no model call, so
+  there is nothing to schedule — it simply runs.
 - **Layer 2 is enqueued** as an ordinary semantic job — the same persisted
   `queued`/`running`/`completed`/`failed` record a manual Layer 2 creates, with
   the same single in-flight turn per task and the same push on settling. Cost is
   not the concern; contention is: an L2 turn can land in the same subscription
   rate window a dev session needs.
+- **That job record is written before the trigger hands off any work.** A run's
+  end is observed exactly once and then settled forever, so the hub records the
+  job first and evaluates afterwards. A hub stopped or crashed before the turn
+  runs therefore leaves a `failed` job at the next startup (*"semantic evaluation
+  abandoned (hub restarted during queued)"*) — visible in the task's Layer 2
+  panel and retryable from its button — instead of a completed task that
+  silently never got a report.
 - **A task gets at most one automatic Layer 2, ever.** The completion signal is
   per *run*, not per task (a task that completes without being archived stays
   launchable, and the close-out-only re-run that follows classifies `completed`

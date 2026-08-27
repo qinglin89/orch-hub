@@ -17,6 +17,7 @@ import datetime as dt
 import itertools
 import json
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -37,7 +38,12 @@ from orch_hub.semantic import (
     SEMANTIC_REPORT_NAME,
     SemanticEvaluator,
 )
-from orch_hub.semantic_jobs import STATUS_COMPLETED, SemanticJobManager
+from orch_hub.semantic_jobs import (
+    STATUS_COMPLETED,
+    STATUS_FAILED,
+    STATUS_QUEUED,
+    SemanticJobManager,
+)
 from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from orch_hub.subprocess_utils import CommandResult
 
@@ -236,18 +242,24 @@ def test_automatic_triggering_is_switchable_without_disabling_the_subsystem(tmp_
 # -- dispatch -----------------------------------------------------------------
 
 
-def test_work_is_handed_to_the_executor_not_run_on_the_callers_thread(tmp_path):
-    """The caller holds the run-manager lock, so nothing slow may run inline."""
+def test_the_layer_2_job_is_recorded_before_the_hook_returns(tmp_path):
+    """The completion signal is one-shot: acceptance may not wait on a thread.
+
+    The caller holds the run-manager lock, so only O(1) work may run inline — and
+    the durable Layer 2 record is exactly that, while Layer 1's evidence build is
+    what gets detached.
+    """
     executor = DeferredExecutor()
     trig, static, jobs = trigger(tmp_path, executor=executor)
 
     trig.on_task_completed(completed_record())
 
+    assert len(jobs.calls) == 1  # durable acceptance, before returning
+    assert static.calls == []  # the slow layer did not run on the caller's thread
     assert len(executor.pending) == 1
-    assert static.calls == [] and jobs.calls == []  # nothing ran inline
 
     executor.run_all()
-    assert len(static.calls) == 1 and len(jobs.calls) == 1
+    assert len(static.calls) == 1
 
 
 # -- refusals and isolation ---------------------------------------------------
@@ -270,7 +282,7 @@ def test_an_unattributable_record_evaluates_nothing(tmp_path, record):
     assert static.calls == [] and jobs.calls == []
 
 
-def test_a_layer_1_failure_still_enqueues_layer_2(tmp_path):
+def test_a_layer_1_failure_leaves_the_durable_layer_2_job_standing(tmp_path):
     """The two layers are separate artifacts over separately generated evidence."""
     trig, static, jobs = trigger(
         tmp_path, static=FakeStatic(error=OSError("evidence unreadable"))
@@ -279,7 +291,7 @@ def test_a_layer_1_failure_still_enqueues_layer_2(tmp_path):
     trig.on_task_completed(completed_record())  # must not raise
 
     assert len(static.calls) == 1
-    assert len(jobs.calls) == 1
+    assert len(jobs.calls) == 1  # already accepted, and untouched by the failure
 
 
 def test_a_layer_2_enqueue_failure_is_isolated(tmp_path):
@@ -289,8 +301,9 @@ def test_a_layer_2_enqueue_failure_is_isolated(tmp_path):
 
     trig.on_task_completed(completed_record())  # must not raise
 
-    assert len(static.calls) == 1  # layer 1 already happened and stands
     assert len(jobs.calls) == 1
+    # A broken job store costs this task its Layer 2, not its deterministic layer.
+    assert len(static.calls) == 1
 
 
 def test_a_task_that_already_has_a_job_record_enqueues_no_second_turn(tmp_path):
@@ -415,9 +428,23 @@ def _snapshot_tree(root: Path) -> dict[str, bytes]:
     }
 
 
-def _wire(tmp_path: Path):
-    """Real evaluation stack + real run manager, with only the model call faked."""
-    cfg = config(tmp_path)
+class Stack(NamedTuple):
+    """The evaluation collaborators one hub process builds over one data dir."""
+
+    service: EvaluationService
+    static: StaticEvaluator
+    semantic: SemanticEvaluator
+    jobs: SemanticJobManager
+    trigger: CompletionEvaluationTrigger
+
+
+def _stack(cfg: Config, *, executor=sync_executor) -> Stack:
+    """Build the real evaluation stack, with only the model call faked.
+
+    A function of the config alone, so a test can build it twice over the same
+    data dir and get what a *restarted* hub gets: fresh in-memory managers over
+    the same persisted records.
+    """
     service = EvaluationService(cfg, git_runner=_fake_git, clock=lambda: FIXED_TS)
     static = StaticEvaluator(cfg, evaluation_service=service, clock=lambda: FIXED_TS)
     semantic = SemanticEvaluator(
@@ -428,21 +455,32 @@ def _wire(tmp_path: Path):
         clock=lambda: FIXED_TS,
     )
     jobs = SemanticJobManager(
-        cfg, evaluator=semantic, clock=lambda: FIXED_TS, executor=sync_executor
+        cfg, evaluator=semantic, clock=lambda: FIXED_TS, executor=executor
     )
     trig = CompletionEvaluationTrigger(
-        cfg, static_evaluator=static, job_manager=jobs, executor=sync_executor
+        cfg, static_evaluator=static, job_manager=jobs, executor=executor
     )
-    spawner = FakeSpawner()
-    manager = RunManager(
+    return Stack(service, static, semantic, jobs, trig)
+
+
+def _run_manager(cfg: Config, *, hook, spawner: FakeSpawner | None = None) -> RunManager:
+    return RunManager(
         cfg,
         readiness_checker=lambda r, c: ReadinessReport((ReadinessCheck("all", True, "ok"),)),
-        spawner=spawner,
+        spawner=spawner if spawner is not None else FakeSpawner(),
         pid_probe=lambda pid: False,
         clock=lambda: FIXED_TS,
-        task_completed_hook=trig.on_task_completed,
+        task_completed_hook=hook,
     )
-    return cfg, service, jobs, manager, spawner
+
+
+def _wire(tmp_path: Path):
+    """Real evaluation stack + real run manager, with only the model call faked."""
+    cfg = config(tmp_path)
+    stack = _stack(cfg)
+    spawner = FakeSpawner()
+    manager = _run_manager(cfg, hook=stack.trigger.on_task_completed, spawner=spawner)
+    return cfg, stack.service, stack.jobs, manager, spawner
 
 
 def test_a_finished_run_evaluates_its_task_without_operator_action(tmp_path):
@@ -499,3 +537,50 @@ def test_a_second_completed_run_of_the_same_task_spends_no_second_model_turn(tmp
     stored = service.list_evaluations(target, TASK)
     assert sum(1 for s in stored if SEMANTIC_REPORT_NAME in s.artifacts) == 1
     assert sum(1 for s in stored if SEMANTIC_REPORT_NAME not in s.artifacts) == 2
+
+
+def test_a_completion_survives_a_hub_that_stops_before_the_evaluation_runs(tmp_path):
+    """The completion signal settles once, so acceptance must outlive the process.
+
+    ``_refresh`` persists ``ended_ts`` and never revisits that run: a completion
+    held only in a pending closure would be gone when the hub stops — silently,
+    with nothing on disk left to reconcile — and the restarted manager returns
+    early for the already-ended run rather than announcing it again. Here neither
+    layer ever runs: both executors are left holding their work, exactly as an
+    interpreter exit leaves its daemon threads.
+    """
+    cfg = config(tmp_path)
+    held = DeferredExecutor()
+    stack = _stack(cfg, executor=held)
+    spawner = FakeSpawner()
+    manager = _run_manager(cfg, hook=stack.trigger.on_task_completed, spawner=spawner)
+    target = _write_repo(tmp_path)
+
+    manager.start_run(target, TASK)
+    _write_orch_log(target)
+    spawner.procs[0].returncode = 0
+    assert manager.list_runs()[0].state == "completed"
+
+    # No evaluation work has run at all — and the completion is durable anyway.
+    assert stack.service.list_evaluations(target, TASK) == []
+    assert stack.jobs.get_job(target, TASK).status == STATUS_QUEUED
+    assert (cfg.data_dir / "semantic-jobs" / "alpha" / TASK / "job.json").is_file()
+
+    # The hub stops: whatever those threads were holding is dropped, never run.
+    held.pending.clear()
+
+    # Restart. The ended run is settled, so it is never announced a second time...
+    announced: list[RunRecord] = []
+    restarted = _run_manager(cfg, hook=announced.append)
+    assert [s.state for s in restarted.list_runs()] == ["completed"]
+    assert announced == []
+
+    # ...which leaves the durable record as the only thing still speaking for this
+    # completion. The startup sweep settles it to a visible, retryable failure —
+    # a recorded outcome rather than a task that quietly left the corpus.
+    fresh = _stack(cfg, executor=held)
+    reconciled = fresh.jobs.reconcile_orphans()
+    assert [j.task_id for j in reconciled] == [TASK]
+    settled = fresh.jobs.get_job(target, TASK)
+    assert settled.status == STATUS_FAILED
+    assert "hub restarted" in (settled.error or "")

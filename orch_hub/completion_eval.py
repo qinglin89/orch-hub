@@ -17,6 +17,19 @@ The two layers are dispatched differently because they cost differently:
   forever. Cost is not the constraint here; contention is: one L2 turn can land
   inside the same subscription rate window a dev session needs.
 
+Accepting a completion is durable **before the hook returns**. The run manager
+settles an end permanently — ``ended_ts`` is persisted and ``_refresh``
+early-returns for that run forever after — so a completion this module has only
+*promised* to evaluate (a closure handed to a daemon thread) is lost outright if
+the hub stops before that closure reaches the job store: nothing on disk records
+that the task ever reached the sidecar, and no reconciliation can find what was
+never written. The Layer 2 job record is therefore written inline, before the
+hook returns; only the slow part — Layer 1's evidence build — is detached. A hub
+that dies after that record exists leaves an observable orphan the startup sweep
+settles to ``failed``, which is a recorded outcome. A hub that dies before it
+would have left a silent gap in the one corpus whose entire point is that it has
+none.
+
 Two gates and one guard:
 
 - ``Config.evaluation_enabled`` is the subsystem gate (shared with every manual
@@ -123,6 +136,25 @@ class CompletionEvaluationTrigger:
         ``run.json``, or one with no task id — rather than guessing a target;
         there is nothing to evaluate and an evaluation keyed by a wrong
         ``(repo, task)`` would be worse than none.
+
+        Then the ordering that matters: **Layer 2 is enqueued inline, Layer 1 is
+        dispatched.** The completion signal is one-shot and already settled when
+        this runs, so the automatic path has to accept it durably before returning
+        (module docstring). Enqueuing is that acceptance and it is O(1) — one small
+        record read plus one atomic write, under the job manager's briefly-held
+        lock — the same class of work ``_refresh`` already does under its own.
+        Layer 1 is not O(1): it walks the task file, every related run's
+        records/events/sessions, a bounded git window and the ``.ai/`` snapshot, so
+        it stays on the executor.
+
+        The two steps are independent and independently isolated: they are separate
+        artifacts over separately generated evidence, so an enqueue failure must
+        not also cost the task its deterministic layer, and a Layer 1 failure — a
+        git hiccup, an unreadable log — cannot reach an already-durable job. The
+        consequence of enqueuing first is that the semantic turn (dispatched by the
+        job manager onto its own thread) may now overlap this Layer 1 build rather
+        than following it. Both are read-only and unrelated; a redundant concurrent
+        evidence build costs less than a completion that is never recorded.
         """
         if not self.enabled:
             return
@@ -135,34 +167,21 @@ class CompletionEvaluationTrigger:
             )
             return
         task_id = record.task_id
-        self._executor(lambda: self._evaluate(repo, task_id))
-
-    def _evaluate(self, repo: ManagedRepo, task_id: str) -> None:
-        """Run Layer 1 and enqueue Layer 2 for one completed task, off the lock.
-
-        The two steps are independent and independently isolated. Layer 1 runs
-        first because it is the layer that always happens (it makes no model call,
-        so there is nothing to schedule and nothing to skip), but its outcome does
-        **not** gate Layer 2: they are separate artifacts over separately generated
-        evidence, so a transient Layer 1 failure — a git hiccup, an unreadable log
-        — must not also cost the corpus its semantic report.
-
-        Ordering note: Layer 2 is enqueued *after* Layer 1 returns rather than
-        concurrently, so the two evidence builds do not run the same repo's git
-        window and ``.ai/`` reads at once for no benefit. The semantic turn is the
-        slow part and it is asynchronous either way.
-        """
-        self._run_static(repo, task_id)
         self._enqueue_semantic(repo, task_id)
+        self._executor(lambda: self._run_static(repo, task_id))
 
     def _run_static(self, repo: ManagedRepo, task_id: str) -> None:
-        """Generate the deterministic Layer 1 report; never raise.
+        """Generate the deterministic Layer 1 report off the lock; never raise.
 
         A fresh evidence pack plus ``static_metrics.json``, exactly what the manual
         ``/metrics`` route produces — the trigger adds no second generation path,
         it only removes the click. Read-only over target state by construction: the
         only writes are the two hub-owned artifacts, and a failure has already
         removed its own reserved dir.
+
+        Interrupting this loses only a free, reproducible artifact: the Layer 2 job
+        is already durable when this runs, and its own turn regenerates a complete
+        evidence + static pair.
         """
         try:
             report = self._static.generate_metrics(repo, task_id)
@@ -183,7 +202,7 @@ class CompletionEvaluationTrigger:
         )
 
     def _enqueue_semantic(self, repo: ManagedRepo, task_id: str) -> None:
-        """Enqueue the Layer 2 job unless this task already has one; never raise.
+        """Durably accept the completion as a Layer 2 job; never raise.
 
         ``start_job_if_absent`` is both the single-flight guard and the
         once-per-task guard (see its docstring): a second completion signal for the
@@ -191,6 +210,20 @@ class CompletionEvaluationTrigger:
         record and starts nothing. The job itself then runs asynchronously and
         settles to ``completed``/``failed`` on its own; a failure there is a
         recorded job outcome, not an exception here.
+
+        That same record is the only durable trace that the automatic path accepted
+        this completion, which is why there is no startup replay to fall back on:
+        a scan for "completed runs with no job record" cannot distinguish a
+        completion this hub accepted from every task that completed before the
+        trigger existed, so it would enqueue a model turn for the entire archived
+        backlog on the first restart after deployment — the backfill this task
+        deliberately leaves to its own resumable, capacity-aware work. Writing the
+        record inline instead needs no second mechanism: it is already the guard.
+
+        Called on the run manager's thread, under its lock, so it must stay O(1);
+        the slow layer is dispatched, not this one. Isolated all the same — a
+        broken job store leaves the run untouched and costs this task its automatic
+        Layer 2, not the hub's run control.
         """
         try:
             job = self._jobs.start_job_if_absent(repo, task_id)
