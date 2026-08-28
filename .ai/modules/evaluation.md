@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: 39eda85d7efd91d1191f40b6c616ea660323d776
+last-updated: 2026-08-28
+verified-against: d4a9de5969e397c7896d23299d73ed175bd83a61
 ---
 
 # Modules: Task Evaluation Layers
@@ -137,6 +137,9 @@ boundary is load-bearing: the semantic model must judge only the persisted
 prompt/evidence and cannot read live repo files, raw logs, or secrets. It sees
 `.ai/` only as the bounded persisted copy in the prompt; a live reread would
 break artifact reproducibility.
+Codex CLI 0.149.0 is not an admissible backend: its read-only sandbox still
+allows filesystem reads, and `codex exec` has no built-in-tool-disable equivalent;
+reconsideration requires re-verifying that structural gate in a newer CLI.
 API exposes generation through `SemanticJobManager` at protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`, detail readback, and
 a gated `GET /api/evaluation/doctor` readiness route.
