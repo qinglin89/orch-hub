@@ -2158,7 +2158,8 @@ code {
 /* The way up to the feed from Run history, where the per-task Evaluation links
    already live. Right-aligned so it reads as a page-level action rather than
    competing with the filter controls under it. */
-.reports-entry {
+.reports-entry,
+.coverage-entry {
   margin: 2px 0 0;
   text-align: right;
 }
@@ -2610,6 +2611,77 @@ code {
 
 .card.run .run-protocol .kv {
   margin-top: 6px;
+}
+
+/* ---- protocol identity coverage census ---- */
+
+/* Its own page rather than a panel: it walks every run dir once, so it is
+   entered deliberately and never rides a background refresh. */
+.cov-intro {
+  margin: 6px 0 12px;
+  line-height: 1.5;
+}
+
+/* The one figure the page exists to state, in the identifier treatment figures
+   get elsewhere here so it reads as a measurement rather than as prose. */
+.cov-summary {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  margin: 0 0 10px;
+}
+
+.cov-note {
+  font-size: 12px;
+  margin: 10px 0 0;
+  line-height: 1.45;
+}
+
+.cov-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Count, verdict, meaning — in that order, because the count is what is being
+   compared down the column. The count column is fixed and tabular so the figures
+   line up whatever their width; the sentence wraps under them on a phone. */
+.cov-row {
+  display: grid;
+  grid-template-columns: 3.5em auto;
+  gap: 2px 10px;
+  align-items: baseline;
+}
+
+.cov-count {
+  font-family: var(--mono);
+  font-size: 15px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.cov-why {
+  grid-column: 2;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* An identity-less published report: the repo under the row's own identity, then
+   the hub's persisted reason — the whole information on this row, so it is body
+   text rather than a muted footnote. */
+.cov-repo {
+  margin: 4px 0 0;
+  font-size: 12px;
+}
+
+.cov-detail {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 /* ---- remote intake (draft review) ---- */

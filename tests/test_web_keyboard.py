@@ -97,6 +97,7 @@ def test_keyboard_smoke_actually_ran(harness_output: str):
         "usage:",
         "evalqueue:",
         "protocol:",
+        "census:",
     ],
 )
 def test_keyboard_smoke_covers_each_acceptance_surface(harness_output: str, scenario: str):

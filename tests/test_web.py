@@ -2434,10 +2434,7 @@ def test_report_feed_route_and_entry_are_wired():
     # the two runless pages keep it: a report needs no related run and outlives
     # the run records it was built from, so a feed-holding hub can have zero runs.
     assert "function historyHead(data) {" in body
-    assert (
-        'return pageTitle("Run history") + reportsEntryLink(data.evaluation_enabled);'
-        in body
-    )
+    assert "reportsEntryLink(data.evaluation_enabled)" in body
     runs_view = body[body.index("async function renderRuns(cursor)") :]
     runs_view = runs_view[: runs_view.index("function renderRunTask")]
     assert runs_view.count("historyHead(data)") == 3
@@ -2687,6 +2684,79 @@ def test_report_card_states_protocol_provenance():
     assert "const proto = prov.protocol || {};" in body
     assert "shortRev(proto.effective_revision)" in body
     assert '"unavailable" + (proto.detail ? " — " + proto.detail : "")' in body
+
+
+# ---- protocol identity coverage census ---------------------------------------
+#      (2026-08-29-protocol-identity-coverage, session-3)
+#
+# Rendering behaviour — the buckets, the two unavailable halves, the truncation
+# note, the entry links — is verified by the jsc harness (scenarioProtocolCensus).
+# These pin the two boundaries a grep can hold, and both are cross-surface: the
+# census must not hold a second copy of the vocabulary the run rows use, nor a
+# second copy of the order the hub emits.
+
+
+def test_coverage_census_reuses_the_run_row_vocabulary():
+    body = app_js()
+    # One label map for both surfaces. A census whose buckets read differently
+    # from the rows they count is two opinions, which is the defect this whole
+    # feature removes — so the census renders through PROTOCOL_COVERAGE and adds
+    # no labels of its own.
+    census = body[body.index("function coverageRow(key, count) {") :]
+    census = census[: census.index("async function renderProtocolCoverage")]
+    assert "PROTOCOL_COVERAGE[key] || [key, \"\", \"\"]" in census
+    assert "const PROTOCOL_COVERAGE" not in census
+
+
+def test_coverage_census_takes_its_order_from_the_payload():
+    body = app_js()
+    from orch_hub.protocol_provenance import RUN_COVERAGES
+
+    census = body[body.index("function coverageRunsSection(runs) {") :]
+    census = census[: census.index("function coverageReportRow(entry)")]
+    # The hub emits counts in RUN_COVERAGES order and JSON object key order is
+    # preserved, so the page enumerates the payload rather than holding a list
+    # that a new bucket would silently fall out of.
+    assert "Object.keys(counts)" in census
+    for value in RUN_COVERAGES:
+        assert f'"{value}"' not in census or value == "verified"
+    # `verified` is the one name the section may hold: it is the answer to the
+    # page's question and renders at zero, where every other bucket is hidden.
+    assert 'key === "verified"' in census
+    assert "counts.verified" in census
+
+
+def test_coverage_census_entry_is_not_gated_on_evaluation():
+    body = app_js()
+    # The run half is a property of run records, so the way in must survive a hub
+    # with the sidecar off — the hub whose every report is unpublished. Its own
+    # class, because the feed entry beside it IS gated and a shared selector would
+    # make "is the feed offered here" unanswerable.
+    entry = body[body.index("function coverageEntryLink() {") :]
+    entry = entry[: entry.index("\n  }")]
+    assert '<p class="coverage-entry">' in entry
+    assert "enabled" not in entry
+    assert (
+        "reportsEntryLink(data.evaluation_enabled) +\n      coverageEntryLink()"
+        in body
+    )
+
+
+def test_coverage_census_is_a_read_with_no_write_surface():
+    body = app_js()
+    view = body[body.index("async function renderProtocolCoverage() {") :]
+    view = view[: view.index("// ---- remote intake")]
+    # Asking how many runs carry an identity must never settle one: the page has
+    # no POST, no polling, and one read.
+    assert 'api("/api/protocol-coverage")' in view or "api(COVERAGE_PATH)" in view
+    assert "method:" not in view
+    assert "setTimeout" not in view
+
+
+def test_coverage_census_styles_are_present():
+    css = styles_css()
+    for selector in (".cov-row", ".cov-count", ".cov-why", ".cov-detail"):
+        assert selector in css, selector
 
 
 def test_protocol_coverage_styles_are_present():

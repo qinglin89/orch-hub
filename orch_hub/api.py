@@ -106,6 +106,7 @@ from .runs import (
     RunManager,
     UnknownRunError,
 )
+from .runs import protocol_coverage as run_protocol_coverage
 from .semantic import (
     SEMANTIC_REPORT_MD_NAME,
     SEMANTIC_REPORT_NAME,
@@ -1882,6 +1883,44 @@ def create_app(
             ),
             headers=headers,
         )
+
+    @app.get("/api/protocol-coverage")
+    def protocol_coverage_census() -> dict:
+        """Report how much of this hub's corpus carries a verified protocol identity.
+
+        The read surface for the one field this hub publishes that nothing else
+        surfaces: whether a run — and the report of the task it worked — can name
+        the deployed protocol its sessions actually ran under. Both halves are
+        already decided per item and persisted; what could not be asked before is
+        the aggregate, which until now meant grepping run dirs for
+        ``protocol.json`` or opening evidence packs one at a time.
+
+        Two populations, deliberately both, because neither answers for the other:
+        ``runs`` buckets every persisted run by
+        :data:`~orch_hub.protocol_provenance.RUN_COVERAGES` — the verdict plus each
+        distinct reason it is not one — while ``reports`` counts what the
+        publication feed actually carries. A task publishes an identity only under
+        unanimity over its contributing runs, so the run figure bounds the
+        published one from above and the reasons in ``runs`` are what explains the
+        gap.
+
+        **Not** under ``/api/evaluation``, and that is the point: the run half is a
+        property of run records and stays readable on a hub with evaluation
+        switched off, which is exactly the hub whose reports are all unpublished.
+        The report half carries its own ``available`` flag with the reason instead,
+        so a disabled subsystem or a catalog failing closed degrades one section
+        rather than 404-ing the page.
+
+        Read-only in the strict sense both underlying reads are: no pid probe, no
+        record rewrite, no publication, no reconciliation, no model call. Asking
+        how many runs carry an identity must never settle one. It costs one small
+        file read per run dir plus one catalog scan, which is why it answers a page
+        an operator opens rather than a background poll.
+        """
+        return {
+            "runs": run_protocol_coverage(resolved).to_dict(),
+            "reports": catalog.protocol_coverage().to_dict(),
+        }
 
     @app.get("/api/repos/{repo_id}/evaluations/{task_id}")
     def list_task_evaluations(repo_id: str, task_id: str) -> dict:

@@ -155,6 +155,8 @@ from .models import (
     ReportBundle,
     ReportCatalogEntry,
     ReportPage,
+    ReportProtocolCoverage,
+    ReportProtocolCoverageEntry,
     ReportProvenance,
 )
 from .protocol_provenance import effective_protocol_from_dict
@@ -225,6 +227,29 @@ query parameter — the feed lets a consumer choose, because ``has_more`` makes 
 short page unambiguous and a bulk importer and an idle poller genuinely want
 different sizes. Exceeding it is a fail-closed error rather than a silent clamp
 (config contract: malformed explicit values fail loudly)."""
+
+COVERAGE_ENTRY_LIMIT = 50
+"""How many identity-less reports the coverage census lists before truncating.
+The counts beside them stay complete, so this bounds the response without ever
+understating the corpus; a reader that wants every row walks the feed itself,
+which is what the feed's cursors are for."""
+
+CATALOG_UNREADABLE_DETAIL = (
+    "the report catalog could not be read; run `orch-hub eval catalog verify`"
+)
+"""Why a coverage census reports no reports at all. The feed fails closed on a
+catalog whose identities are ambiguous rather than serving a page that quietly
+omits one, and a census must inherit that refusal instead of publishing a total
+built from whatever happened to parse. It names the repair path, because the
+alternative reading — "this hub has published nothing" — is the one wrong answer
+that looks like a valid one."""
+
+EVALUATION_DISABLED_DETAIL = (
+    "task evaluation is disabled on this hub, so no reports are published"
+)
+"""Why the report half of the census is unavailable on a hub with evaluation off.
+Distinct from an empty catalog on purpose: nothing was published *because nothing
+publishes here*, which is a configuration fact rather than a coverage one."""
 
 PACK_UNREADABLE_DETAIL = "evidence pack unreadable"
 """Why every derived provenance section is unavailable when the pack itself could
@@ -614,6 +639,67 @@ class ReportCatalog:
             # from the same place instead of restarting the feed.
             next_cursor=entries[-1].seq if entries else cursor,
             has_more=len(window) > limit,
+        )
+
+    def protocol_coverage(self) -> ReportProtocolCoverage:
+        """How many published reports carry a protocol identity, and why the rest do not.
+
+        The published half of the coverage census, and the one that answers the
+        question as a consumer meets it: ``provenance.protocol`` is the block an
+        external importer cohorts by, so "how much of my feed is cohortable" is a
+        property of these entries and of nothing else. Per-run coverage
+        (:func:`orch_hub.runs.protocol_coverage`) explains this number but cannot
+        stand in for it — a task publishes an identity only when *every*
+        contributing run verified the same one.
+
+        Read straight off the durable catalog lines, never from live run or repo
+        state: an entry records what was true when it was published, and a report
+        whose repo has since been redeployed still carries the identity its runs
+        actually used. The reasons are the hub's own persisted sentences, listed
+        per report rather than bucketed, because the catalog publishes availability
+        plus prose and inventing classes by parsing that prose back would be a
+        second, unowned vocabulary (:class:`~orch_hub.models.ReportProtocolCoverage`).
+
+        Degrades explicitly instead of raising, in both directions this read can
+        fail: a disabled subsystem and a catalog failing closed on ambiguous
+        identities each return ``available=False`` with the reason. It is a census
+        *over* the feed, not a feed read — a caller asking how much is covered gets
+        an honest "cannot say" rather than a 4xx that also takes the run half of
+        the page down with it. Lock-free and read-only like :meth:`entries`.
+        """
+        if not self.enabled:
+            return ReportProtocolCoverage(
+                available=False, detail=EVALUATION_DISABLED_DETAIL
+            )
+        try:
+            found = self.entries()
+        except ReportCatalogError as err:
+            _log.warning("protocol coverage census: catalog unreadable (%s)", err)
+            return ReportProtocolCoverage(
+                available=False, detail=CATALOG_UNREADABLE_DETAIL
+            )
+        missing = [
+            ReportProtocolCoverageEntry(
+                seq=entry.seq,
+                report_key=entry.report_key,
+                repo_name=entry.repo_name,
+                task_id=entry.task_id,
+                evaluation_id=entry.evaluation_id,
+                detail=entry.provenance.protocol_detail,
+            )
+            for entry in found
+            if not entry.provenance.protocol_available
+        ]
+        return ReportProtocolCoverage(
+            available=True,
+            total=len(found),
+            with_identity=len(found) - len(missing),
+            # Newest first: the reasons worth acting on are the ones still being
+            # produced, and a corpus's oldest reports are the ones whose runs
+            # predate the capture entirely. The feed itself stays ascending —
+            # that ordering is a cursor contract, and this is not a cursor.
+            entries=tuple(reversed(missing[-COVERAGE_ENTRY_LIMIT:])),
+            truncated=len(missing) > COVERAGE_ENTRY_LIMIT,
         )
 
     def read_bundle(self, entry: ReportCatalogEntry) -> ReportBundle:

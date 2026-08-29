@@ -36,10 +36,13 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import read_effective_config_snapshot
 from orch_hub.protocol_provenance import (
+    COVERAGE_ABSENT,
     COVERAGE_PENDING,
+    COVERAGE_PENDING_ENDED,
     COVERAGE_VERIFIED,
     DEPLOY_LOCK_NAME,
     DEPLOY_MANIFEST_NAME,
+    RUN_COVERAGES,
     STABILITY_CHANGED,
     STABILITY_DRIFTED,
     STABILITY_STABLE,
@@ -57,6 +60,7 @@ from orch_hub.runs import (
     RunManager,
     UnknownRunError,
     load_records,
+    protocol_coverage,
 )
 
 FIXED_NOW = dt.datetime(2026, 7, 8, 3, 0, 0, tzinfo=dt.timezone.utc)
@@ -3266,6 +3270,143 @@ def test_load_records_reads_persisted_runs_without_mutating(tmp_path):
     # No write of any kind happened.
     assert (run_dir / "run.json").read_text(encoding="utf-8") == run_json_before
     assert (run_dir / "events.jsonl").read_text(encoding="utf-8") == events_before
+
+
+# -- protocol identity coverage census ----------------------------------------
+
+
+def test_protocol_coverage_buckets_agree_with_run_history(tmp_path):
+    # The census answers in aggregate exactly what a run row answers one at a
+    # time; if the two could disagree the census would be a second opinion rather
+    # than a count. Same manager, same artifacts, same vocabulary.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+
+    live = protocol_coverage(config)
+    assert live.total == 1
+    assert live.counts[COVERAGE_PENDING] == 1
+    assert live.counts[COVERAGE_VERIFIED] == 0
+    assert manager.recent_runs(limit=1)[0].to_dict()["protocol"]["coverage"] == (
+        COVERAGE_PENDING
+    )
+
+    end_run(spawner, 0)
+    only_status(manager)  # observe the end: this is what runs the one look
+
+    ended = protocol_coverage(config)
+    assert ended.total == 1
+    assert ended.counts[COVERAGE_VERIFIED] == 1
+    assert ended.counts[COVERAGE_PENDING] == 0
+    assert manager.recent_runs(limit=1)[0].to_dict()["protocol"]["coverage"] == (
+        COVERAGE_VERIFIED
+    )
+
+
+def test_protocol_coverage_decides_a_finished_runs_pending_check(tmp_path):
+    # The join the artifact cannot make. This run's end was recorded without its
+    # check ever running (a hub that died between the two writes), so the check
+    # will never run — and a census that reported it as pending would tell an
+    # operator to wait for a verdict the one-look rule has already withheld.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+    run_json = manager.runs_dir / record.run_id / "run.json"
+    data = json.loads(run_json.read_text(encoding="utf-8"))
+    data["ended_ts"] = "2026-07-08T04:00:00Z"
+    run_json.write_text(json.dumps(data), encoding="utf-8")
+
+    census = protocol_coverage(config)
+
+    assert census.counts[COVERAGE_PENDING_ENDED] == 1
+    assert census.counts[COVERAGE_PENDING] == 0
+
+
+def test_protocol_coverage_counts_a_run_predating_the_capture(tmp_path):
+    # No artifact is its own bucket, never folded into a capture that found no
+    # lock: one says the hub never looked, the other says the repo's receipts are
+    # unusable, and only the second is a defect to chase.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    (manager.runs_dir / record.run_id / "protocol.json").unlink()
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+
+    census = protocol_coverage(config)
+
+    assert census.total == 1
+    assert census.counts[COVERAGE_ABSENT] == 1
+
+
+def test_protocol_coverage_reports_every_bucket_and_sums_to_total(tmp_path):
+    # A complete census: every value present even at zero, so a reader renders a
+    # stable set of figures instead of reading an absent key as zero, and the
+    # buckets account for every run walked.
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+
+    empty = protocol_coverage(config)  # no runs dir at all
+    assert empty.total == 0
+    assert list(empty.counts) == list(RUN_COVERAGES)
+    assert set(empty.counts.values()) == {0}
+
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    (config.data_dir / "runs" / "20260708T030000Z-broken").mkdir(parents=True)
+
+    census = protocol_coverage(config)
+
+    assert census.total == 2
+    assert sum(census.counts.values()) == census.total
+    # Serialized order is the vocabulary's, so a surface enumerating the payload
+    # gets the presentation order without holding a second list.
+    assert list(census.to_dict()["counts"]) == list(RUN_COVERAGES)
+
+
+def test_protocol_coverage_names_a_bucket_it_does_not_know(tmp_path, monkeypatch):
+    # The vocabulary relation is pinned by its own test, so this is the belt: a
+    # coverage value nobody listed is counted under its own name rather than
+    # raising, because a census that 500s takes the published half of the page
+    # down with it over a bucket it could simply have named.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+    monkeypatch.setattr(runs_module, "run_coverage", lambda snap, *, live: "from-later")
+
+    census = protocol_coverage(config)
+
+    assert census.total == 1
+    assert census.counts["from-later"] == 1
+
+
+def test_protocol_coverage_reads_without_mutating(tmp_path):
+    # Asking how many runs carry an identity must never settle one: the census
+    # shares load_records' no-refresh contract, so a dead pid does not flip a run
+    # to ended, append an event, or run the end check it has not earned.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)  # pid_probe returns False (dead)
+    record = manager.start_run(repo, TASK_ID)
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+    run_dir = manager.runs_dir / record.run_id
+    before = {
+        name: (run_dir / name).read_text(encoding="utf-8")
+        for name in ("run.json", "events.jsonl", "protocol.json")
+    }
+
+    census = protocol_coverage(config)
+
+    assert census.counts[COVERAGE_PENDING] == 1
+    for name, text in before.items():
+        assert (run_dir / name).read_text(encoding="utf-8") == text
 
 
 def test_load_records_missing_runs_dir_is_empty(tmp_path):

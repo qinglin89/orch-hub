@@ -26,6 +26,7 @@ from orch_hub.protocol_provenance import (
     COVERAGE_CHANGED,
     COVERAGE_DRIFTED,
     COVERAGE_PENDING,
+    COVERAGE_PENDING_ENDED,
     COVERAGE_UNCAPTURED,
     COVERAGE_UNCOMPARED,
     COVERAGE_UNUSABLE,
@@ -43,6 +44,7 @@ from orch_hub.protocol_provenance import (
     PAYLOAD_MISMATCHED,
     PAYLOAD_UNVERIFIABLE,
     PROTOCOL_SCHEMA_VERSION,
+    RUN_COVERAGES,
     STABILITY_CHANGED,
     STABILITY_DRIFTED,
     STABILITY_STABLE,
@@ -57,6 +59,7 @@ from orch_hub.protocol_provenance import (
     effective_protocol_from_dict,
     read_deploy_lock,
     read_protocol,
+    run_coverage,
     settle_protocol,
     verify_payload,
     write_protocol,
@@ -1151,6 +1154,60 @@ def test_an_unobserved_end_records_that_it_can_never_be_settled(
     assert settled.coverage == COVERAGE_UNCOMPARED
     # And the window really is closed: a later pass settles nothing.
     assert settle_protocol(run_dir, repo_path, now=ENDED_AT) is None
+
+
+def test_run_coverage_decides_a_pending_check_a_run_can_no_longer_get(
+    tmp_path: Path,
+) -> None:
+    # The one join the artifact cannot make for itself. Same file, opposite
+    # readings: a live run's end check is genuinely still to come, while a run
+    # that has already ended will never get one — the check happens only at that
+    # transition. Presenting the second as outstanding is what invites an operator
+    # to wait for an answer the one-look rule withheld permanently.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    captured = capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+
+    assert captured.coverage == COVERAGE_PENDING
+    assert run_coverage(captured, live=True) == COVERAGE_PENDING
+    assert run_coverage(captured, live=False) == COVERAGE_PENDING_ENDED
+
+    # And nothing else moves with liveness: every settled verdict, the two
+    # unavailable snapshots, and a run with no artifact read the same either way.
+    unchanged = [
+        snap(stability=STABILITY_STABLE),
+        snap(stability=STABILITY_CHANGED),
+        snap(stability=STABILITY_DRIFTED),
+        snap(available=False),
+        None,
+    ]
+    for snapshot in unchanged:
+        assert run_coverage(snapshot, live=True) == run_coverage(
+            snapshot, live=False
+        ) == coverage_of(snapshot)
+
+
+def test_run_coverages_extends_the_artifact_vocabulary_in_place() -> None:
+    # A census and a run row share these buckets, so the joined list must be the
+    # artifact list with one value inserted — never a reordering of it. Pinned as
+    # an exact tuple for the same reason COVERAGES is: membership alone would let
+    # a bucket move to a different position on one surface than on the other.
+    assert RUN_COVERAGES == (
+        COVERAGE_VERIFIED,
+        COVERAGE_PENDING,
+        COVERAGE_CHANGED,
+        COVERAGE_DRIFTED,
+        COVERAGE_PENDING_ENDED,
+        COVERAGE_UNCOMPARED,
+        COVERAGE_UNCAPTURED,
+        COVERAGE_UNUSABLE,
+        COVERAGE_ABSENT,
+    )
+    assert tuple(v for v in RUN_COVERAGES if v != COVERAGE_PENDING_ENDED) == COVERAGES
+    # The added value is a reader's, not the artifact's: no snapshot can carry it,
+    # which is why the join has an owner instead of being re-done per surface.
+    assert COVERAGE_PENDING_ENDED not in COVERAGES
 
 
 def test_a_demoted_legacy_verdict_is_labelled_by_what_it_now_means(

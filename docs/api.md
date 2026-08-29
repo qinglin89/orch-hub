@@ -115,6 +115,12 @@ no live run or other non-terminal intake may own the repo.
 | `GET /api/evaluation/reports/{report_key}` | One published report bundle |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | Exact persisted artifact bytes |
 
+`GET /api/protocol-coverage` reports how many runs and how many published
+reports carry a verified deployed-protocol identity, and the reasons for the
+rest. It sits outside `/api/evaluation` on purpose: its run half is a property of
+run records and still answers while the evaluation subsystem is disabled, where
+its report half states that as its reason instead.
+
 Evaluation writes only hub-owned artifacts under `ORCH_HUB_DATA_DIR`; it does
 not mutate target repos, task files, run records, or Mandrel protocol state.
 Layer 1 is deterministic. Layer 2 invokes Claude over a bounded persisted

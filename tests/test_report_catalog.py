@@ -61,7 +61,9 @@ from orch_hub.report_catalog import (
     CATALOG_BACKUP_SUFFIX,
     CATALOG_NAME,
     CATALOG_SUBDIR,
+    CATALOG_UNREADABLE_DETAIL,
     CONFIG_UNAVAILABLE_DETAIL,
+    COVERAGE_ENTRY_LIMIT,
     DEFECT_DAMAGED_ARTIFACTS,
     DEFECT_DUPLICATE_KEY,
     DEFECT_DUPLICATE_SEQ,
@@ -69,6 +71,7 @@ from orch_hub.report_catalog import (
     DEFECT_UNADDRESSABLE,
     DEFECT_UNPARSEABLE_LINE,
     DEFECT_UNREADABLE_ARTIFACTS,
+    EVALUATION_DISABLED_DETAIL,
     INTEGRITY_VERIFIED,
     PACK_UNREADABLE_DETAIL,
     REPAIR_DROP_DUPLICATE_LINE,
@@ -2982,3 +2985,121 @@ def test_disabled_catalog_writes_nothing(tmp_path):
         catalog(config).reconcile()
 
     assert not (config.data_dir / CATALOG_SUBDIR).exists()
+
+
+# -- protocol identity coverage census ----------------------------------------
+#
+# The published half of the coverage question (2026-08-29-protocol-identity-
+# coverage): how many of these reports carry the protocol identity a consumer
+# cohorts by, and — for the rest — the reason this hub persisted when it
+# published them. A census over the durable lines, never over live repo state.
+
+
+def test_protocol_coverage_counts_published_identities(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, slug="alpha", task_id=TASK_A, protocol=protocol_section())
+    write_eval(
+        config,
+        slug="beta",
+        task_id=TASK_B,
+        evaluation_id="20260730T110000Z",
+        protocol=protocol_section(
+            available=False,
+            revision=None,
+            runs=2,
+            verified=1,
+            detail="1 of 2 contributing runs carry no verified protocol identity",
+        ),
+    )
+    cat = catalog(config)
+    cat.reconcile()
+
+    census = cat.protocol_coverage()
+
+    assert census.available is True
+    assert (census.total, census.with_identity) == (2, 1)
+    # Only the ones that carry none are listed, and each states the reason the
+    # entry recorded — not a class this census invented by parsing that sentence.
+    assert [(e.task_id, e.detail) for e in census.entries] == [
+        (TASK_B, "1 of 2 contributing runs carry no verified protocol identity")
+    ]
+    row = census.entries[0]
+    assert (row.repo_name, row.evaluation_id) == ("beta", "20260730T110000Z")
+    assert row.seq and row.report_key  # traceable to the feed entry it counts
+
+
+def test_protocol_coverage_reads_the_line_not_the_repo(tmp_path):
+    # An entry records what was true at publication. The repo it came from has
+    # usually been redeployed since, and a census that re-derived from current
+    # state would report today's deployment as the identity yesterday's runs used.
+    config = cfg(tmp_path)
+    write_eval(config, protocol=protocol_section())
+    cat = catalog(config)
+    cat.reconcile()
+    shutil.rmtree(config.data_dir / "evaluations")  # artifacts pruned since
+
+    census = cat.protocol_coverage()
+
+    assert (census.total, census.with_identity) == (1, 1)
+    assert census.entries == ()
+
+
+def test_protocol_coverage_caps_its_rows_but_never_its_counts(tmp_path):
+    config = cfg(tmp_path)
+    missing = protocol_section(
+        available=False, revision=None, detail="no related runs"
+    )
+    for index in range(COVERAGE_ENTRY_LIMIT + 3):
+        write_eval(
+            config,
+            slug=f"repo{index}",
+            task_id=f"2026-07-30-task-{index}",
+            evaluation_id=f"20260730T1000{index:02d}Z",
+            protocol=missing,
+        )
+    cat = catalog(config)
+    cat.reconcile()
+
+    census = cat.protocol_coverage()
+
+    # The figures stay complete; only the rows are bounded, and the payload says
+    # so — a surface showing the first N silently reads as "this is everything".
+    assert (census.total, census.with_identity) == (COVERAGE_ENTRY_LIMIT + 3, 0)
+    assert len(census.entries) == COVERAGE_ENTRY_LIMIT
+    assert census.truncated is True
+    # Newest first, so the rows are the reports still being produced. The feed
+    # itself stays ascending — that order is a cursor contract; this is not.
+    seqs = [entry.seq for entry in census.entries]
+    assert seqs == sorted(seqs, reverse=True)
+    assert seqs[0] == COVERAGE_ENTRY_LIMIT + 3
+
+
+def test_protocol_coverage_says_a_catalog_it_cannot_read_is_unavailable(tmp_path):
+    # The feed fails closed on an ambiguous catalog rather than serving a page
+    # that quietly omits a report. A census must inherit that refusal: "0 of 0"
+    # here would read as "this hub has published nothing", which is the one wrong
+    # answer that looks like a valid one.
+    config = cfg(tmp_path)
+    publish_many(config, 2)
+    rows = lines(config)
+    rows[1]["seq"] = rows[0]["seq"]
+    rewrite_lines(config, rows)
+
+    census = catalog(config).protocol_coverage()
+
+    assert census.available is False
+    assert census.detail == CATALOG_UNREADABLE_DETAIL
+    assert (census.total, census.with_identity) == (0, 0)
+
+
+def test_protocol_coverage_degrades_on_a_disabled_hub_instead_of_raising(tmp_path):
+    # The one evaluation read that does not fail closed with an exception, because
+    # its caller renders the run half of the same page: a disabled subsystem is a
+    # stated reason on this section, not a 404 over both.
+    config = cfg(tmp_path, enabled=False)
+
+    census = catalog(config).protocol_coverage()
+
+    assert census.available is False
+    assert census.detail == EVALUATION_DISABLED_DETAIL
+    assert census.total == 0

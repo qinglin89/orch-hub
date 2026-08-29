@@ -82,6 +82,7 @@ from .models import (
     RunEvent,
     RunHistoryEntry,
     RunHistoryPage,
+    RunProtocolCoverage,
     RunRecord,
     RunStatus,
     SessionEst,
@@ -99,9 +100,11 @@ from .orch_config import (
     write_effective_config_snapshot,
 )
 from .protocol_provenance import (
+    RUN_COVERAGES,
     STABILITY_DRIFTED,
     capture_protocol,
     read_protocol,
+    run_coverage,
     settle_protocol,
 )
 from .readiness import check_readiness
@@ -1674,6 +1677,45 @@ def load_records(config: Config) -> list[tuple[Path, RunRecord]]:
         (run_dir, _load_record(run_dir))
         for run_dir in sorted(p for p in runs_dir.iterdir() if p.is_dir())
     ]
+
+
+def protocol_coverage(config: Config) -> RunProtocolCoverage:
+    """Bucket every persisted run by whether it carries a protocol identity.
+
+    The run half of the coverage census. Until this existed the question — how
+    many of my runs can publish the deployed-protocol identity a report is
+    cohorted by, and why can the rest not — was answerable only by grepping run
+    dirs for ``protocol.json``, which is precisely the walk an operator surface
+    is for.
+
+    Built on :func:`load_records` and therefore **read-only in the same strict
+    sense**: no pid probe, no ``run.json`` rewrite, no event, no notification.
+    Asking about coverage must not move a run, and a census that settled a run's
+    end as a side effect of being read would be doing the one thing this task's
+    whole scope forbids. It costs one small read per run dir
+    (:func:`~orch_hub.protocol_provenance.read_protocol`), which is why it belongs
+    on a page an operator opens rather than on a background poll.
+
+    Liveness comes from the record's own ``ended_ts`` rather than from a refreshed
+    :class:`~orch_hub.models.RunStatus`, for the same reason: it is the strongest
+    signal available without touching anything. A run whose process has died but
+    whose end this hub has not yet observed therefore counts as still pending —
+    correctly so, since its end check has genuinely not run yet and the resident
+    monitor's next scan is what will settle it, one way or the other.
+    """
+    counts = dict.fromkeys(RUN_COVERAGES, 0)
+    total = 0
+    for run_dir, record in load_records(config):
+        total += 1
+        bucket = run_coverage(read_protocol(run_dir), live=record.ended_ts is None)
+        # ``run_coverage`` answers from a closed vocabulary, and a test pins that
+        # vocabulary against the artifact's own, so a value missing from
+        # RUN_COVERAGES fails there first. This still counts one under its own key
+        # rather than raising: the failure mode of the strict form is a census
+        # that 500s — taking the published half of the page down with it — over a
+        # bucket it could simply have named.
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return RunProtocolCoverage(total=total, counts=counts)
 
 
 def _load_record(run_dir: Path) -> RunRecord:

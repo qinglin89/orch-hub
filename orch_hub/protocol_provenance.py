@@ -291,6 +291,19 @@ existed. The one value :meth:`ProtocolSnapshot.coverage` cannot return, since
 there is no snapshot to ask — :func:`coverage_of` supplies it. Never repairable:
 provenance is not backfilled from a later deployment."""
 
+COVERAGE_PENDING_ENDED = "pending-ended"
+""":data:`COVERAGE_PENDING` on a run that has already ended: the end check did not
+run and now never will, because it happens only at the live->ended transition
+(:func:`settle_protocol`).
+
+Not a value the artifact can carry, and deliberately so — ``protocol.json`` says
+only that no check is recorded, and whether that is an ordinary in-flight state or
+a permanent one is a fact about the *run*, not about the capture. So it is
+produced only by a reader that holds both (:func:`run_coverage`), and it is the
+one value here a run row and a census must agree to make: the commonest thing an
+operator would otherwise mistake is a terminal absence shown as an outstanding
+check."""
+
 COVERAGES = (
     COVERAGE_VERIFIED,
     COVERAGE_PENDING,
@@ -308,7 +321,31 @@ could compare, a deployment lock that named none, a run record that cannot be
 read, and no record at all). The order is part of the contract, not incidental:
 it is exported so a census and a UI enumerate the same buckets in the same
 sequence instead of each hardcoding a list that a new value would silently fall
-out of, or ordering one differently from the other."""
+out of, or ordering one differently from the other.
+
+This is the vocabulary of the *artifact*. A reader that also holds the run uses
+:data:`RUN_COVERAGES`."""
+
+RUN_COVERAGES = (
+    COVERAGE_VERIFIED,
+    COVERAGE_PENDING,
+    COVERAGE_CHANGED,
+    COVERAGE_DRIFTED,
+    COVERAGE_PENDING_ENDED,
+    COVERAGE_UNCOMPARED,
+    COVERAGE_UNCAPTURED,
+    COVERAGE_UNUSABLE,
+    COVERAGE_ABSENT,
+)
+""":data:`COVERAGES` as a reader holding the run record reports it, in the same
+order plus :data:`COVERAGE_PENDING_ENDED`.
+
+The insertion point is not cosmetic: it opens the run of values that mean "no
+evidence, permanently", and it comes first among them because it is the one where
+*nothing was looked at* — before the check that ran and concluded nothing, the
+lock that named no identity, the record that cannot be read, and the run that
+wrote none. Removing it yields :data:`COVERAGES` exactly, so a bucket keeps its
+relative position on every surface whichever list that surface enumerates."""
 
 _HASH_CHUNK = 64 * 1024
 
@@ -527,6 +564,32 @@ def coverage_of(snapshot: ProtocolSnapshot | None) -> str:
     distinction is the reason the reader returns ``None`` in the first place.
     """
     return COVERAGE_ABSENT if snapshot is None else snapshot.coverage
+
+
+def run_coverage(snapshot: ProtocolSnapshot | None, *, live: bool) -> str:
+    """One run's coverage as a reader holding the run record reports it.
+
+    :func:`coverage_of` joined with the run's own liveness, which is the only
+    addition a reader may make to the module's verdict — and the only one it
+    *must*: a settled run whose check never ran carries the same artifact as a run
+    still in flight (:data:`COVERAGE_PENDING`), and showing the first as
+    outstanding invites an operator to wait for an answer the one-look rule has
+    already withheld forever (:data:`COVERAGE_PENDING_ENDED`).
+
+    Nothing else about the run is consulted. In particular a run's *end
+    classification* is not: whether it completed, was stopped, or errored says
+    nothing about the deployment it ran under, and folding it in here would make
+    two unrelated verdicts share one bucket.
+
+    ``live`` is the caller's, because "still running" is read differently by
+    different callers and neither reading belongs here: a dashboard row has a
+    refreshed :class:`~orch_hub.models.RunStatus` state, while a census over
+    persisted records must not probe or write anything to get one.
+    """
+    coverage = coverage_of(snapshot)
+    if coverage == COVERAGE_PENDING and not live:
+        return COVERAGE_PENDING_ENDED
+    return coverage
 
 
 @dataclass(frozen=True)

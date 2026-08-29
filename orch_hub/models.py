@@ -2492,6 +2492,123 @@ class EvaluationQueueSnapshot:
         }
 
 
+# -- protocol identity coverage -----------------------------------------------
+# Read-only census of the one fact this hub publishes that nothing else surfaces:
+# whether a run — and the report of the task it worked — carries a verified
+# deployed-protocol identity, and when it does not, why. Both populations already
+# hold the answer per item (a run's ``protocol.json``, a catalog entry's
+# ``provenance.protocol``); what nobody could ask before was how much of the
+# corpus carries one. These shapes are the aggregate, and nothing more: the census
+# starts no check, repairs no run, and publishes nothing.
+
+
+@dataclass(frozen=True)
+class RunProtocolCoverage:
+    """How every persisted run buckets by protocol identity coverage.
+
+    ``counts`` is a **complete census** over run records, never capped, keyed by
+    :data:`orch_hub.protocol_provenance.RUN_COVERAGES` with every value present
+    (zero-valued when unseen) so a reader renders a stable set of figures instead
+    of inferring an absent key as zero. A value outside that vocabulary is counted
+    under its own key rather than dropped, on the same rule as the semantic-job
+    census — the count is real even when no surface has a label for it yet.
+
+    ``total`` is the number of run records walked, so ``counts`` sums to it. The
+    one figure that answers the coverage question is ``counts['verified']``, and
+    it is deliberately not repeated as a field of its own: a headline that can
+    disagree with the breakdown below it is a defect waiting to happen.
+
+    What it counts is **runs**, one entry per persisted run dir — not tasks and
+    not reports. A task publishes an identity only if *every* contributing run
+    carries one (unanimity,
+    :func:`orch_hub.protocol_provenance.effective_protocol`), so this population
+    is strictly the more forgiving of the two and its verified share is an upper
+    bound on the published one, never an estimate of it. The published side is
+    :class:`ReportProtocolCoverage`.
+    """
+
+    total: int = 0
+    counts: Mapping[str, int] = field(default_factory=dict)
+
+    def to_dict(self) -> dict:
+        return {"total": self.total, "counts": dict(self.counts)}
+
+
+@dataclass(frozen=True)
+class ReportProtocolCoverageEntry:
+    """One published report that carries no protocol identity, and why.
+
+    The identity is the catalog's own (``seq``/``report_key`` plus the source
+    repo/task/evaluation), so a row is traceable to the feed entry and to the very
+    evaluation that was published — not merely to that task's newest one — without
+    a second lookup. ``detail`` is the reason the hub persisted at publication
+    time — how many contributing runs carried no verified identity, or which
+    revisions/payloads they disagreed about — read back verbatim, never re-derived
+    from current run or repo state.
+    """
+
+    seq: int = 0
+    report_key: str = ""
+    repo_name: str = ""
+    task_id: str = ""
+    evaluation_id: str = ""
+    detail: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "seq": self.seq,
+            "report_key": self.report_key,
+            "repo_name": self.repo_name,
+            "task_id": self.task_id,
+            "evaluation_id": self.evaluation_id,
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class ReportProtocolCoverage:
+    """How many published reports carry a protocol identity, and why the rest do not.
+
+    The population an external consumer actually sees: every entry in the
+    append-only report catalog. ``with_identity`` counts entries whose
+    ``provenance.protocol`` is available — the ones a consumer can cohort by
+    revision — out of ``total``.
+
+    The reasons are carried as ``entries`` rather than as a second ``counts``
+    table, because unlike a run there is no per-report reason *vocabulary* to
+    bucket by: a catalog entry records availability plus one operator-readable
+    sentence, and that sentence embeds run counts, revisions, and digests.
+    Bucketing it would mean parsing the hub's own prose back into classes it never
+    published — so each unavailable report states its own reason instead, capped
+    (``truncated`` says when) so one large corpus cannot return an unbounded page.
+    ``total``/``with_identity`` stay complete regardless of that cap.
+
+    ``available`` is about the *census*, not about any report: false means the
+    catalog could not be read at all — evaluation disabled, or a feed failing
+    closed on a duplicate identity — and ``detail`` says which. It is a separate
+    flag rather than a zero total, under the rule this whole subsystem is built
+    on: an unavailable answer is said, never served as an empty one a reader could
+    mistake for "nothing published".
+    """
+
+    available: bool = False
+    detail: str | None = None
+    total: int = 0
+    with_identity: int = 0
+    entries: tuple[ReportProtocolCoverageEntry, ...] = ()
+    truncated: bool = False
+
+    def to_dict(self) -> dict:
+        return {
+            "available": self.available,
+            "detail": self.detail,
+            "total": self.total,
+            "with_identity": self.with_identity,
+            "entries": [entry.to_dict() for entry in self.entries],
+            "truncated": self.truncated,
+        }
+
+
 # -- agent subscription usage -------------------------------------------------
 # Read-only, display-only view of the *agent CLI subscriptions* (Claude, Codex)
 # the hub drives — how much of each provider's rate-limit windows is spent and

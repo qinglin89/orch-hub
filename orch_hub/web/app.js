@@ -560,6 +560,9 @@
     // the same tab rather than claiming one of its own.
     else if (path.startsWith("/evaluations")) tab = "/tasks";
     else if (path.startsWith("/reports")) tab = "/tasks";
+    // The coverage census counts runs first and is entered from Run history, so
+    // it keeps that tab even though its second half is over published reports.
+    else if (path.startsWith("/protocol")) tab = "/runs";
     else if (path.startsWith("/runs")) tab = "/runs";
     document.querySelectorAll(".tabbar a").forEach((a) => {
       const active = a.dataset.tab === tab;
@@ -589,6 +592,9 @@
     // "list" kind, whose top-level card grid would break a strictly ordered feed
     // into columns.
     if (seg[0] === "reports") return "wide";
+    // A census reads as prose and figures, not as a card grid: the bounded
+    // reading column, like the other single-subject pages.
+    if (seg[0] === "protocol") return "read";
     if (seg[0] === "overview") return "overview";
     return "list"; // default repo list
   }
@@ -3324,6 +3330,22 @@
     );
   }
 
+  // The way into the coverage census, beside it and deliberately NOT gated on
+  // evaluation: its run half is a property of run records, so it still answers on
+  // a hub with the sidecar switched off — and that hub is exactly the one whose
+  // every report is unpublished. It goes here because these are the rows it
+  // counts: a reader who wants one run's verdict opens a card below, and one who
+  // wants to know how many of them carry an identity goes up from the same page.
+  function coverageEntryLink() {
+    // Its own class, not the feed entry's: they lay out alike but they are gated
+    // differently, and a selector that matched both would make "is the feed
+    // offered here" unanswerable — by a test or by a reader.
+    return (
+      `<p class="coverage-entry">` +
+      `<a class="text-link" href="#/protocol">Protocol identity coverage →</a></p>`
+    );
+  }
+
   // Every Run-history page opens the same way, whether or not it has runs to
   // show. One shell rather than three call sites, because the feed entry is a
   // property of the *page*, not of the page having runs: an evaluation needs no
@@ -3334,7 +3356,11 @@
   // dashboard path to the feed is this link, so the empty states are where it
   // matters most.
   function historyHead(data) {
-    return pageTitle("Run history") + reportsEntryLink(data.evaluation_enabled);
+    return (
+      pageTitle("Run history") +
+      reportsEntryLink(data.evaluation_enabled) +
+      coverageEntryLink()
+    );
   }
 
   // The newest evaluation opened by the group's link, expressed as one compact
@@ -4955,9 +4981,177 @@
          feed an external consumer imports from; orch-hub publishes the artifacts
          and does not decide what to change in the protocol. Each report opens its
          existing per-task evaluation view.</p>` +
+      // The aggregate of the one provenance block every row above carries: how
+      // many of these reports a consumer can cohort by protocol revision at all.
+      `<p class="coverage-entry"><a class="text-link" href="#/protocol">Protocol
+         identity coverage →</a></p>` +
       (empty ? "" : reportPager(data, entries)) +
       body;
     if (!empty) wireReportPager(data);
+  }
+
+  // ---- protocol identity coverage census -----------------------------------
+  //
+  // Run history says whether ONE run carries the deployed-protocol identity its
+  // report would be cohorted by, and the feed says it for one published report.
+  // Neither answers the question an operator actually has about the field —
+  // how much of the corpus carries one, and why the rest does not — which before
+  // this page meant grepping run dirs for protocol.json.
+  //
+  // Two populations on one page because neither stands in for the other: a task
+  // publishes an identity only when EVERY contributing run verified the same one
+  // (unanimity), so the run figure bounds the published one from above and the
+  // run reasons are what explains the gap between them. The page reads; it never
+  // starts a check, repairs a run, or publishes anything — the same boundary the
+  // rest of this sidecar keeps.
+
+  const COVERAGE_PATH = "/api/protocol-coverage";
+
+  // One coverage bucket as a row. The label, badge colour, and sentence come from
+  // PROTOCOL_COVERAGE — the same map a run row renders — so a bucket cannot read
+  // one way in the census and another on the run it counts, which is the whole
+  // point of a census. A bucket this asset has no label for (a newer hub than the
+  // cached asset) shows its raw name rather than being dropped, exactly as a run
+  // row does: the count is real even when the label is not known here.
+  function coverageRow(key, count) {
+    const [label, kind, why] = PROTOCOL_COVERAGE[key] || [key, "", ""];
+    return (
+      `<li class="cov-row">` +
+      `<span class="cov-count">${escapeHtml(count)}</span>` +
+      `<span class="cov-label">${badge(label, kind)}</span>` +
+      `<span class="cov-why muted">${escapeHtml(why)}</span>` +
+      `</li>`
+    );
+  }
+
+  // The run census. Bucket order is the payload's own key order — the hub emits
+  // RUN_COVERAGES order and appends anything it did not recognize — so the two
+  // surfaces cannot drift apart by holding two lists.
+  //
+  // `verified` always renders, at zero too: it is the answer to the question this
+  // page exists for, and a hub with none must say so rather than show a page of
+  // reasons with nothing to compare them against. The other buckets appear only
+  // when non-empty, so what is listed is exactly what has actually happened here.
+  function coverageRunsSection(runs) {
+    const head = `<section class="section cov-runs"><h2>Runs</h2>`;
+    const foot = `</section>`;
+    if (!runs) return head + `<p class="muted">Run coverage is unavailable.</p>` + foot;
+    const counts = runs.counts || {};
+    const total = runs.total || 0;
+    if (!total)
+      return (
+        head +
+        `<p class="muted">No runs are recorded on this hub yet.</p>` +
+        foot
+      );
+    const rows = Object.keys(counts)
+      .filter((key) => counts[key] > 0 || key === "verified")
+      .map((key) => coverageRow(key, counts[key] || 0))
+      .join("");
+    return (
+      head +
+      `<p class="cov-summary">${escapeHtml(
+        (counts.verified || 0) + " of " + total + " runs carry a verified identity."
+      )}</p>` +
+      `<ul class="cov-list">${rows}</ul>` +
+      `<p class="cov-note muted">Each run's own verdict, with what its capture
+         recorded, is on the run in <a class="text-link" href="#/runs">Run
+         history</a>.</p>` +
+      foot
+    );
+  }
+
+  // One published report that carries no identity, with the reason the hub
+  // persisted when it published it. The row links to the exact evaluation that was
+  // published (not the task's newest), matching where the feed row goes.
+  function coverageReportRow(entry) {
+    const linkable = !!(entry.repo_name && entry.task_id && entry.evaluation_id);
+    const head =
+      `<div class="card-head">` +
+      `<span class="report-seq">#${escapeHtml(entry.seq)}</span>` +
+      `<span class="task-id">${escapeHtml(
+        entry.task_id || "(unknown task)"
+      )}</span>` +
+      `</div>` +
+      `<p class="cov-repo muted">${escapeHtml(
+        entry.repo_name || "(unknown repo)"
+      )}</p>` +
+      `<p class="cov-detail">${escapeHtml(entry.detail || "no reason recorded")}</p>`;
+    return (
+      `<li class="card report">` +
+      (linkable
+        ? `<a class="card-link" href="${evalHash(entry.repo_name, entry.task_id)}/${
+            encodeURIComponent(entry.evaluation_id)
+          }">${head}</a>`
+        : head) +
+      `</li>`
+    );
+  }
+
+  // The published census. `available: false` is the hub saying it cannot take
+  // this census at all — evaluation switched off, or a catalog failing closed —
+  // and it renders as that reason rather than as zero reports, which would read as
+  // "nothing published" and is the one wrong answer that looks right.
+  function coverageReportsSection(reports) {
+    const head = `<section class="section cov-reports"><h2>Published reports</h2>`;
+    const foot = `</section>`;
+    if (!reports)
+      return head + `<p class="muted">Report coverage is unavailable.</p>` + foot;
+    if (!reports.available)
+      return (
+        head +
+        `<p class="muted">${escapeHtml(
+          reports.detail || "Report coverage is unavailable."
+        )}</p>` +
+        foot
+      );
+    const total = reports.total || 0;
+    if (!total)
+      return (
+        head +
+        `<p class="muted">No evaluation reports have been published yet.</p>` +
+        foot
+      );
+    const entries = reports.entries || [];
+    return (
+      head +
+      `<p class="cov-summary">${escapeHtml(
+        (reports.with_identity || 0) +
+          " of " +
+          total +
+          " published reports carry a protocol identity."
+      )}</p>` +
+      (entries.length
+        ? `<ul class="list">${entries.map(coverageReportRow).join("")}</ul>` +
+          (reports.truncated
+            ? `<p class="cov-note muted">${escapeHtml(
+                "Showing the " +
+                  entries.length +
+                  " most recent; the counts above are complete."
+              )}</p>`
+            : "")
+        : `<p class="muted">Every published report carries one.</p>`) +
+      foot
+    );
+  }
+
+  async function renderProtocolCoverage() {
+    const superseded = routeGuard();
+    view().innerHTML = loadingView(
+      "Protocol identity coverage",
+      "Loading coverage…"
+    );
+    const data = await api(COVERAGE_PATH); // 401 re-gates; 5xx → error view
+    if (superseded()) return;
+    view().innerHTML =
+      pageTitle("Protocol identity coverage") +
+      `<p class="cov-intro muted">Whether a run — and the report of the task it
+         worked — can name the deployed protocol its sessions actually ran under.
+         A report carries an identity only when every run behind it verified the
+         same one, so the runs below both bound and explain the published figure.
+         This page reads; it starts no check and repairs no run.</p>` +
+      coverageRunsSection(data ? data.runs : null) +
+      coverageReportsSection(data ? data.reports : null);
   }
 
   // ---- remote intake (draft → review → confirm / cancel) ----
@@ -6723,6 +6917,10 @@
         reportTrail = [];
         return renderReports(null);
       };
+    // /protocol — the coverage census over runs and published reports. One read,
+    // no paging and no polling: it walks every run dir once, so it answers a page
+    // an operator opens rather than a background refresh.
+    if (seg[0] === "protocol") return renderProtocolCoverage;
     if (seg[0] === "repos" && seg.length >= 2)
       return () => renderRepoDetail(seg[1]);
     if (seg[0] === "overview") return renderOverview;

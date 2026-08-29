@@ -560,6 +560,34 @@ leaving a blank:
   runs carried no verified identity, or which revisions or payloads they
   disagreed about.
 
+### How much of the corpus carries one
+
+```
+GET /api/protocol-coverage
+```
+
+The aggregate of the two rows above — `Protocol identity coverage →` from Run
+history or the report feed, `#/protocol` — for the question neither one answers:
+how much of this hub's corpus can be cohorted by protocol revision at all.
+
+- `runs` counts **every persisted run** by the same `coverage` values the run
+  rows show, complete and never capped, with every bucket present at zero. It is
+  the more forgiving population by construction: a report needs *all* its runs to
+  have verified the same identity, so the verified run share is an upper bound on
+  the published one and the other buckets are what explains the difference.
+- `reports` counts **published catalog entries** — `total`, `with_identity`, and
+  each identity-less report with the reason the hub persisted when it published
+  it (newest first, capped; `truncated` says when, and the counts stay complete).
+  Its own `available: false` means the census could not be taken at all —
+  evaluation disabled, or a catalog failing closed — never that nothing is
+  published.
+
+Deliberately not an `/api/evaluation/…` route: the run half is a property of run
+records and keeps answering on a hub with the sidecar switched off, which is
+exactly the hub whose every report is unpublished. Reading it is read-only in the
+strict sense — no pid probe, no record rewrite, no publication, no model call.
+Asking how many runs carry an identity must never spend the one look a run gets.
+
 ### Fetching one report
 
 ```

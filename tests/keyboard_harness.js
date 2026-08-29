@@ -5715,6 +5715,216 @@ async function scenarioProtocolCoverage() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// ---------------------------------------------------------------------------
+// The coverage census (#/protocol): the aggregate of the per-run and per-report
+// facts the scenario above renders one at a time — how much of this hub's corpus
+// carries a protocol identity, and what the reasons are for the rest. Its buckets
+// must read exactly as the run rows do (same labels, same colours, same
+// liveness-joined vocabulary), or a count and a card would be two opinions.
+async function scenarioProtocolCensus() {
+  installRoutes({ waiting: false });
+
+  var counts = function (over) {
+    // Emitted in RUN_COVERAGES order by the hub, which is where the page takes
+    // its presentation order from rather than holding a second list.
+    var base = {
+      verified: 0, pending: 0, changed: 0, drifted: 0, "pending-ended": 0,
+      uncompared: 0, uncaptured: 0, unusable: 0, absent: 0,
+    };
+    for (var k in over) base[k] = over[k];
+    return base;
+  };
+  var census = function (runs, reports) {
+    return {
+      runs: runs,
+      reports: reports,
+    };
+  };
+  var labelsOf = function () {
+    var out = [];
+    var rows = doc.querySelectorAll("#view .cov-row");
+    for (var i = 0; i < rows.length; i++) {
+      var count = rows[i].querySelector(".cov-count");
+      var badge = rows[i].querySelector(".cov-label .badge");
+      out.push(
+        (count ? count.textContent.trim() : "?") +
+          " " +
+          (badge ? badge.textContent.trim() : "?")
+      );
+    }
+    return out;
+  };
+  var textOf = function (sel) {
+    var el = doc.querySelector(sel);
+    return el ? el.textContent.trim().replace(/\s+/g, " ") : null;
+  };
+
+  // ---- 1) a corpus with several reasons in it ----
+  route(
+    "GET",
+    "/api/protocol-coverage",
+    census(
+      {
+        total: 9,
+        counts: counts({
+          verified: 3, pending: 1, changed: 2, "pending-ended": 2, absent: 1,
+        }),
+      },
+      { available: true, detail: null, total: 4, with_identity: 1, entries: [], truncated: false }
+    )
+  );
+  await navigate("#/protocol");
+  eq(
+    "census: the run figure answers the question the page exists for",
+    textOf("#view .cov-runs .cov-summary"),
+    "3 of 9 runs carry a verified identity."
+  );
+  // The vocabulary is the run row's, in the hub's own order, and a bucket nobody
+  // hit is not listed — what is shown is what has actually happened here.
+  eq(
+    "census: buckets read as the run rows read, in the payload's order",
+    labelsOf().join(" | "),
+    "3 verified | 1 end check pending | 2 redeployed mid-run | " +
+      "2 never checked | 1 no record"
+  );
+  eq(
+    "census: the published half is counted separately",
+    textOf("#view .cov-reports .cov-summary"),
+    "1 of 4 published reports carry a protocol identity."
+  );
+  check(
+    "census: a reader is sent to the per-run verdicts",
+    (textOf("#view .cov-runs .cov-note") || "").indexOf("Run history") !== -1,
+    "the runs section does not link to the per-run rows"
+  );
+
+  // ---- 2) a hub with nothing verified: the one bucket that always renders ----
+  route(
+    "GET",
+    "/api/protocol-coverage",
+    census(
+      { total: 2, counts: counts({ uncaptured: 2 }) },
+      { available: true, detail: null, total: 0, with_identity: 0, entries: [], truncated: false }
+    )
+  );
+  await navigate("#/overview");
+  await navigate("#/protocol");
+  eq(
+    "census: zero verified is stated, never omitted",
+    labelsOf().join(" | "),
+    "0 verified | 2 no identity captured"
+  );
+
+  // ---- 3) the reasons the published half can give ----
+  route(
+    "GET",
+    "/api/protocol-coverage",
+    census(
+      { total: 1, counts: counts({ verified: 1 }) },
+      {
+        available: true,
+        detail: null,
+        total: 3,
+        with_identity: 1,
+        entries: [
+          {
+            seq: 7,
+            report_key: "rpt-7",
+            repo_name: REPO,
+            task_id: "2026-08-19-split",
+            evaluation_id: "20260819T090000Z",
+            detail: "1 of 3 contributing runs carry no verified protocol identity",
+          },
+          {
+            seq: 4,
+            report_key: "rpt-4",
+            repo_name: REPO,
+            task_id: "2026-08-11-older",
+            evaluation_id: "20260811T090000Z",
+            detail: "no related runs to take a protocol identity from",
+          },
+        ],
+        truncated: true,
+      }
+    )
+  );
+  await navigate("#/overview");
+  await navigate("#/protocol");
+  var reportCards = doc.querySelectorAll("#view .cov-reports .card.report");
+  eq("census: every identity-less report is listed", reportCards.length, 2);
+  eq(
+    "census: each states the reason the hub persisted, not a class invented here",
+    reportCards[0].querySelector(".cov-detail").textContent.trim(),
+    "1 of 3 contributing runs carry no verified protocol identity"
+  );
+  eq(
+    "census: a row opens the evaluation that was published",
+    reportCards[0].querySelector("a.card-link").getAttribute("href"),
+    "#/evaluations/" + REPO + "/2026-08-19-split/20260819T090000Z"
+  );
+  check(
+    "census: a capped list says so rather than reading as everything",
+    (textOf("#view .cov-reports .cov-note") || "").indexOf(
+      "counts above are complete"
+    ) !== -1,
+    "the truncated list does not say it is truncated"
+  );
+
+  // ---- 4) the census it cannot take is a reason, never a zero ----
+  route(
+    "GET",
+    "/api/protocol-coverage",
+    census(
+      { total: 1, counts: counts({ verified: 1 }) },
+      {
+        available: false,
+        detail: "task evaluation is disabled on this hub, so no reports are published",
+        total: 0,
+        with_identity: 0,
+        entries: [],
+        truncated: false,
+      }
+    )
+  );
+  await navigate("#/overview");
+  await navigate("#/protocol");
+  eq(
+    "census: an unavailable published half says why",
+    textOf("#view .cov-reports p"),
+    "task evaluation is disabled on this hub, so no reports are published"
+  );
+  // The run half is a property of run records and must keep answering: this is
+  // exactly the hub whose every report is unpublished.
+  eq(
+    "census: the run half still answers with the sidecar off",
+    textOf("#view .cov-runs .cov-summary"),
+    "1 of 1 runs carry a verified identity."
+  );
+
+  // ---- 5) the way in, from the rows it counts ----
+  var covLink = function () {
+    var links = doc.querySelectorAll("#view a.text-link");
+    for (var i = 0; i < links.length; i++)
+      if (links[i].getAttribute("href") === "#/protocol") return links[i];
+    return null;
+  };
+  await navigate("#/runs");
+  check(
+    "census: Run history offers the way up to the census",
+    covLink() !== null,
+    "no coverage entry on run history"
+  );
+  // Ungated on purpose: the run half does not depend on the evaluation sidecar,
+  // and installRoutes' history payload carries evaluation_enabled unset.
+  eq(
+    "census: the entry does not wait on the evaluation subsystem",
+    covLink().textContent.trim().indexOf("Protocol identity coverage"),
+    0
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -5739,6 +5949,7 @@ async function scenarioProtocolCoverage() {
     await scenarioSubscriptionUsage();
     await scenarioEvaluationQueue();
     await scenarioProtocolCoverage();
+    await scenarioProtocolCensus();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

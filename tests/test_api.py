@@ -63,6 +63,7 @@ from orch_hub.registry import RegistryError
 from orch_hub.protocol_provenance import (
     COVERAGE_UNCAPTURED,
     LEGACY_AGGREGATE_DETAIL,
+    RUN_COVERAGES,
 )
 from orch_hub.report_catalog import REQUIRED_ARTIFACTS, ReportCatalog
 from orch_hub.runs import RunManager
@@ -3666,6 +3667,142 @@ def test_evaluation_queue_requires_auth(tmp_path, monkeypatch):
     assert client.get("/api/evaluation/queue").status_code == 401
 
 
+# -- protocol identity coverage census -----------------------------------------
+
+
+COVERAGE_COMMIT = "6b62754694c289fc8822562cec22ab774e071b2c"
+COVERAGE_PAYLOAD = "5" * 64
+
+
+def seed_run_protocol(tmp_path, run_id: str, snapshot: dict | None, *, ended: bool):
+    """Write one run dir with an optional protocol artifact, without a manager.
+
+    The census is a read over persisted run dirs, so a test builds them directly:
+    that is the only way to place a run in a state the manager reaches through a
+    crash (an end recorded with no check) rather than through a normal transition.
+    """
+    run_dir = tmp_path / "hub-data" / "runs" / run_id
+    run_dir.mkdir(parents=True)
+    record = {"run_id": run_id, "repo_name": "repo-a", "task_id": RUN_TASK_ID}
+    if ended:
+        record["ended_ts"] = "2026-07-30T10:00:00Z"
+    (run_dir / "run.json").write_text(json.dumps(record), encoding="utf-8")
+    if snapshot is not None:
+        (run_dir / "protocol.json").write_text(json.dumps(snapshot), encoding="utf-8")
+    return run_dir
+
+
+def coverage_snapshot(**over) -> dict:
+    base = {
+        "schema_version": 2,
+        "available": True,
+        "source_git_commit": COVERAGE_COMMIT,
+        "canonical_payload_sha256": COVERAGE_PAYLOAD,
+        "source_repo": "mandrel",
+        "lock_schema_version": 3,
+        "captured_ts": "2026-07-30T09:00:00Z",
+        "stability": "stable",
+        "checked_ts": "2026-07-30T10:00:00Z",
+        "payload_files": 12,
+        "detail": None,
+    }
+    base.update(over)
+    return base
+
+
+def test_protocol_coverage_reports_both_populations(tmp_path, monkeypatch):
+    # The read surface the coverage question needed: how many runs and how many
+    # published reports carry a verified identity, without walking run dirs.
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    seed_run_protocol(tmp_path, "20260730T090000Z-a", coverage_snapshot(), ended=True)
+    seed_run_protocol(
+        tmp_path,
+        "20260730T093000Z-b",
+        coverage_snapshot(stability="changed", detail="redeployed mid-run"),
+        ended=True,
+    )
+    seed_run_protocol(tmp_path, "20260730T094000Z-c", None, ended=True)
+
+    body = client.get("/api/protocol-coverage").json()
+
+    assert body["runs"]["total"] == 3
+    assert body["runs"]["counts"]["verified"] == 1
+    assert body["runs"]["counts"]["changed"] == 1
+    assert body["runs"]["counts"]["absent"] == 1
+    # Complete and ordered: every bucket present at zero, in the vocabulary's own
+    # order, so a surface enumerating the payload holds no second list.
+    assert list(body["runs"]["counts"]) == list(RUN_COVERAGES)
+    # Nothing published yet on this hub — an available census over zero reports,
+    # which is a different fact from a census that could not be taken.
+    assert body["reports"] == {
+        "available": True,
+        "detail": None,
+        "total": 0,
+        "with_identity": 0,
+        "entries": [],
+        "truncated": False,
+    }
+
+
+def test_protocol_coverage_decides_a_finished_runs_pending_check(tmp_path, monkeypatch):
+    # The census makes the join a run row makes: the same artifact reads as an
+    # outstanding check on a live run and as a permanent absence on a finished one,
+    # because the check happens only at that transition.
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    unchecked = coverage_snapshot(
+        stability="unverified", checked_ts=None, payload_files=None
+    )
+    seed_run_protocol(tmp_path, "20260730T090000Z-live", unchecked, ended=False)
+    seed_run_protocol(tmp_path, "20260730T093000Z-done", unchecked, ended=True)
+
+    counts = client.get("/api/protocol-coverage").json()["runs"]["counts"]
+
+    assert counts["pending"] == 1
+    assert counts["pending-ended"] == 1
+
+
+def test_protocol_coverage_answers_while_evaluation_is_disabled(tmp_path, monkeypatch):
+    # Deliberately NOT an /api/evaluation route: the run half is a property of run
+    # records, and a hub with the sidecar switched off is exactly the one whose
+    # every report is unpublished. The published half says why it cannot answer.
+    client, *_ = make_eval_client(tmp_path, monkeypatch, enabled=False)
+    seed_run_protocol(tmp_path, "20260730T090000Z-a", coverage_snapshot(), ended=True)
+
+    resp = client.get("/api/protocol-coverage")
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["runs"]["counts"]["verified"] == 1
+    assert body["reports"]["available"] is False
+    assert "disabled" in body["reports"]["detail"]
+
+
+def test_protocol_coverage_reading_it_settles_nothing(tmp_path, monkeypatch):
+    # Asking how many runs carry an identity must never give one its end check:
+    # the one-look rule means a census that settled a run would spend the only
+    # comparison that run will ever get, at a moment nothing observed.
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    unchecked = coverage_snapshot(
+        stability="unverified", checked_ts=None, payload_files=None
+    )
+    run_dir = seed_run_protocol(tmp_path, "20260730T090000Z-a", unchecked, ended=False)
+    before = {
+        name: (run_dir / name).read_bytes() for name in ("run.json", "protocol.json")
+    }
+
+    assert client.get("/api/protocol-coverage").status_code == 200
+
+    for name, data in before.items():
+        assert (run_dir / name).read_bytes() == data
+
+
+def test_protocol_coverage_requires_auth(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    del client.headers["Authorization"]
+
+    assert client.get("/api/protocol-coverage").status_code == 401
+
+
 # -- generate / list / fetch ---------------------------------------------------
 
 
@@ -4534,6 +4671,66 @@ def test_report_feed_refuses_to_serve_an_ambiguous_catalog(tmp_path, monkeypatch
     assert listed.status_code == 500
     assert "ambiguous" in listed.json()["detail"]
     assert fetched.status_code == 500
+
+
+def test_protocol_coverage_counts_the_feed_the_hub_serves(tmp_path, monkeypatch):
+    # The census's published half reads the app's own catalog, so its figures are
+    # over exactly the reports this hub serves — not over a second view of them.
+    client, _config, repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z",),
+        protocol={
+            "available": False,
+            "effective_revision": None,
+            "deploy_lock_hash": None,
+            "run_count": 2,
+            "verified_count": 1,
+            "detail": "1 of 2 contributing runs carry no verified protocol identity",
+        },
+    )
+
+    reports = client.get("/api/protocol-coverage").json()["reports"]
+
+    assert (reports["available"], reports["total"], reports["with_identity"]) == (
+        True,
+        1,
+        0,
+    )
+    row = reports["entries"][0]
+    assert (row["repo_name"], row["task_id"]) == (repo.name, RUN_TASK_ID)
+    assert row["evaluation_id"] == "20260722T090000Z"  # the published one, exactly
+    assert row["detail"].startswith("1 of 2 contributing runs")
+    assert client.get("/api/evaluation/reports").json()["reports"][0][
+        "report_key"
+    ] == row["report_key"]
+
+
+def test_protocol_coverage_inherits_the_feeds_refusal(tmp_path, monkeypatch):
+    # An ambiguous catalog fails the feed closed; the census must not answer "0
+    # published reports" over it, which reads as a hub that has published nothing.
+    client, config, _repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z", "20260722T100000Z"),
+    )
+    path = config.data_dir / "report-catalog" / "catalog.jsonl"
+    rows = [
+        json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    rows[1]["seq"] = rows[0]["seq"]
+    path.write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows),
+        encoding="utf-8",
+    )
+
+    body = client.get("/api/protocol-coverage").json()
+
+    # The run half still answers: one broken file must not blank a page whose
+    # other half reads a different store entirely.
+    assert body["runs"]["total"] == 0
+    assert body["reports"]["available"] is False
+    assert "catalog verify" in body["reports"]["detail"]
 
 
 def test_report_feed_routes_are_404_when_evaluation_is_disabled(tmp_path, monkeypatch):
