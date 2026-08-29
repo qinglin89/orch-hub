@@ -104,12 +104,13 @@ ever say about that run: an absent identity there is decided, not pending. In
 ``stability`` alone the two are indistinguishable — a live run and a run whose end
 could not be compared both read ``unverified`` — which is why
 :attr:`ProtocolSnapshot.coverage` exists: the four ``stability`` values with that
-one ambiguity resolved by ``checked_ts``, plus the two states that precede a
-stability at all (a capture that found no usable lock, and a run predating the
-capture entirely). A surface answering "how many runs carry an identity, and why
-do the rest not" reads that one field rather than re-deriving the rule from three,
-for the same reason :meth:`ProtocolSnapshot.verified_identity` is a property here
-and not a condition each consumer writes.
+one ambiguity resolved by ``checked_ts``, plus the three states that precede a
+stability at all (a capture that found no usable lock, a persisted record this
+hub cannot read back, and a run predating the capture entirely). A surface
+answering "how many runs carry an identity, and why do the rest not" reads that
+one field rather than re-deriving the rule from the several it is made of, for
+the same reason :meth:`ProtocolSnapshot.verified_identity` is a property here and
+not a condition each consumer writes.
 
 A *report*, though, is about a task, and a task is worked by several runs. The
 same rule therefore applies once more across them
@@ -270,8 +271,19 @@ decided; this module holds the artifact only and cannot tell the two apart."""
 COVERAGE_UNCAPTURED = "uncaptured"
 """The launch capture found no usable identity to freeze — a missing, oversize,
 malformed, or damaged deploy lock — so there was never anything for an end check
-to confirm. ``detail`` names the file and its defect. Distinct from
-:data:`COVERAGE_ABSENT`: the hub looked."""
+to confirm. ``detail`` names the file and its defect. A statement about the
+*target repo's* receipts, and distinct on both sides: the hub looked (unlike
+:data:`COVERAGE_ABSENT`) and what it recorded is intact and says exactly this
+(unlike :data:`COVERAGE_UNUSABLE`)."""
+
+COVERAGE_UNUSABLE = "unusable"
+"""The run's own ``protocol.json`` could not be read or could not be trusted: an
+unreadable file, a shape this hub does not recognize, one written by a newer hub,
+or a persisted record contradicting the only process that writes it
+(:func:`read_protocol`, :func:`_from_dict`). The only value here that says nothing
+about the deployment — the broken thing is hub-owned evidence, not a receipt in
+the target repo — which is why a census must not fold it into
+:data:`COVERAGE_UNCAPTURED`: the two send an operator to different files."""
 
 COVERAGE_ABSENT = "absent"
 """The run wrote no ``protocol.json`` at all: it was launched before this capture
@@ -286,13 +298,17 @@ COVERAGES = (
     COVERAGE_DRIFTED,
     COVERAGE_UNCOMPARED,
     COVERAGE_UNCAPTURED,
+    COVERAGE_UNUSABLE,
     COVERAGE_ABSENT,
 )
 """Every coverage value, in the order a reader should present them: the one that
 publishes, the one still resolving, then the reasons it did not — operator action,
-damage, and the three flavours of no evidence. Exported so a census and a UI
-enumerate the same buckets in the same order instead of each hardcoding a list
-that a new value would silently fall out of."""
+protocol-forbidden damage, and the four flavours of no evidence (an end nobody
+could compare, a deployment lock that named none, a run record that cannot be
+read, and no record at all). The order is part of the contract, not incidental:
+it is exported so a census and a UI enumerate the same buckets in the same
+sequence instead of each hardcoding a list that a new value would silently fall
+out of, or ordering one differently from the other."""
 
 _HASH_CHUNK = 64 * 1024
 
@@ -375,6 +391,18 @@ class ProtocolSnapshot:
     deployed files that comparison actually checked against the manifest (``None``
     when it never got that far). Everything above them is frozen at capture; the
     end check writes only ``stability``/``checked_ts``/``payload_files``/``detail``.
+
+    ``artifact_unusable`` marks the one unavailability that is not about the
+    deployment: a ``protocol.json`` this hub could not read or could not trust
+    (:func:`read_protocol`, :func:`_from_dict`). Every other unavailable snapshot
+    comes from a deploy lock the capture found unusable, and the two are different
+    operator facts — a target repo whose receipts are broken, versus a run whose
+    own hub-owned record is — so :attr:`coverage` must not report them as one. It
+    describes *this read* rather than the file, and needs no persisted
+    counterpart: an unavailable snapshot is never settled or rewritten
+    (:func:`settle_protocol` returns early over one), so no damaged read is ever
+    written back, and the reader re-derives the flag from the same defect every
+    time.
     """
 
     available: bool
@@ -387,6 +415,7 @@ class ProtocolSnapshot:
     checked_ts: str | None = None
     payload_files: int | None = None
     detail: str | None = None
+    artifact_unusable: bool = False
 
     @property
     def verified_identity(self) -> ProtocolIdentity | None:
@@ -427,22 +456,26 @@ class ProtocolSnapshot:
 
         The reader-facing counterpart of :attr:`verified_identity`, which answers
         only *whether* a run publishes. A surface — a run row, a census — has to
-        say why not, and the three fields that decide it (``available``,
-        ``stability``, ``checked_ts``) do not read as one answer: ``unverified``
-        covers both a run still in flight and one whose end check concluded
-        nothing, and neither of the two states that precede a stability at all is
-        expressible in ``stability``. Deriving that here keeps the mapping in the
-        same place as the publication predicate, so a new value cannot mean one
-        thing to the dashboard and another to a tally.
+        say why not, and the fields that decide it (``available``, ``stability``,
+        ``checked_ts``, ``artifact_unusable``) do not read as one answer:
+        ``unverified`` covers both a run still in flight and one whose end check
+        concluded nothing, and none of the three states that precede a stability
+        at all — a lock the capture could not use, a record this reader cannot
+        trust, and no record whatsoever — is expressible in ``stability``.
+        Deriving that here keeps the mapping in the same place as the publication
+        predicate, so a new value cannot mean one thing to the dashboard and
+        another to a tally.
 
-        Ordered most-decided first: an unusable capture is answered before the
-        end check that never happened over it, and publication is asked of
+        Ordered most-decided first: an unavailable snapshot is answered before the
+        end check that never happened over it — and split by ``artifact_unusable``
+        first, because "the deploy lock named no identity" and "this run's record
+        is damaged" point an operator at different files. Publication is asked of
         :attr:`verified_identity` rather than of ``stability`` directly, so no
         reader can be told "verified" about an identity that property would
         refuse.
         """
         if not self.available:
-            return COVERAGE_UNCAPTURED
+            return COVERAGE_UNUSABLE if self.artifact_unusable else COVERAGE_UNCAPTURED
         if self.checked_ts is None:
             return COVERAGE_PENDING
         if self.verified_identity is not None:
@@ -1169,18 +1202,32 @@ def settle_protocol(
     An unobserved end is therefore **permanent**, and that is a decision, not an
     omission: this hub will not look again, and the record says so
     (:data:`UNOBSERVED_END_DETAIL`) instead of leaving an absence that reads as
-    outstanding. A second look would be admissible only against evidence that the
-    deployment did not move between the run's real end and the late look, and that
-    evidence has exactly one shape — a record of the repo's deployed identity at
-    some moment inside that interval, written by something that watches the
-    *deployment* rather than the run. Nothing writes one: this module reads a
-    target's lock at a run's own two boundaries and nowhere else, and ``mandrel``
-    leaves no deploy journal the hub reads. So the alternative is not "retry the
-    check" but "keep a deployment history", a separate mechanism with its own
-    truthfulness to establish — and one that would still say nothing about any run
-    already recorded, since its evidence would start after them. Until it exists,
-    an end nobody observed is uncompared for good, which is what
-    :data:`COVERAGE_UNCOMPARED` reports and what a surface should show.
+    outstanding. A second look is worth no more than the evidence that carries it
+    back to the run's real end, and only two shapes of evidence do that. One is an
+    observation *at* that boundary — the deployed identity and the payload state
+    as they stood when the run ended — which is precisely the observation the hub
+    was not up to make, taken by something else; the late look then adds nothing
+    to it. The other is a complete, trusted history of every change to the two
+    receipts *and* to the deployed files, spanning the whole interval from the
+    real end to the late look with no gap, which is what would let a late
+    observation be carried back to that boundary at all.
+
+    A single sample of the deployment somewhere inside that interval is neither,
+    and is the tempting wrong answer: a lock that went A -> B -> A around the
+    sample, and a deployed file edited and restored around it, both read as
+    untouched — and those two are exactly the facts :data:`STABILITY_CHANGED` and
+    :data:`STABILITY_DRIFTED` exist to report. Evidence that only samples the
+    interval cannot bound what happened across it.
+
+    Nothing here produces either shape. This module reads a target's lock at a
+    run's own two boundaries and nowhere else; ``mandrel`` leaves no deploy
+    journal the hub reads, and an in-place edit by construction leaves no receipt
+    at all. So the alternative is not "retry the check" but "watch the deployment
+    continuously", a separate mechanism with its own truthfulness to establish —
+    and one that would still say nothing about any run already recorded, since its
+    history would start after them. Until it exists, an end nobody observed is
+    uncompared for good, which is what :data:`COVERAGE_UNCOMPARED` reports and
+    what a surface should show.
 
     Only the two identity fields are compared between the locks. A lock that
     renamed its source or bumped its own schema while naming the same commit and
@@ -1234,13 +1281,19 @@ def read_protocol(run_dir: Path) -> ProtocolSnapshot | None:
     internally inconsistent artifact resolves to the latter, not the former: the
     hub did capture something for this run, and claiming otherwise would invite a
     consumer to treat it as backfillable.
+
+    Such a read is marked ``artifact_unusable`` (:func:`_unusable`), because the
+    two unavailable snapshots a reader can meet make opposite claims: one says the
+    repo's deploy lock named no identity, the other says this hub's own record of
+    the run cannot be trusted to say anything at all. Only the flag keeps a
+    tally — or a run row — from reporting the second as the first.
     """
     try:
         data = json.loads(artifact_path(run_dir).read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None
     except (OSError, ValueError) as err:
-        return _unavailable(f"unreadable {ARTIFACT_NAME} ({err})")
+        return _unusable(f"unreadable {ARTIFACT_NAME} ({err})")
     return _from_dict(data)
 
 
@@ -1260,7 +1313,11 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     snapshot, so ``available`` keeps its meaning for every reader: an artifact
     claiming availability without a well-formed commit and payload hash, or
     carrying a stability value this version does not know (a hand-edited file, or
-    one written by a newer hub), is unusable rather than partially trusted.
+    one written by a newer hub), is unusable rather than partially trusted — and
+    says so through :func:`_unusable`, so the defect reads as this record's and
+    not as the deployment's. An artifact that merely *records* an unavailable
+    capture is not one of those: it is intact, and it is read back exactly as it
+    was written.
 
     ``stability`` is validated the same way and for the same reason: it is the
     field that grants publication (:meth:`ProtocolSnapshot.verified_identity`), so
@@ -1290,17 +1347,17 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     reads may not mean here what it meant there.
     """
     if not isinstance(data, dict):
-        return _unavailable(f"{ARTIFACT_NAME} is not a JSON object")
+        return _unusable(f"{ARTIFACT_NAME} is not a JSON object")
     version = _int_field(data, "schema_version")
     if version is None or version < 1:
-        return _unavailable(f"{ARTIFACT_NAME} carries no usable schema version")
+        return _unusable(f"{ARTIFACT_NAME} carries no usable schema version")
     if version > PROTOCOL_SCHEMA_VERSION:
-        return _unavailable(
+        return _unusable(
             f"{ARTIFACT_NAME} was written by a newer hub (schema {version})"
         )
     stability = data.get("stability")
     if stability not in _STABILITIES:
-        return _unavailable(f"{ARTIFACT_NAME} has an unrecognized stability")
+        return _unusable(f"{ARTIFACT_NAME} has an unrecognized stability")
     commit = _hex_field(data, "source_git_commit", _SHA)
     payload = _hex_field(data, "canonical_payload_sha256", _SHA256)
     available = data.get("available") is True
@@ -1308,18 +1365,18 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     payload_files = _int_field(data, "payload_files")
     detail = _str_field(data, "detail")
     if available and (commit is None or payload is None):
-        return _unavailable(f"{ARTIFACT_NAME} claims an identity it does not carry")
+        return _unusable(f"{ARTIFACT_NAME} claims an identity it does not carry")
     if available and stability != STABILITY_UNVERIFIED and checked_ts is None:
-        return _unavailable(f"{ARTIFACT_NAME} carries a verdict it never checked")
+        return _unusable(f"{ARTIFACT_NAME} carries a verdict it never checked")
     if available and stability == STABILITY_STABLE:
         if version < PROTOCOL_SCHEMA_VERSION:
             stability, detail = STABILITY_UNVERIFIED, LEGACY_VERDICT_DETAIL
         elif payload_files is None:
-            return _unavailable(
+            return _unusable(
                 f"{ARTIFACT_NAME} claims a verified payload it never counted"
             )
         elif not 1 <= payload_files <= PAYLOAD_MAX_FILES:
-            return _unavailable(
+            return _unusable(
                 f"{ARTIFACT_NAME} claims a verified payload of {payload_files}"
                 " files, which no check could have produced"
             )
@@ -1388,7 +1445,20 @@ def _verdict(
 
 
 def _unavailable(detail: str) -> ProtocolSnapshot:
+    """An unavailable snapshot whose reason is the *deployment's* lock."""
     return ProtocolSnapshot(available=False, detail=detail)
+
+
+def _unusable(detail: str) -> ProtocolSnapshot:
+    """An unavailable snapshot whose reason is the run's own artifact.
+
+    Same absence, different fact, and the reader keeps them apart
+    (:data:`COVERAGE_UNUSABLE` versus :data:`COVERAGE_UNCAPTURED`) because they
+    send an operator to different files. Named at the call site rather than
+    passed as a flag so every path that fails closed over a persisted record says
+    which of the two it is.
+    """
+    return ProtocolSnapshot(available=False, artifact_unusable=True, detail=detail)
 
 
 def _hex_field(data: dict, key: str, pattern: re.Pattern[str]) -> str | None:

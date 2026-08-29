@@ -28,6 +28,7 @@ from orch_hub.protocol_provenance import (
     COVERAGE_PENDING,
     COVERAGE_UNCAPTURED,
     COVERAGE_UNCOMPARED,
+    COVERAGE_UNUSABLE,
     COVERAGE_VERIFIED,
     COVERAGES,
     DEPLOY_LOCK_NAME,
@@ -866,6 +867,8 @@ def test_read_protocol_distinguishes_absent_from_unusable(tmp_path: Path) -> Non
     assert corrupt is not None
     assert corrupt.available is False
     assert corrupt.detail
+    # ... and unavailable *about the record*, not about the repo's deploy lock.
+    assert corrupt.coverage == COVERAGE_UNUSABLE
 
 
 def test_read_protocol_fails_closed_on_inconsistent_artifacts(tmp_path: Path) -> None:
@@ -927,6 +930,10 @@ def test_read_protocol_fails_closed_on_inconsistent_artifacts(tmp_path: Path) ->
         assert snapshot.available is False, name
         assert snapshot.verified_identity is None, name
         assert snapshot.detail, name
+        # Every one of these is a defect in hub-owned evidence — a newer hub's
+        # artifact included — so none of them may be counted as a repo whose
+        # deployment lock named no identity.
+        assert snapshot.coverage == COVERAGE_UNUSABLE, name
 
 
 def test_a_pre_payload_check_verdict_reads_back_unverified(tmp_path: Path) -> None:
@@ -1032,8 +1039,9 @@ def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
 # ``stability`` answers the publication question in the module's own terms. A run
 # row or a coverage census has to answer a wider one — why does this run carry no
 # identity — and ``stability`` cannot: ``unverified`` covers both a check still
-# owed and one that already happened and concluded nothing, and neither a capture
-# that found no lock nor a run predating the capture has a stability at all.
+# owed and one that already happened and concluded nothing, and none of the three
+# states before a stability exists — a capture that found no lock, a record that
+# cannot be read back, a run predating the capture — has one at all.
 
 
 def test_coverage_separates_a_check_still_owed_from_one_that_concluded_nothing(
@@ -1067,15 +1075,19 @@ def test_coverage_keeps_each_suppressing_verdict_apart(tmp_path: Path) -> None:
     assert snap(stability=STABILITY_STABLE).coverage == COVERAGE_VERIFIED
     assert snap(stability=STABILITY_CHANGED).coverage == COVERAGE_CHANGED
     assert snap(stability=STABILITY_DRIFTED).coverage == COVERAGE_DRIFTED
-    assert set(COVERAGES) == {
+    # Order, not membership: COVERAGES is what a census and the UI both
+    # enumerate, so an accidental reorder would silently give one surface a
+    # different presentation from the other.
+    assert COVERAGES == (
         COVERAGE_VERIFIED,
         COVERAGE_PENDING,
         COVERAGE_CHANGED,
         COVERAGE_DRIFTED,
         COVERAGE_UNCOMPARED,
         COVERAGE_UNCAPTURED,
+        COVERAGE_UNUSABLE,
         COVERAGE_ABSENT,
-    }
+    )
 
 
 def test_coverage_distinguishes_a_capture_that_found_nothing_from_no_capture(
@@ -1093,6 +1105,30 @@ def test_coverage_distinguishes_a_capture_that_found_nothing_from_no_capture(
     assert coverage_of(read_protocol(make_run_dir(tmp_path, "other"))) == (
         COVERAGE_ABSENT
     )
+
+
+def test_coverage_separates_a_lockless_capture_from_a_damaged_record(
+    tmp_path: Path,
+) -> None:
+    # Both are unavailable snapshots carrying a reason, and a census that folded
+    # them together would report a broken hub artifact as a repo whose receipts
+    # are wrong — sending an operator to the wrong file. The first is a fact
+    # about the target repo's deployment; the second says nothing about any
+    # deployment at all.
+    run_dir = make_run_dir(tmp_path)
+    capture_protocol(run_dir, make_repo(tmp_path), now=CAPTURED_AT)
+    damaged_dir = make_run_dir(tmp_path, "damaged")
+    artifact_path(damaged_dir).write_text(
+        json.dumps({"schema_version": PROTOCOL_SCHEMA_VERSION + 1}), encoding="utf-8"
+    )
+
+    damaged = read_protocol(damaged_dir)
+
+    assert damaged is not None
+    assert damaged.coverage == COVERAGE_UNUSABLE
+    # The lockless capture keeps its own bucket through the round trip a census
+    # walks: it is persisted, intact, and says exactly what it found.
+    assert coverage_of(read_protocol(run_dir)) == COVERAGE_UNCAPTURED
 
 
 def test_an_unobserved_end_records_that_it_can_never_be_settled(
