@@ -98,6 +98,19 @@ a run that is still live, whose receipts had vanished by its end, or whose end t
 hub was not up to observe keeps its identity readable for audit and publishes
 nothing.
 
+Every one of those outcomes except the first is *terminal*. The end check runs
+once and a run ends once, so a settled verdict is the last thing this module will
+ever say about that run: an absent identity there is decided, not pending. In
+``stability`` alone the two are indistinguishable — a live run and a run whose end
+could not be compared both read ``unverified`` — which is why
+:attr:`ProtocolSnapshot.coverage` exists: the four ``stability`` values with that
+one ambiguity resolved by ``checked_ts``, plus the two states that precede a
+stability at all (a capture that found no usable lock, and a run predating the
+capture entirely). A surface answering "how many runs carry an identity, and why
+do the rest not" reads that one field rather than re-deriving the rule from three,
+for the same reason :meth:`ProtocolSnapshot.verified_identity` is a property here
+and not a condition each consumer writes.
+
 A *report*, though, is about a task, and a task is worked by several runs. The
 same rule therefore applies once more across them
 (:func:`effective_protocol`): the identity an evaluation report is published
@@ -151,7 +164,12 @@ PROTOCOL_SCHEMA_VERSION = 2
 artifact so a later change stays separable, exactly like the evidence pack's.
 Schema 1 wrote a ``stable`` verdict from a lock-only comparison; schema 2 requires
 the deployed files to have been compared against their receipt as well, which is
-why :func:`_from_dict` refuses to read an older verdict as this one."""
+why :func:`_from_dict` refuses to read an older verdict as this one.
+
+Adding a *derived* key (``coverage``) is deliberately not a bump. Nothing
+persisted changed meaning, the reader re-derives it, and a bump would demote every
+existing ``stable`` verdict through the same older-schema clause — costing real
+identities to record an addition that took none away."""
 
 LOCK_MAX_BYTES = 4 * 1024 * 1024
 """Read cap for the lock file. It carries one record per deployed file (~36KB for
@@ -219,6 +237,62 @@ _STABILITIES = (
     STABILITY_CHANGED,
     STABILITY_DRIFTED,
 )
+
+COVERAGE_VERIFIED = "verified"
+"""This run carries a publishable identity (``stability`` :data:`STABILITY_STABLE`
+with both halves validated). The one value that answers "yes" to the coverage
+question; every other one is a reason for "no"."""
+
+COVERAGE_CHANGED = "changed"
+"""The deployment was replaced mid-run (:data:`STABILITY_CHANGED`). An operator's
+own action, and ordinary — but it costs this run, and therefore its task, an
+identity."""
+
+COVERAGE_DRIFTED = "drifted"
+"""The deployed files were edited under the run (:data:`STABILITY_DRIFTED`).
+Damage the protocol forbids and the receipts do not record; the only value here
+that names a defect to go and fix."""
+
+COVERAGE_UNCOMPARED = "uncompared"
+"""The end check ran and could conclude nothing: the hub was not up to observe the
+run's end, or a receipt was unreadable or untrustworthy at it. ``detail`` says
+which. Kept apart from :data:`COVERAGE_PENDING` because it is *terminal* — one run
+gets one look (:func:`settle_protocol`) — and a permanent absence shown as an
+outstanding one invites an operator to wait for an answer that is not coming."""
+
+COVERAGE_PENDING = "pending"
+"""No end check is recorded yet. For a live run this is the ordinary in-flight
+state and the only non-terminal value here. For a run that has already ended it
+means the check did not run and will not — its transition has passed — so a
+reader that knows the run's liveness (run history, the run record) reports it as
+decided; this module holds the artifact only and cannot tell the two apart."""
+
+COVERAGE_UNCAPTURED = "uncaptured"
+"""The launch capture found no usable identity to freeze — a missing, oversize,
+malformed, or damaged deploy lock — so there was never anything for an end check
+to confirm. ``detail`` names the file and its defect. Distinct from
+:data:`COVERAGE_ABSENT`: the hub looked."""
+
+COVERAGE_ABSENT = "absent"
+"""The run wrote no ``protocol.json`` at all: it was launched before this capture
+existed. The one value :meth:`ProtocolSnapshot.coverage` cannot return, since
+there is no snapshot to ask — :func:`coverage_of` supplies it. Never repairable:
+provenance is not backfilled from a later deployment."""
+
+COVERAGES = (
+    COVERAGE_VERIFIED,
+    COVERAGE_PENDING,
+    COVERAGE_CHANGED,
+    COVERAGE_DRIFTED,
+    COVERAGE_UNCOMPARED,
+    COVERAGE_UNCAPTURED,
+    COVERAGE_ABSENT,
+)
+"""Every coverage value, in the order a reader should present them: the one that
+publishes, the one still resolving, then the reasons it did not — operator action,
+damage, and the three flavours of no evidence. Exported so a census and a UI
+enumerate the same buckets in the same order instead of each hardcoding a list
+that a new value would silently fall out of."""
 
 _HASH_CHUNK = 64 * 1024
 
@@ -348,6 +422,38 @@ class ProtocolSnapshot:
         )
 
     @property
+    def coverage(self) -> str:
+        """This run's identity coverage as a reader sees it: one of :data:`COVERAGES`.
+
+        The reader-facing counterpart of :attr:`verified_identity`, which answers
+        only *whether* a run publishes. A surface — a run row, a census — has to
+        say why not, and the three fields that decide it (``available``,
+        ``stability``, ``checked_ts``) do not read as one answer: ``unverified``
+        covers both a run still in flight and one whose end check concluded
+        nothing, and neither of the two states that precede a stability at all is
+        expressible in ``stability``. Deriving that here keeps the mapping in the
+        same place as the publication predicate, so a new value cannot mean one
+        thing to the dashboard and another to a tally.
+
+        Ordered most-decided first: an unusable capture is answered before the
+        end check that never happened over it, and publication is asked of
+        :attr:`verified_identity` rather than of ``stability`` directly, so no
+        reader can be told "verified" about an identity that property would
+        refuse.
+        """
+        if not self.available:
+            return COVERAGE_UNCAPTURED
+        if self.checked_ts is None:
+            return COVERAGE_PENDING
+        if self.verified_identity is not None:
+            return COVERAGE_VERIFIED
+        if self.stability == STABILITY_CHANGED:
+            return COVERAGE_CHANGED
+        if self.stability == STABILITY_DRIFTED:
+            return COVERAGE_DRIFTED
+        return COVERAGE_UNCOMPARED
+
+    @property
     def verified_revision(self) -> str | None:
         """The revision half of :attr:`verified_identity`, or ``None``.
 
@@ -370,8 +476,24 @@ class ProtocolSnapshot:
             "stability": self.stability,
             "checked_ts": self.checked_ts,
             "payload_files": self.payload_files,
+            "coverage": self.coverage,
             "detail": self.detail,
         }
+
+
+def coverage_of(snapshot: ProtocolSnapshot | None) -> str:
+    """One run's coverage value, including for a run that captured nothing.
+
+    The census entry point. :attr:`ProtocolSnapshot.coverage` cannot express
+    :data:`COVERAGE_ABSENT` — there is no snapshot to ask — and ``None`` is
+    exactly what :func:`read_protocol` returns for a run predating the capture, so
+    every caller that tallies over run dirs would otherwise write the same
+    ``None`` branch and be free to call it something else. It is deliberately not
+    folded into ``read_protocol`` as a synthetic unavailable snapshot: absent and
+    uncaptured are different operator facts (:data:`COVERAGE_ABSENT`), and that
+    distinction is the reason the reader returns ``None`` in the first place.
+    """
+    return COVERAGE_ABSENT if snapshot is None else snapshot.coverage
 
 
 @dataclass(frozen=True)
@@ -992,6 +1114,19 @@ def capture_protocol(
     return snapshot
 
 
+UNOBSERVED_END_DETAIL = (
+    "run ended while the hub was down, so the deployment could not be compared at"
+    " its end; one run gets one such comparison, so this run can never publish a"
+    " protocol identity"
+)
+"""Why a run the hub did not see end publishes nothing, *and* that the answer is
+final. The permanence is stated rather than implied because this is the reason an
+operator meets most often — every hub restart across a live run produces one — and
+a bare "could not be compared" reads as a check still owed. The rationale for the
+one-look rule, and what evidence a second look would have needed, is in
+:func:`settle_protocol`."""
+
+
 def settle_protocol(
     run_dir: Path,
     repo_path: Path,
@@ -1031,6 +1166,22 @@ def settle_protocol(
     tells an operator, in ``detail``, that the deployment moved under their run
     when nothing observed says it did.
 
+    An unobserved end is therefore **permanent**, and that is a decision, not an
+    omission: this hub will not look again, and the record says so
+    (:data:`UNOBSERVED_END_DETAIL`) instead of leaving an absence that reads as
+    outstanding. A second look would be admissible only against evidence that the
+    deployment did not move between the run's real end and the late look, and that
+    evidence has exactly one shape — a record of the repo's deployed identity at
+    some moment inside that interval, written by something that watches the
+    *deployment* rather than the run. Nothing writes one: this module reads a
+    target's lock at a run's own two boundaries and nowhere else, and ``mandrel``
+    leaves no deploy journal the hub reads. So the alternative is not "retry the
+    check" but "keep a deployment history", a separate mechanism with its own
+    truthfulness to establish — and one that would still say nothing about any run
+    already recorded, since its evidence would start after them. Until it exists,
+    an end nobody observed is uncompared for good, which is what
+    :data:`COVERAGE_UNCOMPARED` reports and what a surface should show.
+
     Only the two identity fields are compared between the locks. A lock that
     renamed its source or bumped its own schema while naming the same commit and
     payload hash deployed the same protocol text, and reporting that as a change
@@ -1041,11 +1192,7 @@ def settle_protocol(
         return None
     payload_files: int | None = None
     if not end_observed:
-        stability, detail = (
-            STABILITY_UNVERIFIED,
-            "run ended while the hub was down; the deployment could not be"
-            " compared at its end",
-        )
+        stability, detail = STABILITY_UNVERIFIED, UNOBSERVED_END_DETAIL
     else:
         current = read_deploy_lock(repo_path)
         stability, detail = _verdict(snapshot, current)
@@ -1126,6 +1273,12 @@ def _from_dict(data: object) -> ProtocolSnapshot:
     is a rewritten artifact, not a smaller verification. Both are the same class
     of defect as a verdict with no ``checked_ts``: evidence that contradicts the
     only process that writes it.
+
+    The persisted ``coverage`` is not among the fields read back. It is derived
+    (:attr:`ProtocolSnapshot.coverage`) and re-derived here from the three fields
+    that decide it, so a hand-edited or stale one is ignored rather than trusted —
+    and so a demotion below cannot leave a record whose verdict and whose reader
+    label disagree.
 
     The schema stamp is read as *meaning*, not just shape, which is what keeps the
     older artifacts honest without touching them. A schema-1 ``stable`` was reached

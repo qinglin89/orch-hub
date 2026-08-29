@@ -36,6 +36,8 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import read_effective_config_snapshot
 from orch_hub.protocol_provenance import (
+    COVERAGE_PENDING,
+    COVERAGE_VERIFIED,
     DEPLOY_LOCK_NAME,
     DEPLOY_MANIFEST_NAME,
     STABILITY_CHANGED,
@@ -3183,6 +3185,43 @@ def test_protocol_settle_failure_does_not_corrupt_run_end(tmp_path, monkeypatch)
     snapshot = read_protocol(manager.runs_dir / record.run_id)
     assert snapshot is not None
     assert snapshot.stability == STABILITY_UNVERIFIED
+
+
+def test_run_history_carries_each_runs_protocol_verdict(tmp_path):
+    # Embedded snapshot-only like effective_config: this is the field a published
+    # report's cohort key comes from, and without it the coverage question — does
+    # this run carry an identity, and if not why — is answerable only by walking
+    # run dirs. 'coverage' rides along so a reader is not left re-deriving the
+    # rule from three fields.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    manager.start_run(repo, TASK_ID)
+
+    live = manager.recent_runs(limit=1)[0].to_dict()
+    assert live["protocol"]["source_git_commit"] == COMMIT
+    assert live["protocol"]["coverage"] == COVERAGE_PENDING  # end check still owed
+
+    end_run(spawner, 0)
+    ended = manager.recent_runs(limit=1)[0].to_dict()
+
+    assert ended["protocol"]["coverage"] == COVERAGE_VERIFIED
+    assert ended["protocol"]["stability"] == STABILITY_STABLE
+
+
+def test_run_history_reports_a_run_predating_the_capture_as_unknown(tmp_path):
+    # The same 'unknown' effective_config uses, and for the same reason: no
+    # artifact is not a verdict about this run's deployment, and must not be
+    # rendered as one.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    (manager.runs_dir / record.run_id / "protocol.json").unlink()
+
+    end_run(spawner, 0)
+
+    assert manager.recent_runs(limit=1)[0].to_dict()["protocol"] is None
 
 
 def test_a_run_predating_the_capture_still_ends_cleanly(tmp_path):

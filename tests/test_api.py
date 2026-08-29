@@ -60,7 +60,10 @@ from orch_hub.models import (
 )
 from orch_hub.orch_config import OrchestratorConfigError, parse_effective_config
 from orch_hub.registry import RegistryError
-from orch_hub.protocol_provenance import LEGACY_AGGREGATE_DETAIL
+from orch_hub.protocol_provenance import (
+    COVERAGE_UNCAPTURED,
+    LEGACY_AGGREGATE_DETAIL,
+)
 from orch_hub.report_catalog import REQUIRED_ARTIFACTS, ReportCatalog
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
@@ -1418,6 +1421,23 @@ def test_history_runs_embeds_effective_config(tmp_path, monkeypatch):
     resp = client.get("/api/history/runs?limit=1")
     assert resp.status_code == 200
     assert resp.json()["runs"][0]["effective_config"] == SAMPLE_CONFIG
+
+
+def test_history_runs_embeds_the_protocol_verdict_and_its_reason(
+    tmp_path, monkeypatch
+):
+    # This repo has no deployment receipts, which is the interesting case: the
+    # capture looked and found nothing, and the payload has to *say* so with its
+    # reason. An omitted block would read as "no protocol", and the run's missing
+    # cohort key would stay invisible on the one surface that lists runs.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_a_run(client, repo)
+
+    protocol = client.get("/api/history/runs?limit=1").json()["runs"][0]["protocol"]
+
+    assert protocol["available"] is False
+    assert protocol["coverage"] == COVERAGE_UNCAPTURED
+    assert protocol["detail"]
 
 
 # -- list / get ----------------------------------------------------------------

@@ -453,6 +453,18 @@ class RunHistoryEntry:
     request. ``None`` — serialized as ``effective_config: null`` — is "unknown": a
     run with no persisted snapshot yet (live/pre-field) or whose startup line could
     not be parsed. Read snapshot-only here (cheap), like ``sessions``.
+
+    ``protocol`` is the run's persisted protocol provenance — the deployed
+    protocol identity captured at launch and the verdict of the end check over it
+    (:meth:`orch_hub.protocol_provenance.ProtocolSnapshot.to_dict`, including its
+    derived ``coverage``) — embedded the same way and for the same reason: it is a
+    small per-run artifact the history view shows beside the launch snapshot, and
+    a per-run fetch for it would be one request per row. It is the field a
+    published report's cohort key comes from, so whether a run carries one is
+    exactly what an operator cannot otherwise see without walking run dirs.
+    ``None`` — serialized as ``protocol: null`` — is "unknown" in the same sense
+    ``effective_config`` is: a run launched before the capture existed, which is
+    the artifact's own absent case and not a verdict about that run's deployment.
     """
 
     status: RunStatus
@@ -460,6 +472,7 @@ class RunHistoryEntry:
     sessions: SessionsSnapshot | None = None
     session_est: SessionEst | None = None
     effective_config: dict | None = None
+    protocol: dict | None = None
 
     def to_dict(self) -> dict:
         snapshot = self.sessions if self.sessions is not None else SessionsSnapshot()
@@ -471,6 +484,7 @@ class RunHistoryEntry:
                 self.session_est.to_dict() if self.session_est is not None else None
             ),
             "effective_config": self.effective_config,
+            "protocol": self.protocol,
         }
 
 

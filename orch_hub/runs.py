@@ -101,6 +101,7 @@ from .orch_config import (
 from .protocol_provenance import (
     STABILITY_DRIFTED,
     capture_protocol,
+    read_protocol,
     settle_protocol,
 )
 from .readiness import check_readiness
@@ -850,6 +851,7 @@ class RunManager:
                     sessions=self._history_sessions(run_dir),
                     session_est=self._history_session_est(record, est_cache),
                     effective_config=self._history_effective_config(run_dir),
+                    protocol=self._history_protocol(run_dir),
                 )
             )
         return entries
@@ -1221,6 +1223,27 @@ class RunManager:
         detail route (:meth:`read_effective_config`) is the path that live-parses.
         """
         return read_effective_config_snapshot(run_dir)
+
+    @staticmethod
+    def _history_protocol(run_dir: Path) -> dict | None:
+        """The run's persisted protocol provenance for the history view.
+
+        Snapshot-only and cheap like the two above, and with no live counterpart
+        at all: this artifact is written by the run's own lifecycle (captured
+        before the spawn, settled at the live->ended transition) rather than
+        parsed out of a log, so reading the file *is* the whole answer for a live
+        and an ended run alike. A live run's entry carries its capture with the
+        end check still outstanding, which is exactly what its ``coverage``
+        reports.
+
+        No isolation wrapper, unlike :meth:`_history_session_est`:
+        :func:`read_protocol` is total by contract — a missing artifact is
+        ``None`` and an unreadable or malformed one is an unavailable snapshot
+        carrying its own reason — so there is no failure here to convert into a
+        blank row, and wrapping it would only hide one if that ever changed.
+        """
+        snapshot = read_protocol(run_dir)
+        return snapshot.to_dict() if snapshot is not None else None
 
     def _snapshot_sessions(
         self, run_dir: Path, record: RunRecord, *, resumed: bool = False

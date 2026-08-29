@@ -22,6 +22,14 @@ from pathlib import Path
 
 from orch_hub.protocol_provenance import (
     ARTIFACT_NAME,
+    COVERAGE_ABSENT,
+    COVERAGE_CHANGED,
+    COVERAGE_DRIFTED,
+    COVERAGE_PENDING,
+    COVERAGE_UNCAPTURED,
+    COVERAGE_UNCOMPARED,
+    COVERAGE_VERIFIED,
+    COVERAGES,
     DEPLOY_LOCK_NAME,
     DEPLOY_MANIFEST_NAME,
     LEGACY_AGGREGATE_DETAIL,
@@ -38,10 +46,12 @@ from orch_hub.protocol_provenance import (
     STABILITY_DRIFTED,
     STABILITY_STABLE,
     STABILITY_UNVERIFIED,
+    UNOBSERVED_END_DETAIL,
     ProtocolIdentity,
     ProtocolSnapshot,
     artifact_path,
     capture_protocol,
+    coverage_of,
     effective_protocol,
     effective_protocol_from_dict,
     read_deploy_lock,
@@ -1015,6 +1025,143 @@ def test_persisted_snapshots_round_trip(tmp_path: Path) -> None:
     write_protocol(run_dir, snapshot)
 
     assert read_protocol(run_dir) == snapshot
+
+
+# -- coverage: the verdict as a reader meets it -------------------------------
+#
+# ``stability`` answers the publication question in the module's own terms. A run
+# row or a coverage census has to answer a wider one — why does this run carry no
+# identity — and ``stability`` cannot: ``unverified`` covers both a check still
+# owed and one that already happened and concluded nothing, and neither a capture
+# that found no lock nor a run predating the capture has a stability at all.
+
+
+def test_coverage_separates_a_check_still_owed_from_one_that_concluded_nothing(
+    tmp_path: Path,
+) -> None:
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    live = capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+
+    # Both verdicts below are 'unverified'; only this one may still become
+    # something else, and a surface that showed them alike would invite an
+    # operator to wait for an answer that is not coming.
+    assert live.stability == STABILITY_UNVERIFIED
+    assert live.coverage == COVERAGE_PENDING
+
+    (repo_path / DEPLOY_MANIFEST_NAME).unlink()  # unreadable receipt at the end
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    assert settled is not None
+    assert settled.stability == STABILITY_UNVERIFIED
+    assert settled.coverage == COVERAGE_UNCOMPARED
+    assert settled.detail  # and it says which receipt, in operator terms
+
+
+def test_coverage_keeps_each_suppressing_verdict_apart(tmp_path: Path) -> None:
+    # The three reasons a settled run publishes nothing are three different
+    # operator facts: an ordinary redeployment, damage the protocol forbids, and
+    # no evidence either way. Rendering them as one 'unavailable' would preserve
+    # in a new place exactly the defect this reports.
+    assert snap(stability=STABILITY_STABLE).coverage == COVERAGE_VERIFIED
+    assert snap(stability=STABILITY_CHANGED).coverage == COVERAGE_CHANGED
+    assert snap(stability=STABILITY_DRIFTED).coverage == COVERAGE_DRIFTED
+    assert set(COVERAGES) == {
+        COVERAGE_VERIFIED,
+        COVERAGE_PENDING,
+        COVERAGE_CHANGED,
+        COVERAGE_DRIFTED,
+        COVERAGE_UNCOMPARED,
+        COVERAGE_UNCAPTURED,
+        COVERAGE_ABSENT,
+    }
+
+
+def test_coverage_distinguishes_a_capture_that_found_nothing_from_no_capture(
+    tmp_path: Path,
+) -> None:
+    # The distinction ``read_protocol`` returns ``None`` to preserve: a hub that
+    # looked and found no usable lock, versus a run launched before it ever
+    # looked. Only the first is a repo-side defect worth chasing.
+    run_dir = make_run_dir(tmp_path)
+    uncaptured = capture_protocol(run_dir, make_repo(tmp_path), now=CAPTURED_AT)
+
+    assert uncaptured.available is False
+    assert uncaptured.coverage == COVERAGE_UNCAPTURED
+    assert coverage_of(uncaptured) == COVERAGE_UNCAPTURED
+    assert coverage_of(read_protocol(make_run_dir(tmp_path, "other"))) == (
+        COVERAGE_ABSENT
+    )
+
+
+def test_an_unobserved_end_records_that_it_can_never_be_settled(
+    tmp_path: Path,
+) -> None:
+    # The decision, in the record: one run gets one comparison, so an end nobody
+    # observed is not a check still owed. The reason has to say so — this is the
+    # commonest suppressing verdict there is (every hub restart across a live run
+    # produces one), and 'could not be compared' alone reads as pending.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+
+    settled = settle_protocol(run_dir, repo_path, now=ENDED_AT, end_observed=False)
+
+    assert settled is not None
+    assert settled.detail == UNOBSERVED_END_DETAIL
+    assert "can never publish" in UNOBSERVED_END_DETAIL
+    assert settled.coverage == COVERAGE_UNCOMPARED
+    # And the window really is closed: a later pass settles nothing.
+    assert settle_protocol(run_dir, repo_path, now=ENDED_AT) is None
+
+
+def test_a_demoted_legacy_verdict_is_labelled_by_what_it_now_means(
+    tmp_path: Path,
+) -> None:
+    # A schema-1 'stable' reads back 'unverified' with a checked_ts, so the label
+    # follows the demotion rather than the file: the run was compared, and what
+    # that comparison covered is not enough here. Derived on read, never taken
+    # from the artifact — the persisted label below is ignored outright.
+    run_dir = make_run_dir(tmp_path)
+    artifact_path(run_dir).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "available": True,
+                "source_git_commit": COMMIT,
+                "canonical_payload_sha256": PAYLOAD,
+                "stability": STABILITY_STABLE,
+                "checked_ts": ENDED_AT.isoformat(),
+                "coverage": COVERAGE_VERIFIED,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    snapshot = read_protocol(run_dir)
+
+    assert snapshot is not None
+    assert snapshot.detail == LEGACY_VERDICT_DETAIL
+    assert snapshot.coverage == COVERAGE_UNCOMPARED
+
+
+def test_a_persisted_capture_carries_its_coverage(tmp_path: Path) -> None:
+    # Serialized with the verdict so every reader of this artifact — the run dir
+    # an operator cats, the history payload, the evidence pack — gets the same
+    # answer without re-deriving it, and so the schema stamp keeps its meaning:
+    # a derived key is not a version bump.
+    repo_path = make_repo(tmp_path)
+    run_dir = make_run_dir(tmp_path)
+    deploy(repo_path)
+    capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
+    settle_protocol(run_dir, repo_path, now=ENDED_AT)
+
+    written = json.loads(artifact_path(run_dir).read_text(encoding="utf-8"))
+
+    assert written["coverage"] == COVERAGE_VERIFIED
+    assert written["schema_version"] == PROTOCOL_SCHEMA_VERSION
 
 
 # -- aggregating a task's runs into one effective identity ---------------------
