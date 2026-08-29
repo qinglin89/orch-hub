@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: 39eda85d7efd91d1191f40b6c616ea660323d776
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Features: Semantic Evaluation and Report Feed
@@ -120,7 +120,7 @@ CLI `orch-hub eval catalog verify|repair`; protected
 `GET /api/evaluation/reports[?after=<seq>&limit=<n>]` and
 `GET /api/evaluation/reports/{report_key}` plus
 `GET /api/evaluation/reports/{report_key}/artifacts/{name}`; dashboard
-`#/reports`.
+`#/reports`; protected `GET /api/protocol-coverage`; dashboard `#/protocol`.
 
 Implemented behavior:
 
@@ -186,6 +186,18 @@ Implemented behavior:
   protocol evidence, legacy revision-only records, and absent config evidence
   are explicitly unavailable with a reason, never inferred from current target
   state.
+- Feed cards render the persisted protocol provenance block beside run/git
+  provenance; unavailable identity always includes its cataloged reason.
+- `ReportCatalog.protocol_coverage()` counts distinct published
+  `(repo_slug, task_id)` work units, each decided by its newest published
+  evaluation using `evaluation_order_key` (publication `seq` tie-break), while
+  separately retaining complete report-version counts. Uncovered rows are one per
+  task, linked to the deciding report, newest publication first and capped at 50;
+  counts remain complete. Disabled or ambiguous catalogs return an unavailable
+  section rather than a false zero.
+- `GET /api/protocol-coverage` composes that task census with the independent
+  persisted-run census outside the evaluation gate; it performs no evaluation,
+  reconciliation, protocol settlement, or mutation.
 - `#/reports` preserves global order, uses a visited-cursor trail for exact
   Previous navigation, and links each coherent row to existing per-task report
   detail. Every Run-history state exposes the gated `All evaluation reports →`

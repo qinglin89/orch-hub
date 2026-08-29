@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Modules
@@ -37,12 +37,12 @@ Full responsibilities live in the detail files below.
 | Completion evaluation | `orch_hub/completion_eval.py` | isolated completed-task trigger; durable enqueue/skip; off-lock Layer 1 |
 | Evaluation dispatch | `orch_hub/eval_dispatch.py` | usage/spacing-gated deferred queue; operator snapshot |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | one latest job/outcome per task; once-guard, skip, orphan reconciliation |
-| Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained bundle + byte-exact artifact reads |
+| Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained reads; distinct-task protocol-coverage census |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
 | StatusLine writer | `orch_hub/statusline.py` | legacy optional statusLine fallback feeding the usage sink |
 | Intake manager | `orch_hub/intake.py` | remote intake lifecycle/audit; off-lock turns; verified confirm |
 | Intake agent | `orch_hub/intake_agent.py` | Claude CLI `/intake-task` backend with envelopes/resume |
-| Run manager | `orch_hub/runs.py` | subprocess lifecycle/state/stop; per-repo serialization; terminal side-effect hooks |
+| Run manager | `orch_hub/runs.py` | subprocess lifecycle/state/stop; per-repo serialization; terminal hooks; read-only protocol-coverage census |
 | Orchestrator launch config | `orch_hub/orch_config.py` | `--print-config` query/parse; split/legacy argv; config snapshots |
 | Run monitor | `orch_hub/monitor.py` | resident status scanner plus isolated retry sweeps |
 | History | `orch_hub/history.py` | per-run JSONL event storage/readback |

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # APIs: HTTP — Task Evaluation
@@ -40,6 +40,26 @@ Cross-cutting auth/app behavior: `http-core.md`.
   never consume action rows.
 - Gate: protected and evaluation-enabled; deliberately not hidden when
   `ORCH_HUB_EVAL_AUTO=false`, because `auto_enabled:false` explains a held queue.
+
+## `GET /api/protocol-coverage`
+
+- Purpose: report how many persisted runs and distinct published tasks carry a
+  verified deployed-protocol identity, plus the reasons the rest do not.
+- Shape: `{runs:{total,counts}, reports:{available,detail,tasks,
+  tasks_with_identity,reports,reports_with_identity,entries,truncated}}`.
+  `runs.counts` contains every ordered run-coverage bucket, including zeroes;
+  report entries list uncovered tasks through the report that decides them.
+- Task rule: group catalog entries by `(repo_slug, task_id)` and select the
+  newest published evaluation by `evaluation_order_key`, then publication `seq`.
+  Report-version counts remain separate so the census reconciles with the feed.
+- Run rule: a pending snapshot stays pending exactly while persisted lifecycle
+  evidence says a future refresh can still execute its end check. An
+  ended-but-settling tail qualifies; an unrefreshable error stub does not.
+- Boundary: protected but deliberately outside `/api/evaluation`; the run half
+  remains readable when evaluation is disabled. Both reads are strict read-only:
+  no pid probe, run settlement/write, catalog reconciliation, or model call.
+  Disabled or unreadable report catalogs set only `reports.available=false` with
+  a reason.
 
 ## `GET /api/evaluation/reports`
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Modules: Service Surface
@@ -39,7 +39,8 @@ implemented escalation routes are
 `GET /api/runs/{run_id}/logs/stream`; implemented history route is
 `GET /api/history/runs`; implemented commit route is
 `GET /api/repos/{repo_id}/commits`; implemented usage route is
-`GET /api/usage`. `GET /api/repos` includes a best-effort
+`GET /api/usage`; implemented cross-store coverage route is
+`GET /api/protocol-coverage`. `GET /api/repos` includes a best-effort
 `commit` field and display-only `housekeeping_pending` state shared with CLI
 JSON; recent commit lookup failures return `available:false` rather than
 raising. `GET /api/history/runs` also batches optional task-evaluation state
@@ -84,6 +85,11 @@ default semantic evaluator publishes after its complete artifact set is
 durable, and the lifespan reconciles existing/newly archived reports before
 serving. The global feed/export routes are read-only thin adapters over that
 append-only catalog; they never evaluate or reconcile on request.
+The protocol-coverage route composes a non-refreshing persisted-run census with
+the catalog's distinct-published-task census. It deliberately sits outside the
+evaluation gate so a disabled/unreadable report half degrades inside its own
+payload while run coverage remains available; the request settles no run and
+publishes/reconciles nothing.
 Mutating intake routes return transient records
 (`drafting`/`revising`/`confirming`) immediately; clients poll
 `GET /api/intakes/{intake_id}` for the settled outcome.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-07-30
-verified-against: 6bf52dafcdddb8935581b5112dfd31d402389238
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Features: Run Observability
@@ -59,7 +59,7 @@ Modules: history, runs, api, models, control_dir.
 
 APIs: `GET /api/history/runs`, `GET /api/runs/{run_id}/task`,
 `GET /api/runs/{run_id}/sessions`,
-`GET /api/runs/{run_id}/effective-config`.
+`GET /api/runs/{run_id}/effective-config`, `GET /api/protocol-coverage`.
 
 Implemented behavior:
 
@@ -88,11 +88,20 @@ Implemented behavior:
   `page == total_pages + 1` and keeps a Previous cursor.
 - Returned runs retain normal serialized status plus embedded persisted events,
   per-run session snapshots (`sessions`, `context_budget`), typed `session_est`
-  (`null` when unknown), persisted `effective_config` (`null` when absent), and
-  batched optional task-evaluation state. Evaluation state is returned once per
-  distinct `(repo_path, task_id)` group in the returned window/summary as
-  `none` / `l1` / `l1_l2`, skips all reads when evaluation is disabled, and
-  fails soft per task.
+  (`null` when unknown), persisted `effective_config` (`null` when absent), the
+  run-owned protocol snapshot with its derived coverage verdict, and batched
+  optional task-evaluation state. Evaluation state is returned once per distinct
+  `(repo_path, task_id)` group in the returned window/summary as `none` / `l1` /
+  `l1_l2`, skips all reads when evaluation is disabled, and fails soft per task.
+- Protocol coverage keeps verified, pending, changed, drifted, end-inconclusive,
+  uncaptured, unusable-record, and absent-artifact states distinct. A pending
+  artifact becomes terminal `pending-ended` only when persisted lifecycle
+  evidence proves no future refresh can reach its end check; ended-but-
+  `end_settling` remains pending, while an unrefreshable error stub is terminal.
+- `GET /api/protocol-coverage` reads every persisted run without pid probes,
+  record writes, or settlement and returns complete ordered bucket counts. Its
+  published-task half is documented with the report feed; evaluation-disabled or
+  unreadable-catalog state degrades only that half.
 - `GET /api/runs/{run_id}/task` reads the task file through the persisted run
   identity: active `.ai-tasks/<task_id>.md` first, then
   `.ai-tasks/archive/<task_id>.md`. It returns `source:

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Modules: Web UI Views
@@ -92,8 +92,11 @@ counts/no-match text as page-local. Newly encountered groups start collapsed;
 the explicit expansion set survives filter repaints and page navigation where a
 group reappears. Visible cards open the run's task through the shared
 liveness-aware destination rule, with direct-log fallback only when no task id
-is available; each card renders its embedded `effective_config` snapshot as a
-disclosure outside the link. Enabled task groups show an inline `Evaluation →`
+is available; each card renders its embedded `effective_config` snapshot and
+protocol-identity coverage as disclosures outside the link. The protocol view
+uses the server-owned coverage vocabulary and refreshed row state to separate an
+owed end check from `pending-ended`; verified is the only verdict that displays
+the cohort revision. Enabled task groups show an inline `Evaluation →`
 action with a grey/amber/green state light
 for not evaluated, L1, or L1 + L2; the state is from the same newest evaluation
 the sidecar route opens and is exposed through title/ARIA text, not a visible
@@ -111,11 +114,18 @@ owns its gated `All evaluation reports →` entry through one shared page head, 
 the entry remains discoverable with populated history, zero persisted runs, or
 a cursor page pruned away. Feed rows preserve server `seq` order, expose
 repo/task/evaluation, evaluator/completeness, timestamps, key, and explicit
-run/git provenance, and link coherent identities to existing per-task detail.
+run/git/protocol provenance (including unavailability detail), and link coherent
+identities to existing per-task detail.
 Next follows `next_cursor`; Previous reuses a client-side trail of exact visited
 cursors rather than computing across possible sequence gaps. Never-published,
 past-end, and disabled states are distinct, and the view performs no evaluation
 write/model call.
+
+`#/protocol` is the aggregate read surface reached from both Run history and the
+report feed. It renders ordered complete run buckets and distinct published-task
+coverage from `GET /api/protocol-coverage`; rerun/version totals are secondary,
+and uncovered task rows open the deciding newest published report. The route
+performs no background refresh or write.
 
 Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
 Tasks tab active. It probes availability first, distinguishes disabled,

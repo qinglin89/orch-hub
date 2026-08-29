@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Project Map
@@ -19,6 +19,7 @@ behavior and rationale stay in the owning doc.
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
 | Task semantic evaluator | completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | evidence-bounded Layer 2; completion-triggered L1; durable capacity-held L2; recorded skip; isolated backend |
 | Global evaluation report feed | report_catalog, protocol_provenance, evaluation, semantic, task_store, models, api, cli, web | append-only catalog; seq + report_key identity; reconciliation; verify/repair CLI; consumers decide evolution |
+| Protocol identity coverage | protocol_provenance, runs, report_catalog, models, api, web | persisted run verdicts; check-owed lifecycle join; newest-published-report task denominator; read-only cross-store census |
 | Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, eval_dispatch, web, docs | fail-soft display; cache-primary Claude; model-free refresh; automatic-L2 pacing only |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | thin routes over shared helpers; only health + shell public |
 | Control-dir file channel | control_dir, models | file-channel only; atomic answers; idempotent stop.flag |
@@ -43,6 +44,7 @@ behavior and rationale stay in the owning doc.
 | Task static metrics | internal `StaticEvaluator`; `POST .../evaluations/{task_id}/metrics`; detail readback; dashboard Layer 1 |
 | Task semantic evaluator | internal `CompletionEvaluationTrigger` + `DeferredDispatcher` + `SemanticEvaluator` + `SemanticJobManager`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `GET /api/evaluation/queue`; `POST /api/runs` opt-out; CLI `orch-hub eval doctor`; report readback |
 | Global evaluation report feed | internal `ReportCatalog`; CLI `orch-hub eval catalog verify\|repair [--json] [--confirm]`; `GET /api/evaluation/reports[?after=<seq>&limit=<n>]`; `GET /api/evaluation/reports/{report_key}[/artifacts/{name}]`; dashboard `#/reports` |
+| Protocol identity coverage | internal `run_coverage` + run/report-catalog censuses; `GET /api/protocol-coverage`; dashboard `#/protocol` + Run-history/report-feed rows |
 | Agent subscription usage | internal `UsageService` + collectors/parsers; legacy `orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage` |
 | HTTP API foundation | public shell routes; `GET /api/health`; all protected data APIs; `orch-hub-api` |
 | Control-dir file channel | internal `list_questions`, `pending_questions`, `write_answer`, `request_stop` |

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Features
@@ -19,6 +19,7 @@ below.
 | Task static metrics | implemented | deterministic Layer 1 score report beside the evidence pack | evaluation.md |
 | Task semantic evaluator | implemented | completion-triggered L1 + capacity-held async Layer 2 with recorded opt-out | evaluation-reporting.md |
 | Global evaluation report feed | implemented | append-only cross-repo publication catalog + verified reads | evaluation-reporting.md |
+| Protocol identity coverage | implemented | per-run verdict visibility + distinct published-task coverage census | run-observability.md, evaluation-reporting.md, dashboard-views.md |
 | Run lifecycle | implemented | admission-gated orchestrator subprocess start/stop/reattach | run-control.md |
 | Control-dir file channel | implemented | question/answer/stop file adapter | run-control.md |
 | Human question relay | implemented | remote answering of waiting control-dir questions | run-control.md |

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Modules: Runtime
@@ -88,8 +88,8 @@ the persisted snapshot, and falls back to live parsing only for pre-field runs
 with no snapshot. The same transition snapshots the real startup
 `effective-config:` JSON into `effective_config.json`; `read_effective_config`
 serves live runs from the current log, ended runs from the snapshot with log
-fallback, and `recent_runs()` embeds the persisted effective config plus each
-run's persisted session snapshot and current active-or-archived `session-est`.
+fallback, and Run-history reads embed the persisted effective config, protocol
+snapshot, per-session snapshot, and current active-or-archived `session-est`.
 Task estimates are deduped per `(repo, task)` and degrade to unknown on
 task-file read failures.
 
@@ -100,6 +100,12 @@ lock and verifies the bounded complete lock/manifest target set against actual
 files. Only an unchanged pair plus a matching payload is publishable; unobserved
 ends, receipt damage, redeployment, or target drift stay explicitly unavailable
 without changing run state or being repaired from later target state.
+`protocol_coverage(config)` is the non-refreshing aggregate over these run-owned
+artifacts. It joins a pending artifact to `_refresh`'s persisted reachability
+branches through `_end_check_owed`: error stubs can never settle, unended records
+still can, and ended records can only while `end_settling` remains. The read uses
+`load_records`, performs no pid probe/write/settlement, and preserves the module's
+ordered reason vocabulary rather than deriving a second protocol verdict.
 
 The manager also owns notification trigger timing when a notifier is
 configured: run-end notifications fire once at the observed live-to-ended

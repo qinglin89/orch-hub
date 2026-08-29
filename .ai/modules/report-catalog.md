@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-16
-verified-against: cad31851334def4258d4004c2e62516807aaff85
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Modules: Global Report Catalog
@@ -50,6 +50,14 @@ fail-closed aggregate into the atomic `provenance.protocol.effective_revision`
 plus `deploy_lock_hash` pair. The catalog never reads current target state or
 invents/completes an identity for legacy revision-only, unverified, or mixed
 runs; append-only legacy lines demote at readback.
+
+`protocol_coverage()` is a lock-free read over catalog lines. It counts distinct
+published `(repo_slug, task_id)` pairs using the newest published evaluation by
+the shared `evaluation_order_key` (then `seq`) and separately returns the full
+report-version denominator. Uncovered tasks are listed once through their
+deciding report and persisted reason; rows are capped but counts are not.
+Disabled or identity-ambiguous catalogs return explicit unavailable coverage,
+never a misleading zero.
 
 `unpublished_ids()` is injected as `EvaluationService.retention_guard` so a
 prune cannot destroy recoverable publication debt. The guard and publisher read

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-29
+verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -94,7 +94,11 @@ Implemented behavior:
   per-run session strips from persisted snapshots plus a rollup of observed dev
   sessions vs frontmatter `session-est`, peak per-session context, summed run
   wall-clock from `started_ts`/`ended_ts`, and each run's embedded
-  `effective_config` launch snapshot as an out-of-link disclosure. Snapshot
+  `effective_config` launch snapshot and protocol-identity coverage as
+  out-of-link disclosures. The protocol disclosure uses the backend-owned
+  coverage verdict plus refreshed run state to distinguish a genuinely owed end
+  check from one that can never run, keeps every suppressing reason visible, and
+  shows the verified revision only for verified coverage. Snapshot
   rows use authoritative `profiles.dev`/`profiles.review`, identify Custom from
   CLI model provenance, and derive both roles from legacy top-level `profile`
   when the additive fields are absent. Evaluation-enabled history payloads also
@@ -106,11 +110,17 @@ Implemented behavior:
   populated, zero runs, or a cursor page whose runs vanished. The view probes
   evaluation availability before fetching `GET /api/evaluation/reports`, keeps
   the server's ascending global order, shows sequence/source/evaluator/L1+L2 and
-  explicit run/git provenance, and links coherent source rows to the existing
-  per-task evaluation detail. Forward paging sends the server's `next_cursor`;
+  explicit run/git/protocol provenance (including the persisted reason when
+  protocol identity is unavailable), and links coherent source rows to the
+  existing per-task evaluation detail. Forward paging sends the server's `next_cursor`;
   exact Previous navigation uses a client-side trail of visited cursors because
   sequence gaps make arithmetic reconstruction unsound. Empty feed, past-end
   page, and disabled subsystem remain distinct states.
+- `#/protocol`, linked from both Run history and the report feed, renders the
+  read-only `GET /api/protocol-coverage` census: complete ordered run buckets and
+  distinct published-task coverage, with report-version figures stated only
+  when reruns make the populations differ. Uncovered tasks link to the exact
+  newest published report that decides their reason.
 - Log view uses recent logs for finished runs and fetch/ReadableStream SSE for
   live runs. It renders the `spawn.out` diagnostic when the recent-log route has
   no orchestrator log, and a live stream that ends before any log line falls
