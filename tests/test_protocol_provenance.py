@@ -1160,21 +1160,25 @@ def test_run_coverage_decides_a_pending_check_a_run_can_no_longer_get(
     tmp_path: Path,
 ) -> None:
     # The one join the artifact cannot make for itself. Same file, opposite
-    # readings: a live run's end check is genuinely still to come, while a run
-    # that has already ended will never get one — the check happens only at that
-    # transition. Presenting the second as outstanding is what invites an operator
-    # to wait for an answer the one-look rule withheld permanently.
+    # readings: where the end check can still run it is genuinely still to come,
+    # and where it cannot the run will never get one — the check happens only at
+    # the live->ended transition. Presenting the second as outstanding is what
+    # invites an operator to wait for an answer the one-look rule withheld
+    # permanently. The caller decides which it holds, and deliberately answers
+    # "can the check still run" rather than "is the process alive": the two come
+    # apart for a run whose end tail was interrupted, and for a record broken past
+    # refreshing (:func:`orch_hub.runs._end_check_owed`).
     repo_path = make_repo(tmp_path)
     run_dir = make_run_dir(tmp_path)
     deploy(repo_path)
     captured = capture_protocol(run_dir, repo_path, now=CAPTURED_AT)
 
     assert captured.coverage == COVERAGE_PENDING
-    assert run_coverage(captured, live=True) == COVERAGE_PENDING
-    assert run_coverage(captured, live=False) == COVERAGE_PENDING_ENDED
+    assert run_coverage(captured, check_owed=True) == COVERAGE_PENDING
+    assert run_coverage(captured, check_owed=False) == COVERAGE_PENDING_ENDED
 
-    # And nothing else moves with liveness: every settled verdict, the two
-    # unavailable snapshots, and a run with no artifact read the same either way.
+    # And nothing else moves with it: every settled verdict, the two unavailable
+    # snapshots, and a run with no artifact read the same either way.
     unchanged = [
         snap(stability=STABILITY_STABLE),
         snap(stability=STABILITY_CHANGED),
@@ -1183,8 +1187,8 @@ def test_run_coverage_decides_a_pending_check_a_run_can_no_longer_get(
         None,
     ]
     for snapshot in unchanged:
-        assert run_coverage(snapshot, live=True) == run_coverage(
-            snapshot, live=False
+        assert run_coverage(snapshot, check_owed=True) == run_coverage(
+            snapshot, check_owed=False
         ) == coverage_of(snapshot)
 
 

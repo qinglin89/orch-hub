@@ -1898,11 +1898,16 @@ def create_app(
         Two populations, deliberately both, because neither answers for the other:
         ``runs`` buckets every persisted run by
         :data:`~orch_hub.protocol_provenance.RUN_COVERAGES` — the verdict plus each
-        distinct reason it is not one — while ``reports`` counts what the
-        publication feed actually carries. A task publishes an identity only under
-        unanimity over its contributing runs, so the run figure bounds the
-        published one from above and the reasons in ``runs`` are what explains the
-        gap.
+        distinct reason it is not one — while ``reports`` counts the published
+        side. A task publishes an identity only under unanimity over its
+        contributing runs, so the run figure bounds the published one from above
+        and the reasons in ``runs`` are what explains the gap.
+
+        The published side is counted over **tasks**, each answered by its newest
+        published report, with the report-version figures carried beside them:
+        reruns mint fresh evaluation ids, so entries alone would let one much-rerun
+        task weigh several times, while the feed a consumer pages is still made of
+        entries (:meth:`~orch_hub.report_catalog.ReportCatalog.protocol_coverage`).
 
         **Not** under ``/api/evaluation``, and that is the point: the run half is a
         property of run records and stays readable on a hub with evaluation

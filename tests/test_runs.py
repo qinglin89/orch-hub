@@ -3326,6 +3326,59 @@ def test_protocol_coverage_decides_a_finished_runs_pending_check(tmp_path):
     assert census.counts[COVERAGE_PENDING] == 0
 
 
+def test_protocol_coverage_still_owes_a_settling_ends_check(tmp_path):
+    # An ended record still carrying `end_settling` is a hub stopped mid
+    # transition: the next refresh resumes the tail and runs the check, so the
+    # capture is genuinely outstanding. Reading "ended" alone would call it never
+    # checked here while the manager was still about to look — a census
+    # contradicting the very lifecycle it counts.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+    run_json = manager.runs_dir / record.run_id / "run.json"
+    data = json.loads(run_json.read_text(encoding="utf-8"))
+    data["ended_ts"] = "2026-07-08T04:00:00Z"
+    data["end_settling"] = True
+    run_json.write_text(json.dumps(data), encoding="utf-8")
+
+    census = protocol_coverage(config)
+
+    assert census.counts[COVERAGE_PENDING] == 1
+    assert census.counts[COVERAGE_PENDING_ENDED] == 0
+    # And the resumed tail does run it, which is what makes the bucket above the
+    # honest one rather than a lucky guess.
+    only_status(manager)  # the refresh that resumes the interrupted end tail
+    assert read_protocol(manager.runs_dir / record.run_id).checked_ts is not None
+
+
+def test_protocol_coverage_calls_an_unrefreshable_records_check_never(tmp_path):
+    # The mirror case, and the one `ended_ts` alone gets backwards: this run dir
+    # holds its capture but no readable run.json (the crash window between the
+    # spawn and the record write), so it loads as an error stub with no end stamp.
+    # _refresh returns early on every such record, so nothing will ever settle it
+    # — and run history already renders it terminal, which is exactly what the
+    # census has to agree with instead of showing a check outstanding forever.
+    repo = make_repo(tmp_path)
+    write_deploy_lock(repo)
+    manager, _, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
+    run_dir = manager.runs_dir / record.run_id
+    (run_dir / "run.json").write_text("{ truncated", encoding="utf-8")
+
+    census = protocol_coverage(config)
+
+    assert census.counts[COVERAGE_PENDING_ENDED] == 1
+    assert census.counts[COVERAGE_PENDING] == 0
+    # Same verdict on the surface it must agree with: the row is terminal (error),
+    # so the run card reads this capture as decided too.
+    entry = manager.recent_runs(limit=1)[0].to_dict()
+    assert entry["state"] == "error"
+    assert entry["protocol"]["coverage"] == COVERAGE_PENDING
+
+
 def test_protocol_coverage_counts_a_run_predating_the_capture(tmp_path):
     # No artifact is its own bucket, never folded into a capture that found no
     # lock: one says the hub never looked, the other says the repo's receipts are
@@ -3379,7 +3432,9 @@ def test_protocol_coverage_names_a_bucket_it_does_not_know(tmp_path, monkeypatch
     manager, _, _ = make_manager(tmp_path)
     manager.start_run(repo, TASK_ID)
     config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
-    monkeypatch.setattr(runs_module, "run_coverage", lambda snap, *, live: "from-later")
+    monkeypatch.setattr(
+        runs_module, "run_coverage", lambda snap, *, check_owed: "from-later"
+    )
 
     census = protocol_coverage(config)
 

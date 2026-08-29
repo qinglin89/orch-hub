@@ -2629,13 +2629,13 @@ def test_shell_assets_resolve_through_the_runtime_resource_root():
 def test_protocol_coverage_is_read_not_re_derived():
     body = app_js()
     # The view reads the `coverage` the hub derived, and makes exactly one
-    # addition of its own: splitting a `pending` end check by run liveness, which
-    # the artifact alone cannot do. It must not reconstruct the verdict from
-    # `available`/`stability`/`checked_ts` — that mapping lives in
+    # addition of its own: splitting a `pending` end check by whether that check
+    # can still run, which the artifact alone cannot do. It must not reconstruct
+    # the verdict from `available`/`stability`/`checked_ts` — that mapping lives in
     # orch_hub/protocol_provenance.py and having two of it is the defect.
-    assert "function protocolCoverage(snap, live) {" in body
+    assert "function protocolCoverage(snap, checkOwed) {" in body
     assert 'const coverage = snap ? String(snap.coverage || "") : "absent";' in body
-    assert 'if (coverage === "pending" && !live) return "pending-ended";' in body
+    assert 'if (coverage === "pending" && !checkOwed) return "pending-ended";' in body
     assert "protocolCoverage(snap, LIVE_STATES.has(run.state))" in body
     assert "snap.stability" not in body
 

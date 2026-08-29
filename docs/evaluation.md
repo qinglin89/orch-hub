@@ -575,11 +575,22 @@ how much of this hub's corpus can be cohorted by protocol revision at all.
   the more forgiving population by construction: a report needs *all* its runs to
   have verified the same identity, so the verified run share is an upper bound on
   the published one and the other buckets are what explains the difference.
-- `reports` counts **published catalog entries** — `total`, `with_identity`, and
-  each identity-less report with the reason the hub persisted when it published
-  it (newest first, capped; `truncated` says when, and the counts stay complete).
-  Its own `available: false` means the census could not be taken at all —
-  evaluation disabled, or a catalog failing closed — never that nothing is
+  `end check pending` here means a check that is genuinely still owed — a live
+  run, or one whose end tail was interrupted and which the next scan resumes.
+  A run record broken past refreshing (an unreadable `run.json`) can never reach
+  its check, so it reads as `never checked` like any other decided absence.
+- `reports` counts the published side, over **tasks** first: `tasks` and
+  `tasks_with_identity` are distinct published `(repo, task)` pairs, each answered
+  by that task's **newest** report — newest by evaluation id, with publication
+  order as the tie-break. A rerun mints a fresh evaluation id rather than
+  overwriting, so counting catalog entries would let one much-rerun task weigh
+  several times; `reports` and `reports_with_identity` carry that entry
+  population beside it, because the feed a consumer pages is made of entries and
+  the two figures have to reconcile. Each uncovered task is listed once, under
+  the report that decides it, with the reason the hub persisted when it published
+  that report (newest first, capped; `truncated` says when, and the counts stay
+  complete). Its own `available: false` means the census could not be taken at
+  all — evaluation disabled, or a catalog failing closed — never that nothing is
   published.
 
 Deliberately not an `/api/evaluation/…` route: the run half is a property of run

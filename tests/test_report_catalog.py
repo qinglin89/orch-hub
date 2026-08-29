@@ -3017,7 +3017,10 @@ def test_protocol_coverage_counts_published_identities(tmp_path):
     census = cat.protocol_coverage()
 
     assert census.available is True
-    assert (census.total, census.with_identity) == (2, 1)
+    assert (census.tasks, census.tasks_with_identity) == (2, 1)
+    # One report each here, so the two populations coincide — which is exactly the
+    # corpus where a single `total` looked right and hid which one it counted.
+    assert (census.reports, census.reports_with_identity) == (2, 1)
     # Only the ones that carry none are listed, and each states the reason the
     # entry recorded — not a class this census invented by parsing that sentence.
     assert [(e.task_id, e.detail) for e in census.entries] == [
@@ -3026,6 +3029,48 @@ def test_protocol_coverage_counts_published_identities(tmp_path):
     row = census.entries[0]
     assert (row.repo_name, row.evaluation_id) == ("beta", "20260730T110000Z")
     assert row.seq and row.report_key  # traceable to the feed entry it counts
+
+
+def test_protocol_coverage_counts_a_rerun_task_once(tmp_path):
+    # A rerun mints a fresh evaluation id rather than overwriting, so one task can
+    # hold several published reports — and, because provenance is recomputed per
+    # pack, they can disagree about its identity. Counted per entry, this task
+    # would weigh three times and land on both sides of the same census at once;
+    # counted as work, it is one task, answered by its newest report.
+    config = cfg(tmp_path)
+    covered = protocol_section()
+    uncovered = protocol_section(
+        available=False,
+        revision=None,
+        runs=2,
+        verified=1,
+        detail="1 of 2 contributing runs carry no verified protocol identity",
+    )
+    for evaluation_id, protocol in (
+        ("20260730T100000Z", covered),
+        ("20260730T110000Z", uncovered),
+        ("20260730T090000Z", covered),  # an older evaluation, published last
+    ):
+        write_eval(
+            config, task_id=TASK_A, evaluation_id=evaluation_id, protocol=protocol
+        )
+        catalog(config).reconcile()
+    write_eval(config, slug="beta", task_id=TASK_B, protocol=covered)
+    catalog(config).reconcile()
+
+    census = catalog(config).protocol_coverage()
+
+    # Two tasks, one of them uncovered: the reran task is decided by its newest
+    # *evaluation* (110000Z), not by the entry that happens to hold the highest
+    # seq — reconciliation published 090000Z after it.
+    assert (census.tasks, census.tasks_with_identity) == (2, 1)
+    # The version population is kept beside it rather than instead of it: this is
+    # the corpus where the two genuinely differ, and either alone misleads.
+    assert (census.reports, census.reports_with_identity) == (4, 3)
+    # Listed once, under the report that decides it — the row an operator opens.
+    assert [(e.task_id, e.evaluation_id) for e in census.entries] == [
+        (TASK_A, "20260730T110000Z")
+    ]
 
 
 def test_protocol_coverage_reads_the_line_not_the_repo(tmp_path):
@@ -3040,7 +3085,7 @@ def test_protocol_coverage_reads_the_line_not_the_repo(tmp_path):
 
     census = cat.protocol_coverage()
 
-    assert (census.total, census.with_identity) == (1, 1)
+    assert (census.tasks, census.tasks_with_identity) == (1, 1)
     assert census.entries == ()
 
 
@@ -3064,7 +3109,7 @@ def test_protocol_coverage_caps_its_rows_but_never_its_counts(tmp_path):
 
     # The figures stay complete; only the rows are bounded, and the payload says
     # so — a surface showing the first N silently reads as "this is everything".
-    assert (census.total, census.with_identity) == (COVERAGE_ENTRY_LIMIT + 3, 0)
+    assert (census.tasks, census.tasks_with_identity) == (COVERAGE_ENTRY_LIMIT + 3, 0)
     assert len(census.entries) == COVERAGE_ENTRY_LIMIT
     assert census.truncated is True
     # Newest first, so the rows are the reports still being produced. The feed
@@ -3089,7 +3134,7 @@ def test_protocol_coverage_says_a_catalog_it_cannot_read_is_unavailable(tmp_path
 
     assert census.available is False
     assert census.detail == CATALOG_UNREADABLE_DETAIL
-    assert (census.total, census.with_identity) == (0, 0)
+    assert (census.tasks, census.reports) == (0, 0)
 
 
 def test_protocol_coverage_degrades_on_a_disabled_hub_instead_of_raising(tmp_path):
@@ -3102,4 +3147,4 @@ def test_protocol_coverage_degrades_on_a_disabled_hub_instead_of_raising(tmp_pat
 
     assert census.available is False
     assert census.detail == EVALUATION_DISABLED_DETAIL
-    assert census.total == 0
+    assert (census.tasks, census.reports) == (0, 0)

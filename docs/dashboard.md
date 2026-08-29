@@ -107,10 +107,11 @@ cannot, which reason applies. See
 [Protocol provenance](evaluation.md#protocol-provenance).
 
 `Protocol identity coverage →` opens the aggregate of that field over every run
-and every published report (`#/protocol`): how many carry a verified identity and
-what the reasons are for the rest. It is a read — it starts no check and repairs
-no run — and it stays available with the evaluation sidecar switched off, since
-the run half is a property of run records.
+and every published task (`#/protocol`): how many carry a verified identity and
+what the reasons are for the rest. A republished task counts once, under its
+newest report, with the report-version figures shown beside the task ones. It is
+a read — it starts no check and repairs no run — and it stays available with the
+evaluation sidecar switched off, since the run half is a property of run records.
 
 Ended runs show a bounded recent log tail. Live runs use `fetch` plus a
 `ReadableStream` reader so the bearer header remains attached; browser

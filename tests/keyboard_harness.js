@@ -5770,7 +5770,18 @@ async function scenarioProtocolCensus() {
           verified: 3, pending: 1, changed: 2, "pending-ended": 2, absent: 1,
         }),
       },
-      { available: true, detail: null, total: 4, with_identity: 1, entries: [], truncated: false }
+      {
+        available: true,
+        detail: null,
+        // Four published report versions over three tasks: one task was
+        // re-evaluated, and the page must count the work, not the reruns.
+        tasks: 3,
+        tasks_with_identity: 1,
+        reports: 4,
+        reports_with_identity: 1,
+        entries: [],
+        truncated: false,
+      }
     )
   );
   await navigate("#/protocol");
@@ -5788,9 +5799,17 @@ async function scenarioProtocolCensus() {
       "2 never checked | 1 no record"
   );
   eq(
-    "census: the published half is counted separately",
+    "census: the published half counts tasks, not how often each was re-evaluated",
     textOf("#view .cov-reports .cov-summary"),
-    "1 of 4 published reports carry a protocol identity."
+    "1 of 3 published tasks carry a protocol identity."
+  );
+  // The feed pages versions, so the version figure stays readable beside the
+  // task one — the two surfaces have to reconcile without a second page.
+  eq(
+    "census: the report versions behind the task figure are stated",
+    textOf("#view .cov-reports .cov-versions"),
+    "Each is answered by that task's newest report; the feed holds 4 published" +
+      " report versions, 1 with an identity."
   );
   check(
     "census: a reader is sent to the per-run verdicts",
@@ -5804,7 +5823,16 @@ async function scenarioProtocolCensus() {
     "/api/protocol-coverage",
     census(
       { total: 2, counts: counts({ uncaptured: 2 }) },
-      { available: true, detail: null, total: 0, with_identity: 0, entries: [], truncated: false }
+      {
+        available: true,
+        detail: null,
+        tasks: 0,
+        tasks_with_identity: 0,
+        reports: 0,
+        reports_with_identity: 0,
+        entries: [],
+        truncated: false,
+      }
     )
   );
   await navigate("#/overview");
@@ -5824,8 +5852,13 @@ async function scenarioProtocolCensus() {
       {
         available: true,
         detail: null,
-        total: 3,
-        with_identity: 1,
+        tasks: 3,
+        tasks_with_identity: 1,
+        // One report per task here: the version line is for a corpus where the
+        // two populations differ, and repeating a figure invites a reader to
+        // hunt for a distinction that is not there.
+        reports: 3,
+        reports_with_identity: 1,
         entries: [
           {
             seq: 7,
@@ -5864,10 +5897,15 @@ async function scenarioProtocolCensus() {
   );
   check(
     "census: a capped list says so rather than reading as everything",
-    (textOf("#view .cov-reports .cov-note") || "").indexOf(
+    (textOf("#view .cov-reports .cov-truncated") || "").indexOf(
       "counts above are complete"
     ) !== -1,
     "the truncated list does not say it is truncated"
+  );
+  eq(
+    "census: one report per task states no second population",
+    textOf("#view .cov-reports .cov-versions"),
+    null
   );
 
   // ---- 4) the census it cannot take is a reason, never a zero ----
@@ -5879,8 +5917,10 @@ async function scenarioProtocolCensus() {
       {
         available: false,
         detail: "task evaluation is disabled on this hub, so no reports are published",
-        total: 0,
-        with_identity: 0,
+        tasks: 0,
+        tasks_with_identity: 0,
+        reports: 0,
+        reports_with_identity: 0,
         entries: [],
         truncated: false,
       }

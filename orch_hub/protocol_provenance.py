@@ -262,11 +262,13 @@ gets one look (:func:`settle_protocol`) — and a permanent absence shown as an
 outstanding one invites an operator to wait for an answer that is not coming."""
 
 COVERAGE_PENDING = "pending"
-"""No end check is recorded yet. For a live run this is the ordinary in-flight
-state and the only non-terminal value here. For a run that has already ended it
-means the check did not run and will not — its transition has passed — so a
-reader that knows the run's liveness (run history, the run record) reports it as
-decided; this module holds the artifact only and cannot tell the two apart."""
+"""No end check is recorded yet. While a run can still reach its end check this is
+the ordinary in-flight state and the only non-terminal value here — a live run,
+and equally a run whose end was recorded but whose end tail is still owed. Once
+that transition is past, the same artifact means the check did not run and will
+not, so a reader that knows the run's lifecycle (run history, the run record)
+reports it as decided; this module holds the artifact only and cannot tell the
+two apart."""
 
 COVERAGE_UNCAPTURED = "uncaptured"
 """The launch capture found no usable identity to freeze — a missing, oversize,
@@ -292,9 +294,12 @@ there is no snapshot to ask — :func:`coverage_of` supplies it. Never repairabl
 provenance is not backfilled from a later deployment."""
 
 COVERAGE_PENDING_ENDED = "pending-ended"
-""":data:`COVERAGE_PENDING` on a run that has already ended: the end check did not
-run and now never will, because it happens only at the live->ended transition
-(:func:`settle_protocol`).
+""":data:`COVERAGE_PENDING` on a run that can no longer reach its end check: the
+check did not run and now never will, because it happens only at the live->ended
+transition (:func:`settle_protocol`). Being *ended* is not by itself that state —
+a run whose end tail was interrupted is resumed and still gets its look, and a run
+record broken past refreshing never had one to lose — which is why the reader
+answers ``check_owed`` from the run's lifecycle rather than from its end stamp.
 
 Not a value the artifact can carry, and deliberately so — ``protocol.json`` says
 only that no check is recorded, and whether that is an ordinary in-flight state or
@@ -566,28 +571,33 @@ def coverage_of(snapshot: ProtocolSnapshot | None) -> str:
     return COVERAGE_ABSENT if snapshot is None else snapshot.coverage
 
 
-def run_coverage(snapshot: ProtocolSnapshot | None, *, live: bool) -> str:
+def run_coverage(snapshot: ProtocolSnapshot | None, *, check_owed: bool) -> str:
     """One run's coverage as a reader holding the run record reports it.
 
-    :func:`coverage_of` joined with the run's own liveness, which is the only
-    addition a reader may make to the module's verdict — and the only one it
-    *must*: a settled run whose check never ran carries the same artifact as a run
-    still in flight (:data:`COVERAGE_PENDING`), and showing the first as
-    outstanding invites an operator to wait for an answer the one-look rule has
-    already withheld forever (:data:`COVERAGE_PENDING_ENDED`).
+    :func:`coverage_of` joined with whether this run's end check can still happen,
+    which is the only addition a reader may make to the module's verdict — and the
+    only one it *must*: a run whose check never ran carries the same artifact as a
+    run whose check is still to come (:data:`COVERAGE_PENDING`), and showing the
+    first as outstanding invites an operator to wait for an answer the one-look
+    rule has already withheld forever (:data:`COVERAGE_PENDING_ENDED`).
 
     Nothing else about the run is consulted. In particular a run's *end
     classification* is not: whether it completed, was stopped, or errored says
     nothing about the deployment it ran under, and folding it in here would make
     two unrelated verdicts share one bucket.
 
-    ``live`` is the caller's, because "still running" is read differently by
-    different callers and neither reading belongs here: a dashboard row has a
-    refreshed :class:`~orch_hub.models.RunStatus` state, while a census over
-    persisted records must not probe or write anything to get one.
+    ``check_owed`` is the caller's, and it is deliberately that question rather
+    than "is the process still running": the check happens in the manager's
+    live->ended transition, so what decides the bucket is whether a future pass
+    can still reach it. The two readings come apart — an ended run whose end tail
+    was interrupted still owes its check — and the callers read it from different
+    evidence: a dashboard row from its refreshed
+    :class:`~orch_hub.models.RunStatus` state, a census over persisted records
+    from the record's own lifecycle fields, since it must not probe or write
+    anything to get one (:func:`orch_hub.runs.protocol_coverage`).
     """
     coverage = coverage_of(snapshot)
-    if coverage == COVERAGE_PENDING and not live:
+    if coverage == COVERAGE_PENDING and not check_owed:
         return COVERAGE_PENDING_ENDED
     return coverage
 

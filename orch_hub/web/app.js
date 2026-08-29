@@ -3206,11 +3206,17 @@
   // One run's coverage as this view reports it: the snapshot's own derived value,
   // plus the two joins only a reader holding the run record can make. A missing
   // snapshot is `absent`, matching the hub's coverage_of() so a run buckets the
-  // same way here and in any tally; a `pending` check on a run that is no longer
-  // live is decided, not outstanding.
-  function protocolCoverage(snap, live) {
+  // same way here and in any tally; a `pending` check on a run that can no longer
+  // reach it is decided, not outstanding.
+  //
+  // `checkOwed` is that second join, and it is deliberately "can the end check
+  // still happen" rather than "is it running" — the same question the hub's
+  // run_coverage() takes. A row answers it from the refreshed run state (see the
+  // call site); a census over persisted records answers it from the record's
+  // lifecycle fields, and the two must agree per run.
+  function protocolCoverage(snap, checkOwed) {
     const coverage = snap ? String(snap.coverage || "") : "absent";
-    if (coverage === "pending" && !live) return "pending-ended";
+    if (coverage === "pending" && !checkOwed) return "pending-ended";
     return coverage;
   }
 
@@ -3228,6 +3234,9 @@
   function protocolBlock(run) {
     const snap =
       run.protocol && typeof run.protocol === "object" ? run.protocol : null;
+    // A live state IS "the check is still owed" for a row: history refreshes each
+    // run before serving it, so an ended run here has already had its transition —
+    // including an interrupted tail, which the same refresh resumes.
     const key = protocolCoverage(snap, LIVE_STATES.has(run.state));
     // An unrecognized value (a newer hub than this asset) shows itself rather
     // than being hidden or renamed: the operator can still see what was recorded.
@@ -5061,9 +5070,10 @@
     );
   }
 
-  // One published report that carries no identity, with the reason the hub
-  // persisted when it published it. The row links to the exact evaluation that was
-  // published (not the task's newest), matching where the feed row goes.
+  // One published task that carries no identity, with the reason the hub
+  // persisted when it published the report that decides it. The row links to that
+  // exact evaluation — the task's newest published one — so the sentence shown
+  // here and the report it came from are the same object.
   function coverageReportRow(entry) {
     const linkable = !!(entry.repo_name && entry.task_id && entry.evaluation_id);
     const head =
@@ -5088,12 +5098,19 @@
     );
   }
 
-  // The published census. `available: false` is the hub saying it cannot take
-  // this census at all — evaluation switched off, or a catalog failing closed —
-  // and it renders as that reason rather than as zero reports, which would read as
-  // "nothing published" and is the one wrong answer that looks right.
+  // The published census, counted over TASKS: a task is the unit of work that was
+  // evaluated, and reruns mint fresh evaluation ids, so counting catalog entries
+  // would let one much-rerun task weigh several times. Each task is answered by
+  // its newest published report; the report-version figures ride below as the
+  // second line, because the feed a reader came from pages entries and the two
+  // surfaces have to reconcile.
+  //
+  // `available: false` is the hub saying it cannot take this census at all —
+  // evaluation switched off, or a catalog failing closed — and it renders as that
+  // reason rather than as zero, which would read as "nothing published" and is the
+  // one wrong answer that looks right.
   function coverageReportsSection(reports) {
-    const head = `<section class="section cov-reports"><h2>Published reports</h2>`;
+    const head = `<section class="section cov-reports"><h2>Published tasks</h2>`;
     const foot = `</section>`;
     if (!reports)
       return head + `<p class="muted">Report coverage is unavailable.</p>` + foot;
@@ -5105,32 +5122,45 @@
         )}</p>` +
         foot
       );
-    const total = reports.total || 0;
-    if (!total)
+    const tasks = reports.tasks || 0;
+    if (!tasks)
       return (
         head +
         `<p class="muted">No evaluation reports have been published yet.</p>` +
         foot
       );
+    const versions = reports.reports || 0;
     const entries = reports.entries || [];
     return (
       head +
       `<p class="cov-summary">${escapeHtml(
-        (reports.with_identity || 0) +
+        (reports.tasks_with_identity || 0) +
           " of " +
-          total +
-          " published reports carry a protocol identity."
+          tasks +
+          " published tasks carry a protocol identity."
       )}</p>` +
+      // Only when the two populations differ: on a corpus where every task was
+      // published once the second figure repeats the first, and a page that says
+      // the same number twice invites a reader to look for the distinction.
+      (versions > tasks
+        ? `<p class="cov-note cov-versions muted">${escapeHtml(
+            "Each is answered by that task's newest report; the feed holds " +
+              versions +
+              " published report versions, " +
+              (reports.reports_with_identity || 0) +
+              " with an identity."
+          )}</p>`
+        : "") +
       (entries.length
         ? `<ul class="list">${entries.map(coverageReportRow).join("")}</ul>` +
           (reports.truncated
-            ? `<p class="cov-note muted">${escapeHtml(
+            ? `<p class="cov-note cov-truncated muted">${escapeHtml(
                 "Showing the " +
                   entries.length +
                   " most recent; the counts above are complete."
               )}</p>`
             : "")
-        : `<p class="muted">Every published report carries one.</p>`) +
+        : `<p class="muted">Every published task carries one.</p>`) +
       foot
     );
   }

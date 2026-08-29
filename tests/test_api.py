@@ -3737,8 +3737,10 @@ def test_protocol_coverage_reports_both_populations(tmp_path, monkeypatch):
     assert body["reports"] == {
         "available": True,
         "detail": None,
-        "total": 0,
-        "with_identity": 0,
+        "tasks": 0,
+        "tasks_with_identity": 0,
+        "reports": 0,
+        "reports_with_identity": 0,
         "entries": [],
         "truncated": False,
     }
@@ -4692,11 +4694,12 @@ def test_protocol_coverage_counts_the_feed_the_hub_serves(tmp_path, monkeypatch)
 
     reports = client.get("/api/protocol-coverage").json()["reports"]
 
-    assert (reports["available"], reports["total"], reports["with_identity"]) == (
-        True,
-        1,
-        0,
-    )
+    assert (
+        reports["available"],
+        reports["tasks"],
+        reports["tasks_with_identity"],
+        reports["reports"],
+    ) == (True, 1, 0, 1)
     row = reports["entries"][0]
     assert (row["repo_name"], row["task_id"]) == (repo.name, RUN_TASK_ID)
     assert row["evaluation_id"] == "20260722T090000Z"  # the published one, exactly
@@ -4704,6 +4707,30 @@ def test_protocol_coverage_counts_the_feed_the_hub_serves(tmp_path, monkeypatch)
     assert client.get("/api/evaluation/reports").json()["reports"][0][
         "report_key"
     ] == row["report_key"]
+
+
+def test_protocol_coverage_answers_a_republished_task_once(tmp_path, monkeypatch):
+    # What the page an operator opens must answer: how much of the *work* carries
+    # an identity. This task was evaluated twice and published twice, and the
+    # payload has to say one task — otherwise a hub that re-ran a few evaluations
+    # reports a corpus it does not have, weighted by how often it re-ran them.
+    client, _config, repo = make_feed_client(
+        tmp_path,
+        monkeypatch,
+        evaluation_ids=("20260722T090000Z", "20260722T100000Z"),
+    )
+
+    reports = client.get("/api/protocol-coverage").json()["reports"]
+
+    assert (reports["tasks"], reports["tasks_with_identity"]) == (1, 0)
+    # The feed still holds both versions, and the census says so beside the task
+    # figure rather than in place of it — the two surfaces have to reconcile.
+    assert (reports["reports"], reports["reports_with_identity"]) == (2, 0)
+    # One row, stated through the report that decides it: this task's newest.
+    assert [(r["task_id"], r["evaluation_id"]) for r in reports["entries"]] == [
+        (RUN_TASK_ID, "20260722T100000Z")
+    ]
+    assert reports["entries"][0]["repo_name"] == repo.name
 
 
 def test_protocol_coverage_inherits_the_feeds_refusal(tmp_path, monkeypatch):

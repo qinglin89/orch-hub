@@ -1696,10 +1696,11 @@ def protocol_coverage(config: Config) -> RunProtocolCoverage:
     (:func:`~orch_hub.protocol_provenance.read_protocol`), which is why it belongs
     on a page an operator opens rather than on a background poll.
 
-    Liveness comes from the record's own ``ended_ts`` rather than from a refreshed
-    :class:`~orch_hub.models.RunStatus`, for the same reason: it is the strongest
-    signal available without touching anything. A run whose process has died but
-    whose end this hub has not yet observed therefore counts as still pending —
+    The pending/decided join comes from the record's own lifecycle fields rather
+    than from a refreshed :class:`~orch_hub.models.RunStatus`
+    (:func:`_end_check_owed`), for the same reason: it is the strongest signal
+    available without touching anything. A run whose process has died but whose
+    end this hub has not yet observed therefore counts as still pending —
     correctly so, since its end check has genuinely not run yet and the resident
     monitor's next scan is what will settle it, one way or the other.
     """
@@ -1707,7 +1708,9 @@ def protocol_coverage(config: Config) -> RunProtocolCoverage:
     total = 0
     for run_dir, record in load_records(config):
         total += 1
-        bucket = run_coverage(read_protocol(run_dir), live=record.ended_ts is None)
+        bucket = run_coverage(
+            read_protocol(run_dir), check_owed=_end_check_owed(record)
+        )
         # ``run_coverage`` answers from a closed vocabulary, and a test pins that
         # vocabulary against the artifact's own, so a value missing from
         # RUN_COVERAGES fails there first. This still counts one under its own key
@@ -1716,6 +1719,38 @@ def protocol_coverage(config: Config) -> RunProtocolCoverage:
         # bucket it could simply have named.
         counts[bucket] = counts.get(bucket, 0) + 1
     return RunProtocolCoverage(total=total, counts=counts)
+
+
+def _end_check_owed(record: RunRecord) -> bool:
+    """Whether this run's protocol end check can still run, from the record alone.
+
+    The census's half of :func:`~orch_hub.protocol_provenance.run_coverage`'s
+    join, and it is a question about the run's *lifecycle* rather than about its
+    process: the check happens inside :meth:`RunManager._settle_end`, so it is
+    owed exactly while some future :meth:`RunManager._refresh` can still reach
+    that call. The three branches are that method's own early returns, read from
+    persisted fields because a census must probe and write nothing:
+
+    - an ``error`` stub is never refreshed at all — an unreadable or missing
+      ``run.json`` (the crash window between the spawn and the record write leaves
+      exactly that, with this run's ``protocol.json`` already on disk). Nothing
+      will ever settle it and run history already renders it terminal, so its
+      capture is decided, not outstanding;
+    - no ``ended_ts`` is the ordinary in-flight case: the check comes at the end,
+      whether the process is still alive or its death simply has not been observed
+      yet;
+    - an ended record still owes the tail exactly while ``end_settling`` stands. A
+      hub stopped mid-transition left that mark, the next refresh resumes the tail
+      and runs the check — a resumed end records an uncompared verdict rather than
+      a stable one, but that verdict has genuinely not been written yet, and a
+      census that anticipated it would be deriving a second opinion instead of
+      counting the module's.
+    """
+    if record.error:
+        return False
+    if record.ended_ts is None:
+        return True
+    return record.end_settling
 
 
 def _load_record(run_dir: Path) -> RunRecord:

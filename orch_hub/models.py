@@ -2536,15 +2536,20 @@ class RunProtocolCoverage:
 
 @dataclass(frozen=True)
 class ReportProtocolCoverageEntry:
-    """One published report that carries no protocol identity, and why.
+    """One published task that carries no protocol identity, and why.
 
-    The identity is the catalog's own (``seq``/``report_key`` plus the source
-    repo/task/evaluation), so a row is traceable to the feed entry and to the very
-    evaluation that was published — not merely to that task's newest one — without
-    a second lookup. ``detail`` is the reason the hub persisted at publication
-    time — how many contributing runs carried no verified identity, or which
-    revisions/payloads they disagreed about — read back verbatim, never re-derived
-    from current run or repo state.
+    A row per *task*, stated through the one published report that decides it —
+    that task's newest (:class:`ReportProtocolCoverage`). The identity is that
+    report's own (``seq``/``report_key`` plus the source repo/task/evaluation), so
+    the row is traceable to the exact feed entry the verdict was read off and
+    opens the evaluation that was published, without a second lookup. A task
+    republished several times therefore appears once, under its current answer,
+    rather than once per rerun.
+
+    ``detail`` is the reason the hub persisted at publication time — how many
+    contributing runs carried no verified identity, or which revisions/payloads
+    they disagreed about — read back verbatim, never re-derived from current run
+    or repo state.
     """
 
     seq: int = 0
@@ -2567,21 +2572,41 @@ class ReportProtocolCoverageEntry:
 
 @dataclass(frozen=True)
 class ReportProtocolCoverage:
-    """How many published reports carry a protocol identity, and why the rest do not.
+    """How much published work carries a protocol identity, and why the rest does not.
 
-    The population an external consumer actually sees: every entry in the
-    append-only report catalog. ``with_identity`` counts entries whose
-    ``provenance.protocol`` is available — the ones a consumer can cohort by
-    revision — out of ``total``.
+    Two populations over the same append-only catalog, because the corpus has two
+    honest denominators and neither is the other:
+
+    - ``tasks``/``tasks_with_identity`` — distinct published tasks
+      (``(repo_slug, task_id)``), each answered by the **newest** report published
+      for it. This is the census the coverage question means: a task is the unit
+      of work that gets evaluated, and how many times the hub happened to re-run
+      the evaluator over one says nothing about whether that work can be cohorted
+      by protocol revision. Counting report versions instead lets one task with
+      three semantic reruns weigh three times, and — since provenance is recomputed
+      per evidence pack — even land on both sides of the same figure.
+    - ``reports``/``reports_with_identity`` — every catalog entry, which is what a
+      consumer pages through. Kept beside the task figures rather than in place of
+      them, so the two surfaces reconcile: the feed shows report versions and this
+      says how much of it is cohortable, while the task figures say how much of
+      the *work* is.
+
+    Which report speaks for a task is an explicit rule, not an accident of order:
+    the newest by evaluation-generation
+    (:func:`orch_hub.evaluation.evaluation_order_key`, the per-task view's own
+    rule), tie-broken by publication ``seq``. Not "any version has one" — that
+    would report a task as covered on the strength of a report superseded since —
+    and not unanimity across versions, which would be a third rule nobody else
+    holds and would let a rerun cost a task coverage it still publishes.
 
     The reasons are carried as ``entries`` rather than as a second ``counts``
     table, because unlike a run there is no per-report reason *vocabulary* to
     bucket by: a catalog entry records availability plus one operator-readable
     sentence, and that sentence embeds run counts, revisions, and digests.
     Bucketing it would mean parsing the hub's own prose back into classes it never
-    published — so each unavailable report states its own reason instead, capped
+    published — so each uncovered task states its own reason instead, capped
     (``truncated`` says when) so one large corpus cannot return an unbounded page.
-    ``total``/``with_identity`` stay complete regardless of that cap.
+    Every count stays complete regardless of that cap.
 
     ``available`` is about the *census*, not about any report: false means the
     catalog could not be read at all — evaluation disabled, or a feed failing
@@ -2593,8 +2618,10 @@ class ReportProtocolCoverage:
 
     available: bool = False
     detail: str | None = None
-    total: int = 0
-    with_identity: int = 0
+    tasks: int = 0
+    tasks_with_identity: int = 0
+    reports: int = 0
+    reports_with_identity: int = 0
     entries: tuple[ReportProtocolCoverageEntry, ...] = ()
     truncated: bool = False
 
@@ -2602,8 +2629,10 @@ class ReportProtocolCoverage:
         return {
             "available": self.available,
             "detail": self.detail,
-            "total": self.total,
-            "with_identity": self.with_identity,
+            "tasks": self.tasks,
+            "tasks_with_identity": self.tasks_with_identity,
+            "reports": self.reports,
+            "reports_with_identity": self.reports_with_identity,
             "entries": [entry.to_dict() for entry in self.entries],
             "truncated": self.truncated,
         }

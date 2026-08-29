@@ -642,23 +642,38 @@ class ReportCatalog:
         )
 
     def protocol_coverage(self) -> ReportProtocolCoverage:
-        """How many published reports carry a protocol identity, and why the rest do not.
+        """How much published work carries a protocol identity, and why the rest does not.
 
-        The published half of the coverage census, and the one that answers the
-        question as a consumer meets it: ``provenance.protocol`` is the block an
-        external importer cohorts by, so "how much of my feed is cohortable" is a
-        property of these entries and of nothing else. Per-run coverage
-        (:func:`orch_hub.runs.protocol_coverage`) explains this number but cannot
+        The published half of the coverage census. ``provenance.protocol`` is the
+        block an external importer cohorts by, so this is where "how much of my
+        corpus can be cohorted at all" is answered; per-run coverage
+        (:func:`orch_hub.runs.protocol_coverage`) explains the number but cannot
         stand in for it — a task publishes an identity only when *every*
         contributing run verified the same one.
+
+        Counted over **tasks** first, and over report versions beside them. A
+        catalog entry is one *publication* of a task's evaluation, and reruns mint
+        fresh evaluation ids by design (history is preserved by minting, not by
+        overwriting), so entries are the wrong denominator for "how much work is
+        covered": one much-rerun task would weigh several times, and a task whose
+        older report carried an identity its newest does not would be counted on
+        both sides at once. So each ``(repo_slug, task_id)`` is answered by the
+        one report that speaks for it — its newest, by
+        :func:`~orch_hub.evaluation.evaluation_order_key` (the rule the per-task
+        evaluation view already lists by) with publication ``seq`` as the
+        tie-break, since a backfilled reconciliation can publish an older
+        evaluation after a newer one. Both figures are returned because the two
+        surfaces must reconcile: the feed pages entries, and a reader comparing
+        them should not have to guess which population a single ``total`` meant
+        (:class:`~orch_hub.models.ReportProtocolCoverage`).
 
         Read straight off the durable catalog lines, never from live run or repo
         state: an entry records what was true when it was published, and a report
         whose repo has since been redeployed still carries the identity its runs
         actually used. The reasons are the hub's own persisted sentences, listed
-        per report rather than bucketed, because the catalog publishes availability
+        per task rather than bucketed, because the catalog publishes availability
         plus prose and inventing classes by parsing that prose back would be a
-        second, unowned vocabulary (:class:`~orch_hub.models.ReportProtocolCoverage`).
+        second, unowned vocabulary.
 
         Degrades explicitly instead of raising, in both directions this read can
         fail: a disabled subsystem and a catalog failing closed on ambiguous
@@ -678,6 +693,14 @@ class ReportCatalog:
             return ReportProtocolCoverage(
                 available=False, detail=CATALOG_UNREADABLE_DETAIL
             )
+        deciding: dict[tuple[str, str], ReportCatalogEntry] = {}
+        for entry in found:
+            key = (entry.repo_slug, entry.task_id)
+            standing = deciding.get(key)
+            if standing is None or _report_version_key(entry) > _report_version_key(
+                standing
+            ):
+                deciding[key] = entry
         missing = [
             ReportProtocolCoverageEntry(
                 seq=entry.seq,
@@ -687,13 +710,20 @@ class ReportCatalog:
                 evaluation_id=entry.evaluation_id,
                 detail=entry.provenance.protocol_detail,
             )
-            for entry in found
+            # By publication order, not by the grouping's: the rows are capped, and
+            # which ones survive the cap has to be a stated rule rather than the
+            # order tasks happened to first appear in the catalog.
+            for entry in sorted(deciding.values(), key=lambda e: e.seq)
             if not entry.provenance.protocol_available
         ]
         return ReportProtocolCoverage(
             available=True,
-            total=len(found),
-            with_identity=len(found) - len(missing),
+            tasks=len(deciding),
+            tasks_with_identity=len(deciding) - len(missing),
+            reports=len(found),
+            reports_with_identity=sum(
+                1 for entry in found if entry.provenance.protocol_available
+            ),
             # Newest first: the reasons worth acting on are the ones still being
             # produced, and a corpus's oldest reports are the ones whose runs
             # predate the capture entirely. The feed itself stays ascending —
@@ -2153,6 +2183,22 @@ _ARTIFACT_DEFECTS = {
 """Which artifact states are defects, and under which code they are reported.
 ``retained`` and ``pruned`` are absent on purpose: a complete set is nothing to
 report, and an entry outliving pruned artifacts is the feed working as designed."""
+
+
+def _report_version_key(entry: ReportCatalogEntry) -> tuple[tuple[str, int], int]:
+    """Which of one task's published reports is the newer, as the coverage census ranks them.
+
+    Generation order first (:func:`~orch_hub.evaluation.evaluation_order_key`, the
+    same rule the per-task evaluation view lists by, so the census and the view a
+    row links to cannot disagree about which report is current), publication
+    ``seq`` second. The tie-break is not decoration: reconciliation backfills a
+    report evaluated before its task was archived, so a *later* seq can carry an
+    *older* evaluation, and ranking by seq alone would let that backfill overrule
+    the newer report of the same task. Comparing scoped evaluation ids is sound
+    only within one ``(repo_slug, task_id)`` group, which is the only place this
+    is used.
+    """
+    return (evaluation_order_key(entry.evaluation_id), entry.seq)
 
 
 def _census_identity(entry: ReportCatalogEntry) -> tuple[str, str, str, str]:
