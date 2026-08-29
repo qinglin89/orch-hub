@@ -101,6 +101,11 @@ elapsed run time, events, and the effective configuration captured from the
 run itself. Historical task links continue working after task closeout by
 falling back to the local task archive.
 
+Each run card also carries a `Protocol identity:` disclosure: whether the hub
+can prove which deployed protocol that run ran under end to end, and when it
+cannot, which reason applies. See
+[Protocol provenance](evaluation.md#protocol-provenance).
+
 Ended runs show a bounded recent log tail. Live runs use `fetch` plus a
 `ReadableStream` reader so the bearer header remains attached; browser
 `EventSource` is not used. Log text is inserted as text, not HTML.

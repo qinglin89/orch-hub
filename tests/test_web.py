@@ -2617,3 +2617,84 @@ def test_shell_assets_resolve_through_the_runtime_resource_root():
     assert api.WEB_DIR == resources.web_dir()
     for filename, _ in api.SHELL_ASSETS.values():
         assert (api.WEB_DIR / filename).is_file(), filename
+
+
+# ---- protocol identity coverage ----------------------------------------------
+#      (2026-08-29-protocol-identity-coverage, session-2)
+#
+# Rendering behaviour — the eight coverage labels and the pending/liveness join —
+# is verified by the jsc harness (tests/keyboard_harness.js,
+# scenarioProtocolCoverage). These pin the boundaries a grep can hold: that the
+# view derives its verdict from the payload it already has, and that the vocabulary
+# it renders is the hub's, not a second one invented here.
+
+
+def test_protocol_coverage_is_read_not_re_derived():
+    body = app_js()
+    # The view reads the `coverage` the hub derived, and makes exactly one
+    # addition of its own: splitting a `pending` end check by run liveness, which
+    # the artifact alone cannot do. It must not reconstruct the verdict from
+    # `available`/`stability`/`checked_ts` — that mapping lives in
+    # orch_hub/protocol_provenance.py and having two of it is the defect.
+    assert "function protocolCoverage(snap, live) {" in body
+    assert 'const coverage = snap ? String(snap.coverage || "") : "absent";' in body
+    assert 'if (coverage === "pending" && !live) return "pending-ended";' in body
+    assert "protocolCoverage(snap, LIVE_STATES.has(run.state))" in body
+    assert "snap.stability" not in body
+
+
+def test_protocol_coverage_keeps_every_reason_apart():
+    from orch_hub.protocol_provenance import COVERAGES
+
+    body = app_js()
+    covermap = body[body.index("const PROTOCOL_COVERAGE = {") :]
+    covermap = covermap[: covermap.index("\n  };")]
+    # The cross-language half of the contract: every value the hub can derive has
+    # its own label here. A coverage the SPA does not know renders as its raw name
+    # — honest, but unexplained — so the map must track COVERAGES, and this is the
+    # only place that can notice when it stops.
+    for value in COVERAGES:
+        assert f"{value}:" in covermap, value
+    # Plus the one key the hub never sends: the reader's join of a `pending` end
+    # check with a run that has already finished.
+    assert '"pending-ended":' in covermap
+    # The three end-check states an operator must not confuse: a check still to
+    # come, one that will now never run, and one that ran and concluded nothing.
+    assert '"end check pending"' in covermap
+    assert '"never checked"' in covermap
+    assert '"end check inconclusive"' in covermap
+    # The hub's own per-run sentence reaches the reader rather than only the log.
+    assert '["detail", snap.detail || "\u2014"]' in body
+
+
+def test_protocol_coverage_rides_the_history_payload():
+    body = app_js()
+    # Snapshot-only, like the launch config beside it: no per-run fetch, and
+    # rendered outside the card link (a <details> inside an <a> is invalid and its
+    # click would fight the card's navigation).
+    card = body[body.index("function historyRunCard(run) {") :]
+    card = card[: card.index("// The way into the cross-repo report feed")]
+    assert "const protocol = protocolBlock(run);" in card
+    assert "</a>\n        ${config}\n        ${protocol}" in card
+    assert "api(" not in card
+
+
+def test_report_card_states_protocol_provenance():
+    body = app_js()
+    # The one provenance block the feed card skipped while rendering the two
+    # beside it — and the one an external consumer actually cohorts by. Absent
+    # provenance is said with its reason, under the rule already written there.
+    assert "const proto = prov.protocol || {};" in body
+    assert "shortRev(proto.effective_revision)" in body
+    assert '"unavailable" + (proto.detail ? " — " + proto.detail : "")' in body
+
+
+def test_protocol_coverage_styles_are_present():
+    css = styles_css()
+    for selector in (
+        ".card.run .run-protocol",
+        ".card.run .run-protocol summary",
+        ".card.run .run-protocol .pc-rev",
+        ".card.run .run-protocol .pc-why",
+    ):
+        assert selector in css, selector

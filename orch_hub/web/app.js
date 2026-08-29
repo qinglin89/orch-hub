@@ -3132,6 +3132,147 @@
     );
   }
 
+  // How a run's protocol identity coverage reads. The keys are the `coverage`
+  // values the hub derives per run (orch_hub/protocol_provenance.py, COVERAGES),
+  // in that order: `verified` is the one that lets the run's task publish the
+  // deployed-protocol identity a report is cohorted by, and every other value is
+  // a distinct reason it cannot. They are deliberately NOT collapsed into one
+  // "unavailable": a mid-run redeployment is the operator's own action, `drifted`
+  // names damage the protocol forbids and someone has to undo, `uncaptured`
+  // points at the target repo's deploy lock, and `unusable` at the run's own
+  // record in the hub's data dir. One shared label would rebuild here exactly the
+  // blindness this block exists to end.
+  //
+  // Each entry is [summary label, badge kind, what it means for this run].
+  // `pending-ended` is the one key the hub never sends: `coverage: "pending"`
+  // says only that no end check is recorded, and the artifact alone cannot tell a
+  // run still in flight from one whose end check will now never happen. A run row
+  // knows the run's state, so it makes that join (protocolCoverage below) instead
+  // of showing a finished run a check that looks outstanding.
+  const PROTOCOL_COVERAGE = {
+    verified: [
+      "verified",
+      "ok",
+      "The deployment this run launched under was unchanged, files and all, when it ended. This run can publish its protocol identity.",
+    ],
+    pending: [
+      "end check pending",
+      "run",
+      "The end check runs when this run ends. It is the only outstanding coverage state.",
+    ],
+    "pending-ended": [
+      "never checked",
+      "",
+      "This run finished without its end check recorded, and the check happens only at that transition — so no identity will be published for it.",
+    ],
+    changed: [
+      "redeployed mid-run",
+      "warn",
+      "The protocol deployment was replaced while this run was going. Ordinary, and it still costs the run an identity: a report names what its sessions actually ran under, end to end.",
+    ],
+    drifted: [
+      "deployed files edited",
+      "bad",
+      "The deployed protocol files were edited under this run. Hand-editing a deployed copy is forbidden; the canonical change belongs in mandrel and the deployment should be redeployed from it.",
+    ],
+    uncompared: [
+      "end check inconclusive",
+      "",
+      "The end check ran and could conclude nothing — the hub was not up to see this run end, or a receipt was unreadable at it. One run gets one look, so this is permanent.",
+    ],
+    uncaptured: [
+      "no identity captured",
+      "",
+      "The launch capture found no usable deploy lock in the target repo, so there was never an identity for the end check to confirm. The defect is in the repo's receipts.",
+    ],
+    unusable: [
+      "record unreadable",
+      "bad",
+      "This run's own protocol record could not be read or could not be trusted. The damaged file is the hub's, under its data dir — not a receipt in the target repo.",
+    ],
+    absent: [
+      "no record",
+      "",
+      "This run was launched before the hub captured protocol identity. Provenance is never backfilled from a later deployment, so this stays absent.",
+    ],
+  };
+
+  // One run's coverage as this view reports it: the snapshot's own derived value,
+  // plus the two joins only a reader holding the run record can make. A missing
+  // snapshot is `absent`, matching the hub's coverage_of() so a run buckets the
+  // same way here and in any tally; a `pending` check on a run that is no longer
+  // live is decided, not outstanding.
+  function protocolCoverage(snap, live) {
+    const coverage = snap ? String(snap.coverage || "") : "absent";
+    if (coverage === "pending" && !live) return "pending-ended";
+    return coverage;
+  }
+
+  // The run's protocol identity coverage: whether this run can publish the
+  // identity a report is cohorted by and, when it cannot, which reason applies.
+  // A disclosure beside the launch snapshot and for the same reason — the verdict
+  // belongs on the summary line where it is scannable, the capture's own fields
+  // behind it.
+  //
+  // Unlike the launch snapshot, an absent artifact renders too. "This run has no
+  // protocol record" is itself one of the eight answers, and a card that simply
+  // dropped the block would leave the run silent about the very field an operator
+  // came to check — the same omission the report feed made by skipping this
+  // provenance block entirely.
+  function protocolBlock(run) {
+    const snap =
+      run.protocol && typeof run.protocol === "object" ? run.protocol : null;
+    const key = protocolCoverage(snap, LIVE_STATES.has(run.state));
+    // An unrecognized value (a newer hub than this asset) shows itself rather
+    // than being hidden or renamed: the operator can still see what was recorded.
+    const [label, kind, why] = PROTOCOL_COVERAGE[key] || [key || "unknown", "", ""];
+    // The verified revision rides the summary, because that is the whole payload
+    // of a verified run: the cohort key a consumer will read off its task's
+    // report. No other coverage has one to show.
+    const identity = key === "verified" ? " · " + shortRev(snap.source_git_commit) : "";
+    // The capture's own fields, only where there is a capture to show. They are
+    // labelled `captured` throughout: a snapshot keeps its recorded identity
+    // readable for audit even when the end check refused it, and a bare "rev" row
+    // on a `changed` run would read as an identity the run is publishable under.
+    const rows = [["coverage", label]];
+    if (snap) {
+      rows.push(
+        ["captured rev", shortRev(snap.source_git_commit)],
+        ["captured payload", shortRev(snap.canonical_payload_sha256)],
+        ["captured", snap.captured_ts ? formatCommitTime(snap.captured_ts) : "—"],
+        [
+          "end check",
+          snap.checked_ts ? formatCommitTime(snap.checked_ts) : "not recorded",
+        ],
+        [
+          "files checked",
+          snap.payload_files === null || snap.payload_files === undefined
+            ? "—"
+            : String(snap.payload_files),
+        ],
+        // The hub's own sentence for THIS run, beside the sentence above for its
+        // class of reason: the class says what kind of gap it is, the detail says
+        // which file, which run boundary, which mismatch.
+        ["detail", snap.detail || "—"]
+      );
+    }
+    const kv = rows
+      .map(([k, v]) => `<dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd>`)
+      .join("");
+    // The verdict is badged, not written as more mono text like the launch
+    // config's summary: it reuses the dashboard's one state vocabulary (ok /
+    // warn / bad / run) rather than adding an eight-value palette of its own, so
+    // "this needs a human" reads the same here as on a run or a readiness row.
+    return (
+      `<details class="run-protocol">` +
+      `<summary>Protocol identity: ${badge(label, kind)}` +
+      `<span class="pc-rev">${escapeHtml(identity)}</span></summary>` +
+      `<p class="pc-why">${escapeHtml(why)}</p>` +
+      `<dl class="kv">${kv}</dl>` +
+      `</details>`
+    );
+  }
+
   function historyRunCard(run) {
     const kv = runMetaKv(run);
     // Each entry embeds its persisted per-session snapshot (sessions[] +
@@ -3143,6 +3284,11 @@
     // OUTSIDE the card-link — interactive content like <details>/<summary> is
     // invalid inside an <a> and its click would fight the card's own link.
     const config = effectiveConfigBlock(run.effective_config);
+    // So does the protocol snapshot, and it goes outside the link for the same
+    // reason. It follows the launch config deliberately: the config says what
+    // this run was told to do, the protocol says whether the hub can prove what
+    // it did it under.
+    const protocol = protocolBlock(run);
     // History spans live and ended runs, so the destination splits accordingly:
     // a live run opens its active task detail, an ended one the run-scoped task
     // view (the task may already be archived), and a run with no task id keeps
@@ -3159,6 +3305,7 @@
           ${strips}
         </a>
         ${config}
+        ${protocol}
       </li>`;
   }
 
@@ -4646,6 +4793,7 @@
     const prov = entry.provenance || {};
     const runs = prov.runs || {};
     const git = prov.git || {};
+    const proto = prov.protocol || {};
     const linkable = !!(entry.repo_name && entry.task_id && entry.evaluation_id);
     const kv = evalKv([
       ["repo", entry.repo_name || "(unknown repo)"],
@@ -4666,6 +4814,20 @@
       // omitted — a blank row would read as "no runs" / "no commits".
       ["runs", runs.available ? String(runs.count || 0) : "unavailable"],
       ["commits", git.available ? String(git.commit_count || 0) : "unavailable"],
+      // The protocol identity — the one provenance block this card used to skip
+      // while rendering the two beside it, and the one a consumer keys on: it
+      // cohorts reports by the deployed protocol their sessions ran under. It is
+      // unanimity-gated over the report's contributing runs, so "unavailable" is
+      // common and its reason is the whole information — how many runs carried no
+      // verified identity, or which revisions/payloads they disagreed about. The
+      // detail is appended rather than hidden behind the row, under the rule
+      // already written here: absent provenance is said, not omitted.
+      [
+        "protocol",
+        proto.available
+          ? shortRev(proto.effective_revision)
+          : "unavailable" + (proto.detail ? " — " + proto.detail : ""),
+      ],
     ]);
     // Publication requires the whole L1 + L2 artifact set to be durable, so every
     // feed item is complete by construction. Say it once per row in the same

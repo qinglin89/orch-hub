@@ -2575,6 +2575,43 @@ code {
   font-family: var(--mono);
 }
 
+/* Protocol identity coverage: the same disclosure geometry as the launch config
+   directly above it, so the two per-run snapshots read as one stack rather than
+   two unrelated widgets. The summary stays a plain block — a flex summary drops
+   the disclosure triangle in WebKit, and this row must still look openable. */
+
+.card.run .run-protocol {
+  margin: 6px 12px 2px;
+  font-size: 12px;
+}
+
+.card.run .run-protocol summary {
+  cursor: pointer;
+  color: var(--muted);
+  font-family: var(--mono);
+  letter-spacing: 0.04em;
+}
+
+/* The verified revision, and only ever that — the cohort key a consumer reads
+   off this run's report, kept in the summary beside its badge. */
+.card.run .run-protocol .pc-rev {
+  font-family: var(--mono);
+  color: var(--muted);
+}
+
+/* What this coverage value means, in a sentence, above the capture's own fields:
+   an operator who has never read the provenance module should not have to infer
+   "redeployed mid-run" from a bare label. */
+.card.run .run-protocol .pc-why {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.45;
+}
+
+.card.run .run-protocol .kv {
+  margin-top: 6px;
+}
+
 /* ---- remote intake (draft review) ---- */
 
 .intake .intake-actions,

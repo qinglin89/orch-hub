@@ -5337,6 +5337,384 @@ async function scenarioRepoAdmission() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+/* ------------------------------------------------- protocol identity coverage
+ *
+ * Whether a run can publish the deployed-protocol identity its task's report is
+ * cohorted by — and, when it cannot, WHICH of the reasons applies. The reasons
+ * are the point: a redeployment mid-run, an edited deployed file, an end nobody
+ * observed, and a run record the hub cannot read send an operator to four
+ * different places, and rendering them as one "unavailable" would preserve, in
+ * this view, the blindness the field had before it was rendered at all.
+ *
+ * Behaviour rather than wiring, so it belongs here: the summary label is derived
+ * (coverage x run liveness), and the one join a payload cannot make on its own —
+ * a `pending` end check on a run that has already finished is decided, not
+ * outstanding — is only observable by rendering it.
+ */
+async function scenarioProtocolCoverage() {
+  installRoutes({ waiting: false });
+
+  var REV = "1234567890abcdef1234567890abcdef12345678";
+  var PAYLOAD = "fedcba0987654321fedcba0987654321fedcba09";
+  // A settled snapshot as the hub serializes it (ProtocolSnapshot.to_dict),
+  // including the derived `coverage` the view reads.
+  var snap = function (coverage, over) {
+    var base = {
+      schema_version: 2,
+      available: true,
+      source_git_commit: REV,
+      canonical_payload_sha256: PAYLOAD,
+      source_repo: "mandrel",
+      lock_schema_version: 1,
+      captured_ts: "2026-08-20T08:00:00Z",
+      stability: "stable",
+      checked_ts: "2026-08-20T08:30:00Z",
+      payload_files: 12,
+      coverage: coverage,
+      detail: null,
+    };
+    for (var k in over) base[k] = over[k];
+    return base;
+  };
+  var run = function (id, state, protocol) {
+    return {
+      run_id: id,
+      repo_name: REPO,
+      repo_path: "/repos/" + REPO,
+      task_id: TASK,
+      state: state,
+      started_ts: "2026-08-20T08:00:00Z",
+      ended_ts: state === "active" ? null : "2026-08-20T08:30:00Z",
+      exit_code: state === "active" ? null : 0,
+      sessions: [],
+      context_budget: 200000,
+      session_est: { current: 1, total: 2 },
+      effective_config: null,
+      protocol: protocol,
+    };
+  };
+  var runs = [
+    run("pc-verified", "completed", snap("verified")),
+    run(
+      "pc-changed",
+      "completed",
+      snap("changed", {
+        stability: "changed",
+        detail: ".ai-deploy-lock.json no longer names the deploy this run captured",
+      })
+    ),
+    run(
+      "pc-drifted",
+      "completed",
+      snap("drifted", {
+        stability: "drifted",
+        detail: "deployed files no longer match the manifest: conduct.md",
+      })
+    ),
+    run(
+      "pc-uncompared",
+      "completed",
+      snap("uncompared", {
+        stability: "unverified",
+        payload_files: null,
+        detail:
+          "run ended while the hub was down; this run can never publish a protocol identity",
+      })
+    ),
+    run(
+      "pc-uncaptured",
+      "completed",
+      snap("uncaptured", {
+        available: false,
+        source_git_commit: null,
+        canonical_payload_sha256: null,
+        captured_ts: null,
+        checked_ts: null,
+        payload_files: null,
+        detail: "no .ai-deploy-lock.json in the repo",
+      })
+    ),
+    run(
+      "pc-unusable",
+      "completed",
+      snap("unusable", {
+        available: false,
+        source_git_commit: null,
+        canonical_payload_sha256: null,
+        captured_ts: null,
+        checked_ts: null,
+        payload_files: null,
+        detail: "protocol.json could not be read",
+      })
+    ),
+    // The join: identical artifacts, opposite readings. A live run's end check is
+    // genuinely still to come; the finished one's transition has passed, so its
+    // check will never run and must not read as outstanding.
+    run("pc-live", "active", snap("pending", { checked_ts: null, payload_files: null })),
+    run(
+      "pc-ended-pending",
+      "completed",
+      snap("pending", { checked_ts: null, payload_files: null })
+    ),
+    // A run from before the capture existed: the hub serializes `protocol: null`.
+    run("pc-absent", "completed", null),
+  ];
+  route("GET", "/api/history/runs", {
+    runs: runs,
+    page: 1,
+    page_size: 50,
+    total_runs: runs.length,
+    total_pages: 1,
+    has_prev: false,
+    has_next: false,
+    prev_cursor: null,
+    next_cursor: null,
+    evaluation_enabled: false,
+    evaluation_states: [],
+  });
+
+  var callsBefore = CALLS.length;
+  await navigate("#/runs");
+  // The snapshot rides the history payload, like the launch config beside it. A
+  // per-run fetch would be one extra request per row on the page that has the
+  // most rows, which is exactly why the backend embeds it.
+  check(
+    "protocol: the coverage of a whole page costs no extra request",
+    CALLS.slice(callsBefore).every(function (c) {
+      return c.path.indexOf("protocol") === -1;
+    }),
+    "run history issued a per-run protocol request"
+  );
+  // Card lookup by run id, so the assertions do not depend on group ordering.
+  var blockFor = function (runId) {
+    var cards = doc.querySelectorAll(".card.run");
+    for (var i = 0; i < cards.length; i++) {
+      var idEl = cards[i].querySelector(".run-id");
+      if (idEl && idEl.textContent.trim() === runId)
+        return cards[i].querySelector(".run-protocol");
+    }
+    return null;
+  };
+  var summaryFor = function (runId) {
+    var block = blockFor(runId);
+    return block ? block.querySelector("summary").textContent.trim() : null;
+  };
+  var badgeFor = function (runId) {
+    var block = blockFor(runId);
+    var el = block && block.querySelector("summary .badge");
+    return el ? el.className : null;
+  };
+
+  eq(
+    "protocol: every run carries the block, including one with no record",
+    doc.querySelectorAll(".run-protocol").length,
+    runs.length
+  );
+  // A verified run states the cohort key itself — that is the whole payload of
+  // being verified.
+  eq(
+    "protocol: a verified run shows its verdict and revision",
+    summaryFor("pc-verified"),
+    "Protocol identity: verified · 1234567890ab…"
+  );
+  eq("protocol: verified badges ok", badgeFor("pc-verified"), "badge ok");
+  // The four suppressing reasons stay four different sentences.
+  eq(
+    "protocol: a mid-run redeployment says so",
+    summaryFor("pc-changed"),
+    "Protocol identity: redeployed mid-run"
+  );
+  eq("protocol: a redeployment warns", badgeFor("pc-changed"), "badge warn");
+  eq(
+    "protocol: an edited deployment says so",
+    summaryFor("pc-drifted"),
+    "Protocol identity: deployed files edited"
+  );
+  eq(
+    "protocol: forbidden damage is the strongest signal",
+    badgeFor("pc-drifted"),
+    "badge bad"
+  );
+  eq(
+    "protocol: an unobservable end is its own reason",
+    summaryFor("pc-uncompared"),
+    "Protocol identity: end check inconclusive"
+  );
+  eq(
+    "protocol: a repo with no usable deploy lock is its own reason",
+    summaryFor("pc-uncaptured"),
+    "Protocol identity: no identity captured"
+  );
+  eq(
+    "protocol: a damaged hub-owned record is not the repo's fault",
+    summaryFor("pc-unusable"),
+    "Protocol identity: record unreadable"
+  );
+  eq(
+    "protocol: a damaged record is a defect, not a gap",
+    badgeFor("pc-unusable"),
+    "badge bad"
+  );
+  eq(
+    "protocol: a run predating the capture says it has no record",
+    summaryFor("pc-absent"),
+    "Protocol identity: no record"
+  );
+  // A <details> inside the card's <a> is invalid HTML and its click would fight
+  // the card's own navigation — the same reason the launch config sits outside.
+  check(
+    "protocol: the disclosure stays outside the card link",
+    blockFor("pc-verified").closest("a") === null,
+    "the protocol disclosure is nested in the card link"
+  );
+
+  // The join, both directions.
+  eq(
+    "protocol: a live run's end check is genuinely outstanding",
+    summaryFor("pc-live"),
+    "Protocol identity: end check pending"
+  );
+  eq(
+    "protocol: an outstanding check rides the run colour",
+    badgeFor("pc-live"),
+    "badge run"
+  );
+  eq(
+    "protocol: the same artifact on a finished run reads as decided",
+    summaryFor("pc-ended-pending"),
+    "Protocol identity: never checked"
+  );
+
+  // Opening a row gives the hub's own reason for THIS run, beside what the
+  // capture recorded — the detail every suppressing verdict already carried and
+  // that nothing outside the module could read.
+  var rowsFor = function (runId) {
+    var out = {};
+    var block = blockFor(runId);
+    if (!block) return out;
+    var dts = block.querySelectorAll("dt");
+    var dds = block.querySelectorAll("dd");
+    for (var i = 0; i < dts.length; i++)
+      out[dts[i].textContent.trim()] = dds[i].textContent.trim();
+    return out;
+  };
+  var drifted = rowsFor("pc-drifted");
+  eq("protocol: the row names its coverage", drifted["coverage"], "deployed files edited");
+  eq(
+    "protocol: the hub's own reason reaches the reader",
+    drifted["detail"],
+    "deployed files no longer match the manifest: conduct.md"
+  );
+  eq("protocol: the capture's revision stays auditable", drifted["captured rev"], "1234567890ab…");
+  eq("protocol: and so does its payload digest", drifted["captured payload"], "fedcba098765…");
+  eq("protocol: the end check reports what it compared", drifted["files checked"], "12");
+  check(
+    "protocol: an unexplained why is never rendered empty",
+    (blockFor("pc-drifted").querySelector(".pc-why") || {}).textContent.indexOf(
+      "forbidden"
+    ) !== -1,
+    "the drifted block explains nothing"
+  );
+  eq(
+    "protocol: an unrun end check says so rather than showing a time",
+    rowsFor("pc-ended-pending")["end check"],
+    "not recorded"
+  );
+  // An absent artifact has no capture to show: coverage alone, no "—" rows
+  // pretending there were fields.
+  eq(
+    "protocol: a run with no record shows coverage and nothing invented",
+    Object.keys(rowsFor("pc-absent")).join(","),
+    "coverage"
+  );
+
+  // ---- the same fact on the published report, where a consumer reads it ----
+  var provenance = function (over) {
+    var base = {
+      runs: { available: true, run_ids: ["r1", "r2"], count: 2, detail: null },
+      git: {
+        available: true,
+        since: null,
+        until: null,
+        commit_count: 4,
+        newest_sha: "abc1234",
+        detail: null,
+      },
+      protocol: {
+        available: true,
+        effective_revision: REV,
+        deploy_lock_hash: PAYLOAD,
+        detail: null,
+      },
+      orchestrator_config: { available: false, detail: "not in the evidence pack" },
+    };
+    for (var k in over) base.protocol[k] = over[k];
+    return base;
+  };
+  var entry = function (seq, task, prov) {
+    return {
+      seq: seq,
+      report_key: "key-" + seq,
+      cataloged_ts: "2026-08-21T09:00:00Z",
+      repo_name: REPO,
+      repo_slug: REPO,
+      repo_path: "/repos/" + REPO,
+      task_id: task,
+      evaluation_id: "20260821T09000" + seq + "Z",
+      generated_ts: "2026-08-21T08:00:00Z",
+      target_source: "archived",
+      archived: true,
+      evaluator: { backend: "claude-cli", model: "m", schema_version: "1" },
+      artifacts: [],
+      provenance: prov,
+    };
+  };
+  route("GET", "/api/evaluation/reports", {
+    enabled: true,
+    reports: [
+      entry(1, TASK, provenance()),
+      entry(
+        2,
+        "2026-08-19-split",
+        provenance({
+          available: false,
+          effective_revision: null,
+          deploy_lock_hash: null,
+          detail: "1 of 3 contributing runs carry no verified protocol identity",
+        })
+      ),
+    ],
+    cursor: 0,
+    next_cursor: null,
+    has_more: false,
+  });
+  await navigate("#/reports");
+  var protocolRow = function (index) {
+    var card = doc.querySelectorAll(".card.report")[index];
+    if (!card) return null;
+    var dts = card.querySelectorAll("dt");
+    var dds = card.querySelectorAll("dd");
+    for (var i = 0; i < dts.length; i++)
+      if (dts[i].textContent.trim() === "protocol") return dds[i].textContent.trim();
+    return null;
+  };
+  eq(
+    "protocol: a published report states the identity it was cohorted under",
+    protocolRow(0),
+    "1234567890ab…"
+  );
+  // The reason IS the information: unanimity-gated provenance is unavailable far
+  // more often than not, and a bare "unavailable" would say nothing an operator
+  // can act on.
+  eq(
+    "protocol: an unavailable report says why, not nothing",
+    protocolRow(1),
+    "unavailable — 1 of 3 contributing runs carry no verified protocol identity"
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -5360,6 +5738,7 @@ async function scenarioRepoAdmission() {
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();
     await scenarioEvaluationQueue();
+    await scenarioProtocolCoverage();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

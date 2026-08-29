@@ -509,6 +509,17 @@ when reading a `detail`:
    publishable identity. These are two point observations: nothing is watched
    between them, and the hub claims nothing about a file edited and restored in
    between.
+
+   The end look happens **once, at that transition, and never again**. A run
+   whose end the hub did not observe — it was down, or the run was a resumed tail
+   — therefore never gets one, and can never publish an identity. That is
+   permanent by design, not a check still owed: a later look would compare
+   against whatever is deployed *now*, so an ordinary redeployment after the run
+   would read as a mid-run change the hub never saw. Recovering such a run would
+   need either an observation taken *at* its end boundary by something else, or a
+   complete trusted history of every change to both receipts and the deployed
+   files across the whole gap — and an in-place edit leaves no receipt at all.
+   Nothing produces either, so the honest answer is the permanent one.
 3. **Aggregating over the task (across runs).** A report is about a task, which
    several runs worked, so the pair is published only when **every** contributing
    run verified **one and the same** pair.
@@ -528,6 +539,26 @@ files, which by publication time usually name a later revision than the runs
 used. The practical cost is that every run that ended before the hub verified
 payloads publishes no identity, so older tasks read as protocol-provenance
 unavailable — which is the honest state, not a defect to repair.
+
+### Where you read it
+
+Because "unavailable" is common and permanent, both surfaces state it rather than
+leaving a blank:
+
+- **Run history** carries each run's own snapshot beside its launch config, as a
+  `Protocol identity:` disclosure. Its verdict is one `coverage` value —
+  `verified`, `redeployed mid-run`, `deployed files edited`, `never checked`,
+  `end check inconclusive`, `no identity captured`, `record unreadable`, or
+  `no record` — plus, only while a run is still live, `end check pending`. A run
+  that has finished never shows an outstanding check. Opening the row gives the
+  captured revision and payload digest, when the capture and the end check ran,
+  how many deployed files that check compared, and the hub's own one-line reason
+  for this run.
+- **The report feed** (`#/reports`) shows a `protocol` row on every card beside
+  `runs` and `commits`: the effective revision when the task's runs agreed on
+  one, otherwise `unavailable` followed by the reason — how many contributing
+  runs carried no verified identity, or which revisions or payloads they
+  disagreed about.
 
 ### Fetching one report
 
