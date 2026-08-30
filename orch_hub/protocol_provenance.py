@@ -36,10 +36,15 @@ comparison against the *actual* deployed files at a boundary the hub can trust.
 There are two such boundaries, checked by different mechanisms:
 
 - **Launch** — the readiness gate. ``mandrel status`` compares every deployed file
-  against the manifest (and the manifest against the current canonical tree) and
-  exits nonzero on any drift, so a run exists at all only because its repo's
-  files matched their receipt immediately before the capture
-  (:meth:`orch_hub.runs.RunManager.start_run` gates on the whole report). Nothing
+  against the manifest, and separately places the *lock's* revision against the
+  lines ``mandrel`` releases. It reads no working canonical tree, and that absence
+  is the point: an uncommitted tree is exactly the state in which a deploy refuses
+  to state a commit, so a comparison against it would name a referent no target
+  can match. A drift from either half exits nonzero, so a run exists at all only
+  because its repo's files matched their receipt immediately before the capture
+  (:meth:`orch_hub.runs.RunManager.start_run` gates on the whole report). Only the
+  first half vouches for the bytes; placement answers which protocol the repo
+  stands on, which is a different question this module does not ask. Nothing
   is re-validated at capture: a second, weaker copy of a check that already
   blocked the launch would add only a way for the two to disagree.
 - **End** — :func:`verify_payload`, the hub's own bounded receipt-to-target
