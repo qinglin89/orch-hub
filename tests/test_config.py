@@ -25,6 +25,7 @@ from orch_hub.config import (
     DEFAULT_EVAL_DISPATCH_SPACING,
     DEFAULT_EVAL_QUEUE_MAX_AGE,
     DEFAULT_EVAL_RETENTION,
+    DEFAULT_EVAL_TURN_TIMEOUT,
     DEFAULT_EVAL_USAGE_CEILING,
     DEFAULT_INTAKE_EFFORT,
     DEFAULT_INTAKE_MODEL,
@@ -35,6 +36,7 @@ from orch_hub.config import (
     EVAL_MODEL_ENV,
     EVAL_QUEUE_MAX_AGE_ENV,
     EVAL_RETENTION_ENV,
+    EVAL_TURN_TIMEOUT_ENV,
     EVAL_USAGE_CEILING_ENV,
     HOST_ENV,
     INTAKE_EFFORT_ENV,
@@ -462,3 +464,33 @@ def test_dispatch_policy_malformed_value_is_an_explicit_error(env_name, bad):
     """A mistyped threshold is a policy nobody chose; it must not start the hub."""
     with pytest.raises(ValueError, match=env_name):
         _configured_from_env({env_name: bad})
+
+
+# -- Layer 2 turn deadline -----------------------------------------------------
+
+
+def test_turn_timeout_default_is_configuration_with_a_pinned_value():
+    cfg = _configured_from_env()
+    assert cfg.eval_turn_timeout == DEFAULT_EVAL_TURN_TIMEOUT
+    assert Config(mandrel_path=Path("/root/mandrel")).eval_turn_timeout == (
+        DEFAULT_EVAL_TURN_TIMEOUT
+    )
+    # 30 minutes: unreachable by a real turn (observed turns run minutes), so the
+    # deadline only ever catches a turn that is not progressing at all.
+    assert DEFAULT_EVAL_TURN_TIMEOUT == 1800
+
+
+def test_turn_timeout_overrides_and_disable_token():
+    assert _configured_from_env({EVAL_TURN_TIMEOUT_ENV: "60"}).eval_turn_timeout == 60
+    # 0 removes the deadline — and with it the in-flight stuck sweep derived from it.
+    assert _configured_from_env({EVAL_TURN_TIMEOUT_ENV: "0"}).eval_turn_timeout == 0
+    for blank in ("", "   "):
+        assert _configured_from_env(
+            {EVAL_TURN_TIMEOUT_ENV: blank}
+        ).eval_turn_timeout == DEFAULT_EVAL_TURN_TIMEOUT
+
+
+@pytest.mark.parametrize("bad", ["half-hour", "-1"])
+def test_turn_timeout_malformed_value_is_an_explicit_error(bad):
+    with pytest.raises(ValueError, match=EVAL_TURN_TIMEOUT_ENV):
+        _configured_from_env({EVAL_TURN_TIMEOUT_ENV: bad})

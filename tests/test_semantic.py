@@ -9,13 +9,17 @@ Session-2 adds: the concrete Claude CLI backend over a fake runner (argv shape,
 the structural evidence-isolation gates — all tools disabled, safe-mode, an
 isolated empty cwd, plan-mode write gate — stream parsing, exit/stream-error
 failure paths, ``claude`` is never launched), the ``report.md`` Markdown render,
-and its persistence. The protected HTTP surfaces live in ``tests/test_api.py``.
+and its persistence. The turn deadline is covered here too: the configured bound
+reaches the runner, an expiry becomes the ordinary named failure without leaking
+the prompt into the diagnostic, and the throwaway sandbox is still removed. The
+protected HTTP surfaces live in ``tests/test_api.py``.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,7 +91,7 @@ from orch_hub.static_metrics import (
     STATIC_METRICS_NAME,
     StaticEvaluator,
 )
-from orch_hub.subprocess_utils import CommandResult
+from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
 
 TASK = "2026-07-22-semantic-task-evaluator"
 REPO_PATH = Path("/repos/alpha")
@@ -1965,24 +1969,31 @@ def test_render_report_md_is_deterministic():
 
 class ScriptRunner:
     """Returns a scripted :class:`SemanticRunResult` per call, recording argv, cwd,
-    and the cwd's contents AT call time.
+    the cwd's contents AT call time, and the deadline it was handed.
 
     The backend runs the turn in a throwaway sandbox dir it removes after the turn,
     so the contents are captured here (while the dir still exists) to let a test
     prove the turn ran in an isolated empty directory, never the target repo.
+
+    A scripted result may be an exception instance instead of a
+    :class:`SemanticRunResult`, which is raised — that is how a hung turn is
+    modelled (``subprocess.TimeoutExpired``) without launching anything.
     """
 
-    def __init__(self, *results: SemanticRunResult):
+    def __init__(self, *results):
         self._results = list(results)
-        self.calls: list[tuple[list[str], Path, list[str] | None]] = []
+        self.calls: list[tuple[list[str], Path, list[str] | None, float | None]] = []
 
-    def __call__(self, argv, cwd) -> SemanticRunResult:
+    def __call__(self, argv, cwd, timeout=None) -> SemanticRunResult:
         cwd = Path(cwd)
         contents = sorted(p.name for p in cwd.iterdir()) if cwd.is_dir() else None
-        self.calls.append((list(argv), cwd, contents))
+        self.calls.append((list(argv), cwd, contents, timeout))
         if not self._results:
             raise AssertionError("runner called more times than scripted")
-        return self._results.pop(0)
+        result = self._results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return result
 
     @property
     def argv(self) -> list[str]:
@@ -1995,6 +2006,10 @@ class ScriptRunner:
     @property
     def cwd_contents(self) -> list[str] | None:
         return self.calls[0][2]
+
+    @property
+    def timeout(self) -> float | None:
+        return self.calls[0][3]
 
 
 def stream(text: str, *, is_error: bool = False, returncode: int = 0,
@@ -2109,6 +2124,75 @@ def test_claude_backend_stream_error_raises(tmp_path):
     backend = ClaudeSemanticBackend(model="m", runner=runner)
 
     with pytest.raises(SemanticEvaluationError, match="stream_error=True"):
+        backend.evaluate("p", _repo(tmp_path))
+
+
+# -- turn deadline ------------------------------------------------------------
+# A turn that *fails* was always handled well. A turn that neither finishes nor
+# fails was the one nothing recovered from: the worker blocked forever, the job
+# record stayed `running`, and it held the task's slot until the hub restarted.
+# The deadline turns that hang into the ordinary failure — no new status, no new
+# retry path.
+
+
+def test_claude_backend_hands_the_configured_deadline_to_the_runner(tmp_path):
+    config = Config.from_env(
+        {"ORCH_HUB_MANDREL_PATH": "/test/mandrel", "ORCH_HUB_EVAL_TURN_TIMEOUT": "42"}
+    )
+    runner = ScriptRunner(stream(envelope()))
+    backend = ClaudeSemanticBackend(
+        model="m", timeout=config.eval_turn_timeout, runner=runner
+    )
+
+    backend.evaluate("p", _repo(tmp_path))
+
+    assert runner.timeout == 42
+
+
+def test_claude_backend_default_deadline_is_unset_only_when_disabled(tmp_path):
+    # 0 is the config's "no deadline" token; it must reach the runner as None
+    # rather than as an instantly-expired 0-second bound.
+    runner = ScriptRunner(stream(envelope()), stream(envelope()))
+    ClaudeSemanticBackend(model="m", timeout=0, runner=runner).evaluate("p", _repo(tmp_path))
+    assert runner.calls[0][3] is None
+
+    ClaudeSemanticBackend(model="m", runner=runner).evaluate("p", _repo(tmp_path))
+    assert runner.calls[1][3] is None
+
+
+def test_claude_backend_timed_out_turn_becomes_a_named_failure(tmp_path):
+    runner = ScriptRunner(subprocess.TimeoutExpired(["claude", "-p", "SECRET PROMPT"], 30))
+    backend = ClaudeSemanticBackend(model="m", timeout=30, runner=runner)
+
+    with pytest.raises(SemanticEvaluationError) as excinfo:
+        backend.evaluate("SECRET PROMPT", _repo(tmp_path))
+
+    # The same terminal shape a backend failure produces, naming the deadline so
+    # an operator can tell a hang from a failure (and raise the bound if it was
+    # simply too tight).
+    assert "30s deadline" in str(excinfo.value)
+    # And NOT the raw TimeoutExpired, whose str() carries the whole argv — the
+    # last element of which is the full evidence prompt. A persisted job
+    # diagnostic must not become a copy of the task's evidence.
+    assert "SECRET PROMPT" not in str(excinfo.value)
+
+
+def test_claude_backend_removes_its_sandbox_after_a_timeout(tmp_path):
+    # The turn dir is hub-owned scratch; a hang must not leak one per stuck turn.
+    runner = ScriptRunner(subprocess.TimeoutExpired(["claude"], 5))
+    backend = ClaudeSemanticBackend(model="m", timeout=5, runner=runner)
+
+    with pytest.raises(SemanticEvaluationError):
+        backend.evaluate("p", _repo(tmp_path))
+
+    assert not runner.cwd.exists()
+
+
+def test_claude_backend_missing_executable_becomes_a_clean_failure(tmp_path):
+    runner = ScriptRunner(CommandNotFoundError("claude"))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+
+    with pytest.raises(SemanticEvaluationError, match="claude executable not found"):
         backend.evaluate("p", _repo(tmp_path))
 
 

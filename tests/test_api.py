@@ -5356,6 +5356,44 @@ def test_the_app_wires_the_dispatch_policy_onto_the_resident_tick(tmp_path):
     assert dispatcher.sweep in app.state.run_monitor._sweeps
 
 
+def test_the_app_wires_in_flight_stuck_reconciliation_onto_the_resident_tick(tmp_path):
+    """The startup orphan sweep only runs when no worker can exist, so a turn that
+    hangs while the service is up needs the resident counterpart — otherwise its
+    (repo, task) slot is held until somebody restarts the hub.
+
+    Reaping is ordered before the dispatch sweep so a slot freed on this tick is
+    already free when the dispatcher reads the store.
+    """
+    app = api.create_app(eval_config(tmp_path))
+
+    sweeps = app.state.run_monitor._sweeps
+    reaps = [s for s in sweeps if getattr(s, "__name__", "") == "reconcile_stuck"]
+    assert len(reaps) == 1
+    assert sweeps.index(reaps[0]) < sweeps.index(app.state.eval_dispatcher.sweep)
+
+
+def test_the_apps_semantic_backend_carries_the_configured_turn_deadline(
+    tmp_path, monkeypatch
+):
+    # End of the config→backend chain: without a deadline a hung `claude -p`
+    # blocks its worker forever, which is the state the whole in-flight recovery
+    # path exists for. The backend is not reachable through a route, so observe
+    # its construction.
+    real = api.ClaudeSemanticBackend
+    built: list = []
+
+    def spy(**kwargs):
+        backend = real(**kwargs)
+        built.append(backend)
+        return backend
+
+    monkeypatch.setattr(api, "ClaudeSemanticBackend", spy)
+
+    api.create_app(replace(eval_config(tmp_path), eval_turn_timeout=77))
+
+    assert [b.timeout for b in built] == [77]
+
+
 def test_the_dispatch_gate_reads_usage_without_ever_gating_run_control(tmp_path):
     """Usage is display-only, so a broken feed must hold evaluation and nothing else."""
     class BrokenUsage:

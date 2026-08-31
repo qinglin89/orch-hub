@@ -65,7 +65,7 @@ import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Optional, Protocol
 
 from .ai_snapshot import AiDiff, AiDoc, AiSnapshot
 from .config import DEFAULT_EVAL_EFFORT, Config
@@ -88,6 +88,7 @@ from .models import (
 from .runs import _orchestrator_env
 from .session_reads import MemoryRead, ReadBehavior, SessionReads
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
+from .subprocess_utils import CommandNotFoundError, run_command
 
 _log = logging.getLogger(__name__)
 
@@ -1122,6 +1123,15 @@ class _UnavailableSemanticBackend:
 # manager's ``spawner`` and the intake agent's ``runner``, so every mechanic is
 # unit-tested with a fake and the thin real runner (:func:`_default_runner`) stays
 # untested.
+#
+# The turn is also DEADLINED. A turn that exits nonzero is already a good outcome
+# — the job store records a bounded diagnostic and the operator can retry — but a
+# turn that neither finishes nor fails is the state nothing else in the system
+# recovers from: the worker thread blocks forever, the job record stays
+# ``running``, and it holds the task's duplicate slot until the hub restarts. So
+# the runner takes a deadline (``ORCH_HUB_EVAL_TURN_TIMEOUT``) and its expiry is
+# translated into the ordinary failure shape, which is what keeps a hang from
+# needing a new status, a new retry path, or a restart.
 
 
 @dataclass(frozen=True)
@@ -1133,33 +1143,44 @@ class SemanticRunResult:
     returncode: int
 
 
-SemanticRunner = Callable[[Sequence[str], Path], SemanticRunResult]
+SemanticRunner = Callable[[Sequence[str], Path, Optional[float]], SemanticRunResult]
 """Runs one evaluator-CLI turn to completion in ``cwd`` and returns its captured
 output (blocking and output-capturing — the ``stream-json`` stdout must be parsed,
-not detached). Tests inject a fake; :func:`_default_runner` is the real one."""
+not detached). Tests inject a fake; :func:`_default_runner` is the real one.
+
+The third argument is the turn's deadline in seconds (``None`` = unbounded), and
+it is part of the seam rather than a private detail of the real runner because
+the deadline is what the *caller* has to reason about: :meth:`ClaudeSemanticBackend.evaluate`
+turns its expiry into a named failure, and a test proves that without launching
+``claude``. A runner that reaches it must raise
+:class:`subprocess.TimeoutExpired`, having already killed the child."""
 
 
-def _default_runner(argv: Sequence[str], cwd: Path) -> SemanticRunResult:
+def _default_runner(
+    argv: Sequence[str], cwd: Path, timeout: float | None
+) -> SemanticRunResult:
     """Run ``claude`` to completion, capturing stdout/stderr (the real runner).
 
-    Uses the augmented PATH shared with detached orchestrator and intake runs
-    (:func:`orch_hub.runs._orchestrator_env`): the hub may run under launchd with
-    a sparse PATH while ``claude`` is installed under the user's home, and this
-    backend launches it by name. ``capture_output`` drains both pipes so a large
-    ``stream-json`` stdout cannot deadlock against stderr. Untested, like runs'
+    Goes through the shared wrapper (:func:`orch_hub.subprocess_utils.run_command`)
+    rather than calling :mod:`subprocess` directly, so this turn gets the same
+    bounded-call semantics every other hub command check has: ``timeout`` covers
+    the whole call and raises :class:`subprocess.TimeoutExpired` on expiry, stdin
+    is ``DEVNULL``, and both pipes are drained so a large ``stream-json`` stdout
+    cannot deadlock against stderr. Uncapped rather than ``max_stdout_bytes``:
+    the capped mode discards stderr, which is exactly the tail
+    :meth:`ClaudeSemanticBackend.evaluate` reports when a turn *fails*.
+
+    The child environment is the augmented PATH shared with detached orchestrator
+    and intake runs (:func:`orch_hub.runs._orchestrator_env`): the hub may run
+    under launchd with a sparse PATH while ``claude`` is installed under the
+    user's home, and this backend launches it by name. Untested, like runs'
     ``_default_spawner`` and the intake agent's ``_default_runner``.
     """
-    proc = subprocess.run(
-        list(argv),
-        cwd=str(cwd),
-        env=_orchestrator_env(),
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        text=True,
-        check=False,
+    result = run_command(
+        list(argv), cwd=cwd, timeout=timeout, env=_orchestrator_env()
     )
     return SemanticRunResult(
-        stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode
+        stdout=result.stdout, stderr=result.stderr, returncode=result.returncode
     )
 
 
@@ -1189,7 +1210,8 @@ class ClaudeSemanticBackend:
     alone and cannot reach target-repo files — so the report stays reproducible from
     the persisted evidence. ``model``/``effort`` come from ``ORCH_HUB_EVAL_MODEL`` /
     ``ORCH_HUB_EVAL_EFFORT`` (via :attr:`~orch_hub.config.Config.eval_model` and
-    :attr:`~orch_hub.config.Config.eval_effort`); ``runner`` is injected for
+    :attr:`~orch_hub.config.Config.eval_effort`) and ``timeout`` from
+    ``ORCH_HUB_EVAL_TURN_TIMEOUT``; ``runner`` is injected for
     tests. Constructing it launches nothing — a subprocess only starts when a
     semantic evaluation is actually requested — so the default app wiring can build
     it unconditionally, exactly like the intake agent.
@@ -1200,12 +1222,21 @@ class ClaudeSemanticBackend:
         *,
         model: str,
         effort: str = DEFAULT_EVAL_EFFORT,
+        timeout: float | None = None,
         runner: SemanticRunner = _default_runner,
         which: Callable[[], str | None] | None = None,
         usage_observer: Callable[[str], None] | None = None,
     ):
         self.model = model
         self.effort = effort
+        # Seconds the turn may run before it is killed and reported as a timed-out
+        # failure (``ORCH_HUB_EVAL_TURN_TIMEOUT`` via
+        # :attr:`orch_hub.config.Config.eval_turn_timeout`). ``None`` — and the
+        # ``0`` the config uses to disable the bound, normalized to it here — runs
+        # the turn unbounded, which is the pre-deadline behavior and the one state
+        # in which a hung backend can still hold a job's slot until the hub is
+        # restarted.
+        self.timeout = timeout if timeout else None
         self._runner = runner
         # Injectable ``claude`` resolver for :meth:`doctor`; ``None`` means resolve
         # via the module-global :func:`_default_which` at call time (so a test can
@@ -1264,15 +1295,38 @@ class ClaudeSemanticBackend:
         dir is removed after the turn (it only exists so ``claude`` has a benign,
         empty place to run).
 
-        Raises :class:`SemanticEvaluationError` on a nonzero exit or a stream-level
-        error (the same success test the orchestrator/intake readers use), so the
-        service turns a backend/model failure into a clean failed evaluation (dir
-        removed, no partial artifacts, target state untouched).
+        Raises :class:`SemanticEvaluationError` on a nonzero exit, a stream-level
+        error (the same success test the orchestrator/intake readers use), a
+        missing ``claude``, or a turn that outlives :attr:`timeout`, so the service
+        turns a backend/model failure into a clean failed evaluation (dir removed,
+        no partial artifacts, target state untouched).
+
+        The timeout is translated here rather than allowed to propagate, and that
+        is not cosmetic: :class:`subprocess.TimeoutExpired` stringifies its whole
+        ``cmd``, and this argv's last element is the full evidence prompt — so the
+        raw exception would write task content into the persisted job diagnostic.
+        The replacement names the deadline instead, which is the one fact an
+        operator needs to tell a hang from a failure (and to raise the bound if the
+        deadline was simply too tight).
         """
         argv = self._argv(prompt)
         sandbox = Path(tempfile.mkdtemp(prefix="orch-hub-semantic-"))
         try:
-            result = self._runner(argv, sandbox)
+            result = self._runner(argv, sandbox, self.timeout)
+        except subprocess.TimeoutExpired as exc:
+            # The runner's own reading of the deadline, falling back to this
+            # backend's, so the message states the bound that actually expired.
+            deadline = exc.timeout if exc.timeout is not None else self.timeout
+            named = f"{deadline:g}s" if deadline is not None else "configured"
+            raise SemanticEvaluationError(
+                f"claude semantic evaluation turn exceeded its {named} deadline"
+                " and was killed"
+            ) from exc
+        except CommandNotFoundError as exc:
+            raise SemanticEvaluationError(
+                f"claude executable not found ({exc}); semantic evaluation"
+                " cannot run"
+            ) from exc
         finally:
             shutil.rmtree(sandbox, ignore_errors=True)
         self._observe_usage(result.stdout)

@@ -20,7 +20,7 @@ import os
 import selectors
 import subprocess
 import time
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Callable, Optional, Union
@@ -64,6 +64,7 @@ def run_command(
     cwd: Optional[Union[str, Path]] = None,
     timeout: Optional[float] = None,
     max_stdout_bytes: Optional[int] = None,
+    env: Optional[Mapping[str, str]] = None,
 ) -> CommandResult:
     """Run ``args`` capturing text output; never raises on non-zero exit.
 
@@ -79,15 +80,31 @@ def run_command(
     therefore combine it with ``max_stdout_bytes`` to bound memory and runtime
     at once.
 
+    ``env`` replaces the child's whole environment (``None`` inherits this
+    process's, the default every probe wants). It exists for the one caller class
+    that cannot rely on inheritance: a hub running under launchd has a sparse
+    PATH while the tools it launches by name live under the user's home, so those
+    callers pass the augmented environment
+    (:func:`orch_hub.runs._orchestrator_env`) the detached run paths already use.
+
+    stdin is always ``DEVNULL``. Every command this wrapper runs is a
+    non-interactive probe, and an inherited stdin is a way for one to wait
+    forever on input nobody will type — the same unbounded wait ``timeout``
+    exists to remove. EOF makes such a command fail promptly instead.
+
     Raises :class:`CommandNotFoundError` when the executable is missing.
     """
     argv = [str(a) for a in args]
     if max_stdout_bytes is not None:
-        return _run_capped(argv, cwd=cwd, timeout=timeout, limit=max(0, max_stdout_bytes))
+        return _run_capped(
+            argv, cwd=cwd, timeout=timeout, limit=max(0, max_stdout_bytes), env=env
+        )
     try:
         proc = subprocess.run(
             argv,
             cwd=str(cwd) if cwd is not None else None,
+            env=dict(env) if env is not None else None,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -108,6 +125,7 @@ def _run_capped(
     cwd: Optional[Union[str, Path]],
     timeout: Optional[float],
     limit: int,
+    env: Optional[Mapping[str, str]] = None,
 ) -> CommandResult:
     """Run ``argv``, retaining only the first ``limit`` bytes of its stdout.
 
@@ -135,6 +153,8 @@ def _run_capped(
         proc = subprocess.Popen(
             argv,
             cwd=str(cwd) if cwd is not None else None,
+            env=dict(env) if env is not None else None,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )

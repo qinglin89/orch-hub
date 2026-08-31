@@ -77,6 +77,7 @@ of the hub — for the launchd service they live in the plist's
 | `ORCH_HUB_EVAL_USAGE_CEILING` | `80` | Subscription utilization (percent) at or above which an **automatic** Layer 2 turn waits instead of running (see [When an automatic Layer 2 turn actually runs](#when-an-automatic-layer-2-turn-actually-runs)). Compared against the most exhausted currently-measured window. Only the automatic path consults it; a manual evaluation is never capacity-gated. A value outside 0-100, or a non-number, fails startup. |
 | `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn admitted to spend (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
 | `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue and flags it on the dashboard (see [Seeing the queue](#seeing-the-queue)). Visibility only — it changes no dispatch decision. `0` disables the flag. A negative or non-integer value fails startup. |
+| `ORCH_HUB_EVAL_TURN_TIMEOUT` | `1800` (30 min) | How long one Layer 2 CLI turn may run before it is killed and recorded as a failed job (see [When a turn hangs](#when-a-turn-hangs)). Also the basis for in-flight stuck detection. `0` removes the deadline *and* that detection. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
 other change is required — the routes and dashboard controls self-disable.
@@ -368,6 +369,56 @@ never-evaluated trigger, and still offers to run it.
 Both surfaces are reads. Opening them never dispatches, holds, or rewrites a job,
 and never consults the usage service (a usage read can trigger a background
 refresh, which a passive dashboard poll has no business causing).
+
+## When a turn hangs
+
+A Layer 2 turn that *fails* has always been a good outcome: nonzero exit or a
+stream error becomes a persisted `failed` job carrying a bounded diagnostic, the
+task's slot frees, and the [Layer 2 button](#using-it-from-the-dashboard) is the
+retry. A turn that neither finishes nor fails — a wedged backend, a network read
+that never returns — used to be the one state nothing recovered from: the worker
+blocked indefinitely, the record stayed `running`, and every retry handed back
+the stuck job. The only cure was restarting the hub.
+
+Two bounds close that, and the second is derived from the first rather than
+guessed:
+
+- **The turn is deadlined.** The CLI subprocess runs under
+  `ORCH_HUB_EVAL_TURN_TIMEOUT`. On expiry the process is killed and the job
+  settles `failed` with a diagnostic naming the deadline — the same terminal
+  shape a backend failure produces, so there is no new status to learn and no new
+  retry path. The default is deliberately far above any observed turn: cutting a
+  real evaluation short spends the subscription window and loses the report,
+  which is worse than waiting.
+- **In-flight records are swept.** The deadline lives inside the worker, so it
+  cannot help if the worker itself is lost (a thread killed, a subprocess whose
+  own children hold the pipes). The resident monitor tick therefore also settles
+  any `queued`/`running` record older than the turn deadline plus a fixed
+  ten-minute grace — the grace covering the evidence build and report persistence
+  that bracket the model call. This runs while the service is up, so a slot
+  stuck at 09:00 is free the same morning.
+
+The startup sweep is unchanged and still needed: a hub that died mid-turn leaves
+transient records that no clock has to justify failing, because a process only
+now starting owns no workers. The two are the same settle admitted by different
+evidence — process absence at startup, elapsed time while running.
+
+Both bounds rest on the deadline, which is why `ORCH_HUB_EVAL_TURN_TIMEOUT=0`
+disables the sweep as well: without a deadline there is no non-arbitrary line
+between a hung turn and a slow one, and inventing one is how a legitimate
+evaluation gets killed. Raise the bound rather than removing it.
+
+Sweeping a record whose worker is somehow still alive is possible and accepted.
+That worker's own finalize finds a settled record and writes nothing, and its
+evaluation was read-only over target state throughout. If it does eventually
+succeed, its artifacts are still written and still publishable — only the job
+record, which reports the *attempt*, no longer points at them, which is the
+same attempts-not-reports reading the [queue census](#seeing-the-queue) already
+carries. Holding a slot until somebody notices and restarts the hub is the worse
+outcome.
+
+A swept job notifies like any other fresh failure (the startup sweep stays
+silent — a restart is not an outcome anyone is waiting on).
 
 ## Retention
 

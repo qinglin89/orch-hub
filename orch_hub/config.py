@@ -176,6 +176,30 @@ DEFAULT_EVAL_EFFORT = "max"
 over persisted evidence with no tool loop to recover from a shallow read, so
 depth is bought once here; override with ``ORCH_HUB_EVAL_EFFORT``."""
 
+EVAL_TURN_TIMEOUT_ENV = "ORCH_HUB_EVAL_TURN_TIMEOUT"
+"""Seconds one Layer 2 evaluator CLI turn may run before it is killed.
+
+A semantic evaluation is a single ``claude -p`` subprocess, and a subprocess that
+*fails* is already an outcome the job store records well. A subprocess that
+neither finishes nor fails — a wedged backend, a network read that never returns,
+a child holding the pipe open — is the state nothing recovers from: the job record
+stays ``running``, holds the task's duplicate slot, and every retry hands back the
+stuck job. This bound turns that hang into the failure it should have been. Unset
+or blank means :data:`DEFAULT_EVAL_TURN_TIMEOUT`; ``0`` removes the deadline (and
+with it the in-flight stuck detection derived from it, which has no other basis to
+rest on); a negative or non-integer value fails loudly."""
+
+DEFAULT_EVAL_TURN_TIMEOUT = 1800
+"""Default Layer 2 turn deadline: 30 minutes.
+
+Sized to be unreachable by a legitimate turn rather than to be tight. The
+evaluator sends one bounded prompt (~32k input tokens) to a max-effort model and
+reads back one report; observed turns run minutes, and the pessimistic case — CLI
+retries against a degraded provider — is still well inside this. Cutting a real
+turn short would spend the window and lose the report, which is worse than
+waiting, so the deadline is only meant to catch the case where nothing is
+progressing at all."""
+
 EVAL_RETENTION_ENV = "ORCH_HUB_EVAL_RETENTION"
 """Environment variable bounding how many evaluations are kept per task.
 
@@ -491,6 +515,15 @@ class Config:
     an unusable effort fails that one evaluation, not service startup.
     """
 
+    eval_turn_timeout: int = DEFAULT_EVAL_TURN_TIMEOUT
+    """Seconds one Layer 2 evaluator CLI turn may run (``ORCH_HUB_EVAL_TURN_TIMEOUT``).
+
+    Passed to the semantic backend as its subprocess deadline, and — plus a fixed
+    grace for the evidence build bracketing the turn — the basis for the in-flight
+    stuck sweep in :mod:`orch_hub.semantic_jobs`. ``0`` disables both: with no
+    deadline there is nothing to distinguish a hung turn from a long one.
+    """
+
     eval_retention: int = DEFAULT_EVAL_RETENTION
     """Per-task cap on retained evaluations (``ORCH_HUB_EVAL_RETENTION``).
 
@@ -586,6 +619,11 @@ class Config:
             eval_model=(env.get(EVAL_MODEL_ENV) or "").strip() or DEFAULT_EVAL_MODEL,
             eval_effort=(env.get(EVAL_EFFORT_ENV) or "").strip() or DEFAULT_EVAL_EFFORT,
             eval_retention=_parse_retention(env.get(EVAL_RETENTION_ENV)),
+            eval_turn_timeout=_parse_seconds(
+                env.get(EVAL_TURN_TIMEOUT_ENV),
+                default=DEFAULT_EVAL_TURN_TIMEOUT,
+                env_name=EVAL_TURN_TIMEOUT_ENV,
+            ),
             eval_usage_ceiling=_parse_percent(
                 env.get(EVAL_USAGE_CEILING_ENV),
                 default=DEFAULT_EVAL_USAGE_CEILING,

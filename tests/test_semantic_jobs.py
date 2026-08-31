@@ -12,6 +12,9 @@ mints no second report while the operator's manual retry stays open; a terminal
 job is overwritten by a fresh attempt; state reloads from disk
 across manager instances; orphaned transient jobs are reconciled to ``failed`` at
 startup while a held ``deferred`` one survives the restart it exists to survive;
+the resident in-flight sweep settles a transient record past the turn deadline
+plus its grace — freeing the slot without a restart — while leaving a slower turn,
+a held job, a settled one, and a record of unprovable age alone;
 the deferred-queue operations (promote, hold with a bounded reason, fail an
 unattributable record) each act only on the same still-deferred attempt; unsafe
 task ids fail closed; a corrupt record surfaces as ``error``
@@ -23,7 +26,9 @@ sweep, and delivery failures isolated from the persisted record; an automatic jo
 completing is silent while an automatic failure still pushes. One integration
 test drives a *real* :class:`~orch_hub.semantic.SemanticEvaluator` (fake backend)
 through the manager to confirm the completed job links a real evaluation dir and
-the target repo is untouched. The protected HTTP surfaces live in
+the target repo is untouched, and a second drives the real Claude backend over a
+hanging subprocess to confirm a turn that never returns settles ``failed`` with a
+deadline diagnostic. The protected HTTP surfaces live in
 ``tests/test_api.py``.
 """
 
@@ -31,17 +36,22 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from orch_hub import semantic_jobs
-from orch_hub.config import Config
+from orch_hub.config import DEFAULT_EVAL_TURN_TIMEOUT, Config
 from orch_hub.evaluation import EvaluationService
 from orch_hub.models import ManagedRepo, SemanticEvaluatorInfo, SemanticReport
 from orch_hub.notifications import Notification
-from orch_hub.semantic import SemanticEvaluationError, SemanticEvaluator
+from orch_hub.semantic import (
+    ClaudeSemanticBackend,
+    SemanticEvaluationError,
+    SemanticEvaluator,
+)
 from orch_hub.semantic_jobs import (
     SEMANTIC_JOB_NAME,
     STATUS_COMPLETED,
@@ -51,6 +61,7 @@ from orch_hub.semantic_jobs import (
     STATUS_QUEUED,
     STATUS_RUNNING,
     STATUSES,
+    STUCK_GRACE_SECONDS,
     SemanticJobManager,
     UnknownSemanticJobError,
     _ERROR_MAX_CHARS,
@@ -178,11 +189,17 @@ def sync_dispatch(deliver) -> None:
     deliver()
 
 
-def config(tmp_path: Path, *, enabled: bool = True) -> Config:
+def config(
+    tmp_path: Path,
+    *,
+    enabled: bool = True,
+    turn_timeout: int = DEFAULT_EVAL_TURN_TIMEOUT,
+) -> Config:
     return Config(
         mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         evaluation_enabled=enabled,
+        eval_turn_timeout=turn_timeout,
     )
 
 
@@ -203,6 +220,12 @@ def manager(
         notifier=notifier,
         notify_dispatch=notify_dispatch,
     )
+
+
+#: The whole-attempt bound :meth:`SemanticJobManager.reconcile_stuck` enforces:
+#: the backend's turn deadline plus the fixed grace for the evidence build and
+#: report persistence that bracket it.
+STUCK_LIMIT = DEFAULT_EVAL_TURN_TIMEOUT + STUCK_GRACE_SECONDS
 
 
 def dispatch_now(mgr: SemanticJobManager, r: ManagedRepo | None = None, task_id: str = TASK):
@@ -869,6 +892,186 @@ def test_reconcile_leaves_a_held_job_in_the_queue_it_exists_to_survive(tmp_path)
     assert reborn.get_job(repo(), TASK).evaluation_id == "EVAL-AFTER-RESTART"
 
 
+# -- in-flight stuck reconciliation -------------------------------------------
+
+
+def _stuck_manager(
+    tmp_path: Path,
+    *,
+    clock: Clock,
+    turn_timeout: int = DEFAULT_EVAL_TURN_TIMEOUT,
+    evaluator=None,
+    notifier=None,
+) -> SemanticJobManager:
+    return SemanticJobManager(
+        config(tmp_path, turn_timeout=turn_timeout),
+        evaluator=evaluator if evaluator is not None else FakeEvaluator(),
+        clock=clock,
+        executor=sync_executor,
+        notifier=notifier,
+        notify_dispatch=sync_dispatch,
+    )
+
+
+@pytest.mark.parametrize("status", [STATUS_QUEUED, STATUS_RUNNING])
+def test_stuck_sweep_fails_an_in_flight_job_past_the_bound(tmp_path, status):
+    """The finding: a hung turn holds its slot until somebody restarts the hub.
+
+    The startup sweep cannot help — it only runs when no worker can exist — so the
+    resident sweep has to settle the record while the service is up, on a clock.
+    """
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(
+        cfg, "alpha", TASK, status,
+        started_ts=clock.now.isoformat() if status == STATUS_RUNNING else None,
+        updated_ts=clock.now.isoformat(),
+    )
+    mgr = _stuck_manager(tmp_path, clock=clock)
+    clock.advance(STUCK_LIMIT + 1)
+
+    settled = mgr.reconcile_stuck()
+
+    assert [j.status for j in settled] == [STATUS_FAILED]
+    on_disk = mgr.get_job(repo(), TASK)
+    assert on_disk.status == STATUS_FAILED
+    assert "stuck" in (on_disk.error or "") and str(STUCK_LIMIT) in (on_disk.error or "")
+    assert on_disk.ended_ts is not None
+
+
+def test_stuck_sweep_leaves_a_legitimately_long_turn_alone(tmp_path):
+    """A slow turn is not a stuck one: right up to the bound, nothing is settled.
+
+    This is the failure the bound is derived rather than guessed for — killing a
+    real evaluation spends the subscription window and loses the report.
+    """
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(cfg, "alpha", TASK, STATUS_RUNNING, started_ts=clock.now.isoformat())
+    mgr = _stuck_manager(tmp_path, clock=clock)
+
+    clock.advance(STUCK_LIMIT - 1)
+    assert mgr.reconcile_stuck() == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_RUNNING
+
+
+def test_stuck_sweep_measures_a_queued_job_from_its_admitting_write(tmp_path):
+    # A queued record has no started_ts — its worker never ran — so the sweep
+    # dates it from the write that admitted it, not from nothing.
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(
+        cfg, "alpha", TASK, STATUS_QUEUED,
+        created_ts=clock.now.isoformat(), updated_ts=clock.now.isoformat(),
+    )
+    mgr = _stuck_manager(tmp_path, clock=clock)
+
+    clock.advance(STUCK_LIMIT - 1)
+    assert mgr.reconcile_stuck() == []
+    clock.advance(2)
+    assert [j.status for j in mgr.reconcile_stuck()] == [STATUS_FAILED]
+
+
+def test_stuck_sweep_frees_the_slot_without_a_restart(tmp_path):
+    # The acceptance this exists for: after the sweep the task is retryable in the
+    # same process, with no hub restart between.
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(cfg, "alpha", TASK, STATUS_RUNNING, started_ts=clock.now.isoformat())
+    ev = FakeEvaluator(report=mk_report(evaluation_id="EVAL-AFTER-STUCK"))
+    mgr = _stuck_manager(tmp_path, clock=clock, evaluator=ev)
+    clock.advance(STUCK_LIMIT + 1)
+    mgr.reconcile_stuck()
+
+    mgr.start_job(repo(), TASK)
+
+    assert mgr.get_job(repo(), TASK).status == STATUS_COMPLETED
+    assert mgr.get_job(repo(), TASK).evaluation_id == "EVAL-AFTER-STUCK"
+
+
+def test_stuck_sweep_leaves_deferred_and_terminal_records_alone(tmp_path):
+    # Only in-flight records are candidates: a held job has no turn to abandon
+    # (failing it would delete the queue), and a settled one is already an outcome.
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(cfg, "alpha", "held", STATUS_DEFERRED, created_ts=clock.now.isoformat())
+    _write_raw_job(cfg, "alpha", "done", STATUS_COMPLETED, evaluation_id="EVAL-K",
+                   updated_ts=clock.now.isoformat())
+    mgr = _stuck_manager(tmp_path, clock=clock)
+    clock.advance(STUCK_LIMIT * 10)
+
+    assert mgr.reconcile_stuck() == []
+    assert mgr.get_job(repo(), "held").status == STATUS_DEFERRED
+    assert mgr.get_job(repo(), "done").evaluation_id == "EVAL-K"
+
+
+def test_stuck_sweep_is_disabled_with_no_turn_deadline(tmp_path):
+    """``ORCH_HUB_EVAL_TURN_TIMEOUT=0`` removes the deadline, and with it the
+    only non-arbitrary basis for calling an in-flight turn stuck."""
+    cfg = config(tmp_path, turn_timeout=0)
+    clock = Clock()
+    _write_raw_job(cfg, "alpha", TASK, STATUS_RUNNING, started_ts=clock.now.isoformat())
+    mgr = _stuck_manager(tmp_path, clock=clock, turn_timeout=0)
+    clock.advance(STUCK_LIMIT * 100)
+
+    assert mgr.reconcile_stuck() == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_RUNNING
+
+
+def test_stuck_sweep_leaves_a_record_with_no_readable_timestamp(tmp_path):
+    # Unprovable age is not evidence of being stuck. The startup sweep, which
+    # needs no clock, is what catches such a record.
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(cfg, "alpha", TASK, STATUS_RUNNING, started_ts="not-a-timestamp")
+    mgr = _stuck_manager(tmp_path, clock=clock)
+    clock.advance(STUCK_LIMIT * 10)
+
+    assert mgr.reconcile_stuck() == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_RUNNING
+
+
+def test_stuck_sweep_notifies_unlike_the_startup_sweep(tmp_path):
+    # A reap is a fresh outcome arriving while the operator is running — the same
+    # event a backend failure would have pushed had the turn managed to fail.
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(cfg, "alpha", TASK, STATUS_RUNNING, started_ts=clock.now.isoformat())
+    notifier = RecordingNotifier()
+    mgr = _stuck_manager(tmp_path, clock=clock, notifier=notifier)
+    clock.advance(STUCK_LIMIT + 1)
+
+    mgr.reconcile_stuck()
+
+    assert len(notifier.sent) == 1
+
+
+def test_a_late_worker_cannot_clobber_a_reaped_record(tmp_path):
+    """The one real cost of reaping on a clock: the worker may still be alive.
+
+    It is contained by the finalize guard — a worker that returns after its record
+    was settled finds a non-transient record and writes nothing.
+    """
+    cfg = config(tmp_path)
+    clock = Clock()
+    executor = DeferredExecutor()
+    mgr = SemanticJobManager(
+        cfg,
+        evaluator=FakeEvaluator(report=mk_report(evaluation_id="EVAL-LATE")),
+        clock=clock,
+        executor=executor,
+    )
+    mgr.start_job(repo(), TASK)  # queued; its turn is captured, not run
+    clock.advance(STUCK_LIMIT + 1)
+    assert [j.status for j in mgr.reconcile_stuck()] == [STATUS_FAILED]
+
+    executor.run_all()  # the abandoned worker finally runs
+
+    settled = mgr.get_job(repo(), TASK)
+    assert settled.status == STATUS_FAILED
+    assert settled.evaluation_id is None
+
+
 # -- corrupt record -----------------------------------------------------------
 
 
@@ -1146,6 +1349,50 @@ def test_manager_drives_real_evaluator_links_evaluation_and_leaves_repo_intact(t
     assert job.backend == "claude-cli"
     # The target repo is byte-identical: the async wrapper adds no repo mutation.
     assert snapshot_tree(target_repo.path) == before
+
+
+def test_a_hung_turn_settles_failed_and_frees_the_slot_without_a_restart(tmp_path):
+    """The headline: end-to-end, a ``claude`` process that never returns.
+
+    Real manager, real evaluator, real Claude backend — only the subprocess is
+    faked, and it hangs rather than fails. Before the deadline this blocked its
+    worker forever and left the record ``running``, so the task's slot was held
+    until somebody restarted the hub. Now the turn is killed at the bound and the
+    record settles into the same terminal shape any backend failure produces, with
+    a diagnostic that names the deadline and a slot open for the next attempt.
+    """
+    cfg = config(tmp_path, turn_timeout=30)
+    target_repo = _write_repo(cfg, tmp_path)
+    service = EvaluationService(cfg, git_runner=_fake_git, clock=Clock())
+    backend = ClaudeSemanticBackend(
+        model="claude-x",
+        timeout=cfg.eval_turn_timeout,
+        runner=_hanging_runner,
+    )
+    evaluator = SemanticEvaluator(
+        cfg, evaluation_service=service, backend=backend, clock=Clock()
+    )
+    mgr = SemanticJobManager(cfg, evaluator=evaluator, clock=Clock(), executor=sync_executor)
+
+    mgr.start_job(target_repo, TASK)
+
+    job = mgr.get_job(target_repo, TASK)
+    assert job.status == STATUS_FAILED
+    assert "30s deadline" in (job.error or "")
+    assert job.evaluation_id is None
+    # Terminal, so the slot is free: the next start is a fresh attempt, not the
+    # stuck job handed back.
+    assert mgr.start_job(target_repo, TASK).job_id is not None
+    assert mgr.get_job(target_repo, TASK).status == STATUS_FAILED
+
+
+def _hanging_runner(argv, cwd, timeout):
+    """A ``claude`` turn that neither finishes nor fails, killed at the deadline.
+
+    Exactly what :func:`orch_hub.subprocess_utils.run_command` raises once its
+    deadline expires, so no real process has to hang for the test to be honest
+    about what the backend sees."""
+    raise subprocess.TimeoutExpired(list(argv), timeout)
 
 
 def test_the_status_enumeration_covers_every_declared_status():

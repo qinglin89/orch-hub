@@ -666,6 +666,7 @@ def create_app(
             backend=ClaudeSemanticBackend(
                 model=resolved.eval_model,
                 effort=resolved.eval_effort,
+                timeout=resolved.eval_turn_timeout,
                 usage_observer=claude_usage_observer,
             ),
             catalog=catalog,
@@ -755,10 +756,18 @@ def create_app(
     # the same repo. Safe here: no request thread exists until the app is served.
     manager.use_admission(admission)
     intake.use_admission(admission)
-    # The resident tick also retries the deferred evaluation queue: a job held
+    # The resident tick also carries the evaluation queue's two upkeep jobs. The
+    # stuck sweep runs first: it is the in-flight counterpart of the startup
+    # orphan reconcile, settling a transient job that has outlived the backend's
+    # turn deadline so a hung turn stops holding its (repo, task) slot without a
+    # hub restart. Then the dispatch sweep retries the deferred queue — a job held
     # for capacity is picked back up by nothing else, and a hub restart resumes
     # the queue through this sweep rather than through a startup step of its own.
-    monitor = RunMonitor(manager, sweeps=(eval_dispatcher.sweep,))
+    # In this order a slot freed by the reap is already free when the dispatcher
+    # reads the store on the same tick.
+    monitor = RunMonitor(
+        manager, sweeps=(semantic_jobs.reconcile_stuck, eval_dispatcher.sweep)
+    )
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):

@@ -20,6 +20,15 @@ status *before* the turn means a hub that dies mid-turn leaves an observable
 orphan, reconciled to ``failed`` at startup (:meth:`reconcile_orphans`) so a
 stuck job never blocks a fresh attempt.
 
+A turn can also stop making progress without the hub dying, and that case needs
+its own answer because the startup sweep — which settles any transient record it
+finds, on the reasoning that a hub only now starting owns no workers — would
+settle live turns if it ran while the service was up. :meth:`reconcile_stuck` is
+that answer: the same settle, admitted by a clock instead of by process absence,
+driven by the resident monitor tick. Its bound is the backend's own turn deadline
+plus :data:`STUCK_GRACE_SECONDS`, so "stuck" stays a derived fact rather than a
+guess about how long an evaluation ought to take.
+
 Layout under ``Config.data_dir``, parallel to the run manager's ``runs/`` and the
 intake manager's ``intake/`` trees:
 
@@ -192,6 +201,21 @@ stderr tail, and parse/schema errors are short, so this is a defensive second ca
 that guarantees the scope's "no unbounded model output" even if an unexpected
 exception carries a large message."""
 
+STUCK_GRACE_SECONDS = 600
+"""Slack added to the turn deadline before an in-flight record is called stuck.
+
+:meth:`SemanticJobManager.reconcile_stuck` bounds a whole *attempt*, while
+``Config.eval_turn_timeout`` bounds only the model subprocess inside it. The rest
+of the attempt is the evaluator's own work on either side of that call — building
+the evidence pack (a task-file read, a run/event/session walk, and git subprocess
+calls whose cost scales with the task's history), computing static metrics, then
+parsing and persisting the report — plus the gap between the admitting ``queued``
+write and the worker actually starting. Ten minutes is far more than any of that
+has been observed to take, and erring long is the right direction: this sweep
+settles a record whose worker may still be alive, so the only real cost of extra
+grace is a later reap, while too little grace fails a turn that was about to
+succeed."""
+
 
 class SemanticJobError(Exception):
     """Base class for semantic-job manager operational errors."""
@@ -203,6 +227,41 @@ class UnknownSemanticJobError(SemanticJobError):
 
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
+
+
+def _parse_ts(value: str | None) -> dt.datetime | None:
+    """Parse a persisted ISO-8601 job timestamp to aware UTC, or ``None``.
+
+    A local copy of the same tolerant parse the sibling modules keep
+    (``eval_dispatch``, ``usage``, ``logs``, ``static_metrics``), so this module
+    stays independent. An unparseable stamp reads as absent, which
+    :meth:`SemanticJobManager.reconcile_stuck` treats as "cannot prove this record
+    is overdue" and leaves alone."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = dt.datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def _attempt_instant(record: SemanticJob) -> dt.datetime | None:
+    """When this transient record's attempt began, or ``None`` if unknowable.
+
+    ``started_ts`` once a worker flipped the record to ``running``; otherwise the
+    ``queued`` record's own admitting write (``updated_ts``), which is the moment
+    the attempt was accepted and the last point at which anything is known to have
+    progressed. ``created_ts`` is the final fallback for a record written before
+    those stamps existed. Mirrors :func:`orch_hub.eval_dispatch._turn_instant`,
+    which reads the same two stamps for the opposite purpose (pacing)."""
+    for value in (record.started_ts, record.updated_ts, record.created_ts):
+        parsed = _parse_ts(value)
+        if parsed is not None:
+            return parsed
+    return None
 
 
 SemanticJobExecutor = Callable[[Callable[[], None]], None]
@@ -844,6 +903,83 @@ class SemanticJobManager:
                 _write_record(job_dir, updated)
                 reconciled.append(updated)
         return reconciled
+
+    def reconcile_stuck(self) -> list[SemanticJob]:
+        """Fail every in-flight job that has outlived its bound; return what settled.
+
+        The resident counterpart of :meth:`reconcile_orphans`, and the two split on
+        *when* a transient record can be judged rather than on what they do to it.
+        The startup sweep can settle any transient record it finds, because a hub
+        that is only now starting has no worker that could own one. This one runs
+        while workers exist, so it cannot use presence as the test and needs a
+        clock instead — and it runs on the resident monitor tick, so a job that
+        gets stuck at 09:00 stops holding its ``(repo, task)`` slot the same
+        morning rather than at the next restart.
+
+        The bound is derived, not invented: ``Config.eval_turn_timeout`` is the
+        deadline the backend already enforces on the model subprocess, plus
+        :data:`STUCK_GRACE_SECONDS` for the evidence build and report persistence
+        bracketing it. A record younger than that is a turn doing its job, however
+        slow it looks. With the deadline disabled (``0``) this sweep does nothing
+        at all: without it there is no non-arbitrary line between a hung turn and a
+        long one, and inventing one is exactly how a legitimate evaluation gets
+        killed.
+
+        Age is measured from :func:`_attempt_instant`; a record whose timestamps
+        are all unreadable is left alone rather than settled on an unprovable age
+        (the startup sweep will catch it).
+
+        Settling a record whose worker is still alive is possible and accepted: the
+        grace makes it unlikely, and the consequences are contained. That worker's
+        own :meth:`_finalize` finds a non-transient record and returns without
+        clobbering this outcome; its evaluation was read-only over target state
+        throughout; and if it does eventually succeed, its artifacts are durable
+        and publishable exactly as they would have been — only this record, which
+        reports the *attempt*, no longer points at them. The alternative — holding
+        the slot until someone notices and restarts the hub — is the failure this
+        exists to end.
+
+        Failing here notifies, unlike the startup sweep: this *is* a fresh outcome
+        arriving while the operator is running, the same event a backend failure
+        would have pushed had the turn managed to fail on its own.
+        """
+        bound = self._config.eval_turn_timeout
+        if bound <= 0:
+            return []
+        limit = bound + STUCK_GRACE_SECONDS
+        settled: list[SemanticJob] = []
+        with self._lock:
+            now = self._clock()
+            for job_dir in self._job_dirs():
+                record = _load_record(job_dir)
+                if record.status not in _TRANSIENT:
+                    continue
+                instant = _attempt_instant(record)
+                if instant is None or (now - instant).total_seconds() < limit:
+                    continue
+                ts = now.isoformat()
+                updated = replace(
+                    record,
+                    status=STATUS_FAILED,
+                    error=_bound_error(
+                        f"semantic evaluation stuck in {record.status} for more"
+                        f" than {limit}s; the turn was abandoned and its slot freed"
+                    ),
+                    ended_ts=ts,
+                    updated_ts=ts,
+                )
+                _write_record(job_dir, updated)
+                _log.warning(
+                    "semantic job %s for %s/%s abandoned: stuck in %s past %ds",
+                    record.job_id,
+                    record.repo_name,
+                    record.task_id,
+                    record.status,
+                    limit,
+                )
+                self._emit(semantic_job_notification(updated))
+                settled.append(updated)
+        return settled
 
     # -- inspection -----------------------------------------------------------
 

@@ -7,7 +7,8 @@ writes far more than the caller asked for, and that bound is the whole point of
 the capped mode: the evidence layer's ``git log --patch`` output is repo-content
 sized, so the cap has to bound what is read, not what is kept afterwards. The
 timeout tests need a live child for the same reason: only a real process can
-stall a read.
+stall a read, and only a real child can show what environment it inherited or
+what its stdin was connected to.
 """
 
 from __future__ import annotations
@@ -161,3 +162,56 @@ def test_uncapped_run_still_captures_everything_including_stderr():
     assert result.stdout == "o" and result.stderr == "e"
     # Unmeasured: no cap was asked for, so no size/truncation claim is made.
     assert result.stdout_bytes is None and result.stdout_truncated is False
+
+
+def test_uncapped_run_times_out_rather_than_waiting_for_a_stalled_child():
+    # The uncapped mode is what the semantic evaluator's turn goes through, so its
+    # deadline has to bind on a child that simply never finishes.
+    started = time.monotonic()
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(hold(LONG), timeout=0.2)
+
+    assert time.monotonic() - started < PATIENCE
+
+
+ECHO_ENV = [
+    sys.executable,
+    "-c",
+    "import os, sys; sys.stdout.write(os.environ.get('ORCH_HUB_PROBE', '(absent)'))",
+]
+"""Argv for a command reporting one environment variable, to show what it inherited."""
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_env_replaces_the_child_environment_in_both_modes(capped, monkeypatch):
+    # The augmented-PATH callers (the semantic turn, launched by name under a
+    # launchd-sparse PATH) depend on this reaching the child in whichever mode
+    # they use.
+    monkeypatch.setenv("ORCH_HUB_PROBE", "inherited")
+
+    passed = run_command(ECHO_ENV, env={"ORCH_HUB_PROBE": "passed"}, max_stdout_bytes=capped)
+    assert passed.stdout == "passed"
+
+    # And omitting it still inherits, which is what every probe caller wants.
+    inherited = run_command(ECHO_ENV, max_stdout_bytes=capped)
+    assert inherited.stdout == "inherited"
+
+
+READ_STDIN = [
+    sys.executable,
+    "-c",
+    "import sys; sys.stdout.write(repr(sys.stdin.read()))",
+]
+"""Argv for a command that reads stdin to EOF — a hang, if stdin never closes."""
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_stdin_is_devnull_so_a_reading_command_cannot_wait_forever(capped):
+    # Every command this wrapper runs is a non-interactive probe. An inherited
+    # stdin is another way for one to block indefinitely on input nobody will
+    # type — the same unbounded wait the timeout exists to remove.
+    result = run_command(READ_STDIN, timeout=PATIENCE, max_stdout_bytes=capped)
+
+    assert result.ok is True
+    assert result.stdout == "''"  # immediate EOF, not a blocked read
