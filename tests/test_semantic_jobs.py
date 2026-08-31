@@ -70,7 +70,7 @@ from orch_hub.semantic_jobs import (
     UnknownSemanticJobError,
     _ERROR_MAX_CHARS,
 )
-from orch_hub.subprocess_utils import CommandResult
+from orch_hub.subprocess_utils import CommandCanceller, CommandResult
 
 TASK = "2026-07-23-semantic-evaluation-async-status"
 REPO_PATH = Path("/repos/alpha")
@@ -133,16 +133,23 @@ class FakeEvaluator:
         self._info = info or mk_info()
         self.calls: list[tuple[ManagedRepo, str]] = []
         self.deadlines: list[dt.datetime | None] = []
+        self.cancels: list[CommandCanceller | None] = []
 
     @property
     def evaluator_info(self) -> SemanticEvaluatorInfo:
         return self._info
 
     def evaluate(
-        self, r: ManagedRepo, task_id: str, *, turn_start_by: dt.datetime | None = None
+        self,
+        r: ManagedRepo,
+        task_id: str,
+        *,
+        turn_start_by: dt.datetime | None = None,
+        cancel: CommandCanceller | None = None,
     ) -> SemanticReport:
         self.calls.append((r, task_id))
         self.deadlines.append(turn_start_by)
+        self.cancels.append(cancel)
         if self._on_evaluate is not None:
             self._on_evaluate(r, task_id)
         if self._error is not None:
@@ -797,30 +804,131 @@ def test_cancelling_a_queued_job_stops_the_model_turn_before_it_opens(tmp_path):
     assert mgr.get_job(repo(), TASK).status == STATUS_CANCELLED
 
 
-def test_cancelling_a_running_job_abandons_the_turn_without_clobbering_the_record(tmp_path):
-    """From ``running`` the turn is abandoned, not killed — the hub holds no handle
-    on the subprocess.
+def test_cancelling_a_running_job_stops_the_turn_it_reports_stopping(tmp_path):
+    """From ``running`` the cancel must reach the turn, not just the record.
 
-    The property that makes that acceptable is the same one the stuck sweep rests
-    on: the late worker's own finalize finds a non-transient record and returns, so
-    the cancel stands and the slot really is free. ``started_ts`` is what tells an
-    abandoned turn from one that never opened.
+    A record settled ``cancelled`` while its model turn ran on would free the slot
+    and report the spending stopped while the subscription window kept draining —
+    and a manual retry could then run beside it. So the manager registers each
+    in-flight attempt's canceller and fires it here; the worker's own finalize then
+    finds a non-transient record and returns, which is what keeps the cancel
+    standing. ``started_ts`` still tells a turn that had opened from one that never
+    did.
     """
     box: dict = {}
-    mgr = manager(
-        tmp_path,
-        evaluator=FakeEvaluator(
-            on_evaluate=lambda r, t: box.setdefault("cancelled", mgr.cancel_job(r, t))
-        ),
+    ev = FakeEvaluator(
+        on_evaluate=lambda r, t: box.setdefault("cancelled", mgr.cancel_job(r, t))
     )
+    mgr = manager(tmp_path, evaluator=ev)
 
     mgr.start_job(repo(), TASK)  # synchronous executor: the turn runs inline
 
     assert box["cancelled"].status == STATUS_CANCELLED
     assert box["cancelled"].started_ts is not None
+    # The handle the turn was given is fired, so a real backend's child is killed
+    # rather than left spending the window the cancel was protecting.
+    assert ev.cancels[-1] is not None and ev.cancels[-1].cancelled is True
     settled = mgr.get_job(repo(), TASK)
     assert settled.status == STATUS_CANCELLED
     assert settled.evaluation_id is None
+
+
+def test_a_cancel_after_the_turn_returned_has_nothing_left_to_stop(tmp_path):
+    """The gap between a turn ending and its record settling is not a lost handle.
+
+    The attempt is unregistered as its turn returns, so a cancel landing in that
+    window settles the record without claiming to have killed anything — which is
+    the truth, and is also why a stale registration can never reach a *later*
+    attempt's process.
+    """
+    ev = FakeEvaluator()
+    mgr = manager(tmp_path, evaluator=ev)
+    mgr.start_job(repo(), TASK)  # synchronous executor: the turn runs to completion
+
+    with pytest.raises(SemanticJobStateError):
+        mgr.cancel_job(repo(), TASK)  # already at rest
+
+    assert ev.cancels[-1].cancelled is False
+
+
+def test_a_cancelled_attempt_cannot_settle_the_retry_that_replaced_it(tmp_path):
+    """Cancel, then ask again in the same second, while the old worker finishes.
+
+    The abandoned worker still finalizes, and it finds the *replacement's* record
+    sitting transient in the same place. What must stop it is per-attempt identity:
+    with the id minted from the clock alone, two attempts inside one second are
+    indistinguishable, so the late finalize settles the retry with the cancelled
+    attempt's evaluation and the retry's own worker then aborts against a record it
+    no longer owns — the corpus keeping a report nobody asked for and losing the
+    one somebody did.
+    """
+    executor = DeferredExecutor()
+    clock = Clock()  # never advanced: both attempts are minted in one second
+    box: dict = {}
+
+    class Evaluator:
+        """Cancels its own first turn and immediately asks for another."""
+
+        def __init__(self):
+            self.calls: list[str] = []
+
+        @property
+        def evaluator_info(self) -> SemanticEvaluatorInfo:
+            return mk_info()
+
+        def evaluate(self, r, task_id, *, turn_start_by=None, cancel=None):
+            self.calls.append(task_id)
+            if len(self.calls) == 1:
+                box["cancelled"] = mgr.cancel_job(r, task_id)
+                # Queued behind this worker in the same executor, so the retry is
+                # still transient when the cancelled attempt finalizes below.
+                box["retry"] = mgr.start_job(r, task_id)
+            return mk_report(evaluation_id=f"EVAL-{len(self.calls)}")
+
+    ev = Evaluator()
+    mgr = SemanticJobManager(
+        config(tmp_path), evaluator=ev, clock=clock, executor=executor
+    )
+    mgr.start_job(repo(), TASK)
+
+    executor.run_all()  # attempt 1 finalizes late, then attempt 2 runs
+
+    assert box["cancelled"].job_id != box["retry"].job_id
+    assert ev.calls == [TASK, TASK]  # the retry really ran its own turn
+    settled = mgr.get_job(repo(), TASK)
+    assert settled.job_id == box["retry"].job_id
+    assert settled.status == STATUS_COMPLETED
+    assert settled.evaluation_id == "EVAL-2"  # never the cancelled attempt's
+
+
+def test_every_attempt_has_its_own_id_inside_one_clock_second(tmp_path):
+    """The id is per attempt, not per second: the finalize guards key on it."""
+    clock = Clock()
+    mgr = manager(tmp_path, clock=clock)
+
+    first = mgr.start_job(repo(), TASK)
+    second = mgr.start_job(repo(), TASK)
+
+    assert first.job_id != second.job_id
+    assert first.job_id.startswith("20260723T120000Z-")
+
+
+def test_an_unrecognized_status_is_refused_rather_than_rewritten(tmp_path):
+    """A status this build does not know is preserved by the loader on purpose —
+    a record from a newer build, or a damaged one, stays visible instead of being
+    normalized away. Cancelling from an allowlist keeps it that way; "not terminal"
+    would have overwritten it with a lifecycle nobody here understands."""
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo(), TASK)
+    job_dir = config(tmp_path).data_dir / "semantic-jobs" / "alpha" / TASK
+    semantic_jobs._write_record(
+        job_dir, replace(mgr.get_job(repo(), TASK), status="reticulating")
+    )
+
+    with pytest.raises(SemanticJobStateError):
+        mgr.cancel_job(repo(), TASK)
+
+    assert mgr.get_job(repo(), TASK).status == "reticulating"
 
 
 @pytest.mark.parametrize(
@@ -1603,7 +1711,7 @@ class FakeBackend:
     def info(self) -> SemanticEvaluatorInfo:
         return mk_info(backend="claude-cli", model="claude-opus-4-8")
 
-    def evaluate(self, prompt: str, r: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, r: ManagedRepo, *, cancel=None) -> str:
         from orch_hub.semantic import SEMANTIC_END, SEMANTIC_START
 
         body = json.dumps(VALID_ENVELOPE_PAYLOAD)
@@ -1685,7 +1793,7 @@ def test_a_hung_turn_settles_failed_and_frees_the_slot_without_a_restart(tmp_pat
     assert mgr.get_job(target_repo, TASK).status == STATUS_FAILED
 
 
-def _hanging_runner(argv, cwd, timeout):
+def _hanging_runner(argv, cwd, timeout, cancel=None):
     """A ``claude`` turn that neither finishes nor fails, killed at the deadline.
 
     Exactly what :func:`orch_hub.subprocess_utils.run_command` raises once its

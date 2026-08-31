@@ -28,6 +28,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import threading
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,11 @@ from orch_hub.eval_dispatch import (
     DeferredDispatcher,
     queue_snapshot,
 )
-from orch_hub.eval_control import PAUSE_OPERATOR, PAUSE_UNREADABLE
+from orch_hub.eval_control import (
+    PAUSE_OPERATOR,
+    PAUSE_UNREADABLE,
+    EvaluationControlStore,
+)
 from orch_hub.models import (
     PROVIDER_CLAUDE,
     EvaluationControl,
@@ -75,6 +80,13 @@ from orch_hub.semantic_jobs import (
 
 TASK = "2026-08-09-completion-triggered-evaluation"
 REPO_PATH = Path("/repos/alpha")
+
+RACE_PATIENCE = 5
+"""Seconds a threaded test waits on the other thread before calling it stuck.
+
+Generous, because the assertion never depends on winning a timing race — the
+barrier decides the outcome, and this only keeps a regression from hanging the
+suite instead of failing it."""
 NOW = dt.datetime(2026, 8, 9, 12, 0, 0, tzinfo=dt.timezone.utc)
 
 
@@ -165,7 +177,9 @@ class FakeEvaluator:
     def evaluator_info(self) -> SemanticEvaluatorInfo:
         return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
 
-    def evaluate(self, r: ManagedRepo, task_id: str, *, turn_start_by=None) -> SemanticReport:
+    def evaluate(
+        self, r: ManagedRepo, task_id: str, *, turn_start_by=None, cancel=None
+    ) -> SemanticReport:
         self.calls.append((r, task_id))
         return mk_report(f"EVAL-{task_id}")
 
@@ -188,7 +202,7 @@ class FlippingBackend:
             backend="claude-cli", model="fake-model", schema_version="1"
         )
 
-    def evaluate(self, prompt: str, r: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, r: ManagedRepo, *, cancel=None) -> str:
         if self.fail:
             raise SemanticEvaluationError("claude backend exited 1")
         body = json.dumps(
@@ -453,7 +467,7 @@ def test_two_overlapping_sweeps_do_not_start_two_turns(tmp_path):
             super().__init__()
             self._box = dispatcher_box
 
-        def evaluate(self, r, task_id, *, turn_start_by=None):
+        def evaluate(self, r, task_id, *, turn_start_by=None, cancel=None):
             reentered.append(self._box["dispatcher"].sweep())
             return super().evaluate(r, task_id, turn_start_by=turn_start_by)
 
@@ -882,6 +896,81 @@ def test_an_unreadable_control_holds_the_drain(tmp_path):
 
     assert dispatcher.sweep() is None
     assert evaluator.calls == []
+
+
+def test_the_promotion_boundary_re_reads_the_pause_it_pre_checked(tmp_path):
+    """The gap between the sweep's pause check and its promotion is real time.
+
+    Between them sit a store walk, a spacing check, and a capacity read — all of
+    which an operator can press Pause during. A sweep that carried its first
+    reading down to the promotion would spend a turn out of a queue that is, by
+    then, held. So the check that decides is taken at the promotion boundary.
+    """
+    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
+    evaluator = FakeEvaluator()
+    reads: list[bool] = []
+
+    def control() -> EvaluationControl:
+        # Running when the sweep pre-checks; paused by the time it promotes.
+        reads.append(True)
+        return EvaluationControl() if len(reads) == 1 else EvaluationControl(paused=True)
+
+    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=live,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=control,
+        clock=clock,
+    )
+
+    assert dispatcher.sweep() is None
+    assert len(reads) == 2  # the pre-filter, then the one that decides
+    assert evaluator.calls == []
+    assert live.get_job(repo(), TASK).status == STATUS_DEFERRED
+
+
+def test_a_pause_write_cannot_be_overtaken_by_a_sweep_already_deciding(tmp_path):
+    """The live race, driven through the real control store and the real barrier.
+
+    The pause lives in one store and the queue in another, written by two
+    different threads, so "paused" is only a hold if the two cannot interleave. A
+    sweep that read the control just before ``POST .../queue/pause`` would
+    otherwise go on to promote a job after the pause is durable — and after the
+    route has answered that the queue is held.
+    """
+    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
+    evaluator = FakeEvaluator()
+    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
+    store = EvaluationControlStore(cfg.data_dir)
+    read_an_unpaused_control = threading.Event()
+
+    def control() -> EvaluationControl:
+        state = store.state()
+        if not state.paused:
+            read_an_unpaused_control.set()
+        return state
+
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=live,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=control,
+        clock=clock,
+    )
+    swept: list = []
+    sweeper = threading.Thread(target=lambda: swept.append(dispatcher.sweep()))
+
+    with dispatcher.admission_barrier():  # what the pause route holds
+        sweeper.start()
+        assert read_an_unpaused_control.wait(RACE_PATIENCE), "the sweep never ran"
+        store.pause()
+    sweeper.join(RACE_PATIENCE)
+
+    assert not sweeper.is_alive()
+    assert swept == [None]
+    assert evaluator.calls == []
+    assert live.get_job(repo(), TASK).status == STATUS_DEFERRED
 
 
 def test_a_dispatcher_built_without_a_control_store_is_not_paused(tmp_path):

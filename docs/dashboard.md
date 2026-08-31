@@ -40,8 +40,9 @@ The Overview refreshes while visible. Missing subscription-usage data degrades
 only its own panel; evaluation failures remain isolated to history and
 evaluation surfaces. Neither becomes repo health or a launch gate. The evaluation
 queue's controls change only what gets *measured*: pausing holds the automatic
-drain (completions still enter the queue) and cancelling settles one job — neither
-touches readiness, run state, or launch/intake admission.
+drain (completions still enter the queue) and cancelling stops one job, killing
+its model turn if one is running — neither touches readiness, run state, or
+launch/intake admission.
 
 ## Starting a run
 

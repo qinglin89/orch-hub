@@ -14,6 +14,7 @@ import itertools
 import json
 import os
 import shutil
+import threading
 from dataclasses import replace
 from pathlib import Path
 
@@ -3393,7 +3394,7 @@ class FakeSemanticBackend:
 
         return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, repo: ManagedRepo, *, cancel=None) -> str:
         self.prompts.append(prompt)
         return self._text
 
@@ -3418,7 +3419,7 @@ class RaisingSemanticBackend:
 
         return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, repo: ManagedRepo, *, cancel=None) -> str:
         raise SemanticEvaluationError("claude semantic evaluation turn failed (exit 1)")
 
     def doctor(self):
@@ -3784,6 +3785,40 @@ def test_the_pause_survives_a_restart_of_the_service(tmp_path, monkeypatch):
     reborn, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo)
 
     assert reborn.get("/api/evaluation/queue").json()["control"]["paused"] is True
+
+
+def test_the_pause_route_writes_under_the_dispatcher_admission_barrier(tmp_path, monkeypatch):
+    """The composition the route owes the dispatcher.
+
+    The pause lives in its own store and the drain in the job store, written by two
+    different threads. Unless the write is serialized against the promotion step, a
+    sweep that read an unpaused control a moment earlier can promote a job *after*
+    this route has answered that the queue is held — the one thing a pause exists
+    to prevent. The dispatcher lends the lock (it must not acquire the ability to
+    write the control); taking it is this route's job, so this pins that it does.
+    """
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    dispatcher = client.app.state.eval_dispatcher
+    answered = threading.Event()
+
+    def press_pause() -> None:
+        client.post("/api/evaluation/queue/pause")
+        answered.set()
+
+    with dispatcher.admission_barrier():
+        presser = threading.Thread(target=press_pause)
+        presser.start()
+        # It cannot have answered: whatever a sweep is doing right now, this write
+        # waits for it rather than landing beside it.
+        assert not answered.wait(0.2)
+
+    presser.join(PAUSE_ROUTE_PATIENCE)
+    assert answered.is_set()
+    assert client.get("/api/evaluation/queue").json()["control"]["paused"] is True
+
+
+PAUSE_ROUTE_PATIENCE = 5
+"""Seconds the threaded pause-route test waits before calling the request stuck."""
 
 
 def test_the_queue_controls_are_gated_and_protected(tmp_path, monkeypatch):

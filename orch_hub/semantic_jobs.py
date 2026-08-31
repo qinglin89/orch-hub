@@ -69,13 +69,17 @@ what makes the deterministic path containment-safe (and keeps every record on th
 two-level ``<repo-slug>/<task-id>/`` layout the startup reconcile scan walks).
 
 The operator's own lever on a single record is :meth:`SemanticJobManager.cancel_job`
-(modelled on the intake manager's cancel): it settles any non-terminal record to
-terminal ``cancelled``, freeing the task's slot at once. From ``deferred``/``queued``
-that genuinely prevents the model turn; from ``running`` it abandons a turn it
-cannot kill, on exactly the terms :meth:`SemanticJobManager.reconcile_stuck`
-already accepts. The queue-wide counterpart — holding every held job without
-settling any of them — is not this manager's business at all: it is a hub-owned
-switch read by the dispatch policy (:mod:`orch_hub.eval_control`).
+(modelled on the intake manager's cancel): it settles a ``deferred``/``queued``/
+``running`` record to terminal ``cancelled``, freeing the task's slot at once. From
+``deferred``/``queued`` the worker's own guard prevents the model turn; from
+``running`` the turn is *killed*, through the canceller this manager registers for
+each in-flight attempt — so the record and the spending stop together rather than
+the record alone. That is what separates a cancel from the reap
+(:meth:`SemanticJobManager.reconcile_stuck`), which by then has no live child left
+to reach: its records are past a deadline the model subprocess's own timeout
+expired a whole settle grace earlier. The queue-wide counterpart — holding every
+held job without settling any of them — is not this manager's business at all: it
+is a hub-owned switch read by the dispatch policy (:mod:`orch_hub.eval_control`).
 
 A completion the operator opted out of Layer 2 for is the one record that never
 becomes an attempt: it is written straight to a terminal ``skipped``
@@ -122,6 +126,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -131,6 +136,7 @@ from .config import Config
 from .models import ManagedRepo, SemanticJob
 from .notifications import Notification, Notifier, semantic_job_notification
 from .semantic import SemanticEvaluator
+from .subprocess_utils import CommandCanceller
 
 _log = logging.getLogger(__name__)
 
@@ -230,11 +236,40 @@ operator who cancelled can ask again (:meth:`start_job` overwrites it), and the
 automatic path cannot quietly re-enqueue what was just stopped, because the record
 itself is the once-per-task guard."""
 
+_CANCELLABLE = frozenset({STATUS_DEFERRED, STATUS_QUEUED, STATUS_RUNNING})
+"""The statuses :meth:`SemanticJobManager.cancel_job` may act on.
+
+Declared rather than derived as "not terminal", even though today the two sets
+partition :data:`STATUSES` between them. The loader deliberately preserves a
+status it does not recognize (a record from a newer build, or a hand-damaged
+file) so it stays visible instead of being normalized away, and "not terminal"
+would quietly sweep exactly those into a cancel — rewriting a state nobody here
+understands. An allowlist refuses them the way it refuses a resting record, which
+is the fail-closed direction for an operation that overwrites.
+
+Also the set the dashboard mirrors (``EVQ_CANCELLABLE`` in ``web/app.js``) to
+decide which rows get a Cancel button, so the two must say the same thing."""
+
 _JOB_ID_TS = "%Y%m%dT%H%M%SZ"
-"""Job-id stamp format (matches the run/eval id stamps). The id is the attempt's
-start stamp — per-attempt identity for the client to detect a superseded attempt
-across polls; correctness of the finalize guard rests on the status, not on this
-id being globally unique (see :meth:`SemanticJobManager._finalize`)."""
+"""Job-id stamp prefix (matches the run/eval id stamps): readable, sortable, and
+enough on its own to say when an attempt was accepted."""
+
+_JOB_ID_TOKEN_BYTES = 4
+"""Random suffix appended to the stamp, and the whole of what makes an id unique.
+
+The stamp alone is not per-attempt identity, it is per-*second* identity, and the
+finalize guards are keyed on that id (:meth:`SemanticJobManager._finalize`,
+:meth:`SemanticJobManager._begin_running`). Cancelling a running job and
+immediately asking for another puts two attempts inside one second: the abandoned
+worker then finalizes and finds a transient record carrying what it believes is
+its own id, and settles the *replacement* with the cancelled attempt's result.
+
+Randomness rather than a clock or a counter, because both of the obvious
+alternatives fail exactly where this has to hold. The clock is injectable and, in
+tests and across a suspend, repeats — sub-second precision would not have
+separated the two attempts above. A per-process counter resets on restart, which
+is precisely when a stale id can meet a fresh one. Four bytes is far more than
+the two-attempts-per-second-per-task population needs."""
 
 _SLUG = re.compile(r"[^A-Za-z0-9._-]+")
 """Repo-name slug rule (matches ``runs._slug``/``evaluation._SLUG``): collapse any
@@ -517,6 +552,16 @@ class SemanticJobManager:
         self._notifier = notifier
         self._notify_dispatch = notify_dispatch
         self._lock = threading.Lock()
+        # In-flight turns this process owns, ``job_dir -> (job_id, canceller)``,
+        # guarded by the same lock as the records. It is what gives
+        # :meth:`cancel_job` something to actually stop: a record says a turn is
+        # running, but only the worker holds the process, and this is where the
+        # worker publishes the handle that reaches it. Registered atomically with
+        # the queued->running write and dropped when the turn returns, so a
+        # ``running`` record with no entry here is unambiguously not our worker's
+        # (an orphan from a dead process, or a turn already past its last step) —
+        # nothing to stop rather than a lost handle.
+        self._live: dict[Path, tuple[str, CommandCanceller]] = {}
 
     @property
     def jobs_dir(self) -> Path:
@@ -682,10 +727,13 @@ class SemanticJobManager:
         evaluator identity (backend/model/schema) is stamped now so the
         deferred/queued/running UI names the model before a report exists.
 
-        The job id is this attempt's *creation* stamp and is not re-minted when a
-        deferred attempt is later promoted: one acceptance is one attempt however
-        long the policy holds it, and the finalize guards key off the status, not
-        the id's recency.
+        The job id is this attempt's *creation* stamp plus a random token, and is
+        not re-minted when a deferred attempt is later promoted: one acceptance is
+        one attempt however long the policy holds it. The token is what makes the
+        id an attempt identity rather than a second identity
+        (:data:`_JOB_ID_TOKEN_BYTES`) — the finalize guards match on it, and a
+        cancelled attempt's late worker must not be able to mistake its
+        same-second replacement for itself.
 
         A record created directly in a terminal state (a ``skipped`` one — the only
         outcome reachable without an attempt) gets its ``ended_ts`` here, since
@@ -696,7 +744,10 @@ class SemanticJobManager:
         """
         job_dir.mkdir(parents=True, exist_ok=True)
         info = self._evaluator.evaluator_info
-        job_id = self._clock().strftime(_JOB_ID_TS)
+        job_id = (
+            f"{self._clock().strftime(_JOB_ID_TS)}"
+            f"-{secrets.token_hex(_JOB_ID_TOKEN_BYTES)}"
+        )
         ts = self._clock().isoformat()
         record = SemanticJob(
             job_id=job_id,
@@ -832,33 +883,36 @@ class SemanticJobManager:
         """Settle this task's non-terminal job to ``cancelled``; return the record.
 
         The per-job counterpart of the queue-wide pause, modelled on
-        :meth:`orch_hub.intake.IntakeManager.cancel_intake`: legal from any
-        non-terminal status (``deferred``, ``queued``, ``running``), refused from a
-        resting one (:class:`SemanticJobStateError` → 409), and 404 for a task that
-        has no record at all. Like the intake cancel it writes nothing to the target
-        repo and needs no live turn, so it always succeeds for a cancellable job —
-        including one whose worker died with the process that owned it.
+        :meth:`orch_hub.intake.IntakeManager.cancel_intake`: legal from
+        :data:`_CANCELLABLE` (``deferred``, ``queued``, ``running``), refused from
+        any other status (:class:`SemanticJobStateError` → 409), and 404 for a task
+        that has no record at all. Like the intake cancel it writes nothing to the
+        target repo, and it needs no live turn, so it also succeeds on a job whose
+        worker died with the process that owned it.
 
-        What it stops depends on where the job was, and only the last case is a
-        compromise:
+        **The work stops before the record says it did.** The turn is signalled
+        first and the terminal record is written only afterwards, so the outcome
+        this reports is never ahead of the thing it reports on:
 
         - ``deferred`` — the queue simply loses a job it had not spent anything on.
         - ``queued`` — admitted but not yet begun. :meth:`_begin_running` refuses to
           promote a record that is no longer ``queued``, so the worker aborts and
-          **no model turn opens**. This is a real cancellation, not a bookkeeping
-          one.
-        - ``running`` — the model turn is already in flight and this manager holds
-          no handle on the subprocess, so the turn is *abandoned*, not killed: the
-          record settles now and frees the ``(repo, task)`` slot, while the worker
-          runs on under its own deadline and finds a non-transient record at
-          :meth:`_finalize`, which returns without clobbering this outcome. That is
-          exactly the arrangement :meth:`reconcile_stuck` already rests on, and its
-          consequences are the same and equally contained: the turn was read-only
-          over target state, and if it does succeed its artifacts are durable and
-          publishable — only this record, which reports the *attempt*, no longer
-          points at them. ``started_ts`` is what distinguishes the two readings
-          afterwards: a cancelled record carrying one is a turn that was abandoned;
-          one without is a turn that never opened.
+          **no model turn opens**.
+        - ``running`` — the model subprocess is killed through the attempt's
+          registered canceller (:meth:`_stop_live_turn_locked`), so the turn stops
+          spending the window the cancel was protecting. The worker's call raises,
+          the evaluator's all-or-nothing cleanup removes the reserved evaluation
+          dir, and its :meth:`_finalize` finds a non-transient record and writes
+          nothing over this outcome — so a cancelled attempt leaves neither
+          artifacts nor a published report behind the record that says it stopped.
+        - ``running`` with no live turn in *this* process — a record orphaned by a
+          previous hub, or an attempt whose turn has already returned. There is
+          nothing left to kill and the record settles, which is honest rather than
+          a compromise: the turn is not running here.
+
+        ``started_ts`` still distinguishes the two readings afterwards: a cancelled
+        record carrying one is a turn that had opened; one without is a turn that
+        never did.
 
         No notification. A cancel is the operator's own action, taken at the surface
         that shows the outcome — the same reason a ``skipped`` record is silent,
@@ -875,11 +929,15 @@ class SemanticJobManager:
                 raise UnknownSemanticJobError(
                     f"no semantic job for repo {repo.name!r} task {task_id!r}"
                 )
-            if record.status in _TERMINAL:
+            if record.status not in _CANCELLABLE:
                 raise SemanticJobStateError(
                     f"semantic job for task {task_id!r} cannot be cancelled from"
                     f" status {record.status!r}"
                 )
+            # Stop the work first: a kill that fails propagates from here, leaving
+            # the record exactly as it was rather than claiming an outcome the hub
+            # did not achieve.
+            stopped = self._stop_live_turn_locked(job_dir, record)
             ts = self._clock().isoformat()
             cancelled = replace(
                 record,
@@ -892,11 +950,12 @@ class SemanticJobManager:
             )
             _write_record(job_dir, cancelled)
             _log.info(
-                "semantic job %s for %s/%s cancelled from %s",
+                "semantic job %s for %s/%s cancelled from %s (live turn %s)",
                 record.job_id,
                 record.repo_name,
                 record.task_id,
                 record.status,
+                "stopped" if stopped else "none",
             )
             return cancelled
 
@@ -922,20 +981,39 @@ class SemanticJobManager:
         blocks no read; the terminal write re-acquires the lock. That flip is also
         what bounds the attempt, and the evaluator is handed the half of the bound
         it has to honour (:func:`_turn_start_by`): finish the evidence build in
-        time to open the model turn, or open none. Any evaluation
-        failure (backend/model/process error, a non-conforming report, a disabled
-        subsystem, an unsafe id that slipped through) becomes a clean ``failed``
-        job with a bounded diagnostic — the evaluator's own all-or-nothing cleanup
-        has already removed any partial artifacts, so the failed job leaves no
-        half-written evaluation and never mutates target state.
+        time to open the model turn, or open none.
+
+        The other bound on the turn is the operator's: this mints the attempt's
+        :class:`~orch_hub.subprocess_utils.CommandCanceller`, registers it as the
+        live handle for this ``(repo, task)`` while the turn runs, and hands it to
+        the evaluator — so :meth:`cancel_job` kills the model subprocess rather
+        than relabelling a record whose turn keeps spending. Any evaluation
+        failure (backend/model/process error, a cancel, a non-conforming report, a
+        disabled subsystem, an unsafe id that slipped through) becomes a clean
+        ``failed`` job with a bounded diagnostic — the evaluator's own
+        all-or-nothing cleanup has already removed any partial artifacts, so the
+        failed job leaves no half-written evaluation and never mutates target
+        state.
         """
-        running = self._begin_running(job_dir, job_id)
+        cancel = CommandCanceller()
+        running = self._begin_running(job_dir, job_id, cancel)
         if running is None:
             return
         try:
-            report = self._evaluator.evaluate(
-                repo, task_id, turn_start_by=_turn_start_by(running)
-            )
+            try:
+                report = self._evaluator.evaluate(
+                    repo,
+                    task_id,
+                    turn_start_by=_turn_start_by(running),
+                    cancel=cancel,
+                )
+            finally:
+                # Before either finalize, so the window in which a cancel can find
+                # a live handle ends when the turn does rather than when its record
+                # does. A cancel arriving in the gap that remains settles the
+                # record without a kill, which is the truth: there is nothing left
+                # running to stop.
+                self._release_attempt(job_dir, job_id)
         except Exception as exc:  # noqa: BLE001 - any failure is a failed job
             self._finalize(
                 job_dir,
@@ -954,7 +1032,9 @@ class SemanticJobManager:
             schema_version=report.evaluator.schema_version,
         )
 
-    def _begin_running(self, job_dir: Path, job_id: str) -> SemanticJob | None:
+    def _begin_running(
+        self, job_dir: Path, job_id: str, cancel: CommandCanceller
+    ) -> SemanticJob | None:
         """Flip a still-``queued`` job to ``running`` under the lock; else no-op.
 
         Returns ``None`` (so the turn aborts before running the model) when the
@@ -971,6 +1051,13 @@ class SemanticJobManager:
         worker read the same instant instead of each deriving one. With the turn
         deadline disabled there is no bound to derive and the field stays ``None``,
         which is also what turns the sweep off for this record.
+
+        It is likewise where the attempt's canceller is published, in the same
+        locked section as the ``running`` write and never before it. Registering
+        earlier would advertise a stoppable turn to :meth:`cancel_job` while this
+        worker might still abort (the guard below), and registering later would
+        leave a window in which the record says ``running`` and no handle reaches
+        it — so the two facts are made true together.
         """
         with self._lock:
             record = self._load_if_present(job_dir)
@@ -989,7 +1076,46 @@ class SemanticJobManager:
                 updated_ts=ts,
             )
             _write_record(job_dir, running)
+            self._live[job_dir] = (job_id, cancel)
             return running
+
+    def _release_attempt(self, job_dir: Path, job_id: str) -> None:
+        """Withdraw this attempt's cancel handle once its turn has returned.
+
+        Keyed on ``job_id`` as well as the dir so a late release can never drop a
+        *newer* attempt's handle: after a cancel, an operator may already have
+        started the replacement, and unregistering it would leave that live turn
+        unstoppable — the same superseding-attempt care every other guard here
+        takes, in the one place where being late is normal rather than defensive.
+        """
+        with self._lock:
+            live = self._live.get(job_dir)
+            if live is not None and live[0] == job_id:
+                del self._live[job_dir]
+
+    def _stop_live_turn_locked(self, job_dir: Path, record: SemanticJob) -> bool:
+        """Stop this record's in-flight turn if this process is running one.
+
+        Returns whether a live model subprocess was signalled. ``False`` covers
+        every shape of "nothing to kill", none of which is a failure: a
+        ``deferred``/``queued`` record whose turn has not begun, a ``running``
+        record orphaned by the process that owned it, an attempt still in its
+        pre-model evidence build (the canceller's flag stops it at the evaluator's
+        checkpoint, before any window is spent), and one whose turn had already
+        returned.
+
+        A kill that *fails* is not swallowed: it propagates out of
+        :meth:`cancel_job` before the terminal record is written, so a turn the hub
+        could not stop is never reported as cancelled.
+
+        The caller holds the lock, which is what makes this exact rather than
+        best-effort: the registration and the record it belongs to are written
+        under the same lock, so the pair cannot be observed half-updated.
+        """
+        live = self._live.get(job_dir)
+        if live is None or live[0] != record.job_id:
+            return False
+        return live[1].cancel()
 
     def _attempt_bound(self) -> int:
         """Seconds one whole attempt may take, or ``0`` when it is unbounded.

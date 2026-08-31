@@ -88,7 +88,12 @@ from .models import (
 from .runs import _orchestrator_env
 from .session_reads import MemoryRead, ReadBehavior, SessionReads
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
-from .subprocess_utils import CommandNotFoundError, run_command
+from .subprocess_utils import (
+    CommandCancelled,
+    CommandCanceller,
+    CommandNotFoundError,
+    run_command,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -1065,7 +1070,18 @@ class SemanticBackend(Protocol):
     @property
     def info(self) -> SemanticEvaluatorInfo: ...
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str: ...
+    def evaluate(
+        self, prompt: str, repo: ManagedRepo, *, cancel: CommandCanceller | None = None
+    ) -> str:
+        """Run the turn; ``cancel`` is the operator's stop on one already in flight.
+
+        A backend that spends a subscription window MUST honour it: publish
+        whatever handle can end the work (the CLI backend attaches its child
+        process) and raise :class:`SemanticEvaluationError` rather than returning a
+        report whose caller has already stopped waiting for it. ``None`` — the
+        default, and every direct caller — runs to completion as before.
+        """
+        ...
 
     def doctor(self) -> SemanticDoctor:
         """Report whether this backend can actually run, without a model call.
@@ -1096,7 +1112,9 @@ class _UnavailableSemanticBackend:
             backend="unavailable", model=None, schema_version=SEMANTIC_SCHEMA_VERSION
         )
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+    def evaluate(
+        self, prompt: str, repo: ManagedRepo, *, cancel: CommandCanceller | None = None
+    ) -> str:
         raise SemanticEvaluationError("no semantic evaluator backend configured")
 
     def doctor(self) -> SemanticDoctor:
@@ -1156,7 +1174,10 @@ class SemanticRunResult:
     returncode: int
 
 
-SemanticRunner = Callable[[Sequence[str], Path, Optional[float]], SemanticRunResult]
+SemanticRunner = Callable[
+    [Sequence[str], Path, Optional[float], Optional[CommandCanceller]],
+    SemanticRunResult,
+]
 """Runs one evaluator-CLI turn to completion in ``cwd`` and returns its captured
 output (blocking and output-capturing — the ``stream-json`` stdout must be parsed,
 not detached). Tests inject a fake; :func:`_default_runner` is the real one.
@@ -1166,21 +1187,31 @@ it is part of the seam rather than a private detail of the real runner because
 the deadline is what the *caller* has to reason about: :meth:`ClaudeSemanticBackend.evaluate`
 turns its expiry into a named failure, and a test proves that without launching
 ``claude``. A runner that reaches it must raise
-:class:`subprocess.TimeoutExpired`, having already killed the child."""
+:class:`subprocess.TimeoutExpired`, having already killed the child.
+
+The fourth is the operator's stop on a turn already running (``None`` = not
+stoppable), and it is in the seam for the same reason: what the caller reasons
+about is that a cancelled turn ends *promptly* and is reported as stopped rather
+than as a result. A runner given one must publish its child on it and raise
+:class:`~orch_hub.subprocess_utils.CommandCancelled` when it fires."""
 
 
 def _default_runner(
-    argv: Sequence[str], cwd: Path, timeout: float | None
+    argv: Sequence[str],
+    cwd: Path,
+    timeout: float | None,
+    cancel: CommandCanceller | None = None,
 ) -> SemanticRunResult:
     """Run ``claude`` to completion, capturing stdout/stderr (the real runner).
 
     Goes through the shared wrapper (:func:`orch_hub.subprocess_utils.run_command`)
     rather than calling :mod:`subprocess` directly, so this turn gets the same
     bounded-call semantics every other hub command check has: ``timeout`` covers
-    the whole call and raises :class:`subprocess.TimeoutExpired` on expiry, stdin
-    is ``DEVNULL``, and both pipes are drained so a large ``stream-json`` stdout
-    cannot deadlock against stderr. Uncapped rather than ``max_stdout_bytes``:
-    the capped mode discards stderr, which is exactly the tail
+    the whole call and raises :class:`subprocess.TimeoutExpired` on expiry,
+    ``cancel`` makes the child killable from the thread handling the operator's
+    cancel, stdin is ``DEVNULL``, and both pipes are drained so a large
+    ``stream-json`` stdout cannot deadlock against stderr. Uncapped rather than
+    ``max_stdout_bytes``: the capped mode discards stderr, which is exactly the tail
     :meth:`ClaudeSemanticBackend.evaluate` reports when a turn *fails*.
 
     The child environment is the augmented PATH shared with detached orchestrator
@@ -1190,7 +1221,7 @@ def _default_runner(
     ``_default_spawner`` and the intake agent's ``_default_runner``.
     """
     result = run_command(
-        list(argv), cwd=cwd, timeout=timeout, env=_orchestrator_env()
+        list(argv), cwd=cwd, timeout=timeout, env=_orchestrator_env(), cancel=cancel
     )
     return SemanticRunResult(
         stdout=result.stdout, stderr=result.stderr, returncode=result.returncode
@@ -1295,7 +1326,9 @@ class ClaudeSemanticBackend:
             detail=detail,
         )
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+    def evaluate(
+        self, prompt: str, repo: ManagedRepo, *, cancel: CommandCanceller | None = None
+    ) -> str:
         """Run the one read-only, evidence-bounded turn; return the assistant's text.
 
         Evidence isolation is structural (see :meth:`_argv` for the CLI gates). The
@@ -1310,9 +1343,17 @@ class ClaudeSemanticBackend:
 
         Raises :class:`SemanticEvaluationError` on a nonzero exit, a stream-level
         error (the same success test the orchestrator/intake readers use), a
-        missing ``claude``, or a turn that outlives :attr:`timeout`, so the service
-        turns a backend/model failure into a clean failed evaluation (dir removed,
-        no partial artifacts, target state untouched).
+        missing ``claude``, a turn that outlives :attr:`timeout`, or a turn an
+        operator cancelled, so the service turns a backend/model failure into a
+        clean failed evaluation (dir removed, no partial artifacts, target state
+        untouched).
+
+        ``cancel`` is what makes an operator's cancel reach the model turn instead
+        of merely relabelling the record that describes it: the canceller is handed
+        to the runner, which publishes the child on it, so cancelling kills the
+        process — and the same fired canceller turns a turn that finished in the
+        race window into a stop as well, so a report nobody is waiting for is never
+        parsed, persisted, or published.
 
         The timeout is translated here rather than allowed to propagate, and that
         is not cosmetic: :class:`subprocess.TimeoutExpired` stringifies its whole
@@ -1325,7 +1366,12 @@ class ClaudeSemanticBackend:
         argv = self._argv(prompt)
         sandbox = Path(tempfile.mkdtemp(prefix="orch-hub-semantic-"))
         try:
-            result = self._runner(argv, sandbox, self.timeout)
+            result = self._runner(argv, sandbox, self.timeout, cancel)
+        except CommandCancelled as exc:
+            raise SemanticEvaluationError(
+                "claude semantic evaluation turn was cancelled and its process"
+                " stopped"
+            ) from exc
         except subprocess.TimeoutExpired as exc:
             # The runner's own reading of the deadline, falling back to this
             # backend's, so the message states the bound that actually expired.
@@ -1921,6 +1967,7 @@ class SemanticEvaluator:
         task_id: str,
         *,
         turn_start_by: dt.datetime | None = None,
+        cancel: CommandCanceller | None = None,
     ) -> SemanticReport:
         """Run one semantic evaluation for ``(repo, task_id)`` and persist it.
 
@@ -1969,6 +2016,17 @@ class SemanticEvaluator:
         Refusing here is cheap in the only currency that matters: the subscription
         window is untouched, because the turn never started. ``None`` — the default,
         and every direct caller — runs unbounded, exactly as before.
+
+        ``cancel`` is the operator's stop, and it binds at both ends of the model
+        call. Before it, a fired canceller refuses the turn on the same terms as an
+        outrun window — the whole pre-model build has already happened, so the only
+        thing left to withhold is the spend. Inside it, the backend hands the
+        canceller its child, so a cancel during the turn kills the process rather
+        than waiting it out. Either way the failure travels through the same
+        all-or-nothing cleanup as any other, which is what keeps a cancelled
+        attempt from leaving artifacts — or a published report — behind the record
+        that says it was stopped. ``None`` (the default, and every direct caller)
+        cannot be cancelled, exactly as before.
         """
         self._require_enabled()
         pack = self._service.generate_evidence(repo, task_id, prune=False)
@@ -1984,7 +2042,8 @@ class SemanticEvaluator:
             evidence = build_semantic_evidence(pack, static_report)
             prompt = build_prompt(evidence)
             self._require_turn_window(turn_start_by)
-            text = self._backend.evaluate(prompt, repo)
+            self._require_not_cancelled(cancel)
+            text = self._backend.evaluate(prompt, repo, cancel=cancel)
             report = parse_report(
                 text,
                 evaluation_id=pack.evaluation_id,
@@ -2046,6 +2105,24 @@ class SemanticEvaluator:
         raise SemanticEvaluationError(
             "semantic evaluation evidence build outran its window: the model turn"
             f" had to start by {limit.isoformat()} and it is now {now.isoformat()};"
+            " no turn was started"
+        )
+
+    def _require_not_cancelled(self, cancel: CommandCanceller | None) -> None:
+        """Refuse to open a model turn an operator has already cancelled.
+
+        Checked beside :meth:`_require_turn_window` and for the same reason: it is
+        the last moment at which the expensive, window-spending part can still be
+        withheld, and everything cheap has already been attempted. It matters
+        because a cancel can land during the pre-model build — a run/event/session
+        walk and git subprocesses, none of which the canceller's child-kill can
+        reach, because there is no child yet — and without this the attempt would
+        go on to spend exactly the window the cancel was protecting.
+        """
+        if cancel is None or not cancel.cancelled:
+            return
+        raise SemanticEvaluationError(
+            "semantic evaluation was cancelled before its model turn started;"
             " no turn was started"
         )
 

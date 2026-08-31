@@ -512,7 +512,7 @@ class FakeBackend:
             backend="fake-cli", model="fake-model", schema_version="1"
         )
 
-    def evaluate(self, prompt: str, r: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, r: ManagedRepo, *, cancel=None) -> str:
         from orch_hub.semantic import SEMANTIC_END, SEMANTIC_START
 
         return f"{SEMANTIC_START}\n{json.dumps(VALID_ENVELOPE_PAYLOAD)}\n{SEMANTIC_END}"

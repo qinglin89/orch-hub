@@ -424,6 +424,12 @@ Some properties worth knowing:
   button on a task's evaluation view — still runs, exactly as it still runs above
   the usage ceiling. A human asking for one evaluation is not the production-side
   selection any of these gates exist to shape, and it remains the escape hatch.
+- **A pause takes effect at once, not at the next tick.** The pause and the queue
+  are two different stores written by two different threads, so the write is
+  serialized against the step that promotes a job. A sweep already deciding when
+  you press Pause either promotes before the pause is durable — and the queue you
+  get back shows it — or sees the pause and holds. What cannot happen is a turn
+  starting after you were told the queue was held.
 - **The stuck sweep is not paused.** Reaping a turn that has outlived its
   deadline is a liveness mechanism, not a dispatch decision; a pause must not
   leave a hung job holding its slot.
@@ -441,21 +447,28 @@ task's job to terminal `cancelled` and frees its `(repo, task)` slot immediately
 Legal from `deferred`, `queued`, and `running`; a record already at rest answers
 `409`, and a task that never had a job answers `404`.
 
-What it actually stops depends on where the job was:
+The work stops before the record says it did — the turn is signalled first and
+the record is written only once it has been — so what you are told is never ahead
+of what actually happened:
 
 - From `deferred` or `queued`, **no model turn opens**. A queued record's worker
   checks the record before starting, and refuses one this settled. Nothing is
   spent.
-- From `running`, the turn is **abandoned rather than killed** — the hub holds no
-  handle on the CLI subprocess. The record settles now and the slot frees, while
-  the worker runs on under its own deadline; when it finishes it finds a
-  non-transient record and writes nothing over this outcome. That is the same
-  arrangement the [stuck sweep](#when-a-turn-hangs) already rests on, with the
-  same consequences: the turn was read-only over target state throughout, and if
-  it does succeed its artifacts are still written and still publishable — only the
-  job record, which reports the *attempt*, no longer points at them. A cancelled
-  record with a start timestamp is an abandoned turn; one without is a turn that
-  never opened.
+- From `running`, the CLI subprocess is **killed**. The hub keeps a handle on each
+  in-flight turn for exactly this, so cancelling stops the draw on the
+  subscription window rather than only relabelling the record describing it. The
+  worker's call fails, its reserved evaluation directory is removed like any other
+  failure, and its finalize finds a non-transient record and writes nothing over
+  this outcome — so a cancelled attempt leaves no artifacts and publishes no
+  report.
+- From `running` with **no live turn in this hub process** — a record left by a
+  previous hub, or an attempt whose turn had just returned — there is nothing left
+  to kill and the record simply settles. That is not a compromise: the turn is not
+  running here.
+
+A cancelled record with a start timestamp is a turn that had opened; one without
+is a turn that never did. If the hub cannot stop a live turn, the cancel fails and
+the record is left as it was, rather than reporting an outcome that did not happen.
 
 A cancelled record is terminal, so it holds the task's once-per-task guard: the
 automatic path will not quietly re-enqueue what you just stopped. Asking again is

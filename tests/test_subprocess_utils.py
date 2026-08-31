@@ -9,6 +9,10 @@ sized, so the cap has to bound what is read, not what is kept afterwards. The
 timeout tests need a live child for the same reason: only a real process can
 stall a read, and only a real child can show what environment it inherited or
 what its stdin was connected to.
+
+The cancellation tests need one most of all: what a canceller promises is that
+another thread's blocked call *ends* and its child is gone, and neither half is
+observable against a fake.
 """
 
 from __future__ import annotations
@@ -16,11 +20,14 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 import time
 
 import pytest
 
 from orch_hub.subprocess_utils import (
+    CommandCancelled,
+    CommandCanceller,
     CommandNotFoundError,
     run_command,
 )
@@ -215,3 +222,128 @@ def test_stdin_is_devnull_so_a_reading_command_cannot_wait_forever(capped):
 
     assert result.ok is True
     assert result.stdout == "''"  # immediate EOF, not a blocked read
+
+
+# -- cancellation --------------------------------------------------------------
+#
+# ``timeout`` is the bound a caller fixes before the call and then waits out; a
+# canceller is the other half, and the semantic evaluator's operator cancel is the
+# caller that needs it. What it owes: the blocked call ends, the child is gone, and
+# the caller is told it was stopped rather than handed a result.
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_a_cancelled_run_ends_and_leaves_no_child_behind(capped):
+    canceller = CommandCanceller()
+    timer = threading.Timer(0.1, canceller.cancel)
+    timer.start()
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(CommandCancelled):
+            run_command(hold(LONG), max_stdout_bytes=capped, cancel=canceller)
+    finally:
+        timer.cancel()
+
+    # Ended when it was cancelled, not when the child would have finished.
+    assert time.monotonic() - started < PATIENCE
+
+
+class PidCanceller(CommandCanceller):
+    """Reports which child it was handed, and when — the two facts a test needs.
+
+    ``attached`` is what makes the cancel below a decision rather than a race: it
+    fires only once a live process exists to kill.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.pid: int | None = None
+        self.attached = threading.Event()
+
+    def attach(self, proc) -> bool:
+        adopted = super().attach(proc)
+        if adopted:
+            self.pid = proc.pid
+            self.attached.set()
+        return adopted
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_a_cancelled_child_is_killed_and_reaped(capped):
+    # The point of killing rather than merely flagging: the whole reason to cancel
+    # a semantic turn is that its process is spending a subscription window, so a
+    # cancel that only unblocked the caller would stop nothing that matters.
+    canceller = PidCanceller()
+    outcome: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            run_command(hold(LONG), max_stdout_bytes=capped, cancel=canceller)
+        except BaseException as exc:  # noqa: BLE001 - reported to the main thread
+            outcome.append(exc)
+
+    runner = threading.Thread(target=run)
+    runner.start()
+    assert canceller.attached.wait(PATIENCE), "no child was ever published"
+
+    canceller.cancel()
+
+    runner.join(PATIENCE)
+    assert not runner.is_alive()
+    assert outcome and isinstance(outcome[0], CommandCancelled)
+    with pytest.raises(ProcessLookupError):
+        os.kill(canceller.pid, 0)  # killed and reaped, not left running
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_a_canceller_fired_before_the_call_starts_nothing_it_cannot_stop(capped):
+    # Cancelling between the spawn and the child becoming reachable would otherwise
+    # leave a process nobody holds a handle on.
+    canceller = CommandCanceller()
+    canceller.cancel()
+
+    with pytest.raises(CommandCancelled):
+        run_command(hold(LONG), max_stdout_bytes=capped, cancel=canceller)
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_an_uncancelled_run_with_a_canceller_behaves_exactly_as_before(capped):
+    result = run_command(emit(10), max_stdout_bytes=capped, cancel=CommandCanceller())
+
+    assert result.ok is True and result.stdout == "x" * 10
+
+
+def test_an_uncancelled_run_still_captures_stderr():
+    # The uncapped mode is what the semantic turn uses, and its stderr tail is the
+    # bounded diagnostic a *failed* turn reports.
+    result = run_command(
+        [sys.executable, "-c", "import sys; sys.stdout.write('o'); sys.stderr.write('e')"],
+        cancel=CommandCanceller(),
+    )
+
+    assert result.stdout == "o" and result.stderr == "e"
+
+
+def test_a_timeout_still_binds_when_a_canceller_is_attached():
+    # The two bounds are independent: nobody cancelled, so this is a deadline
+    # expiring, and reporting it as a cancel would name the wrong cause.
+    with pytest.raises(subprocess.TimeoutExpired):
+        run_command(hold(LONG), timeout=0.2, cancel=CommandCanceller())
+
+
+class LateCanceller(CommandCanceller):
+    """Fires exactly as the run finishes — the race window, made deterministic."""
+
+    def detach(self) -> None:
+        self.cancel()
+        super().detach()
+
+
+@pytest.mark.parametrize("capped", [None, 1000])
+def test_a_cancel_landing_as_the_command_finishes_is_still_a_cancel(capped):
+    # The caller has already stopped waiting for this result, and for the semantic
+    # turn that matters concretely: a report parsed and published out of a turn the
+    # operator cancelled would outlive the record saying it was stopped.
+    with pytest.raises(CommandCancelled):
+        run_command(emit(10), max_stdout_bytes=capped, cancel=LateCanceller())

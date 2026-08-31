@@ -1802,9 +1802,18 @@ def create_app(
         when the button was last pressed. Returns the same payload as
         ``GET /api/evaluation/queue``, whose ``control`` block now reports the
         pause; disabled → 404 like every other evaluation route.
+
+        The write is taken under the dispatcher's admission barrier so it cannot
+        interleave with a promotion: without it a sweep already past its own pause
+        check goes on to spend a turn after this route has answered that the queue
+        is held, which is the one outcome a pause exists to prevent. The barrier
+        covers the control write only — the payload is read after it, so the answer
+        reflects any promotion that legitimately won the race rather than a
+        snapshot taken under the lock.
         """
         require_evaluation_enabled()
-        eval_control.pause()
+        with eval_dispatcher.admission_barrier():
+            eval_control.pause()
         return _queue_payload()
 
     @app.post("/api/evaluation/queue/resume")
@@ -1820,6 +1829,11 @@ def create_app(
         direction, so damage is visible rather than silently spending the window),
         and this is the operation that repairs it. Returns the queue payload;
         disabled → 404.
+
+        No admission barrier here, unlike the pause: the race the barrier closes is
+        a promotion slipping past a hold, and resuming has no hold to slip past.
+        The worst a concurrent sweep can do against this write is decline one tick
+        it was entitled to decline; the next one drains.
         """
         require_evaluation_enabled()
         eval_control.resume()

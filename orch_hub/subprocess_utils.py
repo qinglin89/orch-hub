@@ -12,6 +12,12 @@ repo content — ``git log --patch`` for the evidence layer — passes
 ``max_stdout_bytes`` instead: the capped mode streams stdout, retains only that
 many bytes, and drains the rest, so a caller's byte cap bounds what is *read*
 rather than what is kept after an unbounded read.
+
+A caller that must be able to stop a call it already started passes a
+:class:`CommandCanceller`. ``timeout`` is the bound a caller sets in advance and
+then waits out; a canceller is the other half — somebody deciding mid-call that
+the work should stop now — and the two are kept apart because they end the call
+with different exceptions and mean different things to whoever reads the result.
 """
 
 from __future__ import annotations
@@ -19,6 +25,7 @@ from __future__ import annotations
 import os
 import selectors
 import subprocess
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -31,6 +38,102 @@ _STREAM_CHUNK = 64 * 1024
 
 class CommandNotFoundError(FileNotFoundError):
     """Raised when the executable for a command does not exist."""
+
+
+class CommandCancelled(Exception):
+    """Raised when a run was stopped by its canceller instead of finishing.
+
+    Deliberately not a :class:`subprocess.TimeoutExpired`: a timeout is the bound
+    the caller set expiring on work nobody asked to stop, while this is somebody
+    asking. They are reported differently at every level above — the semantic
+    evaluator names the deadline in one case and the operator's cancel in the
+    other — so a single exception would force every reader to guess which
+    happened.
+
+    Its message carries the executable name only, never the argv: one caller's
+    last argument is a whole evidence prompt, and a diagnostic that stringified it
+    would write task content into a persisted job record (the same leak
+    :meth:`orch_hub.semantic.ClaudeSemanticBackend.evaluate` already translates
+    ``TimeoutExpired`` to avoid).
+    """
+
+
+class CommandCanceller:
+    """Handle letting one thread stop a command another thread is blocked running.
+
+    :func:`subprocess.run` hands back no handle on its child, so a thread blocked
+    in it cannot be reached: the only lever anyone else has is the ``timeout``
+    that was fixed before the call. This publishes the missing one. The running
+    thread attaches its child (:meth:`attach`), any other thread may
+    :meth:`cancel`, and the run raises :class:`CommandCancelled` rather than
+    returning a result.
+
+    One canceller belongs to exactly one call (the semantic job manager mints one
+    per evaluation attempt), and a fired one stays fired: :meth:`attach` refuses
+    after a cancel rather than adopting a child nobody wants, which is what closes
+    the window between the spawn and the child becoming reachable.
+
+    Cancelling is also meaningful *before* a child exists — a caller may be doing
+    expensive work of its own on the way to the command — so :attr:`cancelled` is
+    the cooperative half of the same signal, checked by callers at whatever points
+    they can abort cheaply.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
+        self._cancelled = False
+
+    @property
+    def cancelled(self) -> bool:
+        """Whether :meth:`cancel` has fired. Safe from any thread."""
+        with self._lock:
+            return self._cancelled
+
+    def cancel(self) -> bool:
+        """Stop the run; return whether a live child was actually signalled.
+
+        ``False`` means there was nothing to kill — the command had not started
+        yet, or had already finished — which is not a failure: the flag is set
+        either way, so a run that has not reached its child refuses to start one
+        and a caller between phases aborts at its next checkpoint.
+
+        The kill happens under the lock so it cannot race an :meth:`attach` or
+        :meth:`detach` from the running thread; ``os.kill`` does not block, so the
+        section stays short. A child that has already exited raises
+        :class:`ProcessLookupError`, which is the goal reached by other means and
+        reads as ``False``. Any other :class:`OSError` propagates: the caller asked
+        for the work to stop and it demonstrably did not, and reporting that as a
+        successful cancel would be the lie this returns a value to avoid.
+        """
+        with self._lock:
+            self._cancelled = True
+            proc = self._proc
+            if proc is None:
+                return False
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                return False
+            return True
+
+    def attach(self, proc: subprocess.Popen) -> bool:
+        """Publish the running child; ``False`` when a cancel already fired.
+
+        A ``False`` return means the caller must not run the child it just spawned
+        — the decision to stop was taken while it was starting — and is the reason
+        this returns anything at all.
+        """
+        with self._lock:
+            if self._cancelled:
+                return False
+            self._proc = proc
+            return True
+
+    def detach(self) -> None:
+        """Withdraw the child once it can no longer be signalled usefully."""
+        with self._lock:
+            self._proc = None
 
 
 @dataclass(frozen=True)
@@ -65,6 +168,7 @@ def run_command(
     timeout: Optional[float] = None,
     max_stdout_bytes: Optional[int] = None,
     env: Optional[Mapping[str, str]] = None,
+    cancel: Optional[CommandCanceller] = None,
 ) -> CommandResult:
     """Run ``args`` capturing text output; never raises on non-zero exit.
 
@@ -92,13 +196,29 @@ def run_command(
     forever on input nobody will type — the same unbounded wait ``timeout``
     exists to remove. EOF makes such a command fail promptly instead.
 
+    ``cancel`` makes the call stoppable from another thread: the child is
+    published on the canceller while it runs, and a fired canceller raises
+    :class:`CommandCancelled` instead of returning a result — including when it
+    fires while the command was finishing, so a caller that asked to stop never
+    receives output it has already stopped acting on. Passing one switches the
+    uncapped mode off :func:`subprocess.run`, which owns its child privately;
+    the no-canceller path is left on it deliberately, so the wrapper every probe
+    in the hub uses keeps exactly the semantics it always had.
+
     Raises :class:`CommandNotFoundError` when the executable is missing.
     """
     argv = [str(a) for a in args]
     if max_stdout_bytes is not None:
         return _run_capped(
-            argv, cwd=cwd, timeout=timeout, limit=max(0, max_stdout_bytes), env=env
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            limit=max(0, max_stdout_bytes),
+            env=env,
+            cancel=cancel,
         )
+    if cancel is not None:
+        return _run_cancellable(argv, cwd=cwd, timeout=timeout, env=env, cancel=cancel)
     try:
         proc = subprocess.run(
             argv,
@@ -119,6 +239,78 @@ def run_command(
     )
 
 
+def _run_cancellable(
+    argv: list[str],
+    *,
+    cwd: Optional[Union[str, Path]],
+    timeout: Optional[float],
+    env: Optional[Mapping[str, str]],
+    cancel: CommandCanceller,
+) -> CommandResult:
+    """:func:`subprocess.run`'s whole-output capture, over a killable child.
+
+    Reached only when a caller supplies a canceller. It is a re-implementation
+    rather than a wrapper because :func:`subprocess.run` keeps its
+    :class:`subprocess.Popen` private, and it is a *separate path* rather than a
+    replacement because every readiness/registry/git probe in the hub goes through
+    the other one: putting all of them behind this change to serve one caller
+    would trade a contained addition for a hub-wide behavior risk.
+
+    ``communicate`` needs no cancellation polling of its own — killing the child
+    closes its pipes, so the blocked read returns at once — which is why the
+    canceller kills rather than merely flagging.
+    """
+    try:
+        proc = subprocess.Popen(
+            argv,
+            cwd=str(cwd) if cwd is not None else None,
+            env=dict(env) if env is not None else None,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except FileNotFoundError as exc:
+        raise CommandNotFoundError(argv[0]) from exc
+    with proc:
+        if not cancel.attach(proc):
+            # Cancelled between the spawn and the publish: no other thread can see
+            # this child yet, so this one kills it.
+            proc.kill()
+            proc.wait()
+            raise CommandCancelled(_cancelled_detail(argv))
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Same shape `subprocess.run` produces: kill, drain what was written,
+            # and re-raise carrying the partial output.
+            proc.kill()
+            stdout, stderr = proc.communicate()
+            raise subprocess.TimeoutExpired(
+                argv, timeout, output=stdout, stderr=stderr  # type: ignore[arg-type]
+            )
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
+        finally:
+            cancel.detach()
+    if cancel.cancelled:
+        raise CommandCancelled(_cancelled_detail(argv))
+    return CommandResult(
+        args=tuple(argv), returncode=proc.returncode, stdout=stdout, stderr=stderr
+    )
+
+
+def _cancelled_detail(argv: list[str]) -> str:
+    """Cancellation diagnostic naming the executable and nothing else.
+
+    The argv is deliberately absent: one caller's last argument is a whole
+    evidence prompt, and this string reaches a persisted job record.
+    """
+    return f"{argv[0]}: cancelled before it finished"
+
+
 def _run_capped(
     argv: list[str],
     *,
@@ -126,6 +318,7 @@ def _run_capped(
     timeout: Optional[float],
     limit: int,
     env: Optional[Mapping[str, str]] = None,
+    cancel: Optional[CommandCanceller] = None,
 ) -> CommandResult:
     """Run ``argv``, retaining only the first ``limit`` bytes of its stdout.
 
@@ -161,6 +354,10 @@ def _run_capped(
     except FileNotFoundError as exc:
         raise CommandNotFoundError(argv[0]) from exc
     deadline = None if timeout is None else time.monotonic() + timeout
+    if cancel is not None and not cancel.attach(proc):
+        proc.kill()
+        proc.wait()
+        raise CommandCancelled(_cancelled_detail(argv))
     try:
         with proc.stdout as stream:  # type: ignore[union-attr] - stdout=PIPE
             head, total, expired = _drain(stream, limit, deadline)
@@ -179,6 +376,13 @@ def _run_capped(
         proc.kill()
         proc.wait()
         raise
+    finally:
+        if cancel is not None:
+            cancel.detach()
+    # A cancelled child closes its pipe, so the drain above ends at EOF like any
+    # other finished command; only the canceller says which of the two it was.
+    if cancel is not None and cancel.cancelled:
+        raise CommandCancelled(_cancelled_detail(argv))
     return CommandResult(
         args=tuple(argv),
         returncode=returncode,

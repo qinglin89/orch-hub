@@ -65,7 +65,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 from .config import Config
 from .models import (
@@ -286,6 +287,15 @@ class DeferredDispatcher:
     one per sweep. That mirrors the run manager's in-memory question-push dedup —
     a restart re-announcing a still-stalled queue once is the correct behavior,
     not a leak.
+
+    A second, much shorter lock sits under :meth:`admission_barrier` and covers the
+    promotion step alone. Single-flight keeps two sweeps from promoting at once;
+    this keeps a promotion from interleaving with a *pause write*, which the
+    single-flight lock knows nothing about because the writer is an HTTP thread
+    that never sweeps. Deliberately not the sweep lock: a pause request would then
+    queue behind a whole store walk and a capacity read, and the thing that has to
+    be serialized is one control read plus one record write, not the sweep that
+    contains them.
     """
 
     def __init__(
@@ -303,6 +313,7 @@ class DeferredDispatcher:
         self._control = control
         self._clock = clock
         self._sweeping = threading.Lock()
+        self._admission = threading.Lock()
         self._stall_logged: set[tuple[str, str, str]] = set()
 
     @property
@@ -334,6 +345,43 @@ class DeferredDispatcher:
         re-decided.
         """
         return self._control().paused
+
+    @contextmanager
+    def admission_barrier(self) -> Iterator[None]:
+        """Hold the promotion step while the caller writes the pause control.
+
+        The pause and the drain live in two different stores written by two
+        different threads, so "paused" is only a real hold if the two cannot
+        interleave. Without this they can, and visibly: a sweep that read the
+        control a moment before a ``POST .../queue/pause`` goes on to walk the
+        store, check capacity, and promote a job *after* the pause is durable —
+        even after the route has answered with a payload saying the queue is held.
+        The operator sees a paused queue spend a turn.
+
+        So the promotion boundary re-reads the control inside this barrier, and a
+        control writer takes the barrier around its write. Whichever gets it first
+        wins cleanly: a pause that lands first is seen by the recheck and the sweep
+        holds; a promotion that lands first is a turn admitted while the queue was
+        genuinely running, and the payload the route then reads back shows it —
+        which is the honest report, not a lost race.
+
+        Exposed as a barrier rather than as a ``pause()`` method on this class on
+        purpose: the dispatcher reads the control and must not acquire the ability
+        to write it (:data:`ControlReader`). It lends the lock; composing the two
+        is the caller's business.
+
+        Held only across the recheck and one small record write, never across the
+        store walk or the capacity read, so a control write waits on the shortest
+        section that makes it correct. Lock order is barrier → job manager, the
+        same direction the sweep already takes, so there is no cycle to deadlock
+        on. It is a plain lock rather than a reentrant one because nothing may take
+        it twice on one thread: a sweep re-entered from inside a turn (which a
+        synchronous executor makes possible) is refused by the single-flight lock
+        well before it reaches here, and a re-entrant lock would hide that rather
+        than keep it true.
+        """
+        with self._admission:
+            yield
 
     def sweep(self) -> SemanticJob | None:
         """Dispatch at most one held job; return it, or ``None`` if none started.
@@ -380,6 +428,13 @@ class DeferredDispatcher:
         landing as ``deferred`` records while it holds, so resuming drains the same
         queue in the same order rather than restarting a corpus with a hole in it.
 
+        The pause is read twice, and only the second read decides. This one is a
+        pre-filter that keeps a held queue from being walked at all; the one inside
+        :meth:`admission_barrier` at the promotion boundary is the one a pause
+        *write* is serialized against, because everything between the two — the
+        store walk, the spacing check, the capacity read — is time in which the
+        operator can press the button.
+
         Returns ``None`` immediately when another sweep is already running (see the
         class docstring): declining is correct, not a missed tick.
         """
@@ -419,9 +474,20 @@ class DeferredDispatcher:
             if job.managed_repo() is None:
                 # Unactionable forever: settle it where failures are visible rather
                 # than leaving a permanent resident every sweep silently skips.
+                # Not under the barrier: it spends nothing, so a pause has no
+                # interest in holding it.
                 self._jobs.fail_deferred(job, UNATTRIBUTABLE_REASON)
                 continue
-            started = self._jobs.dispatch_deferred(job)
+            with self.admission_barrier():
+                # The authoritative pause check. The one in `sweep` is a cheap
+                # pre-filter that saves the walk below; this is the one a pause
+                # write is serialized against, so it is re-read here rather than
+                # carried down from there — everything in between (the walk, the
+                # spacing check, the capacity read) is time in which an operator
+                # can have pressed the button.
+                if self._control().paused:
+                    return None
+                started = self._jobs.dispatch_deferred(job)
             if started is not None:
                 _log.info(
                     "automatic semantic job %s dispatched for %s/%s",

@@ -91,7 +91,12 @@ from orch_hub.static_metrics import (
     STATIC_METRICS_NAME,
     StaticEvaluator,
 )
-from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
+from orch_hub.subprocess_utils import (
+    CommandCancelled,
+    CommandCanceller,
+    CommandNotFoundError,
+    CommandResult,
+)
 
 TASK = "2026-07-22-semantic-task-evaluator"
 REPO_PATH = Path("/repos/alpha")
@@ -250,14 +255,16 @@ class FakeBackend:
         self._info = info or evaluator_info()
         self.prompts: list[str] = []
         self.repos: list[ManagedRepo] = []
+        self.cancels: list[object] = []
 
     @property
     def info(self) -> SemanticEvaluatorInfo:
         return self._info
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, repo: ManagedRepo, *, cancel=None) -> str:
         self.prompts.append(prompt)
         self.repos.append(repo)
+        self.cancels.append(cancel)
         return self._text
 
     def doctor(self) -> SemanticDoctor:
@@ -277,7 +284,7 @@ class RaisingBackend:
     def info(self) -> SemanticEvaluatorInfo:
         return evaluator_info()
 
-    def evaluate(self, prompt: str, repo: ManagedRepo) -> str:
+    def evaluate(self, prompt: str, repo: ManagedRepo, *, cancel=None) -> str:
         raise SemanticEvaluationError("model process crashed")
 
     def doctor(self) -> SemanticDoctor:
@@ -1556,6 +1563,44 @@ def test_evaluate_runs_the_turn_inside_its_pre_model_window(tmp_path):
             / SEMANTIC_REPORT_NAME).is_file()
 
 
+def test_evaluate_opens_no_model_turn_for_an_already_cancelled_attempt(tmp_path):
+    """A cancel landing during the pre-model build must not become a spent turn.
+
+    The canceller kills a *child*, and for most of that build there is no child —
+    only a run/event/session walk and git subprocesses. So the evaluator checks it
+    at the same last moment it checks the window, where withholding the turn still
+    costs nothing: no window is spent, and the reserved dir is removed like any
+    other failure, so a cancelled attempt publishes nothing.
+    """
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    backend = FakeBackend(envelope())
+    ev = semantic_evaluator(config=config, service=_service(config), backend=backend)
+    canceller = CommandCanceller()
+    canceller.cancel()
+
+    with pytest.raises(SemanticEvaluationError, match="cancelled"):
+        ev.evaluate(repo, TASK, cancel=canceller)
+
+    assert backend.prompts == []
+    assert not (config.data_dir / "evaluations" / "alpha" / TASK / FIXED_ID).exists()
+
+
+def test_evaluate_hands_the_canceller_to_the_backend(tmp_path):
+    """The chain only stops a turn if every link forwards the handle."""
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    backend = FakeBackend(envelope())
+    ev = semantic_evaluator(config=config, service=_service(config), backend=backend)
+    canceller = CommandCanceller()
+
+    ev.evaluate(repo, TASK, cancel=canceller)
+
+    assert backend.cancels == [canceller]
+
+
 def test_evaluate_compares_the_window_against_a_naive_clock(tmp_path):
     # The evaluator's clock is injectable, so its reading and a caller's deadline
     # can disagree about tz-awareness. That disagreement must not become a
@@ -2032,18 +2077,26 @@ class ScriptRunner:
     prove the turn ran in an isolated empty directory, never the target repo.
 
     A scripted result may be an exception instance instead of a
-    :class:`SemanticRunResult`, which is raised — that is how a hung turn is
-    modelled (``subprocess.TimeoutExpired``) without launching anything.
+    :class:`SemanticRunResult`, which is raised — that is how a hung turn
+    (``subprocess.TimeoutExpired``) and a cancelled one
+    (:class:`~orch_hub.subprocess_utils.CommandCancelled`) are modelled without
+    launching anything.
+
+    The canceller it was handed is recorded too: what the backend owes the layer
+    above is that the operator's handle actually reaches the process seam, and a
+    runner that quietly dropped it would leave a cancel with nothing to kill.
     """
 
     def __init__(self, *results):
         self._results = list(results)
         self.calls: list[tuple[list[str], Path, list[str] | None, float | None]] = []
+        self.cancels: list[object] = []
 
-    def __call__(self, argv, cwd, timeout=None) -> SemanticRunResult:
+    def __call__(self, argv, cwd, timeout=None, cancel=None) -> SemanticRunResult:
         cwd = Path(cwd)
         contents = sorted(p.name for p in cwd.iterdir()) if cwd.is_dir() else None
         self.calls.append((list(argv), cwd, contents, timeout))
+        self.cancels.append(cancel)
         if not self._results:
             raise AssertionError("runner called more times than scripted")
         result = self._results.pop(0)
@@ -2231,6 +2284,44 @@ def test_claude_backend_timed_out_turn_becomes_a_named_failure(tmp_path):
     # last element of which is the full evidence prompt. A persisted job
     # diagnostic must not become a copy of the task's evidence.
     assert "SECRET PROMPT" not in str(excinfo.value)
+
+
+def test_claude_backend_hands_the_canceller_to_the_runner(tmp_path):
+    """The operator's handle has to reach the process seam.
+
+    Everything above this point can be right — the record settled, the slot freed —
+    while the turn keeps drawing on the window, if the canceller stops here.
+    """
+    runner = ScriptRunner(stream(envelope()))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+    canceller = CommandCanceller()
+
+    backend.evaluate("p", _repo(tmp_path), cancel=canceller)
+
+    assert runner.cancels == [canceller]
+
+
+def test_claude_backend_cancelled_turn_becomes_a_named_failure(tmp_path):
+    runner = ScriptRunner(CommandCancelled("claude: cancelled before it finished"))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+
+    with pytest.raises(SemanticEvaluationError) as excinfo:
+        backend.evaluate("SECRET PROMPT", _repo(tmp_path), cancel=CommandCanceller())
+
+    # Named as a cancel rather than as a failure or a deadline: the three call for
+    # different responses, and only this one is something the operator did.
+    assert "cancelled" in str(excinfo.value)
+    assert "SECRET PROMPT" not in str(excinfo.value)
+
+
+def test_claude_backend_removes_its_sandbox_after_a_cancel(tmp_path):
+    runner = ScriptRunner(CommandCancelled("claude: cancelled before it finished"))
+    backend = ClaudeSemanticBackend(model="m", runner=runner)
+
+    with pytest.raises(SemanticEvaluationError):
+        backend.evaluate("p", _repo(tmp_path), cancel=CommandCanceller())
+
+    assert not runner.cwd.exists()
 
 
 def test_claude_backend_removes_its_sandbox_after_a_timeout(tmp_path):
