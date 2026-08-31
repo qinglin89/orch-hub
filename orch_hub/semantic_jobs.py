@@ -25,9 +25,29 @@ its own answer because the startup sweep — which settles any transient record 
 finds, on the reasoning that a hub only now starting owns no workers — would
 settle live turns if it ran while the service was up. :meth:`reconcile_stuck` is
 that answer: the same settle, admitted by a clock instead of by process absence,
-driven by the resident monitor tick. Its bound is the backend's own turn deadline
-plus :data:`STUCK_GRACE_SECONDS`, so "stuck" stays a derived fact rather than a
-guess about how long an evaluation ought to take.
+driven by the resident monitor tick.
+
+What that clock reads is one **whole-attempt deadline**, persisted on the record
+as ``deadline_ts`` when the turn starts and binding on the worker as well as on
+the sweep:
+
+.. code-block:: text
+
+    started_ts ........ EVIDENCE_GRACE ........ eval_turn_timeout ....... SETTLE_GRACE ....... deadline_ts
+               |<- evidence pack, static ->|<- the model subprocess ->|<- parse, write, publish ->|
+                                           ^                          ^
+                                  turn must start by            turn is dead by
+
+The worker is refused a model turn once the first segment is spent, so the model
+subprocess — bounded by ``Config.eval_turn_timeout`` — is dead by the second mark,
+a whole ``SETTLE_GRACE_SECONDS`` before the record becomes reapable. That is the
+property the sweep rests on: **a record past its ``deadline_ts`` cannot be a turn
+still inside its own model deadline.** Deriving the bound from ``started_ts`` and a
+fixed grace instead would only *assume* it — an evidence build slower than the
+grace would leave a live, unexpired model turn to be reaped as stuck, and the
+worker would go on to publish artifacts the freed slot had already replaced. So
+"stuck" stays a derived, enforced fact rather than a guess about how long an
+evaluation ought to take.
 
 Layout under ``Config.data_dir``, parallel to the run manager's ``runs/`` and the
 intake manager's ``intake/`` trees:
@@ -201,20 +221,39 @@ stderr tail, and parse/schema errors are short, so this is a defensive second ca
 that guarantees the scope's "no unbounded model output" even if an unexpected
 exception carries a large message."""
 
-STUCK_GRACE_SECONDS = 600
-"""Slack added to the turn deadline before an in-flight record is called stuck.
+EVIDENCE_GRACE_SECONDS = 600
+"""How long an attempt may spend *before* its model turn starts.
 
-:meth:`SemanticJobManager.reconcile_stuck` bounds a whole *attempt*, while
-``Config.eval_turn_timeout`` bounds only the model subprocess inside it. The rest
-of the attempt is the evaluator's own work on either side of that call — building
-the evidence pack (a task-file read, a run/event/session walk, and git subprocess
-calls whose cost scales with the task's history), computing static metrics, then
-parsing and persisting the report — plus the gap between the admitting ``queued``
-write and the worker actually starting. Ten minutes is far more than any of that
-has been observed to take, and erring long is the right direction: this sweep
-settles a record whose worker may still be alive, so the only real cost of extra
-grace is a later reap, while too little grace fails a turn that was about to
-succeed."""
+``Config.eval_turn_timeout`` bounds only the model subprocess. On this side of it
+sits the gap between the admitting ``queued`` write and the worker actually
+starting, then the evaluator's own pre-model work: building the evidence pack (a
+task-file read, a run/event/session walk, and git subprocess calls whose cost
+scales with the task's history), computing static metrics, and rendering the
+prompt.
+
+It is an *enforced* allowance, not an assumption. :meth:`SemanticJobManager._run_job`
+hands the evaluator the instant this expires, and the evaluator refuses to start a
+model turn after it (:meth:`orch_hub.semantic.SemanticEvaluator.evaluate`) — which
+is what pins the model turn's own deadline inside the whole-attempt bound below.
+Refusing costs nothing: the model turn has not started, so no window is spent, and
+the attempt settles as an ordinary ``failed`` naming the overrun instead of running
+on toward a reap that could not distinguish it from a hang. Ten minutes is far more
+than a local evidence build has been observed to take."""
+
+SETTLE_GRACE_SECONDS = 600
+"""How long an attempt may spend *after* its model turn returns, before it is stuck.
+
+The other side of the turn: parsing the report, writing the three artifacts,
+offering the evaluation to the report catalog, pruning retention, and the finalize
+write. All local IO over small files, so ten minutes is again far more than it
+takes — and this is the margin that keeps the reap off a worker that is mid-write:
+the model turn cannot end later than ``deadline_ts - SETTLE_GRACE_SECONDS``, so a
+worker persisting a fresh report always has this whole interval before its record
+becomes reapable.
+
+Erring long is the right direction on both sides: this sweep settles a record whose
+worker may still be alive, so the cost of extra grace is a later reap, while too
+little fails an attempt that was about to succeed."""
 
 
 class SemanticJobError(Exception):
@@ -256,12 +295,41 @@ def _attempt_instant(record: SemanticJob) -> dt.datetime | None:
     the attempt was accepted and the last point at which anything is known to have
     progressed. ``created_ts`` is the final fallback for a record written before
     those stamps existed. Mirrors :func:`orch_hub.eval_dispatch._turn_instant`,
-    which reads the same two stamps for the opposite purpose (pacing)."""
+    which reads the same two stamps for the opposite purpose (pacing).
+
+    Only the *fallback* age source for :meth:`SemanticJobManager.reconcile_stuck`
+    (see :func:`_reap_instant`): a record that started a turn carries the deadline
+    the worker itself is held to, and reaping reads that instead."""
     for value in (record.started_ts, record.updated_ts, record.created_ts):
         parsed = _parse_ts(value)
         if parsed is not None:
             return parsed
     return None
+
+
+def _reap_instant(record: SemanticJob, bound: int) -> dt.datetime | None:
+    """When this transient record may be settled as stuck, or ``None`` if never.
+
+    The persisted ``deadline_ts`` when the record has one — the whole-attempt
+    deadline its worker was handed at the queued→running flip, and the only reading
+    that proves the model turn inside it has already expired.
+
+    ``bound`` (the same whole-attempt span, from the *current* config) is the
+    fallback for a transient record that carries no deadline, dated from
+    :func:`_attempt_instant`. Two records reach it: a ``queued`` one whose worker
+    never started — safe, because no model turn exists to reap early and
+    :meth:`SemanticJobManager._begin_running` refuses to start one against a
+    settled record — and a ``running`` one persisted before this field existed,
+    which can only survive a restart and is therefore the startup sweep's business
+    anyway. A record whose stamps are all unreadable returns ``None``: unprovable
+    age is not evidence of being stuck."""
+    deadline = _parse_ts(record.deadline_ts)
+    if deadline is not None:
+        return deadline
+    instant = _attempt_instant(record)
+    if instant is None:
+        return None
+    return instant + dt.timedelta(seconds=bound)
 
 
 SemanticJobExecutor = Callable[[Callable[[], None]], None]
@@ -743,17 +811,23 @@ class SemanticJobManager:
 
         The queued→running flip re-acquires the lock briefly so a poll can observe
         the ``running`` state; the (slow) evaluation itself runs OFF the lock so it
-        blocks no read; the terminal write re-acquires the lock. Any evaluation
+        blocks no read; the terminal write re-acquires the lock. That flip is also
+        what bounds the attempt, and the evaluator is handed the half of the bound
+        it has to honour (:func:`_turn_start_by`): finish the evidence build in
+        time to open the model turn, or open none. Any evaluation
         failure (backend/model/process error, a non-conforming report, a disabled
         subsystem, an unsafe id that slipped through) becomes a clean ``failed``
         job with a bounded diagnostic — the evaluator's own all-or-nothing cleanup
         has already removed any partial artifacts, so the failed job leaves no
         half-written evaluation and never mutates target state.
         """
-        if not self._begin_running(job_dir, job_id):
+        running = self._begin_running(job_dir, job_id)
+        if running is None:
             return
         try:
-            report = self._evaluator.evaluate(repo, task_id)
+            report = self._evaluator.evaluate(
+                repo, task_id, turn_start_by=_turn_start_by(running)
+            )
         except Exception as exc:  # noqa: BLE001 - any failure is a failed job
             self._finalize(
                 job_dir,
@@ -772,25 +846,56 @@ class SemanticJobManager:
             schema_version=report.evaluator.schema_version,
         )
 
-    def _begin_running(self, job_dir: Path, job_id: str) -> bool:
+    def _begin_running(self, job_dir: Path, job_id: str) -> SemanticJob | None:
         """Flip a still-``queued`` job to ``running`` under the lock; else no-op.
 
-        Returns False (so the turn aborts before running the model) when the
-        record no longer represents this attempt as ``queued`` — a defensive check:
-        the duplicate guard already prevents a second attempt from starting while
-        this one is transient, so in practice the record is always this attempt's
-        ``queued`` here.
+        Returns ``None`` (so the turn aborts before running the model) when the
+        record no longer represents this attempt as ``queued``. That covers the
+        defensive case — the duplicate guard already prevents a second attempt
+        from starting while this one is transient — and the one case that is not
+        defensive at all: :meth:`reconcile_stuck` may have settled this record
+        while its turn sat in the executor, and a worker must never start a model
+        turn against a record already reported as failed.
+
+        This is also where the attempt acquires its bound. The returned running
+        record carries ``deadline_ts`` — ``started_ts`` plus the whole-attempt span
+        (:meth:`_attempt_bound`) — persisted here, once, so the sweep and the
+        worker read the same instant instead of each deriving one. With the turn
+        deadline disabled there is no bound to derive and the field stays ``None``,
+        which is also what turns the sweep off for this record.
         """
         with self._lock:
             record = self._load_if_present(job_dir)
             if record is None or record.status != STATUS_QUEUED or record.job_id != job_id:
-                return False
-            ts = self._clock().isoformat()
-            _write_record(
-                job_dir,
-                replace(record, status=STATUS_RUNNING, started_ts=ts, updated_ts=ts),
+                return None
+            now = self._clock()
+            ts = now.isoformat()
+            bound = self._attempt_bound()
+            running = replace(
+                record,
+                status=STATUS_RUNNING,
+                started_ts=ts,
+                deadline_ts=(
+                    (now + dt.timedelta(seconds=bound)).isoformat() if bound else None
+                ),
+                updated_ts=ts,
             )
-            return True
+            _write_record(job_dir, running)
+            return running
+
+    def _attempt_bound(self) -> int:
+        """Seconds one whole attempt may take, or ``0`` when it is unbounded.
+
+        The model subprocess's configured deadline plus the two enforced allowances
+        bracketing it (:data:`EVIDENCE_GRACE_SECONDS`, :data:`SETTLE_GRACE_SECONDS`).
+        ``Config.eval_turn_timeout`` of ``0`` disables the deadline, and with it the
+        whole bound: with nothing bounding the model turn there is no instant at
+        which the rest of the attempt can be called overdue either.
+        """
+        timeout = self._config.eval_turn_timeout
+        if timeout <= 0:
+            return 0
+        return EVIDENCE_GRACE_SECONDS + timeout + SETTLE_GRACE_SECONDS
 
     def _finalize(
         self,
@@ -916,37 +1021,44 @@ class SemanticJobManager:
         gets stuck at 09:00 stops holding its ``(repo, task)`` slot the same
         morning rather than at the next restart.
 
-        The bound is derived, not invented: ``Config.eval_turn_timeout`` is the
-        deadline the backend already enforces on the model subprocess, plus
-        :data:`STUCK_GRACE_SECONDS` for the evidence build and report persistence
-        bracketing it. A record younger than that is a turn doing its job, however
-        slow it looks. With the deadline disabled (``0``) this sweep does nothing
-        at all: without it there is no non-arbitrary line between a hung turn and a
-        long one, and inventing one is exactly how a legitimate evaluation gets
-        killed.
+        The bound is the attempt's own, not one this sweep invents: a running
+        record carries the ``deadline_ts`` its worker was handed at the
+        queued→running flip (:meth:`_begin_running`), and the worker is refused a
+        model turn late enough to outlive it (:func:`_turn_start_by`). So a record
+        past that instant is one whose model subprocess deadline expired at least
+        :data:`SETTLE_GRACE_SECONDS` ago — which is what makes settling it sound
+        rather than merely likely-safe. Re-deriving the limit here from
+        ``started_ts`` plus a fixed grace would drop exactly that guarantee: an
+        evidence build slower than the grace would leave a live turn, still inside
+        an unexpired model deadline, to be reaped as stuck.
 
-        Age is measured from :func:`_attempt_instant`; a record whose timestamps
-        are all unreadable is left alone rather than settled on an unprovable age
-        (the startup sweep will catch it).
+        A transient record with no deadline falls back to the current config's span
+        from :func:`_attempt_instant` (:func:`_reap_instant` says which records
+        those are and why the fallback is safe for them). A record whose stamps are
+        all unreadable is left alone rather than settled on an unprovable age (the
+        startup sweep will catch it). With the turn deadline disabled (``0``) the
+        sweep does nothing at all: without it there is no non-arbitrary line
+        between a hung turn and a long one, and inventing one is exactly how a
+        legitimate evaluation gets killed.
 
-        Settling a record whose worker is still alive is possible and accepted: the
-        grace makes it unlikely, and the consequences are contained. That worker's
-        own :meth:`_finalize` finds a non-transient record and returns without
-        clobbering this outcome; its evaluation was read-only over target state
-        throughout; and if it does eventually succeed, its artifacts are durable
-        and publishable exactly as they would have been — only this record, which
-        reports the *attempt*, no longer points at them. The alternative — holding
-        the slot until someone notices and restarts the hub — is the failure this
-        exists to end.
+        A settled record's worker may still be alive — in a phase with no bound of
+        its own (a wedged evidence build, a post-kill drain) or persisting past its
+        settle grace — and that is accepted, because the consequences are
+        contained. That worker's own :meth:`_finalize` finds a non-transient record
+        and returns without clobbering this outcome; its evaluation was read-only
+        over target state throughout; and if it does eventually succeed, its
+        artifacts are durable and publishable exactly as they would have been —
+        only this record, which reports the *attempt*, no longer points at them.
+        The alternative — holding the slot until someone notices and restarts the
+        hub — is the failure this exists to end.
 
         Failing here notifies, unlike the startup sweep: this *is* a fresh outcome
         arriving while the operator is running, the same event a backend failure
         would have pushed had the turn managed to fail on its own.
         """
-        bound = self._config.eval_turn_timeout
+        bound = self._attempt_bound()
         if bound <= 0:
             return []
-        limit = bound + STUCK_GRACE_SECONDS
         settled: list[SemanticJob] = []
         with self._lock:
             now = self._clock()
@@ -954,28 +1066,30 @@ class SemanticJobManager:
                 record = _load_record(job_dir)
                 if record.status not in _TRANSIENT:
                     continue
-                instant = _attempt_instant(record)
-                if instant is None or (now - instant).total_seconds() < limit:
+                deadline = _reap_instant(record, bound)
+                if deadline is None or now < deadline:
                     continue
                 ts = now.isoformat()
                 updated = replace(
                     record,
                     status=STATUS_FAILED,
                     error=_bound_error(
-                        f"semantic evaluation stuck in {record.status} for more"
-                        f" than {limit}s; the turn was abandoned and its slot freed"
+                        f"semantic evaluation stuck in {record.status}: its attempt"
+                        f" deadline ({deadline.isoformat()}) passed, so the turn was"
+                        f" abandoned and its slot freed"
                     ),
                     ended_ts=ts,
                     updated_ts=ts,
                 )
                 _write_record(job_dir, updated)
                 _log.warning(
-                    "semantic job %s for %s/%s abandoned: stuck in %s past %ds",
+                    "semantic job %s for %s/%s abandoned: stuck in %s past its"
+                    " attempt deadline %s",
                     record.job_id,
                     record.repo_name,
                     record.task_id,
                     record.status,
-                    limit,
+                    deadline.isoformat(),
                 )
                 self._emit(semantic_job_notification(updated))
                 settled.append(updated)
@@ -1108,6 +1222,30 @@ class SemanticJobManager:
 # -- persistence --------------------------------------------------------------
 
 
+def _turn_start_by(record: SemanticJob) -> dt.datetime | None:
+    """The instant this attempt's model turn must have started by, or ``None``.
+
+    The first mark on the attempt timeline: ``started_ts`` plus
+    :data:`EVIDENCE_GRACE_SECONDS`. Handed to
+    :meth:`orch_hub.semantic.SemanticEvaluator.evaluate`, which refuses to open a
+    model turn past it — the enforcement that keeps the subprocess deadline inside
+    the persisted ``deadline_ts``, so the sweep can never reap a turn that is still
+    within its own bound.
+
+    Derived from the same persisted ``started_ts`` the deadline was computed from,
+    so the two marks cannot drift apart. ``None`` when the attempt is unbounded
+    (no ``deadline_ts``) or its start stamp will not parse — in both cases there is
+    no window to enforce, which is exactly the state in which the sweep also stands
+    down.
+    """
+    if not record.deadline_ts:
+        return None
+    started = _parse_ts(record.started_ts)
+    if started is None:
+        return None
+    return started + dt.timedelta(seconds=EVIDENCE_GRACE_SECONDS)
+
+
 def _write_record(job_dir: Path, record: SemanticJob) -> None:
     """Persist ``job.json`` atomically (same-dir tmp + rename), like run.json."""
     path = job_dir / SEMANTIC_JOB_NAME
@@ -1151,6 +1289,7 @@ def _load_record(job_dir: Path) -> SemanticJob:
         created_ts=_str_field(data, "created_ts"),
         updated_ts=_str_field(data, "updated_ts"),
         started_ts=_str_field(data, "started_ts"),
+        deadline_ts=_str_field(data, "deadline_ts"),
         ended_ts=_str_field(data, "ended_ts"),
     )
 

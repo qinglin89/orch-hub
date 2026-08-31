@@ -246,6 +246,19 @@ class SemanticEvaluationError(Exception):
     """
 
 
+def _as_utc(value: dt.datetime) -> dt.datetime:
+    """Read a datetime as aware UTC, treating a naive one as already UTC.
+
+    The tolerant normalization the sibling modules keep for persisted stamps
+    (``semantic_jobs._parse_ts``, ``eval_dispatch``), applied to a live datetime:
+    the evaluator's clock is injectable, so a caller's deadline and this clock can
+    disagree about awareness, and that disagreement must not become an exception
+    in the middle of an evaluation."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=dt.timezone.utc)
+    return value.astimezone(dt.timezone.utc)
+
+
 def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
@@ -1902,7 +1915,13 @@ class SemanticEvaluator:
         static_report = self._static.build_report(pack)
         return build_semantic_evidence(pack, static_report)
 
-    def evaluate(self, repo: ManagedRepo, task_id: str) -> SemanticReport:
+    def evaluate(
+        self,
+        repo: ManagedRepo,
+        task_id: str,
+        *,
+        turn_start_by: dt.datetime | None = None,
+    ) -> SemanticReport:
         """Run one semantic evaluation for ``(repo, task_id)`` and persist it.
 
         Generates a fresh, self-contained evaluation (``evidence.json`` +
@@ -1938,6 +1957,18 @@ class SemanticEvaluator:
         :meth:`EvaluationService.auto_prune` only once every artifact is written, so
         a backend/model/parse/write failure — whose cleanup removes only this new
         dir — can never first delete the task's older retained evaluations.
+
+        ``turn_start_by`` is the caller's deadline for everything *above* the model
+        call — the evidence pack, the static report, the prompt. Reaching it means
+        the model turn is refused (a clean :class:`SemanticEvaluationError`, so the
+        reserved dir is removed like any other failure) rather than opened late.
+        The semantic-job manager passes it because a turn opened late would outlive
+        the attempt deadline its record is reaped against, and a reap that can
+        collide with a live model turn is not a reap it can trust
+        (:meth:`orch_hub.semantic_jobs.SemanticJobManager.reconcile_stuck`).
+        Refusing here is cheap in the only currency that matters: the subscription
+        window is untouched, because the turn never started. ``None`` — the default,
+        and every direct caller — runs unbounded, exactly as before.
         """
         self._require_enabled()
         pack = self._service.generate_evidence(repo, task_id, prune=False)
@@ -1952,6 +1983,7 @@ class SemanticEvaluator:
             )
             evidence = build_semantic_evidence(pack, static_report)
             prompt = build_prompt(evidence)
+            self._require_turn_window(turn_start_by)
             text = self._backend.evaluate(prompt, repo)
             report = parse_report(
                 text,
@@ -1991,6 +2023,31 @@ class SemanticEvaluator:
         # failure above never deletes older retained evaluations (see auto_prune).
         self._service.auto_prune(repo, task_id, protect=pack.evaluation_id)
         return report
+
+    def _require_turn_window(self, turn_start_by: dt.datetime | None) -> None:
+        """Refuse to open a model turn once the caller's pre-model window is spent.
+
+        Called at the last moment before the backend, so everything cheap has
+        already been attempted and only the expensive, window-spending part is
+        withheld. The diagnostic names both instants because they are the two facts
+        that tell the operator which knob moved: a build that outran a generous
+        allowance is a repo/evidence problem, not a model one.
+
+        Both stamps are normalized to aware UTC before comparison — the evaluator's
+        clock is injectable, and a naive/aware mismatch here would surface as a
+        ``TypeError`` inside the turn rather than as the bounded failure this is.
+        """
+        if turn_start_by is None:
+            return
+        now = _as_utc(self._clock())
+        limit = _as_utc(turn_start_by)
+        if now <= limit:
+            return
+        raise SemanticEvaluationError(
+            "semantic evaluation evidence build outran its window: the model turn"
+            f" had to start by {limit.isoformat()} and it is now {now.isoformat()};"
+            " no turn was started"
+        )
 
     def _catalog_report(
         self, repo: ManagedRepo, task_id: str, evaluation_id: str

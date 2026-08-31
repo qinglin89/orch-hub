@@ -158,7 +158,7 @@ class FakeEvaluator:
     def evaluator_info(self) -> SemanticEvaluatorInfo:
         return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
 
-    def evaluate(self, r: ManagedRepo, task_id: str) -> SemanticReport:
+    def evaluate(self, r: ManagedRepo, task_id: str, *, turn_start_by=None) -> SemanticReport:
         self.calls.append((r, task_id))
         return mk_report(f"EVAL-{task_id}")
 
@@ -446,9 +446,9 @@ def test_two_overlapping_sweeps_do_not_start_two_turns(tmp_path):
             super().__init__()
             self._box = dispatcher_box
 
-        def evaluate(self, r, task_id):
+        def evaluate(self, r, task_id, *, turn_start_by=None):
             reentered.append(self._box["dispatcher"].sweep())
-            return super().evaluate(r, task_id)
+            return super().evaluate(r, task_id, turn_start_by=turn_start_by)
 
     cfg = config(tmp_path, eval_dispatch_spacing=0)
     clock = Clock()

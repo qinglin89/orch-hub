@@ -77,7 +77,7 @@ of the hub — for the launchd service they live in the plist's
 | `ORCH_HUB_EVAL_USAGE_CEILING` | `80` | Subscription utilization (percent) at or above which an **automatic** Layer 2 turn waits instead of running (see [When an automatic Layer 2 turn actually runs](#when-an-automatic-layer-2-turn-actually-runs)). Compared against the most exhausted currently-measured window. Only the automatic path consults it; a manual evaluation is never capacity-gated. A value outside 0-100, or a non-number, fails startup. |
 | `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn admitted to spend (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
 | `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue and flags it on the dashboard (see [Seeing the queue](#seeing-the-queue)). Visibility only — it changes no dispatch decision. `0` disables the flag. A negative or non-integer value fails startup. |
-| `ORCH_HUB_EVAL_TURN_TIMEOUT` | `1800` (30 min) | How long one Layer 2 CLI turn may run before it is killed and recorded as a failed job (see [When a turn hangs](#when-a-turn-hangs)). Also the basis for in-flight stuck detection. `0` removes the deadline *and* that detection. A negative or non-integer value fails startup. |
+| `ORCH_HUB_EVAL_TURN_TIMEOUT` | `1800` (30 min) | How long one Layer 2 CLI turn may run before it is killed and recorded as a failed job (see [When a turn hangs](#when-a-turn-hangs)). Plus the two fixed ten-minute allowances bracketing it, it is also the whole-attempt deadline each job is stamped with and reaped against. `0` removes the deadline *and* that detection. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
 other change is required — the routes and dashboard controls self-disable.
@@ -380,8 +380,7 @@ that never returns — used to be the one state nothing recovered from: the work
 blocked indefinitely, the record stayed `running`, and every retry handed back
 the stuck job. The only cure was restarting the hub.
 
-Two bounds close that, and the second is derived from the first rather than
-guessed:
+Two bounds close that, and they are one bound seen from two sides:
 
 - **The turn is deadlined.** The CLI subprocess runs under
   `ORCH_HUB_EVAL_TURN_TIMEOUT`. On expiry the process is killed and the job
@@ -392,30 +391,48 @@ guessed:
   which is worse than waiting.
 - **In-flight records are swept.** The deadline lives inside the worker, so it
   cannot help if the worker itself is lost (a thread killed, a subprocess whose
-  own children hold the pipes). The resident monitor tick therefore also settles
-  any `queued`/`running` record older than the turn deadline plus a fixed
-  ten-minute grace — the grace covering the evidence build and report persistence
-  that bracket the model call. This runs while the service is up, so a slot
-  stuck at 09:00 is free the same morning.
+  own children hold the pipes). So when a job starts its turn it is stamped with
+  a **whole-attempt deadline**, and the resident monitor tick settles any
+  `queued`/`running` record that has passed it. This runs while the service is
+  up, so a slot stuck at 09:00 is free the same morning.
+
+The whole-attempt deadline is the turn deadline plus a fixed ten-minute allowance
+on each side of it:
+
+```text
+started ....... 10 min ....... ORCH_HUB_EVAL_TURN_TIMEOUT ....... 10 min ....... deadline
+        |<- evidence + static ->|<-   the model subprocess   ->|<- write report ->|
+                                ^                              ^
+                       turn must start by                 turn is dead by
+```
+
+Both allowances are **enforced, not assumed**. Once the first is spent the worker
+refuses to open a model turn at all — the attempt settles `failed` naming the
+overrun, and no subscription window is spent, because the turn never started.
+That refusal is what makes the sweep sound: the model subprocess is therefore
+always dead a full ten minutes before the record becomes reapable, so a record
+past its deadline can never be a turn still running inside its own. A worker
+writing out a fresh report has that same ten minutes to finish.
 
 The startup sweep is unchanged and still needed: a hub that died mid-turn leaves
 transient records that no clock has to justify failing, because a process only
 now starting owns no workers. The two are the same settle admitted by different
-evidence — process absence at startup, elapsed time while running.
+evidence — process absence at startup, a passed deadline while running.
 
 Both bounds rest on the deadline, which is why `ORCH_HUB_EVAL_TURN_TIMEOUT=0`
 disables the sweep as well: without a deadline there is no non-arbitrary line
 between a hung turn and a slow one, and inventing one is how a legitimate
 evaluation gets killed. Raise the bound rather than removing it.
 
-Sweeping a record whose worker is somehow still alive is possible and accepted.
-That worker's own finalize finds a settled record and writes nothing, and its
-evaluation was read-only over target state throughout. If it does eventually
-succeed, its artifacts are still written and still publishable — only the job
-record, which reports the *attempt*, no longer points at them, which is the
-same attempts-not-reports reading the [queue census](#seeing-the-queue) already
-carries. Holding a slot until somebody notices and restarts the hub is the worse
-outcome.
+Sweeping a record whose worker is somehow still alive remains possible — a phase
+with no bound of its own, such as a wedged evidence build or a killed subprocess
+whose children still hold the pipes — and is accepted. That worker's own finalize
+finds a settled record and writes nothing, and its evaluation was read-only over
+target state throughout. If it does eventually succeed, its artifacts are still
+written and still publishable — only the job record, which reports the *attempt*,
+no longer points at them, which is the same attempts-not-reports reading the
+[queue census](#seeing-the-queue) already carries. Holding a slot until somebody
+notices and restarts the hub is the worse outcome.
 
 A swept job notifies like any other fresh failure (the startup sweep stays
 silent — a restart is not an outcome anyone is waiting on).

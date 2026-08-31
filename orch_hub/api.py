@@ -758,9 +758,10 @@ def create_app(
     intake.use_admission(admission)
     # The resident tick also carries the evaluation queue's two upkeep jobs. The
     # stuck sweep runs first: it is the in-flight counterpart of the startup
-    # orphan reconcile, settling a transient job that has outlived the backend's
-    # turn deadline so a hung turn stops holding its (repo, task) slot without a
-    # hub restart. Then the dispatch sweep retries the deferred queue — a job held
+    # orphan reconcile, settling a transient job that has outlived the whole-attempt
+    # deadline persisted on its own record, so a hung turn stops holding its
+    # (repo, task) slot without a hub restart. Then the dispatch sweep retries the
+    # deferred queue — a job held
     # for capacity is picked back up by nothing else, and a hub restart resumes
     # the queue through this sweep rather than through a startup step of its own.
     # In this order a slot freed by the reap is already free when the dispatcher

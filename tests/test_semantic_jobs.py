@@ -61,7 +61,8 @@ from orch_hub.semantic_jobs import (
     STATUS_QUEUED,
     STATUS_RUNNING,
     STATUSES,
-    STUCK_GRACE_SECONDS,
+    EVIDENCE_GRACE_SECONDS,
+    SETTLE_GRACE_SECONDS,
     SemanticJobManager,
     UnknownSemanticJobError,
     _ERROR_MAX_CHARS,
@@ -116,6 +117,9 @@ class FakeEvaluator:
 
     ``on_evaluate`` is a spy hook invoked inside ``evaluate`` (off the manager
     lock) so a test can observe the on-disk ``running`` state mid-turn.
+    ``turn_start_by`` deadlines are recorded rather than honoured: enforcing the
+    pre-model window is the real evaluator's job (``tests/test_semantic.py``);
+    here it is only the value the manager hands down.
     """
 
     def __init__(self, *, report: SemanticReport | None = None, error: Exception | None = None,
@@ -125,13 +129,17 @@ class FakeEvaluator:
         self._on_evaluate = on_evaluate
         self._info = info or mk_info()
         self.calls: list[tuple[ManagedRepo, str]] = []
+        self.deadlines: list[dt.datetime | None] = []
 
     @property
     def evaluator_info(self) -> SemanticEvaluatorInfo:
         return self._info
 
-    def evaluate(self, r: ManagedRepo, task_id: str) -> SemanticReport:
+    def evaluate(
+        self, r: ManagedRepo, task_id: str, *, turn_start_by: dt.datetime | None = None
+    ) -> SemanticReport:
         self.calls.append((r, task_id))
+        self.deadlines.append(turn_start_by)
         if self._on_evaluate is not None:
             self._on_evaluate(r, task_id)
         if self._error is not None:
@@ -223,9 +231,9 @@ def manager(
 
 
 #: The whole-attempt bound :meth:`SemanticJobManager.reconcile_stuck` enforces:
-#: the backend's turn deadline plus the fixed grace for the evidence build and
-#: report persistence that bracket it.
-STUCK_LIMIT = DEFAULT_EVAL_TURN_TIMEOUT + STUCK_GRACE_SECONDS
+#: the backend's turn deadline plus the two enforced allowances bracketing it —
+#: the evidence build before the model turn and the report persistence after it.
+STUCK_LIMIT = EVIDENCE_GRACE_SECONDS + DEFAULT_EVAL_TURN_TIMEOUT + SETTLE_GRACE_SECONDS
 
 
 def dispatch_now(mgr: SemanticJobManager, r: ManagedRepo | None = None, task_id: str = TASK):
@@ -913,6 +921,132 @@ def _stuck_manager(
     )
 
 
+def test_a_running_record_carries_the_deadline_its_worker_is_held_to(tmp_path):
+    """The attempt's bound is persisted, not recomputed per sweep.
+
+    Persisting it is what lets the worker and the sweep read the *same* instant:
+    the worker is refused a model turn late enough to outlive it, so the sweep can
+    treat "past the deadline" as proof the model turn is already dead.
+    """
+    clock = Clock()
+    ev = FakeEvaluator()
+    mgr = SemanticJobManager(
+        config(tmp_path), evaluator=ev, clock=clock, executor=sync_executor
+    )
+
+    mgr.start_job(repo(), TASK)
+
+    started = dt.datetime.fromisoformat(read_job(mgr._config, "alpha", TASK)["started_ts"])
+    deadline = dt.datetime.fromisoformat(read_job(mgr._config, "alpha", TASK)["deadline_ts"])
+    assert deadline == started + dt.timedelta(seconds=STUCK_LIMIT)
+    # And the same flip handed the evaluator the window it must start its model
+    # turn inside — one mark on one timeline, both derived from ``started_ts``.
+    assert ev.deadlines == [started + dt.timedelta(seconds=EVIDENCE_GRACE_SECONDS)]
+
+
+def test_the_model_turn_cannot_outlive_the_deadline_it_is_reaped_against(tmp_path):
+    """The property the finding asked for, stated as arithmetic over real values.
+
+    The worker may open a model turn no later than ``turn_start_by``, and that turn
+    carries the same configured deadline the whole-attempt bound was built from. So
+    the latest instant a live model subprocess can still exist is a whole
+    ``SETTLE_GRACE_SECONDS`` before the record becomes reapable — which is why the
+    sweep can never settle a turn that is still inside its own deadline, and why
+    the worker that follows it still has room to persist its report.
+    """
+    clock = Clock()
+    ev = FakeEvaluator()
+    cfg = config(tmp_path)
+    mgr = SemanticJobManager(cfg, evaluator=ev, clock=clock, executor=sync_executor)
+
+    mgr.start_job(repo(), TASK)
+
+    deadline = dt.datetime.fromisoformat(read_job(cfg, "alpha", TASK)["deadline_ts"])
+    latest_turn_end = ev.deadlines[0] + dt.timedelta(seconds=cfg.eval_turn_timeout)
+    assert latest_turn_end == deadline - dt.timedelta(seconds=SETTLE_GRACE_SECONDS)
+    assert latest_turn_end < deadline
+
+
+def test_stuck_sweep_reads_the_persisted_deadline_not_the_start_stamp(tmp_path):
+    """The finding: dating the bound from ``started_ts`` reaps live turns.
+
+    ``started_ts`` marks when the *attempt* began, and the pre-model work between
+    it and the model turn is not fixed — a slow evidence build pushes the turn (and
+    its unexpired deadline) past any offset from the start stamp. So the sweep asks
+    the record what bound it is actually under.
+    """
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(
+        cfg, "alpha", TASK, STATUS_RUNNING,
+        started_ts=clock.now.isoformat(),
+        deadline_ts=(clock.now + dt.timedelta(seconds=STUCK_LIMIT * 3)).isoformat(),
+    )
+    mgr = _stuck_manager(tmp_path, clock=clock)
+
+    # Well past what an offset from ``started_ts`` would have allowed, and still
+    # inside the deadline this attempt was actually handed.
+    clock.advance(STUCK_LIMIT + 1)
+    assert mgr.reconcile_stuck() == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_RUNNING
+
+    clock.advance(STUCK_LIMIT * 2)
+    assert [j.status for j in mgr.reconcile_stuck()] == [STATUS_FAILED]
+
+
+def test_stuck_sweep_settles_a_passed_deadline_on_a_freshly_stamped_record(tmp_path):
+    # The converse reading: a recent ``started_ts`` does not shelter a record whose
+    # own deadline has passed (a shortened bound, or a clock the record predates).
+    cfg = config(tmp_path)
+    clock = Clock()
+    _write_raw_job(
+        cfg, "alpha", TASK, STATUS_RUNNING,
+        started_ts=clock.now.isoformat(),
+        deadline_ts=(clock.now - dt.timedelta(seconds=1)).isoformat(),
+    )
+    mgr = _stuck_manager(tmp_path, clock=clock)
+
+    assert [j.status for j in mgr.reconcile_stuck()] == [STATUS_FAILED]
+
+
+def test_a_running_record_carries_no_deadline_without_a_turn_deadline(tmp_path):
+    # ``ORCH_HUB_EVAL_TURN_TIMEOUT=0`` is the fully unbounded mode: nothing bounds
+    # the model turn, so there is no window to hand the evaluator and no instant at
+    # which the attempt could be called overdue.
+    clock = Clock()
+    ev = FakeEvaluator()
+    cfg = config(tmp_path, turn_timeout=0)
+    mgr = SemanticJobManager(cfg, evaluator=ev, clock=clock, executor=sync_executor)
+
+    mgr.start_job(repo(), TASK)
+
+    assert read_job(cfg, "alpha", TASK)["deadline_ts"] is None
+    assert ev.deadlines == [None]
+
+
+def test_a_worker_does_not_start_a_turn_against_a_reaped_record(tmp_path):
+    """A record settled while its turn waited in the executor gets no model call.
+
+    The other half of containing a reap: the late worker must not spend a window on
+    a task whose record already reports failure. The ``queued`` guard in the
+    running flip is what stops it, before any evaluation work.
+    """
+    clock = Clock()
+    executor = DeferredExecutor()
+    ev = FakeEvaluator()
+    mgr = SemanticJobManager(
+        config(tmp_path), evaluator=ev, clock=clock, executor=executor
+    )
+    mgr.start_job(repo(), TASK)  # queued; its turn is captured, not run
+    clock.advance(STUCK_LIMIT + 1)
+    assert [j.status for j in mgr.reconcile_stuck()] == [STATUS_FAILED]
+
+    executor.run_all()
+
+    assert ev.calls == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_FAILED
+
+
 @pytest.mark.parametrize("status", [STATUS_QUEUED, STATUS_RUNNING])
 def test_stuck_sweep_fails_an_in_flight_job_past_the_bound(tmp_path, status):
     """The finding: a hung turn holds its slot until somebody restarts the hub.
@@ -935,7 +1069,7 @@ def test_stuck_sweep_fails_an_in_flight_job_past_the_bound(tmp_path, status):
     assert [j.status for j in settled] == [STATUS_FAILED]
     on_disk = mgr.get_job(repo(), TASK)
     assert on_disk.status == STATUS_FAILED
-    assert "stuck" in (on_disk.error or "") and str(STUCK_LIMIT) in (on_disk.error or "")
+    assert "stuck" in (on_disk.error or "") and "deadline" in (on_disk.error or "")
     assert on_disk.ended_ts is not None
 
 
@@ -1046,26 +1180,35 @@ def test_stuck_sweep_notifies_unlike_the_startup_sweep(tmp_path):
     assert len(notifier.sent) == 1
 
 
-def test_a_late_worker_cannot_clobber_a_reaped_record(tmp_path):
+def test_a_late_worker_cannot_clobber_a_record_reaped_mid_turn(tmp_path):
     """The one real cost of reaping on a clock: the worker may still be alive.
 
-    It is contained by the finalize guard — a worker that returns after its record
-    was settled finds a non-transient record and writes nothing.
+    Only a worker that has outlived its own bound reaches this — the deadline is
+    the record's, and the worker is held to it — but such a worker does eventually
+    return, and it must not overwrite the outcome the sweep already reported. The
+    reap here happens from *inside* the turn, so the record is genuinely
+    ``running`` when it is settled, and the finalize that follows is the real late
+    one: it finds a non-transient record and writes nothing.
     """
-    cfg = config(tmp_path)
     clock = Clock()
-    executor = DeferredExecutor()
-    mgr = SemanticJobManager(
-        cfg,
-        evaluator=FakeEvaluator(report=mk_report(evaluation_id="EVAL-LATE")),
-        clock=clock,
-        executor=executor,
-    )
-    mgr.start_job(repo(), TASK)  # queued; its turn is captured, not run
-    clock.advance(STUCK_LIMIT + 1)
-    assert [j.status for j in mgr.reconcile_stuck()] == [STATUS_FAILED]
+    box: dict = {}
 
-    executor.run_all()  # the abandoned worker finally runs
+    def reap_from_inside_the_turn(r, task_id):
+        clock.advance(STUCK_LIMIT + 1)
+        assert [j.status for j in box["mgr"].reconcile_stuck()] == [STATUS_FAILED]
+
+    mgr = SemanticJobManager(
+        config(tmp_path),
+        evaluator=FakeEvaluator(
+            report=mk_report(evaluation_id="EVAL-LATE"),
+            on_evaluate=reap_from_inside_the_turn,
+        ),
+        clock=clock,
+        executor=sync_executor,
+    )
+    box["mgr"] = mgr
+
+    mgr.start_job(repo(), TASK)
 
     settled = mgr.get_job(repo(), TASK)
     assert settled.status == STATUS_FAILED

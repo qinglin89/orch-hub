@@ -2369,6 +2369,20 @@ class SemanticJob:
     bounded failure diagnostic on ``failed`` (never full prompt text or unbounded
     model output). ``started_ts`` marks the queued→running transition and
     ``ended_ts`` the terminal transition (both ``None`` until they happen).
+
+    ``deadline_ts`` is this attempt's whole-attempt bound: the instant after which
+    an in-flight record may be reaped as stuck
+    (:meth:`orch_hub.semantic_jobs.SemanticJobManager.reconcile_stuck`). It is
+    written once, by the queued→running flip that also stamps ``started_ts``, and
+    it is persisted rather than recomputed because the worker is held to it too —
+    the worker must finish its pre-model work early enough that the model turn's
+    own deadline expires *before* this instant, which is what makes reaping safe:
+    a record past ``deadline_ts`` cannot be a turn still inside its model
+    deadline. ``None`` on a record that has not started a turn (``deferred``,
+    ``queued``, ``skipped``), and on every record when the turn deadline is
+    disabled (``ORCH_HUB_EVAL_TURN_TIMEOUT=0``), which removes the bound entirely.
+    It survives onto the terminal record as evidence of the bound the attempt ran
+    under.
     """
 
     job_id: str
@@ -2387,6 +2401,7 @@ class SemanticJob:
     created_ts: str | None = None
     updated_ts: str | None = None
     started_ts: str | None = None
+    deadline_ts: str | None = None
     ended_ts: str | None = None
 
     def managed_repo(self) -> ManagedRepo | None:
@@ -2423,6 +2438,7 @@ class SemanticJob:
             "created_ts": self.created_ts,
             "updated_ts": self.updated_ts,
             "started_ts": self.started_ts,
+            "deadline_ts": self.deadline_ts,
             "ended_ts": self.ended_ts,
         }
 
@@ -2449,8 +2465,9 @@ class EvaluationQueueEntry:
     :meth:`orch_hub.eval_dispatch.DeferredDispatcher._log_stalled` warns about,
     so the dashboard and the service log never disagree about which jobs are
     stalled. A ``queued``/``running`` job that has hung is a different failure
-    with its own recovery (restart reconciliation settles it), and giving one
-    threshold two meanings is how a threshold stops meaning anything.
+    with its own recovery — its ``deadline_ts`` settles it, at startup or on the
+    resident sweep — and giving one threshold two meanings is how a threshold
+    stops meaning anything.
     """
 
     job: SemanticJob

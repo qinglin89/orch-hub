@@ -1516,6 +1516,62 @@ def test_evaluate_does_not_mutate_target_repo_or_run_state(tmp_path):
     assert (config.data_dir / "evaluations" / "alpha" / TASK / FIXED_ID / SEMANTIC_REPORT_NAME).is_file()
 
 
+def test_evaluate_refuses_a_model_turn_once_its_pre_model_window_is_spent(tmp_path):
+    """A slow evidence build ends the attempt instead of opening a late turn.
+
+    The caller's window bounds everything above the model call, and it exists so a
+    turn can never start late enough to still be alive when the job record is
+    reaped as stuck. Refusing costs no subscription window — the turn is withheld,
+    not killed — and the diagnostic names both instants, which is what tells the
+    operator this was the evidence build and not the model.
+    """
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    backend = FakeBackend(envelope())
+    ev = semantic_evaluator(config=config, service=_service(config), backend=backend)
+
+    with pytest.raises(SemanticEvaluationError, match="outran its window"):
+        ev.evaluate(repo, TASK, turn_start_by=FIXED_TS - dt.timedelta(seconds=1))
+
+    assert backend.prompts == []  # no turn was opened, so no window was spent
+    # And it is an ordinary failed evaluation: the reserved dir is gone, exactly as
+    # for a backend failure, so no half-written evaluation survives.
+    assert not (config.data_dir / "evaluations" / "alpha" / TASK / FIXED_ID).exists()
+
+
+def test_evaluate_runs_the_turn_inside_its_pre_model_window(tmp_path):
+    # The window only refuses a build that outran it; a build that finishes with
+    # time to spare proceeds to the model exactly as an unbounded one does.
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    backend = FakeBackend(envelope())
+    ev = semantic_evaluator(config=config, service=_service(config), backend=backend)
+
+    report = ev.evaluate(repo, TASK, turn_start_by=FIXED_TS + dt.timedelta(seconds=1))
+
+    assert len(backend.prompts) == 1
+    assert (config.data_dir / "evaluations" / "alpha" / TASK / report.evaluation_id
+            / SEMANTIC_REPORT_NAME).is_file()
+
+
+def test_evaluate_compares_the_window_against_a_naive_clock(tmp_path):
+    # The evaluator's clock is injectable, so its reading and a caller's deadline
+    # can disagree about tz-awareness. That disagreement must not become a
+    # TypeError inside the turn — it would surface as an unrelated diagnostic.
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    ev = semantic_evaluator(
+        config=config, service=_service(config), backend=FakeBackend(envelope()),
+        clock=lambda: FIXED_TS.replace(tzinfo=None),
+    )
+
+    with pytest.raises(SemanticEvaluationError, match="outran its window"):
+        ev.evaluate(repo, TASK, turn_start_by=FIXED_TS - dt.timedelta(seconds=1))
+
+
 def test_evaluate_cleans_up_dir_on_backend_failure(tmp_path):
     config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
                     evaluation_enabled=True)

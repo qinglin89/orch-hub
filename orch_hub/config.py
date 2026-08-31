@@ -518,10 +518,11 @@ class Config:
     eval_turn_timeout: int = DEFAULT_EVAL_TURN_TIMEOUT
     """Seconds one Layer 2 evaluator CLI turn may run (``ORCH_HUB_EVAL_TURN_TIMEOUT``).
 
-    Passed to the semantic backend as its subprocess deadline, and — plus a fixed
-    grace for the evidence build bracketing the turn — the basis for the in-flight
-    stuck sweep in :mod:`orch_hub.semantic_jobs`. ``0`` disables both: with no
-    deadline there is nothing to distinguish a hung turn from a long one.
+    Passed to the semantic backend as its subprocess deadline, and — plus the two
+    fixed allowances for the evidence build before the turn and the report
+    persistence after it — the whole-attempt deadline a semantic job is stamped
+    with and reaped against (:mod:`orch_hub.semantic_jobs`). ``0`` disables both:
+    with no deadline there is nothing to distinguish a hung turn from a long one.
     """
 
     eval_retention: int = DEFAULT_EVAL_RETENTION
