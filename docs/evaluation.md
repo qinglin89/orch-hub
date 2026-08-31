@@ -318,7 +318,8 @@ blocked by a stalled evaluation queue; only the measuring has stopped.
 It shows:
 
 - **The census** — *the latest attempt per task*: how many completed, how many
-  are waiting, how many failed, how many were skipped. These counts are over *every* persisted job
+  are waiting, how many failed, how many were cancelled, how many were skipped.
+  These counts are over *every* persisted job
   record and are never truncated; a figure that quietly meant "the first twenty"
   would report a twenty-deep queue as calm, which is the silence this section
   exists to break.
@@ -340,15 +341,21 @@ It shows:
 - **The outstanding jobs**, oldest first: which task, which repo, how long it has
   waited, and — for a held job — the reason in prose (`capacity`,
   `usage-unknown`, `pacing`). Each row links to that task's evaluation view. The
-  row list *is* capped for readability; when it is, the section says so. Skipped
-  and completed jobs are counted but not listed: both are resting outcomes with
-  nothing to act on, and one row per opted-out task would crowd out what is
-  actually stuck.
-- **Why nothing is draining.** Three of the four reasons are on the records
-  themselves. The fourth — `ORCH_HUB_EVAL_ENABLED` or `ORCH_HUB_EVAL_AUTO`
-  switched off — deliberately leaves no per-record trace (a closed gate is global
-  config, not a fact about a job, and stamping it would churn the whole queue on
-  a config change), so the section names it from configuration instead.
+  row list *is* capped for readability; when it is, the section says so.
+  Completed, skipped, and cancelled jobs are counted but not listed: all three are
+  resting outcomes with nothing to act on, and one row per opted-out or
+  deliberately stopped task would crowd out what is actually stuck. Each job still
+  owed a turn also carries a **Cancel** button — see
+  [cancelling one job](#cancelling-one-job).
+- **Why nothing is draining.** Three reasons are on the records themselves
+  (`capacity`, `usage-unknown`, `pacing`). Two are not: `ORCH_HUB_EVAL_ENABLED` or
+  `ORCH_HUB_EVAL_AUTO` switched off, and an
+  [operator pause](#pausing-and-resuming-the-queue). Both are global facts rather
+  than facts about a job — stamping either on the records would churn the whole
+  queue on a toggle and leave every record claiming a reason that stopped being
+  true the moment it was undone — so the section names them from the payload's own
+  state instead. They are independent and both are reported: a queue can be off
+  *and* paused, and naming only one sends you to fix the wrong switch.
 - **A stall flag** on any held job past `ORCH_HUB_EVAL_QUEUE_MAX_AGE`, with the
   bound spelled out. It is the same population the service log warns about, by
   the same rule, so the two never disagree.
@@ -369,6 +376,93 @@ never-evaluated trigger, and still offers to run it.
 Both surfaces are reads. Opening them never dispatches, holds, or rewrites a job,
 and never consults the usage service (a usage read can trigger a background
 refresh, which a passive dashboard poll has no business causing).
+
+## Pausing and resuming the queue
+
+Sometimes the right answer is not "this turn is stuck" but "not right now" — you
+are about to spend the afternoon in a dev session and would rather the hub did not
+draw on the same rate window to measure the last one.
+
+`ORCH_HUB_EVAL_AUTO=false` is the wrong instrument for that, twice over. It is
+read from the environment, so changing it means editing the launchd plist and
+restarting the service, which nobody does at the moment they notice. And it is the
+*trigger* gate: with it off, completions are not accepted into the queue at all,
+and because a task's job record is its once-per-task guard, every task that
+completes while it is off is permanently absent from the corpus. The queue does
+not pause; it stops existing.
+
+So there is a second lever, and the difference is the whole point:
+
+| | `ORCH_HUB_EVAL_AUTO=false` | a pause |
+|---|---|---|
+| changed by | editing config, then a restart | one request, live |
+| completions still accepted | no | **yes** |
+| held records | held | held |
+| what the corpus loses | those tasks, permanently | nothing |
+
+A pause holds only the *drain*. Completed tasks keep landing as `deferred`
+records, so the queue keeps its shape, and resuming spends it in the same
+completion order it would have had. Pausing costs the corpus time, not entries.
+
+From the dashboard it is the **Pause** / **Resume** button beside the *Evaluation
+queue* heading; the button always names the action rather than the state. A paused
+queue says so above its rows, and says that completions still enter it — a pause
+must never become one more silent reason the queue is sitting still. From the API
+it is `POST /api/evaluation/queue/pause` and `POST /api/evaluation/queue/resume`,
+both of which answer with the whole queue read, so a client renders the result of
+pressing the button through the same code path as every poll.
+
+Some properties worth knowing:
+
+- **It is persisted**, in `<data-dir>/eval-control.json`, so a launchd restart
+  does not silently undo it. That is the same reason the environment variable was
+  the wrong home for it.
+- **"Held since" means what it says.** Pausing an already-paused queue keeps the
+  original instant rather than restamping it, so repeated presses (or a second
+  browser session) cannot make a queue held for hours read as freshly paused.
+- **Manual evaluation stays ungated.** `POST .../semantic/job` — and the Layer 2
+  button on a task's evaluation view — still runs, exactly as it still runs above
+  the usage ceiling. A human asking for one evaluation is not the production-side
+  selection any of these gates exist to shape, and it remains the escape hatch.
+- **The stuck sweep is not paused.** Reaping a turn that has outlived its
+  deadline is a liveness mechanism, not a dispatch decision; a pause must not
+  leave a hung job holding its slot.
+- **An unreadable control record reads as paused.** If the hub cannot read
+  `eval-control.json`, it holds the queue rather than spend a window it cannot
+  account for — the same fail-toward-deferral direction unknown usage gets. The
+  section says so explicitly (it names the damage, not a decision nobody made),
+  and **Resume** rewrites the file and releases it.
+
+## Cancelling one job
+
+The per-job counterpart, on the **Cancel** button beside each queue row, or
+`POST /api/repos/{repo}/evaluations/{task}/semantic/job/cancel`. It settles that
+task's job to terminal `cancelled` and frees its `(repo, task)` slot immediately.
+Legal from `deferred`, `queued`, and `running`; a record already at rest answers
+`409`, and a task that never had a job answers `404`.
+
+What it actually stops depends on where the job was:
+
+- From `deferred` or `queued`, **no model turn opens**. A queued record's worker
+  checks the record before starting, and refuses one this settled. Nothing is
+  spent.
+- From `running`, the turn is **abandoned rather than killed** — the hub holds no
+  handle on the CLI subprocess. The record settles now and the slot frees, while
+  the worker runs on under its own deadline; when it finishes it finds a
+  non-transient record and writes nothing over this outcome. That is the same
+  arrangement the [stuck sweep](#when-a-turn-hangs) already rests on, with the
+  same consequences: the turn was read-only over target state throughout, and if
+  it does succeed its artifacts are still written and still publishable — only the
+  job record, which reports the *attempt*, no longer points at them. A cancelled
+  record with a start timestamp is an abandoned turn; one without is a turn that
+  never opened.
+
+A cancelled record is terminal, so it holds the task's once-per-task guard: the
+automatic path will not quietly re-enqueue what you just stopped. Asking again is
+the ordinary manual start, which overwrites it like any other resting record — so
+cancelling is not a verdict on the task, and the corpus can still gain the report
+later. Cancelling notifies nothing: unlike a failure, it is exactly what you asked
+for, at the surface already showing you the outcome.
 
 ## When a turn hangs
 
@@ -945,7 +1039,9 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
-| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus a per-repo tally of skipped tasks, the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, and whether the trigger gate is open. Read-only — it never dispatches. `404` when disabled. |
+| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus a per-repo tally of skipped tasks, the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, whether the trigger gate is open, and the `control` block reporting any [operator pause](#pausing-and-resuming-the-queue). Read-only — it never dispatches. `404` when disabled. |
+| `POST /api/evaluation/queue/pause` | [Hold automatic dispatch](#pausing-and-resuming-the-queue) live, without a restart; completions keep entering the queue. Idempotent. Answers with the queue read. |
+| `POST /api/evaluation/queue/resume` | Release the pause; the next sweep drains what was held. Also repairs an unreadable control record. Answers with the queue read. |
 | `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
 | `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | One published artifact's [byte-exact persisted content](#verifying-one-artifact-byte-for-byte) for independent digest verification; pruned answers `410`. |
@@ -955,7 +1051,8 @@ All routes are protected by the bearer token like every non-health route.
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |
 | `POST /api/repos/{repo}/evaluations/{task}/metrics` | Generate evidence + Layer 1 static metrics. |
 | `POST /api/repos/{repo}/evaluations/{task}/semantic/job` | Start or reuse the current async Layer 2 job; duplicate in-flight starts return the same job. |
-| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`deferred`/`queued`/`running`/`completed`/`failed`/`skipped`; `null` when none exists). |
+| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`deferred`/`queued`/`running`/`completed`/`failed`/`cancelled`/`skipped`; `null` when none exists). |
+| `POST /api/repos/{repo}/evaluations/{task}/semantic/job/cancel` | [Cancel](#cancelling-one-job) a `deferred`/`queued`/`running` job, freeing its slot. `409` from a resting record, `404` when the task has no job. |
 
 When disabled, every route except `GET /api/evaluation` answers `404` with the
 fail-closed reason.

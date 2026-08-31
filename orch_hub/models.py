@@ -2444,6 +2444,48 @@ class SemanticJob:
 
 
 @dataclass(frozen=True)
+class EvaluationControl:
+    """Whether automatic Layer 2 dispatch is currently held by an operator pause.
+
+    The persisted shape of :class:`orch_hub.eval_control.EvaluationControlStore`,
+    and one of the two config-like facts a queue reader cannot infer from the job
+    records (the other being ``auto_enabled``). It is deliberately the same kind of
+    answer: a pause must never be a *second silent condition* on a queue whose
+    failure modes are already silent by construction — so it travels in the queue
+    payload and explains itself rather than leaving the reader with a still queue
+    and no reason.
+
+    ``paused_ts`` is when the drain actually stopped, not when the button was last
+    pressed: pausing an already-paused queue keeps the original stamp, so "held
+    since 09:14" stays true across repeated presses and a second browser session.
+    It is ``None`` on a pause that no operator made (see below) and on a running
+    queue.
+
+    ``reason`` is a bounded machine token from a closed vocabulary
+    (:data:`orch_hub.eval_control.PAUSE_OPERATOR`,
+    :data:`~orch_hub.eval_control.PAUSE_UNREADABLE`), never operator prose — the
+    same rule the job record's ``defer_reason``/``skip_reason`` follow, for the
+    same reasons: prose is unanalyzable, leaks repo content into a persisted
+    surface, and invites recording a rationalization. It is ``None`` exactly when
+    ``paused`` is false. The two tokens are kept apart because they call for
+    opposite responses: an operator pause ends when the operator ends it, while an
+    unreadable control record is damage that will not fix itself and must not be
+    reported as somebody's decision.
+    """
+
+    paused: bool = False
+    paused_ts: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "paused": self.paused,
+            "paused_ts": self.paused_ts,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True)
 class EvaluationQueueEntry:
     """One semantic job as the operator's queue view shows it.
 
@@ -2537,16 +2579,22 @@ class EvaluationQueueSnapshot:
     share of that repo's tasks and never a lifetime total (a manual evaluation
     overwrites a skipped record like any other terminal one).
 
-    ``auto_enabled`` and ``queue_max_age_seconds`` are the two pieces of *config*
-    a queue reader cannot infer from records. The first is the fourth reason a
-    queue can sit still — both switches closed holds every deferred job with no
+    ``auto_enabled``, ``control``, and ``queue_max_age_seconds`` are the pieces of
+    state a queue reader cannot infer from records. The first is a reason a queue
+    can sit still — both switches closed holds every deferred job with no
     per-record trace, deliberately (see
-    :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep`) — and the second is
-    the bound ``overdue`` was measured against, so the reader renders the real
-    threshold instead of a literal that drifts from it.
+    :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep`) — the second is the
+    live operator pause, which holds the drain the same way and for the same
+    reason travels here rather than being stamped on records
+    (:class:`EvaluationControl`), and the last is the bound ``overdue`` was
+    measured against, so the reader renders the real threshold instead of a
+    literal that drifts from it. The two holds are independent and both are
+    reported: a queue can be off *and* paused, and telling an operator only one of
+    those sends them to fix the wrong switch.
     """
 
     auto_enabled: bool = False
+    control: EvaluationControl = field(default_factory=EvaluationControl)
     queue_max_age_seconds: int = 0
     counts: Mapping[str, int] = field(default_factory=dict)
     skipped_by_repo: Mapping[str, int] = field(default_factory=dict)
@@ -2557,6 +2605,7 @@ class EvaluationQueueSnapshot:
     def to_dict(self) -> dict:
         return {
             "auto_enabled": self.auto_enabled,
+            "control": self.control.to_dict(),
             "queue_max_age_seconds": self.queue_max_age_seconds,
             "counts": dict(self.counts),
             "skipped_by_repo": dict(self.skipped_by_repo),

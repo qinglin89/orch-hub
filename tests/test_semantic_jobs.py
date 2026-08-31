@@ -54,16 +54,19 @@ from orch_hub.semantic import (
 )
 from orch_hub.semantic_jobs import (
     SEMANTIC_JOB_NAME,
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
     STATUS_ERROR,
     STATUS_FAILED,
     STATUS_QUEUED,
     STATUS_RUNNING,
+    STATUS_SKIPPED,
     STATUSES,
     EVIDENCE_GRACE_SECONDS,
     SETTLE_GRACE_SECONDS,
     SemanticJobManager,
+    SemanticJobStateError,
     UnknownSemanticJobError,
     _ERROR_MAX_CHARS,
 )
@@ -750,6 +753,159 @@ def test_list_jobs_walks_every_record_once(tmp_path):
         ("alpha", TASK, STATUS_DEFERRED),
         ("beta", "2026-08-01-other", STATUS_DEFERRED),
     }
+
+
+# -- operator cancel ----------------------------------------------------------
+#
+# The per-job lever, modelled on the intake manager's cancel. What it must get
+# right: freeing the (repo, task) slot without a restart, actually preventing the
+# model turn where one has not opened yet, refusing a resting record rather than
+# rewriting it, and staying quiet — a cancel is the operator's own action, not a
+# corpus loss they need to be told about.
+
+
+def test_cancelling_a_held_job_settles_it_and_frees_the_slot(tmp_path):
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo(), TASK)
+
+    cancelled = mgr.cancel_job(repo(), TASK)
+
+    assert cancelled.status == STATUS_CANCELLED
+    assert cancelled.ended_ts is not None
+    # The waiting reason is no longer true and would read as the cause of the
+    # cancel; the status is the cause.
+    assert cancelled.defer_reason is None
+    assert mgr.get_job(repo(), TASK).status == STATUS_CANCELLED
+
+
+def test_cancelling_a_queued_job_stops_the_model_turn_before_it_opens(tmp_path):
+    """The case where cancelling is a real cancellation rather than bookkeeping.
+
+    A queued record's worker is already submitted but has not begun. The
+    queued→running guard refuses a record this settled, so no turn opens and no
+    window is spent.
+    """
+    ev = FakeEvaluator()
+    executor = DeferredExecutor()
+    mgr = manager(tmp_path, evaluator=ev, executor=executor)
+    mgr.start_job(repo(), TASK)
+
+    mgr.cancel_job(repo(), TASK)
+    executor.run_all()  # the worker finally gets its slot
+
+    assert ev.calls == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_CANCELLED
+
+
+def test_cancelling_a_running_job_abandons_the_turn_without_clobbering_the_record(tmp_path):
+    """From ``running`` the turn is abandoned, not killed — the hub holds no handle
+    on the subprocess.
+
+    The property that makes that acceptable is the same one the stuck sweep rests
+    on: the late worker's own finalize finds a non-transient record and returns, so
+    the cancel stands and the slot really is free. ``started_ts`` is what tells an
+    abandoned turn from one that never opened.
+    """
+    box: dict = {}
+    mgr = manager(
+        tmp_path,
+        evaluator=FakeEvaluator(
+            on_evaluate=lambda r, t: box.setdefault("cancelled", mgr.cancel_job(r, t))
+        ),
+    )
+
+    mgr.start_job(repo(), TASK)  # synchronous executor: the turn runs inline
+
+    assert box["cancelled"].status == STATUS_CANCELLED
+    assert box["cancelled"].started_ts is not None
+    settled = mgr.get_job(repo(), TASK)
+    assert settled.status == STATUS_CANCELLED
+    assert settled.evaluation_id is None
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_CANCELLED],
+)
+def test_cancelling_a_resting_record_is_refused_rather_than_rewritten(tmp_path, seed):
+    """A resting record has nothing to stop. Refusing is 409 territory — the job is
+    right there, so this is about lifecycle, not identity."""
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo(), TASK)
+    job_dir = config(tmp_path).data_dir / "semantic-jobs" / "alpha" / TASK
+    semantic_jobs._write_record(
+        job_dir, replace(mgr.get_job(repo(), TASK), status=seed)
+    )
+
+    with pytest.raises(SemanticJobStateError):
+        mgr.cancel_job(repo(), TASK)
+
+    assert mgr.get_job(repo(), TASK).status == seed
+
+
+def test_cancelling_a_task_with_no_job_is_unknown_not_a_new_record(tmp_path):
+    mgr = manager(tmp_path)
+
+    with pytest.raises(UnknownSemanticJobError):
+        mgr.cancel_job(repo(), TASK)
+
+    assert mgr.find_job(repo(), TASK) is None
+
+
+def test_cancelling_rejects_an_unsafe_task_id(tmp_path):
+    mgr = manager(tmp_path)
+
+    with pytest.raises(ValueError):
+        mgr.cancel_job(repo(), "../escape")
+
+
+def test_a_cancel_is_not_pushed(tmp_path):
+    """Unlike a failure, a cancel is exactly what the operator asked for, at the
+    surface that already shows the outcome. The same silence a skip keeps."""
+    notifier = RecordingNotifier()
+    mgr = manager(tmp_path, notifier=notifier)
+    mgr.enqueue_if_absent(repo(), TASK)
+
+    mgr.cancel_job(repo(), TASK)
+
+    assert notifier.sent == []
+
+
+def test_a_cancelled_record_holds_the_once_per_task_guard(tmp_path):
+    """The automatic path must not quietly re-enqueue what was just stopped: the
+    record is the guard, exactly as a skip is."""
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo(), TASK)
+    mgr.cancel_job(repo(), TASK)
+
+    assert mgr.enqueue_if_absent(repo(), TASK) is None
+    assert mgr.get_job(repo(), TASK).status == STATUS_CANCELLED
+
+
+def test_an_operator_can_still_evaluate_a_cancelled_task(tmp_path):
+    """Cancelling is not a verdict on the task. Asking again produces the report the
+    cancel declined — the corpus gaining an entry, not losing one."""
+    ev = FakeEvaluator()
+    mgr = manager(tmp_path, evaluator=ev)
+    mgr.enqueue_if_absent(repo(), TASK)
+    mgr.cancel_job(repo(), TASK)
+
+    started = mgr.start_job(repo(), TASK)
+
+    assert started.auto is False  # somebody chose this one
+    settled = mgr.get_job(repo(), TASK)
+    assert settled.status == STATUS_COMPLETED
+    assert ev.calls == [(repo(), TASK)]
+
+
+def test_the_startup_sweep_leaves_a_cancelled_record_alone(tmp_path):
+    """Terminal records are not orphans; only a transient one is."""
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo(), TASK)
+    mgr.cancel_job(repo(), TASK)
+
+    assert mgr.reconcile_orphans() == []
+    assert mgr.get_job(repo(), TASK).status == STATUS_CANCELLED
 
 
 # -- failure paths ------------------------------------------------------------

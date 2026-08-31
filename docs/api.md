@@ -105,12 +105,16 @@ no live run or other non-terminal intake may own the repo.
 |---|---|
 | `GET /api/evaluation` | Whether the optional evaluation subsystem is enabled |
 | `GET /api/evaluation/doctor` | Layer 2 backend availability without a model call |
+| `GET /api/evaluation/queue` | Cross-repo state of the automatic Layer 2 path (census, held jobs, gate and pause state) |
+| `POST /api/evaluation/queue/pause` | Hold automatic dispatch live; completions keep entering the queue |
+| `POST /api/evaluation/queue/resume` | Release the pause; the next sweep drains what was held |
 | `GET /api/repos/{repo_id}/evaluations/{task_id}` | Persisted evaluations for an active or archived task |
 | `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}` | One evaluation's artifacts |
 | `POST /api/repos/{repo_id}/evaluations/{task_id}/evidence` | Generate a fresh bounded evidence pack |
 | `POST /api/repos/{repo_id}/evaluations/{task_id}/metrics` | Generate deterministic Layer 1 metrics |
 | `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic/job` | Start or reuse an asynchronous Layer 2 job |
 | `GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job` | Read the current Layer 2 job state |
+| `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic/job/cancel` | Cancel a held or in-flight Layer 2 job, freeing its slot |
 | `GET /api/evaluation/reports` | Cursor-paged cross-repo report feed |
 | `GET /api/evaluation/reports/{report_key}` | One published report bundle |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | Exact persisted artifact bytes |

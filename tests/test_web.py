@@ -2597,6 +2597,32 @@ def test_overview_evaluation_queue_explains_every_way_it_can_stall():
     assert "counts above are complete" in body
 
 
+def test_overview_evaluation_queue_carries_its_controls_not_only_its_state():
+    # 2026-08-27-evaluation-liveness-and-control, session-2. The section used to
+    # be display-only, which left the operator watching a stalled queue with no
+    # lever on the page they were already looking at. Pause/resume and per-job
+    # cancel therefore live HERE, beside the rows they act on — a control
+    # reachable only by a hand-written HTTP call is half-delivered.
+    body = app_js()
+    assert '"/api/evaluation/queue/" + (action === "resume" ? "resume" : "pause")' in body
+    assert "/semantic/job/cancel" in body
+    assert "evq-toggle" in body
+    assert "evq-cancel" in body
+    assert "wireEvaluationQueueControls" in body
+    # The pause is read from the payload's own control block, never from client
+    # memory, so a pause set from another device reads correctly on the next tick.
+    assert "queue.control" in body
+    # And it is explained, not merely obeyed: a pause must never become a second
+    # silent reason the queue sits still.
+    assert "Automatic dispatch is paused" in body
+    # The pause nobody chose (the hub could not read its own control) says so
+    # instead of being reported as somebody's decision.
+    assert "unreadable-control" in body
+    # A cancelled record is countable like a skip — it is a deliberate gap in the
+    # corpus, and a gap that leaves no trace is what this subsystem exists to end.
+    assert 'c.cancelled + " cancelled"' in body
+
+
 def test_task_evaluation_view_renders_a_held_layer_2_job():
     body = app_js()
     # A deferred job is accepted and durably owed, not absent: without its own
@@ -2625,6 +2651,14 @@ def test_overview_evaluation_queue_styles():
     # run signal, warn-coloured — nothing here is an error state.
     assert ".evq-row.evq-overdue > a" in css
     assert ".evq-warn" in css
+    # The controls: a heading row that keeps Pause/Resume on the trailing edge,
+    # and a row that is itself the flex container so Cancel can sit BESIDE the
+    # link rather than inside it (a button nested in an anchor is invalid, and
+    # every tap aimed at it would also navigate).
+    assert ".evq-head" in css
+    assert ".evq-toggle" in css
+    assert ".evq-cancel" in css
+    assert ".evq-row {" in css
 
 
 def test_shell_assets_resolve_through_the_runtime_resource_root():

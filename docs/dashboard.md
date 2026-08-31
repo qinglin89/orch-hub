@@ -25,7 +25,7 @@ replacement for that network boundary.
 
 | View | What it shows |
 |---|---|
-| Overview | Repos ready, active tasks, current activity, outcomes needing attention, and display-only Claude/Codex capacity |
+| Overview | Repos ready, active tasks, current activity, outcomes needing attention, display-only Claude/Codex capacity, and the automatic Layer 2 evaluation queue with its pause/resume and per-job cancel controls |
 | Repos | Registry-backed repo cards with readiness, live-run state, active-task counts, latest commit, and housekeeping warnings |
 | Repo detail | One repo's readiness, commits, task inventory, live run, and remote-intake entry point |
 | Tasks | Cross-repo active task inventory with repo, status, text, and blocker filters |
@@ -38,7 +38,10 @@ replacement for that network boundary.
 
 The Overview refreshes while visible. Missing subscription-usage data degrades
 only its own panel; evaluation failures remain isolated to history and
-evaluation surfaces. Neither becomes repo health or a launch gate.
+evaluation surfaces. Neither becomes repo health or a launch gate. The evaluation
+queue's controls change only what gets *measured*: pausing holds the automatic
+drain (completions still enter the queue) and cancelling settles one job — neither
+touches readiness, run state, or launch/intake admission.
 
 ## Starting a run
 

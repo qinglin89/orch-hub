@@ -12,9 +12,13 @@ rather than left resident, and the queue-age bound warning once per job rather
 than once per sweep. Plus the two switches, checked against the durable queue a
 restart inherits: a closed subsystem or trigger gate holds every accepted record
 untouched, and reopening both drains it with no recovery step. Then the operator
-view ``queue_snapshot`` folds over: a complete census the row cap never shrinks,
-the two-group order, the deferred-only overdue flag, a read that moves nothing —
-and what the census is *not*, pinned from a real completed-then-failed retry.
+pause, which is deliberately none of those: read fresh on every sweep, holding the
+drain exactly as a closed gate does while leaving *acceptance* open, failing
+toward held when its own record is unreadable, and travelling to readers through
+the snapshot rather than being stamped on records. Then the operator view
+``queue_snapshot`` folds over: a complete census the row cap never shrinks, the
+two-group order, the deferred-only overdue flag, a read that moves nothing — and
+what the census is *not*, pinned from a real completed-then-failed retry.
 Every usage snapshot is synthetic; nothing here reads the operator's real
 subscription data or spends a model turn.
 """
@@ -45,8 +49,10 @@ from orch_hub.eval_dispatch import (
     DeferredDispatcher,
     queue_snapshot,
 )
+from orch_hub.eval_control import PAUSE_OPERATOR, PAUSE_UNREADABLE
 from orch_hub.models import (
     PROVIDER_CLAUDE,
+    EvaluationControl,
     ManagedRepo,
     SemanticJob,
     ProviderUsage,
@@ -56,6 +62,7 @@ from orch_hub.models import (
 )
 from orch_hub.semantic_jobs import (
     SKIP_RUN_OPT_OUT,
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
     STATUS_ERROR,
@@ -754,6 +761,206 @@ def test_a_closed_gate_never_fails_an_unattributable_record(tmp_path):
     assert off_jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
 
 
+# -- the operator pause -------------------------------------------------------
+#
+# The lever that is deliberately NOT the trigger gate. ``ORCH_HUB_EVAL_AUTO``
+# needs a restart and stops completions being *accepted*, so every task finishing
+# while it is off is permanently absent from the corpus. A pause holds only the
+# drain, live, and the queue keeps filling behind it — which is what makes it
+# usable as a routine control rather than a decision.
+
+
+def paused(reason: str = PAUSE_OPERATOR, ts: str = "2026-08-09T11:00:00+00:00"):
+    return lambda: EvaluationControl(paused=True, paused_ts=ts, reason=reason)
+
+
+def test_a_paused_queue_is_held_exactly_as_it_is(tmp_path):
+    """Nothing walked, nothing written, nothing failed — the same treatment a
+    closed gate gets, and for the same reason: a pause is one global fact, not a
+    per-job one, so stamping it on records would churn the whole queue on a toggle
+    and leave them claiming a reason that stopped being true on resume."""
+    cfg, jobs, clock = enqueued_queue(tmp_path, (TASK,))
+    before = jobs.get_job(repo(), TASK)
+    evaluator = FakeEvaluator()
+    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=live,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=paused(),
+        clock=clock,
+    )
+
+    assert dispatcher.sweep() is None
+    assert evaluator.calls == []
+    assert live.get_job(repo(), TASK) == before
+
+
+def test_resuming_drains_the_queue_that_was_held_with_no_recovery_step(tmp_path):
+    """The pause costs the corpus nothing but time: the same records, in the same
+    completion order, the moment it is released."""
+    cfg, jobs, clock = enqueued_queue(tmp_path, (TASK,))
+    evaluator = FakeEvaluator()
+    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
+    state = {"paused": True}
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=live,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=lambda: EvaluationControl(paused=state["paused"]),
+        clock=clock,
+    )
+    assert dispatcher.sweep() is None
+
+    state["paused"] = False  # no restart, no reconstruction
+
+    assert dispatcher.sweep() is not None
+    assert evaluator.calls == [(repo(), TASK)]
+
+
+def test_the_pause_is_read_fresh_on_every_sweep(tmp_path):
+    """A dispatcher that cached it would reintroduce the restart the pause exists
+    to remove."""
+    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
+    reads = {"n": 0}
+
+    def control() -> EvaluationControl:
+        reads["n"] += 1
+        return EvaluationControl(paused=True)
+
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=SemanticJobManager(
+            cfg, evaluator=FakeEvaluator(), clock=clock, executor=sync_executor
+        ),
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=control,
+        clock=clock,
+    )
+    dispatcher.sweep()
+    dispatcher.sweep()
+
+    assert reads["n"] == 2
+
+
+def test_a_pause_never_stops_a_completion_being_accepted(tmp_path):
+    """The whole difference from ``ORCH_HUB_EVAL_AUTO``.
+
+    The trigger reads ``enabled`` to decide whether to accept a completion at all;
+    folding the pause into that predicate would make a paused hub drop completions
+    permanently through the once-per-task guard — exactly the loss the pause exists
+    to avoid.
+    """
+    cfg, jobs, clock = enqueued_queue(tmp_path, ())
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=jobs,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=paused(),
+        clock=clock,
+    )
+
+    assert dispatcher.enabled is True  # acceptance stays open
+    assert dispatcher.paused is True  # only the drain is held
+    assert jobs.enqueue_if_absent(repo(), TASK) is not None
+    assert jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
+
+
+def test_an_unreadable_control_holds_the_drain(tmp_path):
+    """The store fails toward paused; the dispatcher consumes that rather than
+    re-deciding it. An unaccountable switch must not spend the window."""
+    cfg, jobs, clock = enqueued_queue(tmp_path, (TASK,))
+    evaluator = FakeEvaluator()
+    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=live,
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        control=paused(PAUSE_UNREADABLE, ts=None),
+        clock=clock,
+    )
+
+    assert dispatcher.sweep() is None
+    assert evaluator.calls == []
+
+
+def test_a_dispatcher_built_without_a_control_store_is_not_paused(tmp_path):
+    """"No control supplied" is a different thing from "the control could not be
+    read" — only the store decides the second, and only it fails closed."""
+    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
+    evaluator = FakeEvaluator()
+    dispatcher = DeferredDispatcher(
+        cfg,
+        job_manager=SemanticJobManager(
+            cfg, evaluator=evaluator, clock=clock, executor=sync_executor
+        ),
+        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
+        clock=clock,
+    )
+
+    assert dispatcher.paused is False
+    assert dispatcher.sweep() is not None
+
+
+def test_the_pause_reaches_a_reader_through_the_queue_snapshot(tmp_path):
+    """A pause must never become a second silent condition on a queue whose failure
+    modes are already silent. It travels the way ``auto_enabled`` does."""
+    control = EvaluationControl(
+        paused=True, paused_ts="2026-08-09T11:00:00+00:00", reason=PAUSE_OPERATOR
+    )
+
+    snap = queue_snapshot(
+        config(tmp_path), [job("a", STATUS_DEFERRED)], control=control, now=NOW
+    )
+
+    assert snap.control == control
+    assert snap.to_dict()["control"] == {
+        "paused": True,
+        "paused_ts": "2026-08-09T11:00:00+00:00",
+        "reason": PAUSE_OPERATOR,
+    }
+    # The held record is still reported: hiding the queue would answer "why is
+    # nothing draining?" with the same silence that made the question necessary.
+    assert len(snap.entries) == 1
+
+
+def test_both_holds_are_reported_independently(tmp_path):
+    """A queue can be off *and* paused; telling an operator only one of those sends
+    them to fix the wrong switch."""
+    snap = queue_snapshot(
+        config(tmp_path, eval_auto=False),
+        [job("a", STATUS_DEFERRED)],
+        control=EvaluationControl(paused=True, reason=PAUSE_OPERATOR),
+        now=NOW,
+    )
+
+    assert snap.auto_enabled is False
+    assert snap.control.paused is True
+
+
+def test_a_snapshot_with_no_control_supplied_reads_as_running(tmp_path):
+    snap = queue_snapshot(config(tmp_path), [], now=NOW)
+
+    assert snap.control == EvaluationControl()
+    assert snap.to_dict()["control"]["paused"] is False
+
+
+def test_a_cancelled_record_is_counted_but_never_listed_as_actionable(tmp_path):
+    """A resting, deliberate outcome — the same treatment ``skipped`` gets. The
+    count is what keeps a deliberate gap in the corpus answerable; a row would only
+    crowd out the jobs that are genuinely stuck."""
+    snap = queue_snapshot(
+        config(tmp_path),
+        [job("a", STATUS_CANCELLED), job("b", STATUS_DEFERRED)],
+        now=NOW,
+    )
+
+    assert snap.counts[STATUS_CANCELLED] == 1
+    assert [e.job.task_id for e in snap.entries] == ["b"]
+    # And it is not folded into the skip tally: a task nobody declined at launch.
+    assert snap.skipped_by_repo == {}
+
+
 # -- spacing spans admission, not just the worker's own start -----------------
 
 
@@ -847,6 +1054,7 @@ def test_the_census_counts_every_status_including_the_zeroes(tmp_path):
         STATUS_RUNNING: 0,
         STATUS_COMPLETED: 2,
         STATUS_FAILED: 0,
+        STATUS_CANCELLED: 0,
         STATUS_SKIPPED: 0,
         STATUS_ERROR: 0,
     }

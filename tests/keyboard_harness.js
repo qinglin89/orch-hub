@@ -4426,9 +4426,10 @@ async function scenarioEvaluationQueue() {
       enabled: true,
       auto_enabled: true,
       queue_max_age_seconds: 21600,
+      control: { paused: false, paused_ts: null, reason: null },
       counts: {
         deferred: 0, queued: 0, running: 0, completed: 0,
-        failed: 0, skipped: 0, error: 0,
+        failed: 0, cancelled: 0, skipped: 0, error: 0,
       },
       skipped_by_repo: {},
       overdue: 0,
@@ -4667,6 +4668,162 @@ async function scenarioEvaluationQueue() {
     reposReady() === "1/1" && !!doc.querySelector("#view .overview-panels"),
     "a queue read failure damaged the operational panels"
   );
+
+  // ---- 9) pause: the operator lever this section was missing. Its whole point
+  // is that it is NOT ORCH_HUB_EVAL_AUTO — that switch needs a restart and stops
+  // completions being accepted at all, so every task finishing while it is off is
+  // permanently absent from the corpus. A pause holds only the drain.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 2, queued: 0, running: 0, completed: 7,
+              failed: 0, cancelled: 0, skipped: 0, error: 0 },
+    entries: [{ job: queueJob({}), age_seconds: 600, overdue: false }],
+  }));
+  route("POST", "/api/evaluation/queue/pause", queuePayload({
+    control: { paused: true, paused_ts: "2026-08-01T09:00:00Z", reason: "operator" },
+    counts: { deferred: 2, queued: 0, running: 0, completed: 7,
+              failed: 0, cancelled: 0, skipped: 0, error: 0 },
+    entries: [{ job: queueJob({}), age_seconds: 600, overdue: false }],
+  }));
+  await navigate("#/overview");
+  var toggle = doc.querySelector("#view .evq-toggle");
+  check("evalqueue: the section carries a queue-level control", !!toggle, "no .evq-toggle");
+  // The label names the ACTION, never the state: a button reading "Paused" leaves
+  // the operator guessing what pressing it does.
+  eq("evalqueue: a running queue offers Pause", (toggle.textContent || "").trim(), "Pause");
+  pressEnter(toggle);
+  await flush();
+  eq("evalqueue: pausing posts to the queue control route",
+     (lastCall("POST", "/api/evaluation/queue/pause") || {}).path,
+     "/api/evaluation/queue/pause");
+  check(
+    "evalqueue: a paused queue says so rather than sitting quietly",
+    (section().textContent || "").indexOf("Automatic dispatch is paused") !== -1,
+    section().textContent
+  );
+  // The difference from the trigger gate, on screen: the queue keeps filling.
+  check(
+    "evalqueue: the pause note says completions still enter the queue",
+    (section().textContent || "").indexOf("still enter the queue") !== -1,
+    section().textContent
+  );
+  eq("evalqueue: the control flips to Resume from the server's own answer",
+     (doc.querySelector("#view .evq-toggle").textContent || "").trim(), "Resume");
+  // Repainting the section must not disturb the panels around it.
+  eq("evalqueue: pausing leaves the operational panels alone", reposReady(), "1/1");
+  eq("evalqueue: held records stay listed while paused",
+     doc.querySelectorAll("#view .evq-row").length, 1);
+
+  // ---- 9b) resume, and the pause nobody chose. An unreadable control record
+  // reads as paused (the hub held the queue rather than spend a window it could
+  // not account for) and must never be reported as somebody's decision.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    control: { paused: true, paused_ts: null, reason: "unreadable-control" },
+    counts: { deferred: 1, queued: 0, running: 0, completed: 7,
+              failed: 0, cancelled: 0, skipped: 0, error: 0 },
+    entries: [{ job: queueJob({}), age_seconds: 600, overdue: false }],
+  }));
+  route("POST", "/api/evaluation/queue/resume", queuePayload({
+    counts: { deferred: 1, queued: 0, running: 0, completed: 7,
+              failed: 0, cancelled: 0, skipped: 0, error: 0 },
+    entries: [{ job: queueJob({}), age_seconds: 600, overdue: false }],
+  }));
+  await navigate("#/overview");
+  check(
+    "evalqueue: an unreadable control explains itself as damage, not a choice",
+    (section().textContent || "").indexOf("could not read its pause control") !== -1,
+    section().textContent
+  );
+  var resumeBtn = doc.querySelector("#view .evq-toggle");
+  eq("evalqueue: a paused queue offers Resume", (resumeBtn.textContent || "").trim(), "Resume");
+  pressEnter(resumeBtn);
+  await flush();
+  eq("evalqueue: resuming posts to the queue control route",
+     (lastCall("POST", "/api/evaluation/queue/resume") || {}).path,
+     "/api/evaluation/queue/resume");
+  eq("evalqueue: the control flips back to Pause",
+     (doc.querySelector("#view .evq-toggle").textContent || "").trim(), "Pause");
+  check(
+    "evalqueue: resuming clears the pause note",
+    (section().textContent || "").indexOf("paused") === -1,
+    section().textContent
+  );
+
+  // ---- 10) per-job cancel, beside the row it acts on.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 1, queued: 0, running: 1, completed: 7,
+              failed: 1, cancelled: 0, skipped: 0, error: 0 },
+    entries: [
+      { job: queueJob({}), age_seconds: 600, overdue: false },
+      { job: queueJob({ job_id: "job-run", task_id: "2026-08-04-running",
+                        status: "running", defer_reason: null,
+                        started_ts: "2026-08-01T08:05:00Z" }),
+        age_seconds: 900, overdue: false },
+      { job: queueJob({ job_id: "job-f", task_id: "2026-08-03-broken", status: "failed",
+                        defer_reason: null, error: "claude backend exited 1" }),
+        age_seconds: 90000, overdue: false },
+    ],
+  }));
+  route("POST",
+    "/api/repos/" + REPO + "/evaluations/" + QUEUE_TASK + "/semantic/job/cancel",
+    { job: queueJob({ status: "cancelled", defer_reason: null,
+                      ended_ts: "2026-08-01T09:30:00Z" }) });
+  await navigate("#/overview");
+  var rows = doc.querySelectorAll("#view .evq-row");
+  eq("evalqueue: a held job offers Cancel", rows[0].querySelectorAll(".evq-cancel").length, 1);
+  eq("evalqueue: a running job offers Cancel too",
+     rows[1].querySelectorAll(".evq-cancel").length, 1);
+  // A settled record has nothing to stop; offering a button that can only earn a
+  // 409 teaches the operator to distrust the section.
+  eq("evalqueue: a failed job offers no Cancel",
+     rows[2].querySelectorAll(".evq-cancel").length, 0);
+  // The control is a sibling of the link, not nested in it: a button inside an
+  // anchor is invalid, and every tap aimed at it would also navigate away.
+  eq("evalqueue: Cancel sits beside the row link, never inside it",
+     rows[0].querySelector("a").querySelectorAll(".evq-cancel").length, 0);
+  // After the cancel the section's own figures move, so it re-reads the queue
+  // rather than splicing one row out of a stale census.
+  route("GET", "/api/evaluation/queue", queuePayload({
+    counts: { deferred: 0, queued: 0, running: 1, completed: 7,
+              failed: 1, cancelled: 1, skipped: 0, error: 0 },
+    entries: [
+      { job: queueJob({ job_id: "job-run", task_id: "2026-08-04-running",
+                        status: "running", defer_reason: null }),
+        age_seconds: 900, overdue: false },
+      { job: queueJob({ job_id: "job-f", task_id: "2026-08-03-broken", status: "failed",
+                        defer_reason: null, error: "claude backend exited 1" }),
+        age_seconds: 90000, overdue: false },
+    ],
+  }));
+  pressEnter(rows[0].querySelector(".evq-cancel"));
+  await flush();
+  eq("evalqueue: cancelling posts to that job's cancel route",
+     (lastCall("POST",
+        "/api/repos/" + REPO + "/evaluations/" + QUEUE_TASK + "/semantic/job/cancel") || {}).path,
+     "/api/repos/" + REPO + "/evaluations/" + QUEUE_TASK + "/semantic/job/cancel");
+  eq("evalqueue: the cancelled row leaves the actionable list",
+     doc.querySelectorAll("#view .evq-row").length, 2);
+  // A cancelled record is counted, never listed: it is a resting, deliberate
+  // outcome, and the count is what keeps the corpus's gaps answerable.
+  check(
+    "evalqueue: a cancelled record is counted on the census line",
+    (textOf(".evq-summary") || "").indexOf("1 cancelled") !== -1,
+    textOf(".evq-summary")
+  );
+
+  // ---- 10b) acting on a row the queue moved under is an ordinary 409, reported
+  // in place — not a broken dashboard.
+  routeError("POST",
+    "/api/repos/" + REPO + "/evaluations/2026-08-04-running/semantic/job/cancel",
+    409, { detail: "semantic job for task '2026-08-04-running' cannot be cancelled from status 'completed'" });
+  var staleCancel = doc.querySelectorAll("#view .evq-row")[0].querySelector(".evq-cancel");
+  pressEnter(staleCancel);
+  await flush();
+  check(
+    "evalqueue: a raced cancel reports the hub's refusal in place",
+    (textOf("#view .evq-status") || "").indexOf("cannot be cancelled") !== -1,
+    textOf("#view .evq-status")
+  );
+  eq("evalqueue: a refused cancel leaves the rest of the overview alone", reposReady(), "1/1");
 
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }

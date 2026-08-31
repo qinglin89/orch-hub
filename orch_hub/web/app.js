@@ -6631,10 +6631,21 @@
     }
   }
 
+  // Statuses a single job can still be cancelled from — the manager's own rule
+  // (anything not resting), mirrored here only so a button that would earn a 409
+  // is never offered. The backend refusal stays the authority if a row is acted
+  // on after the queue moved under it.
+  const EVQ_CANCELLABLE = new Set(["deferred", "queued", "running"]);
+
   // One queue row: which task, what state, how long, and — for a held job — why.
-  // The whole row links to that task's evaluation view, where the full diagnostic
-  // and the manual override live, so "which task is stuck" is one tap from the
+  // The row links to that task's evaluation view, where the full diagnostic and
+  // the manual override live, so "which task is stuck" is one tap from the
   // landing screen instead of a walk through run history.
+  //
+  // The Cancel control sits BESIDE that link rather than inside it: a button
+  // nested in an anchor is invalid, and — worse for the operator this section is
+  // for — every tap aimed at it would also navigate. So the <li> is the flex row
+  // and the anchor is just its wide half.
   function evalQueueRow(entry) {
     const job = entry.job || {};
     const status = job.status || "unknown";
@@ -6648,9 +6659,21 @@
     else if (status === "failed" || status === "error")
       bits.push(job.error || "the evaluation failed");
     if (age) bits.push((held || status === "queued" ? "waiting " : "") + age);
+    const repoName = job.repo_name || "";
+    const taskId = job.task_id || "";
+    // Offered only for a job that is actually stoppable AND identifiable: the
+    // route is keyed on (repo, task), so a record whose attribution is gone (an
+    // unreadable job.json surfaces as an `error` row with neither) has nothing to
+    // address and gets no button rather than one that 404s.
+    const cancel =
+      EVQ_CANCELLABLE.has(status) && repoName && taskId
+        ? `<button type="button" class="btn-secondary evq-cancel"` +
+          ` data-repo="${escapeHtml(repoName)}" data-task="${escapeHtml(taskId)}"` +
+          ` title="Cancel this evaluation">Cancel</button>`
+        : "";
     return (
       `<li class="evq-row${entry.overdue ? " evq-overdue" : ""}">` +
-      `<a href="${escapeHtml(evalHash(job.repo_name || "", job.task_id || ""))}">` +
+      `<a href="${escapeHtml(evalHash(repoName, taskId))}">` +
       `<span class="evq-line">` +
       `<span class="evq-state ${escapeHtml(status)}">${escapeHtml(status)}</span>` +
       `<span class="evq-task task-id">${escapeHtml(job.task_id || "?")}</span>` +
@@ -6659,7 +6682,9 @@
         [job.repo_name || "", bits.join(" · ")].filter(Boolean).join(" — ")
       )}</span>` +
       (entry.overdue ? `<span class="evq-flag">stalled</span>` : "") +
-      `</a></li>`
+      `</a>` +
+      cancel +
+      `</li>`
     );
   }
 
@@ -6690,10 +6715,12 @@
     if (waiting) parts.push(waiting + " waiting");
     const failed = (c.failed || 0) + (c.error || 0);
     if (failed) parts.push(failed + " failed");
-    // A skipped record is the one census entry that is not an attempt at all — a
-    // task that completed and was deliberately not evaluated. It belongs on this
-    // line all the same: the count is exactly what makes the opt-out admissible,
-    // and a figure only reachable by opening tasks one at a time is not a count.
+    // The two records that are a decision rather than an outcome: a task that
+    // completed and was deliberately not evaluated (the launch-time opt-out), and
+    // one whose accepted attempt an operator stopped. Both belong on this line for
+    // the same reason — the count is exactly what makes declining admissible, and
+    // a figure only reachable by opening tasks one at a time is not a count.
+    if (c.cancelled) parts.push(c.cancelled + " cancelled");
     if (c.skipped) parts.push(c.skipped + " skipped");
     return "Latest attempt per task: " + parts.join(" · ");
   }
@@ -6714,11 +6741,43 @@
     );
   }
 
+  // The pause note — a queue held by an operator, explained rather than merely
+  // still. It is deliberately NOT phrased like the ORCH_HUB_EVAL_AUTO note above
+  // it, because the two are not the same loss: that switch stops completions
+  // being accepted at all (their tasks are absent from the corpus for good),
+  // while a pause holds only the drain and the queue keeps filling behind it. An
+  // operator deciding which one to reach for needs that difference on screen.
+  //
+  // `unreadable-control` is the pause nobody chose: the hub could not read its own
+  // control file and held the queue rather than spend a window it could not
+  // account for. It says so, and names Resume as the repair, because reporting it
+  // as somebody's decision would send the operator looking for a choice they
+  // never made.
+  function evalQueuePauseNote(control) {
+    if (!control || !control.paused) return "";
+    if (control.reason === "unreadable-control")
+      return (
+        `<p class="evq-note evq-warn">Automatic dispatch is paused because the hub
+         could not read its pause control, so it held the queue rather than spend a
+         window it cannot account for. Resume rewrites the control and releases it.</p>`
+      );
+    const since = control.paused_ts ? formatCommitTime(control.paused_ts) : "";
+    return (
+      `<p class="evq-note evq-warn">${escapeHtml(
+        "Automatic dispatch is paused" +
+          (since ? " (since " + since + ")" : "") +
+          ". Completed tasks still enter the queue; resuming drains it in the same order."
+      )}</p>`
+    );
+  }
+
   // The Evaluation queue section. Deliberately NO live region on the notes: the
   // Overview repaints #overview-body on a 15-second tick, and a role="status"
   // element re-inserted each tick is re-announced each tick. These are standing
   // facts under a heading, not updates responding to an action — the same reason
-  // the Subscription usage cards carry no role either.
+  // the Subscription usage cards carry no role either. The section's ONE live
+  // region is the control status line at the bottom, which is empty on every paint
+  // and only ever holds the result of an action the operator just took.
   //
   // `queue` is the /api/evaluation/queue payload,
   // `{disabled:true}` when the subsystem is off (render nothing — there is no
@@ -6727,20 +6786,39 @@
   // not an empty one).
   function evaluationQueuePanel(queue) {
     if (queue && queue.disabled) return "";
-    const head = `<section class="section overview-evalq"><h2>Evaluation queue</h2>`;
     const foot = `</section>`;
     if (queue === null)
-      return head + `<p class="muted">Evaluation queue is unavailable.</p>` + foot;
+      return (
+        `<section class="section overview-evalq"><h2>Evaluation queue</h2>` +
+        `<p class="muted">Evaluation queue is unavailable.</p>` +
+        foot
+      );
+    // The one control the section carries at queue level. Rendered from the
+    // payload's own `control` block rather than from client memory, so a pause
+    // another device set reads correctly here on the next tick, and the label
+    // always names the action rather than the state (a button reading "Paused"
+    // is ambiguous about what pressing it does).
+    const paused = !!(queue.control && queue.control.paused);
+    const toggle =
+      `<button type="button" class="btn-secondary evq-toggle"` +
+      ` data-action="${paused ? "resume" : "pause"}">` +
+      (paused ? "Resume" : "Pause") +
+      `</button>`;
+    const head =
+      `<section class="section overview-evalq">` +
+      `<div class="evq-head"><h2>Evaluation queue</h2>${toggle}</div>`;
     const notes = [];
-    // The fourth reason a queue sits still, and the only one that leaves no trace
-    // on the records: the hub deliberately does not stamp a defer_reason for a
-    // closed gate (it is global config, not a per-job fact), so it can only be
-    // explained from the payload's own config echo.
+    // A reason a queue sits still that leaves no trace on the records: the hub
+    // deliberately does not stamp a defer_reason for a closed gate (it is global
+    // config, not a per-job fact), so it can only be explained from the payload's
+    // own config echo. Both holds are rendered when both apply — telling an
+    // operator about only one sends them to fix the wrong switch.
     if (!queue.auto_enabled)
       notes.push(
         `<p class="evq-note evq-warn">Automatic evaluation is off
          (ORCH_HUB_EVAL_AUTO). Held jobs stay queued until it is switched back on.</p>`
       );
+    notes.push(evalQueuePauseNote(queue.control));
     if (queue.overdue)
       notes.push(
         `<p class="evq-note evq-warn">${escapeHtml(
@@ -6764,8 +6842,123 @@
       evalQueueSkips(queue.skipped_by_repo) +
       notes.join("") +
       rows +
+      // Empty on every paint, so the live region announces only what an action
+      // puts in it — the standing facts above are notes under a heading, not
+      // updates, and re-announcing them each 15-second tick is exactly what the
+      // section avoids elsewhere.
+      `<p class="control-status evq-status" role="status"></p>` +
       foot
     );
+  }
+
+  // ---- evaluation queue controls (pause / resume / cancel) ----
+  //
+  // The three levers the section needs to be more than a window onto a stuck
+  // queue. They live HERE, beside the rows they act on, because the operator this
+  // whole section exists for is the one already looking at the dashboard when the
+  // queue stops draining — a control reachable only by a hand-written HTTP call is
+  // half-delivered.
+  //
+  // All three answer with a payload the panel can repaint from directly (the pause
+  // routes return the whole queue read; cancel returns the settled job), so the
+  // result of pressing a button is the server's own state rather than an optimistic
+  // guess that the next 15-second tick might contradict.
+
+  const EVQ_SLOT_ID = "overview-evalq-slot";
+
+  // Repaint just this section from a fresh queue payload, then re-wire it. Scoped
+  // to the section's own slot rather than to #overview-body so an action never
+  // rebuilds the panels around it (and never disturbs a run row someone is
+  // reading). The slot is an empty wrapper paintOverview keeps in place precisely
+  // so this can be an innerHTML write on a stable node — a section that replaced
+  // itself would leave nothing to address on the next repaint. A missing slot
+  // means the view moved on under the request; dropping the paint is then correct,
+  // not a lost update, because the hub already holds the outcome.
+  function repaintEvalQueue(queue) {
+    const slot = document.getElementById(EVQ_SLOT_ID);
+    if (!slot) return;
+    slot.innerHTML = evaluationQueuePanel(queue);
+    wireEvaluationQueueControls();
+  }
+
+  // Bind the section's controls after every paint of #overview-body (and after
+  // each in-place repaint above). Re-binding wholesale is safe because the paint
+  // replaced the nodes: the old listeners went with them.
+  function wireEvaluationQueueControls() {
+    const toggle = document.querySelector(".evq-toggle");
+    if (toggle)
+      toggle.addEventListener("click", () =>
+        onEvalQueuePause(toggle.dataset.action, toggle)
+      );
+    document.querySelectorAll(".evq-cancel").forEach((btn) => {
+      btn.addEventListener("click", () =>
+        onEvalQueueCancel(btn.dataset.repo, btn.dataset.task, btn)
+      );
+    });
+  }
+
+  // Pause/resume the automatic drain. The response IS the fresh queue read, so
+  // the repaint shows the hub's state — including anything that changed between
+  // the click and the write — rather than a locally toggled label.
+  async function onEvalQueuePause(action, button) {
+    const statusEl = document.querySelector(".evq-status");
+    const superseded = routeGuard(); // captured before the POST, not after it
+    setControlBusy(button, statusEl, true);
+    try {
+      const queue = await api(
+        "/api/evaluation/queue/" + (action === "resume" ? "resume" : "pause"),
+        { method: "POST" }
+      );
+      if (superseded()) return; // a newer route owns the view
+      repaintEvalQueue(queue);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return; // login shown
+      if (superseded()) return; // the button and its status line are gone
+      setControlBusy(button, statusEl, false);
+      evalQueueControlError(
+        statusEl,
+        err,
+        action === "resume" ? "Failed to resume." : "Failed to pause."
+      );
+    }
+  }
+
+  // Cancel one job. A 409 is the ordinary outcome of acting on a row the queue
+  // moved under (the job settled between the paint and the click), so it is
+  // reported in place and the section is refreshed to show what it actually
+  // became — never treated as a broken dashboard.
+  async function onEvalQueueCancel(repoName, taskId, button) {
+    const statusEl = document.querySelector(".evq-status");
+    const superseded = routeGuard();
+    setControlBusy(button, statusEl, true);
+    try {
+      await api(
+        "/api/repos/" +
+          encodeURIComponent(repoName) +
+          "/evaluations/" +
+          encodeURIComponent(taskId) +
+          "/semantic/job/cancel",
+        { method: "POST" }
+      );
+      if (superseded()) return;
+      // The cancel response carries only the settled job; the section's own
+      // figures (the census, the skip tally, the remaining rows) all move with
+      // it, so re-read the queue rather than splice one row out of a stale one.
+      const queue = await overviewEvalQueue();
+      if (superseded()) return;
+      repaintEvalQueue(queue);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) return;
+      if (superseded()) return;
+      setControlBusy(button, statusEl, false);
+      evalQueueControlError(statusEl, err, "Failed to cancel.");
+    }
+  }
+
+  function evalQueueControlError(statusEl, err, fallback) {
+    if (!statusEl) return;
+    statusEl.classList.add("error-text");
+    statusEl.textContent = controlErrorText(err, fallback);
   }
 
   // ---- overview data + paint + bounded refresh ----
@@ -6839,10 +7032,20 @@
       // clear of the attention/activity/outcomes flow so quota never reads as
       // health. A failed usage source degrades only this section.
       subscriptionUsagePanel(data.usage) +
-      // Same footing as capacity and for the same reason: display-only, its own
-      // section after the operational grid, so an unmeasured corpus never reads as
-      // a blocked run. A disabled subsystem renders nothing at all.
-      evaluationQueuePanel(data.evalQueue);
+      // Its own section after the operational grid, so an unmeasured corpus never
+      // reads as a blocked run. A disabled subsystem renders nothing at all. It is
+      // no longer display-only — pause/resume and per-job cancel live here — but
+      // it stays out of the attention/activity flow: acting on the queue changes
+      // what gets measured, never what is running. Wrapped in a stable slot so a
+      // control can repaint its own section without rebuilding the panels above.
+      `<div id="${EVQ_SLOT_ID}">` +
+      evaluationQueuePanel(data.evalQueue) +
+      `</div>`;
+    // Bind the queue's controls to the nodes this paint just created. The 15-second
+    // refresh calls paintOverview again, so this runs on every tick; it is skipped
+    // entirely while focus sits inside the body (focusInsideOverviewBody), which is
+    // what keeps a repaint from destroying a button mid-press.
+    wireEvaluationQueueControls();
   }
 
   // True when focus sits on something inside the repaintable Overview body. A

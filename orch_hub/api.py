@@ -43,6 +43,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .completion_eval import CompletionEvaluationTrigger
+from .eval_control import EvaluationControlStore
 from .eval_dispatch import CapacityGate, DeferredDispatcher, queue_snapshot
 from .config import TOKEN_ENV, Config
 from .control_dir import (
@@ -113,7 +114,11 @@ from .semantic import (
     ClaudeSemanticBackend,
     SemanticEvaluator,
 )
-from .semantic_jobs import SemanticJobManager
+from .semantic_jobs import (
+    SemanticJobManager,
+    SemanticJobStateError,
+    UnknownSemanticJobError,
+)
 from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from .task_store import (
     list_repo_tasks,
@@ -709,12 +714,27 @@ def create_app(
     # nothing of their own — so an injected ``semantic_job_manager`` fake is
     # driven by the real policy, and an injected usage service supplies the
     # capacity read without touching the operator's subscription data.
+    #
+    # The pause is the operator's own hold on that same drain, and the one piece of
+    # this policy that IS persisted (under the hub data dir, so it survives a
+    # restart the way the queue it holds does). Deliberately not
+    # ``ORCH_HUB_EVAL_AUTO``: that switch is environment-read (a plist edit and a
+    # restart) and stops the completion trigger from *accepting* completions at
+    # all, so every task finishing while it is off is permanently absent from the
+    # corpus. A pause holds only the dispatch sweep, so the queue keeps filling and
+    # resuming spends it in completion order. Its own store rather than a field on
+    # the dispatcher, which keeps the sweep stateless: the dispatcher reads it, the
+    # HTTP control routes write it, and the queue projection reports it.
+    eval_control = EvaluationControlStore(resolved.data_dir)
     capacity_gate = CapacityGate(
         resolved,
         usage_reader=lambda: usage.provider_usage(PROVIDER_CLAUDE),
     )
     eval_dispatcher = DeferredDispatcher(
-        resolved, job_manager=semantic_jobs, gate=capacity_gate
+        resolved,
+        job_manager=semantic_jobs,
+        gate=capacity_gate,
+        control=eval_control.state,
     )
     completion_trigger = CompletionEvaluationTrigger(
         resolved,
@@ -891,6 +911,24 @@ def create_app(
 
     @app.exception_handler(IntakeStateError)
     async def _intake_state(request: Request, exc: IntakeStateError) -> JSONResponse:
+        return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+    # The semantic-job pair, mirroring the intake pair above and split for the same
+    # reason: a task with no job record at all is 404 (nothing to act on), while a
+    # record whose status forbids the operation is 409 (it is right there, and the
+    # refusal is about lifecycle, not identity). Only ``POST .../semantic/job/cancel``
+    # raises either — the read route answers ``{"job": null}`` for a never-evaluated
+    # task rather than 404.
+    @app.exception_handler(UnknownSemanticJobError)
+    async def _unknown_semantic_job(
+        request: Request, exc: UnknownSemanticJobError
+    ) -> JSONResponse:
+        return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+    @app.exception_handler(SemanticJobStateError)
+    async def _semantic_job_state(
+        request: Request, exc: SemanticJobStateError
+    ) -> JSONResponse:
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     # Cross-subsystem repo admission conflicts (orch_hub.admission): a repo holds
@@ -1683,6 +1721,23 @@ def create_app(
         require_evaluation_enabled()
         return {"enabled": True, "semantic": semantic.doctor().to_dict()}
 
+    def _queue_payload() -> dict:
+        """The queue read, shared by the GET and by both control writes.
+
+        The pause routes answer with the same shape rather than a bare
+        acknowledgement so a client renders the result of pressing the button and
+        every subsequent poll through one code path — the same reason
+        ``POST``/``GET .../semantic/job`` share the ``{"job": ...}`` envelope. It
+        also closes the obvious race: reading the queue back separately after a
+        pause could observe a sweep that slipped in between.
+        """
+        return {
+            "enabled": True,
+            **queue_snapshot(
+                resolved, semantic_jobs.list_jobs(), control=eval_control.state()
+            ).to_dict(),
+        }
+
     @app.get("/api/evaluation/queue")
     def evaluation_queue() -> dict:
         """Report the cross-repo state of automatic Layer 2 evaluation.
@@ -1721,10 +1776,54 @@ def create_app(
         report feed below.
         """
         require_evaluation_enabled()
-        return {
-            "enabled": True,
-            **queue_snapshot(resolved, semantic_jobs.list_jobs()).to_dict(),
-        }
+        return _queue_payload()
+
+    @app.post("/api/evaluation/queue/pause")
+    def pause_evaluation_queue() -> dict:
+        """Hold automatic Layer 2 dispatch, live, without restarting the hub.
+
+        The operator lever this subsystem was missing. ``ORCH_HUB_EVAL_AUTO`` is
+        the only other way to stop automatic evaluation and it is the wrong
+        instrument twice over: it is environment-read (plist edit plus restart, not
+        something anyone does at the moment they notice a turn is drawing on the
+        window they need), and it gates the *completion trigger*, so every task that
+        completes while it is off is refused entry to the queue and — through the
+        once-per-task guard — permanently absent from the corpus.
+
+        This holds only the dispatch sweep. Completions keep landing as ``deferred``
+        records, so the queue keeps its shape and resuming spends it in the same
+        completion order; pausing costs the corpus nothing but time. Manual
+        ``POST .../semantic/job`` is deliberately still ungated, exactly as it is
+        ungated on capacity: a human asking for one evaluation is not the
+        production-side selection any of these gates exist to shape.
+
+        Idempotent — pausing an already-paused queue keeps the original
+        ``paused_ts``, so "held since" answers when the drain stopped rather than
+        when the button was last pressed. Returns the same payload as
+        ``GET /api/evaluation/queue``, whose ``control`` block now reports the
+        pause; disabled → 404 like every other evaluation route.
+        """
+        require_evaluation_enabled()
+        eval_control.pause()
+        return _queue_payload()
+
+    @app.post("/api/evaluation/queue/resume")
+    def resume_evaluation_queue() -> dict:
+        """Release the pause; the next sweep drains the queue that was held.
+
+        No recovery step is needed and none exists: deferral is durable, the sweep
+        is stateless, and the resident monitor tick re-derives everything from the
+        records — so resuming is exactly "stop holding", not "restart the queue".
+
+        Always writes, even against a queue that already reads as running: an
+        unreadable control record reads as *paused* by design (the fail-closed
+        direction, so damage is visible rather than silently spending the window),
+        and this is the operation that repairs it. Returns the queue payload;
+        disabled → 404.
+        """
+        require_evaluation_enabled()
+        eval_control.resume()
+        return _queue_payload()
 
     # -- global report feed ----------------------------------------------------
     #
@@ -2182,6 +2281,38 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return {"job": job.to_dict() if job is not None else None}
+
+    @app.post("/api/repos/{repo_id}/evaluations/{task_id}/semantic/job/cancel")
+    def cancel_semantic_job(repo_id: str, task_id: str) -> dict:
+        """Cancel this task's in-flight or held semantic job, freeing its slot.
+
+        The per-job counterpart of the queue pause, and modelled on
+        ``POST /api/intakes/{id}/cancel``: legal from ``deferred``/``queued``/
+        ``running``, 409 from a resting record, 404 for a task that has never had a
+        job. Writes nothing to the target repo and needs no live turn, so it works
+        on a job whose worker died with the process that owned it.
+
+        From ``deferred``/``queued`` no model turn opens — the worker's own
+        queued→running guard refuses a record this settled. From ``running`` the
+        turn is abandoned rather than killed (the hub holds no handle on the
+        subprocess): the record settles now, the slot frees, and the late worker
+        finds a non-transient record and returns without clobbering the outcome —
+        the arrangement the stuck sweep already rests on. The settled record's
+        ``started_ts`` is what tells the two apart afterwards.
+
+        Cancelling holds the task's once-per-task guard like any other terminal
+        record, so the automatic path will not re-enqueue it; ``POST
+        .../semantic/job`` is how an operator asks again. Returns ``{"job":
+        <record>}`` — the same envelope the start and poll routes use.
+        ``repo_id`` unknown → 404; an unsafe ``task_id`` → 400; disabled → 404.
+        """
+        require_evaluation_enabled()
+        repo = resolve_repo(repo_id)
+        try:
+            job = semantic_jobs.cancel_job(repo, task_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"job": job.to_dict()}
 
     return app
 

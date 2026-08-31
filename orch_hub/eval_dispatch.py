@@ -44,12 +44,20 @@ records accepted by an earlier process outlive it and a sweep that ignored the
 switches would promote them anyway; :meth:`DeferredDispatcher.sweep` therefore
 checks them before anything else and simply holds.
 
+Beside them sits the one hold an operator can actually reach at the moment they
+want it: the persisted pause (:mod:`orch_hub.eval_control`), checked in the same
+place and with the same effect on the queue. It is a separate lever rather than a
+live-editable ``eval_auto`` because the two mean different things — the switch
+stops completions being *accepted*, permanently losing every task that completes
+while it is off, whereas a pause holds only the drain and costs the corpus nothing
+but time.
+
 The sweep is driven by the resident run monitor and by the completion hook's own
 off-lock executor, so a completion arriving in a quiet window becomes a turn
 within milliseconds while a held queue is retried for as long as it takes. It is
-idempotent and stateless: every decision is re-derived from the persisted records
-and the current usage read, so a hub restart resumes the queue without a startup
-step and without a second thing to keep in sync.
+idempotent and stateless: every decision is re-derived from the persisted records,
+the current pause state, and the current usage read, so a hub restart resumes the
+queue without a startup step and without a second thing to keep in sync.
 """
 
 from __future__ import annotations
@@ -62,12 +70,14 @@ from collections.abc import Callable
 from .config import Config
 from .models import (
     PROVIDER_CLAUDE,
+    EvaluationControl,
     EvaluationQueueEntry,
     EvaluationQueueSnapshot,
     ProviderUsage,
     SemanticJob,
 )
 from .semantic_jobs import (
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
     STATUS_QUEUED,
@@ -111,6 +121,22 @@ UNATTRIBUTABLE_REASON = (
 )
 """Diagnostic for a held record whose persisted repo is gone, so no target can be
 resolved without guessing. Settled ``failed`` rather than left in the queue."""
+
+ControlReader = Callable[[], EvaluationControl]
+"""Reads the hub-owned automatic-dispatch pause switch.
+
+Wired to :meth:`orch_hub.eval_control.EvaluationControlStore.state`; a plain
+callable for the same reason :data:`UsageReader` is one — this module consumes one
+value and must not acquire the ability to write the control. Defaults to
+:func:`_never_paused` so a dispatcher built without one simply is not paused
+(which is "no control store attached", a different thing from "the control store
+could not be read" — the store itself decides that one, and it fails toward
+paused)."""
+
+
+def _never_paused() -> EvaluationControl:
+    return EvaluationControl()
+
 
 UsageReader = Callable[[], ProviderUsage]
 """Reads the evaluator provider's current subscription snapshot.
@@ -268,11 +294,13 @@ class DeferredDispatcher:
         *,
         job_manager: SemanticJobManager,
         gate: CapacityGate,
+        control: ControlReader = _never_paused,
         clock: Callable[[], dt.datetime] = _utc_now,
     ):
         self._config = config
         self._jobs = job_manager
         self._gate = gate
+        self._control = control
         self._clock = clock
         self._sweeping = threading.Lock()
         self._stall_logged: set[tuple[str, str, str]] = set()
@@ -285,8 +313,27 @@ class DeferredDispatcher:
         checks, read from the one place that derives it
         (:attr:`orch_hub.config.Config.auto_evaluation_enabled`), because these two
         halves of the automatic path must never disagree about whether it is on.
+
+        Deliberately does NOT fold in the operator pause, even though both hold the
+        queue: the trigger reads this to decide whether to *accept* a completion,
+        and a pause must not stop acceptance — a paused queue that quietly dropped
+        completions would be the ``ORCH_HUB_EVAL_AUTO`` behaviour it exists to
+        replace. The pause is checked in :meth:`sweep` alone.
         """
         return self._config.auto_evaluation_enabled
+
+    @property
+    def paused(self) -> bool:
+        """Whether an operator is currently holding the drain.
+
+        Read fresh on every sweep rather than cached: the whole point of moving the
+        pause out of the environment is that it changes while the service runs, so
+        a dispatcher that remembered it would reintroduce the restart it removed.
+        An unreadable control record reads as paused — the store's fail-closed
+        direction (:mod:`orch_hub.eval_control`), consumed here rather than
+        re-decided.
+        """
+        return self._control().paused
 
     def sweep(self) -> SemanticJob | None:
         """Dispatch at most one held job; return it, or ``None`` if none started.
@@ -322,10 +369,23 @@ class DeferredDispatcher:
         pressure the corpus fills in completion order rather than favouring
         whatever happened to be swept last.
 
+        The operator pause is the second gate and behaves identically: the queue is
+        held exactly as it is, nothing walked, nothing written, nothing failed. It
+        gets the same treatment for the same reason — it is one global fact, not a
+        per-job one, so stamping it as a ``defer_reason`` would churn every held
+        record on a toggle and leave them claiming a reason that stopped being true
+        the moment somebody resumed. It travels to readers through the queue
+        snapshot instead (:class:`~orch_hub.models.EvaluationControl`). What it does
+        *not* share with the trigger gate is the cost of being on: completions keep
+        landing as ``deferred`` records while it holds, so resuming drains the same
+        queue in the same order rather than restarting a corpus with a hole in it.
+
         Returns ``None`` immediately when another sweep is already running (see the
         class docstring): declining is correct, not a missed tick.
         """
         if not self.enabled:
+            return None
+        if self.paused:
             return None
         if not self._sweeping.acquire(blocking=False):
             return None
@@ -483,19 +543,28 @@ def queue_snapshot(
     config: Config,
     jobs: list[SemanticJob],
     *,
+    control: EvaluationControl | None = None,
     now: dt.datetime | None = None,
     limit: int = QUEUE_ENTRY_LIMIT,
 ) -> EvaluationQueueSnapshot:
     """Fold every persisted job into the cross-repo view of the automatic path.
 
-    Pure: takes the records (one :meth:`SemanticJobManager.list_jobs` walk) and a
-    clock, reads three config values, and returns a projection. It holds no state,
-    writes nothing, and — unlike :meth:`DeferredDispatcher.sweep` — is deliberately
-    **not** gated on ``auto_evaluation_enabled``: a reader asking why nothing is
-    draining must be able to see the held records *and* that the switch is off.
-    Hiding the queue while the gate is closed would answer the question with the
-    same silence that made it necessary. The gate state travels as
-    ``auto_enabled`` instead, so the reader explains rather than omits.
+    Pure: takes the records (one :meth:`SemanticJobManager.list_jobs` walk), the
+    pause state, and a clock, reads three config values, and returns a projection.
+    It holds no state, writes nothing, and — unlike :meth:`DeferredDispatcher.sweep`
+    — is deliberately **not** gated on ``auto_evaluation_enabled``: a reader asking
+    why nothing is draining must be able to see the held records *and* that the
+    switch is off. Hiding the queue while the gate is closed would answer the
+    question with the same silence that made it necessary. The gate state travels
+    as ``auto_enabled`` instead, so the reader explains rather than omits.
+
+    ``control`` is the other hold on the drain and travels the same way, for the
+    same reason. It is passed in as a *value* rather than read here, which is what
+    keeps this function pure: a projection that opened a file would make every
+    caller's read depend on store IO it did not ask for, and the sweep and this
+    view would each be reading the switch on their own schedule. ``None`` means "no
+    pause state supplied" and reads as running — callers that own a store pass its
+    state.
 
     ``counts`` is one entry per persisted *record* — and the store keeps one
     record per ``(repo, task)``, holding that task's **latest** attempt. So the
@@ -522,9 +591,11 @@ def queue_snapshot(
     rather than rows because individual rows are the least likely thing anyone
     scrolls to. Only repos with at least one skip appear: the store knows nothing
     about repos it holds no record for, so a zero row would be an invention.
-    Skipped records are the second status kept out of ``entries``, alongside
-    ``completed``: both are resting outcomes with nothing to act on, and one row
-    per opted-out task would crowd out the jobs that are genuinely stuck.
+    Skipped records are kept out of ``entries`` alongside ``completed`` and
+    ``cancelled``: all three are resting outcomes with nothing to act on, and a row
+    per opted-out or deliberately stopped task would crowd out the jobs that are
+    genuinely stuck. All three stay in ``counts``, which is where a reader looks to
+    find out how much of the corpus was declined rather than measured.
     """
     moment = now or _utc_now()
     max_age = config.eval_queue_max_age
@@ -536,7 +607,7 @@ def queue_snapshot(
         if job.status == STATUS_SKIPPED:
             repo_name = job.repo_name or "(unattributed)"
             skipped_by_repo[repo_name] = skipped_by_repo.get(repo_name, 0) + 1
-        elif job.status != STATUS_COMPLETED:
+        elif job.status not in (STATUS_COMPLETED, STATUS_CANCELLED):
             pending.append(job)
     # Two groups with opposite senses, so they are sorted apart and concatenated
     # rather than forced into one comparator.
@@ -566,6 +637,7 @@ def queue_snapshot(
             )
     return EvaluationQueueSnapshot(
         auto_enabled=config.auto_evaluation_enabled,
+        control=control if control is not None else EvaluationControl(),
         queue_max_age_seconds=max_age,
         counts=counts,
         # Most-skipped first, ties by repo name: the reader is looking for which

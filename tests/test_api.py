@@ -3722,6 +3722,82 @@ def test_evaluation_queue_requires_auth(tmp_path, monkeypatch):
     assert client.get("/api/evaluation/queue").status_code == 401
 
 
+# -- queue controls: the live pause the environment switch could not be ---------
+
+
+def test_pausing_holds_the_drain_and_reports_itself(tmp_path, monkeypatch):
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+
+    body = client.post("/api/evaluation/queue/pause").json()
+
+    # The control answers with the whole queue read, so a client renders the
+    # result of pressing the button and every later poll through one path.
+    assert body["enabled"] is True
+    assert body["control"]["paused"] is True
+    assert body["control"]["reason"] == "operator"
+    assert body["control"]["paused_ts"]
+    # Held, not emptied: the record the pause protects is still there.
+    assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
+    assert client.get("/api/evaluation/queue").json()["control"]["paused"] is True
+
+
+def test_a_pause_is_independent_of_the_trigger_gate(tmp_path, monkeypatch):
+    # Both holds are reported: a queue can be off AND paused, and naming only one
+    # sends the operator to fix the wrong switch.
+    client, *_ = make_eval_client(tmp_path, monkeypatch, eval_auto=False)
+
+    body = client.post("/api/evaluation/queue/pause").json()
+
+    assert body["auto_enabled"] is False
+    assert body["control"]["paused"] is True
+
+
+def test_pausing_is_idempotent_on_the_instant_the_drain_stopped(tmp_path, monkeypatch):
+    client, *_ = make_eval_client(tmp_path, monkeypatch)
+    first = client.post("/api/evaluation/queue/pause").json()["control"]
+
+    again = client.post("/api/evaluation/queue/pause").json()["control"]
+
+    assert again["paused_ts"] == first["paused_ts"]
+
+
+def test_resuming_releases_the_queue_without_a_restart(tmp_path, monkeypatch):
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+    client.post("/api/evaluation/queue/pause")
+
+    body = client.post("/api/evaluation/queue/resume").json()
+
+    assert body["control"]["paused"] is False
+    assert body["control"]["reason"] is None
+    # Same records, same order — the pause cost the corpus time, not entries.
+    assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
+
+
+def test_the_pause_survives_a_restart_of_the_service(tmp_path, monkeypatch):
+    # The failure mode that rules an in-memory switch out: an operator pausing for
+    # an afternoon must not have it silently undone by a launchd restart.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    client.post("/api/evaluation/queue/pause")
+
+    reborn, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo)
+
+    assert reborn.get("/api/evaluation/queue").json()["control"]["paused"] is True
+
+
+def test_the_queue_controls_are_gated_and_protected(tmp_path, monkeypatch):
+    repo = make_run_repo(tmp_path)
+    off, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo, enabled=False)
+    assert off.post("/api/evaluation/queue/pause").status_code == 404
+    assert off.post("/api/evaluation/queue/resume").status_code == 404
+
+    client, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo)
+    del client.headers["Authorization"]
+    assert client.post("/api/evaluation/queue/pause").status_code == 401
+    assert client.post("/api/evaluation/queue/resume").status_code == 401
+
+
 # -- protocol identity coverage census -----------------------------------------
 
 
@@ -4282,6 +4358,118 @@ def test_semantic_job_routes_disabled_are_404(tmp_path, monkeypatch):
     assert client.get(
         f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
     ).status_code == 404
+    assert client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
+    ).status_code == 404
+
+
+# -- cancel one job ------------------------------------------------------------
+
+
+def test_cancelling_a_held_job_settles_it_and_frees_the_queue(tmp_path, monkeypatch):
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+
+    body = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
+    ).json()
+
+    # Same envelope the start and poll routes use, so a client renders all three
+    # identically.
+    assert body["job"]["status"] == "cancelled"
+    assert body["job"]["ended_ts"]
+    assert body["job"]["defer_reason"] is None
+    # A resting outcome: counted, never listed among what is stuck.
+    queue = client.get("/api/evaluation/queue").json()
+    assert queue["counts"]["cancelled"] == 1
+    assert queue["entries"] == []
+
+
+def test_cancelling_a_queued_job_stops_the_turn_before_it_opens(tmp_path, monkeypatch):
+    # The deferred executor leaves the started job at `queued`, which is exactly
+    # the window in which cancelling is a real cancellation rather than
+    # bookkeeping: the worker's queued→running guard refuses a settled record.
+    pending: list = []
+    client, *_, repo = make_eval_client(
+        tmp_path, monkeypatch, semantic_job_executor=pending.append
+    )
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel")
+    for run in pending:
+        run()  # the worker finally gets its slot
+
+    got = client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]
+    assert got["status"] == "cancelled"
+    assert got["evaluation_id"] is None
+
+
+def test_cancelling_a_resting_job_is_a_409_not_a_404(tmp_path, monkeypatch):
+    # The record is right there; the refusal is about lifecycle, not identity, so
+    # reporting it as "not found" would send an operator hunting for a record that
+    # is sitting on the screen in front of them.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job")
+
+    resp = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
+    )
+
+    assert resp.status_code == 409
+    assert "cannot be cancelled" in resp.json()["detail"]
+
+
+def test_cancelling_a_task_with_no_job_is_404(tmp_path, monkeypatch):
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+
+    resp = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
+    )
+
+    assert resp.status_code == 404
+
+
+def test_cancel_rejects_an_unsafe_task_id_and_an_unknown_repo(tmp_path, monkeypatch):
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+
+    # ``%2E%2E`` reaches the handler as a literal ``..`` (a plain ``..`` is
+    # normalized away by the router), which is exactly the segment the manager's
+    # containment guard must refuse before any dir is composed.
+    assert client.post(
+        f"/api/repos/{repo.name}/evaluations/%2E%2E/semantic/job/cancel"
+    ).status_code == 400
+    assert client.post(
+        f"/api/repos/ghost/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
+    ).status_code == 404
+
+
+def test_cancel_requires_auth(tmp_path, monkeypatch):
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    del client.headers["Authorization"]
+
+    assert client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
+    ).status_code == 401
+
+
+def test_an_operator_can_ask_again_after_cancelling(tmp_path, monkeypatch):
+    # Cancelling is not a verdict on the task: the manual start overwrites a
+    # cancelled record like any other terminal one, so the corpus gains the report
+    # the cancel declined.
+    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
+    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+    client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel")
+
+    body = client.post(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()
+
+    assert body["job"]["status"] in {"queued", "completed"}
+    assert client.get(
+        f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job"
+    ).json()["job"]["status"] == "completed"
 
 
 def test_app_lifespan_reconciles_orphaned_semantic_jobs(tmp_path, monkeypatch):

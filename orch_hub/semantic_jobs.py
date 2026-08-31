@@ -68,6 +68,15 @@ and the task-id segment — are validated as single safe path components, which 
 what makes the deterministic path containment-safe (and keeps every record on the
 two-level ``<repo-slug>/<task-id>/`` layout the startup reconcile scan walks).
 
+The operator's own lever on a single record is :meth:`SemanticJobManager.cancel_job`
+(modelled on the intake manager's cancel): it settles any non-terminal record to
+terminal ``cancelled``, freeing the task's slot at once. From ``deferred``/``queued``
+that genuinely prevents the model turn; from ``running`` it abandons a turn it
+cannot kill, on exactly the terms :meth:`SemanticJobManager.reconcile_stuck`
+already accepts. The queue-wide counterpart — holding every held job without
+settling any of them — is not this manager's business at all: it is a hub-owned
+switch read by the dispatch policy (:mod:`orch_hub.eval_control`).
+
 A completion the operator opted out of Layer 2 for is the one record that never
 becomes an attempt: it is written straight to a terminal ``skipped``
 (:meth:`SemanticJobManager.skip_if_absent`), carrying a bounded machine reason, so
@@ -138,12 +147,16 @@ SEMANTIC_JOB_NAME = "job.json"
 # legitimate evaluation-failure outcome), and — carrying no repo attribution —
 # never holds a ``(repo, task)`` duplicate slot. ``skipped`` is the one terminal
 # state reached without an attempt: a completed task whose run declined the model
-# turn. Mirrors the intake statuses.
+# turn. ``cancelled`` is the operator stopping an attempt that was already
+# accepted, which is neither of those two: not a failure (nothing went wrong) and
+# not a launch-time decline (the task was in the queue, and — from ``running`` — a
+# turn had already been spent on it). Mirrors the intake statuses.
 STATUS_DEFERRED = "deferred"
 STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
+STATUS_CANCELLED = "cancelled"
 STATUS_SKIPPED = "skipped"
 STATUS_ERROR = "error"
 
@@ -153,6 +166,7 @@ STATUSES = (
     STATUS_RUNNING,
     STATUS_COMPLETED,
     STATUS_FAILED,
+    STATUS_CANCELLED,
     STATUS_SKIPPED,
     STATUS_ERROR,
 )
@@ -194,7 +208,13 @@ which for a corpus that must not be selection-biased is the same silent gap
 automatic triggering was built to close."""
 
 _TERMINAL = frozenset(
-    {STATUS_COMPLETED, STATUS_FAILED, STATUS_SKIPPED, STATUS_ERROR}
+    {
+        STATUS_COMPLETED,
+        STATUS_FAILED,
+        STATUS_CANCELLED,
+        STATUS_SKIPPED,
+        STATUS_ERROR,
+    }
 )
 """Resting states: a new attempt may overwrite a job in one of these.
 
@@ -203,7 +223,12 @@ operator who later asks for this task's evaluation (:meth:`start_job`) gets one,
 and the corpus gains the report the skip declined. What must not happen is the
 *automatic* path silently reversing it, and that is prevented by the
 once-per-task guard the skip record itself is (:meth:`skip_if_absent` /
-:meth:`enqueue_if_absent` both refuse against any existing record)."""
+:meth:`enqueue_if_absent` both refuse against any existing record).
+
+``cancelled`` sits here on exactly the same terms and by the same two rules: the
+operator who cancelled can ask again (:meth:`start_job` overwrites it), and the
+automatic path cannot quietly re-enqueue what was just stopped, because the record
+itself is the once-per-task guard."""
 
 _JOB_ID_TS = "%Y%m%dT%H%M%SZ"
 """Job-id stamp format (matches the run/eval id stamps). The id is the attempt's
@@ -262,6 +287,15 @@ class SemanticJobError(Exception):
 
 class UnknownSemanticJobError(SemanticJobError):
     """No semantic job exists for the given ``(repo, task_id)``."""
+
+
+class SemanticJobStateError(SemanticJobError):
+    """The job exists but its current status does not permit the operation.
+
+    Mirrors :class:`orch_hub.intake.IntakeStateError` (409): the target is real
+    and named, and the refusal is about lifecycle state rather than identity — so
+    it must not be reported as "not found", which would send an operator looking
+    for a record that is sitting right there."""
 
 
 def _utc_now() -> dt.datetime:
@@ -791,6 +825,80 @@ class SemanticJobManager:
             _write_record(job_dir, record)
             self._emit(semantic_job_notification(record))
             return record
+
+    # -- operator cancel ------------------------------------------------------
+
+    def cancel_job(self, repo: ManagedRepo, task_id: str) -> SemanticJob:
+        """Settle this task's non-terminal job to ``cancelled``; return the record.
+
+        The per-job counterpart of the queue-wide pause, modelled on
+        :meth:`orch_hub.intake.IntakeManager.cancel_intake`: legal from any
+        non-terminal status (``deferred``, ``queued``, ``running``), refused from a
+        resting one (:class:`SemanticJobStateError` → 409), and 404 for a task that
+        has no record at all. Like the intake cancel it writes nothing to the target
+        repo and needs no live turn, so it always succeeds for a cancellable job —
+        including one whose worker died with the process that owned it.
+
+        What it stops depends on where the job was, and only the last case is a
+        compromise:
+
+        - ``deferred`` — the queue simply loses a job it had not spent anything on.
+        - ``queued`` — admitted but not yet begun. :meth:`_begin_running` refuses to
+          promote a record that is no longer ``queued``, so the worker aborts and
+          **no model turn opens**. This is a real cancellation, not a bookkeeping
+          one.
+        - ``running`` — the model turn is already in flight and this manager holds
+          no handle on the subprocess, so the turn is *abandoned*, not killed: the
+          record settles now and frees the ``(repo, task)`` slot, while the worker
+          runs on under its own deadline and finds a non-transient record at
+          :meth:`_finalize`, which returns without clobbering this outcome. That is
+          exactly the arrangement :meth:`reconcile_stuck` already rests on, and its
+          consequences are the same and equally contained: the turn was read-only
+          over target state, and if it does succeed its artifacts are durable and
+          publishable — only this record, which reports the *attempt*, no longer
+          points at them. ``started_ts`` is what distinguishes the two readings
+          afterwards: a cancelled record carrying one is a turn that was abandoned;
+          one without is a turn that never opened.
+
+        No notification. A cancel is the operator's own action, taken at the surface
+        that shows the outcome — the same reason a ``skipped`` record is silent,
+        and the opposite of a failure, which is the corpus shrinking without anyone
+        asking. Terminal ``cancelled`` also holds the once-per-task guard, so the
+        automatic path cannot re-enqueue what was just stopped; :meth:`start_job`
+        remains the way to ask again.
+        """
+        _validate_task_id(task_id)
+        with self._lock:
+            job_dir = self._job_dir_for(repo.name, task_id)
+            record = self._load_if_present(job_dir)
+            if record is None:
+                raise UnknownSemanticJobError(
+                    f"no semantic job for repo {repo.name!r} task {task_id!r}"
+                )
+            if record.status in _TERMINAL:
+                raise SemanticJobStateError(
+                    f"semantic job for task {task_id!r} cannot be cancelled from"
+                    f" status {record.status!r}"
+                )
+            ts = self._clock().isoformat()
+            cancelled = replace(
+                record,
+                status=STATUS_CANCELLED,
+                # The held job's waiting reason is no longer true and would read as
+                # the cause of the cancel; the record's status is the cause.
+                defer_reason=None,
+                ended_ts=ts,
+                updated_ts=ts,
+            )
+            _write_record(job_dir, cancelled)
+            _log.info(
+                "semantic job %s for %s/%s cancelled from %s",
+                record.job_id,
+                record.repo_name,
+                record.task_id,
+                record.status,
+            )
+            return cancelled
 
     def list_jobs(self) -> list[SemanticJob]:
         """Every persisted job record, one walk of the tree, deterministic order.

@@ -965,11 +965,29 @@ code {
    capacity cards: an unmeasured corpus is not a blocked run, so nothing here
    borrows the attention/activity vocabulary. Rows are a compact stack even on
    wide screens — the list is short by design and reads as a queue, not a grid. */
+/* Heading plus the queue-level Pause/Resume control on one line. The button is
+   pushed to the trailing edge and never shrinks, so a long heading wraps rather
+   than squeezing the only control the section carries. */
+.evq-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.evq-head > h2 {
+  margin: 0;
+}
+
+.evq-toggle {
+  flex: 0 0 auto;
+}
+
 .evq-summary {
   font-family: var(--mono);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
-  margin: 0 0 10px;
+  margin: 10px 0;
 }
 
 .evq-note {
@@ -988,7 +1006,19 @@ code {
   gap: 6px;
 }
 
+/* The row is the flex container so its Cancel control can sit beside the link
+   rather than inside it — a button nested in an anchor is invalid, and every tap
+   aimed at it would also navigate. `align-items: stretch` keeps the button the
+   full height of the row it acts on, so it is a comfortable target on a phone. */
+.evq-row {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+}
+
 .evq-row > a {
+  flex: 1 1 auto;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 3px;
@@ -998,6 +1028,10 @@ code {
   background: var(--surface-2);
   text-decoration: none;
   color: inherit;
+}
+
+.evq-cancel {
+  flex: 0 0 auto;
 }
 
 /* An overdue (past ORCH_HUB_EVAL_QUEUE_MAX_AGE) held job: the same left-accent
