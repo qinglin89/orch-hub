@@ -42,6 +42,7 @@ from pathlib import Path
 
 import pytest
 
+from orch_hub import semantic as semantic_module
 from orch_hub import semantic_jobs
 from orch_hub.config import DEFAULT_EVAL_TURN_TIMEOUT, Config
 from orch_hub.evaluation import EvaluationService
@@ -834,12 +835,11 @@ def test_cancelling_a_running_job_stops_the_turn_it_reports_stopping(tmp_path):
 
 
 def test_a_cancel_after_the_turn_returned_has_nothing_left_to_stop(tmp_path):
-    """The gap between a turn ending and its record settling is not a lost handle.
+    """A settled record refuses a cancel on its status alone, handle or no handle.
 
-    The attempt is unregistered as its turn returns, so a cancel landing in that
-    window settles the record without claiming to have killed anything — which is
-    the truth, and is also why a stale registration can never reach a *later*
-    attempt's process.
+    The plainest shape of "too late": by the time the operator asked, the job was
+    at rest. Nothing was ever fired at the attempt, which is also why a stale
+    registration can never reach a *later* attempt's process.
     """
     ev = FakeEvaluator()
     mgr = manager(tmp_path, evaluator=ev)
@@ -849,6 +849,41 @@ def test_a_cancel_after_the_turn_returned_has_nothing_left_to_stop(tmp_path):
         mgr.cancel_job(repo(), TASK)  # already at rest
 
     assert ev.cancels[-1].cancelled is False
+
+
+class ReleaseWatchingManager(SemanticJobManager):
+    """Records the record's status at the instant each attempt handle is withdrawn."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.status_at_release: list[str] = []
+
+    def _release_attempt(self, job_dir, job_id):
+        self.status_at_release.append(self.get_job(repo(), TASK).status)
+        super()._release_attempt(job_dir, job_id)
+
+
+def test_an_attempt_holds_its_handle_until_its_record_settles(tmp_path):
+    """The handle is the attempt's cancel boundary, not just a way to kill a child.
+
+    It carries the seal the turn takes as it returns, so a cancel that finds it
+    is refused while the worker persists and publishes. Withdrawing it when the
+    *turn* ends rather than when the *record* does would therefore re-open, for
+    exactly the width of a finalize, the window this whole boundary closes: a
+    cancel landing there would find nothing registered, be accepted, and write
+    ``cancelled`` over an evaluation already on disk and in the feed.
+    """
+    mgr = ReleaseWatchingManager(
+        config(tmp_path),
+        evaluator=FakeEvaluator(),
+        clock=Clock(),
+        executor=sync_executor,
+        notify_dispatch=sync_dispatch,
+    )
+
+    mgr.start_job(repo(), TASK)  # synchronous executor: the turn runs inline
+
+    assert mgr.status_at_release == [STATUS_COMPLETED]
 
 
 def test_a_cancelled_attempt_cannot_settle_the_retry_that_replaced_it(tmp_path):
@@ -1756,6 +1791,114 @@ def test_manager_drives_real_evaluator_links_evaluation_and_leaves_repo_intact(t
     assert job.backend == "claude-cli"
     # The target repo is byte-identical: the async wrapper adds no repo mutation.
     assert snapshot_tree(target_repo.path) == before
+
+
+class RecordingCatalog:
+    """Records each publication the evaluator offers the cross-repo report feed.
+
+    The real feed's mechanics are ``tests/test_report_catalog.py``; what these
+    tests need is only whether the hook fired, because "the record says cancelled
+    and the report is in the global feed" is the divergence under test.
+    """
+
+    def __init__(self):
+        self.calls: list[tuple[str, str]] = []
+
+    def record_evaluation(self, r: ManagedRepo, task_id: str, evaluation_id: str):
+        self.calls.append((task_id, evaluation_id))
+        return None
+
+
+def _real_stack(tmp_path, cfg: Config, *, backend, catalog=None):
+    """Real evaluation service + evaluator + job manager over a fake backend."""
+    target_repo = _write_repo(cfg, tmp_path)
+    service = EvaluationService(cfg, git_runner=_fake_git, clock=Clock())
+    evaluator = SemanticEvaluator(
+        cfg, evaluation_service=service, backend=backend, catalog=catalog,
+        clock=Clock(),
+    )
+    mgr = SemanticJobManager(cfg, evaluator=evaluator, clock=Clock(), executor=sync_executor)
+    return target_repo, mgr
+
+
+def test_a_cancel_during_settlement_is_refused_not_written(tmp_path, monkeypatch):
+    """The post-model race, end to end: settlement wins and the cancel says so.
+
+    Real manager, real evaluator, real artifact writes and publication hook, with
+    the cancel landing where it hurts — after the backend returned, while the
+    report is being parsed on its way to disk and to the feed. Accepting it there
+    leaves a terminal ``cancelled`` record standing beside a persisted
+    ``semantic_report.json`` and a published entry: the operator reads the attempt
+    as stopped while its output goes on existing everywhere else.
+
+    So the attempt seals as its turn returns and the cancel is refused instead —
+    409, naming the settling, which is the one answer that is true. The turn is
+    unstoppable for the seconds it takes to finish writing, and that is bounded by
+    the settle grace the reap already allows for.
+    """
+    cfg = config(tmp_path)
+    catalog = RecordingCatalog()
+    target_repo, mgr = _real_stack(tmp_path, cfg, backend=FakeBackend(), catalog=catalog)
+    real_parse = semantic_module.parse_report
+    refusals: list[Exception] = []
+
+    def cancel_then_parse(*args, **kwargs):
+        # Inside evaluate(), off the manager lock: the turn has returned, the seal
+        # is taken, and nothing is persisted yet. That is the whole window.
+        try:
+            mgr.cancel_job(target_repo, TASK)
+        except Exception as exc:  # noqa: BLE001 - recorded and asserted below
+            refusals.append(exc)
+        return real_parse(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_module, "parse_report", cancel_then_parse)
+
+    mgr.start_job(target_repo, TASK)
+
+    assert len(refusals) == 1 and isinstance(refusals[0], SemanticJobStateError)
+    assert "settling" in str(refusals[0])
+    job = mgr.get_job(target_repo, TASK)
+    assert job.status == STATUS_COMPLETED  # never rewritten to cancelled
+    eval_dir = cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
+    assert (eval_dir / "semantic_report.json").is_file()
+    assert catalog.calls == [(TASK, job.evaluation_id)]
+
+
+class CancellingBackend(FakeBackend):
+    """Runs ``on_return`` as its turn returns — the same window, from the inside."""
+
+    def __init__(self, on_return):
+        self._on_return = on_return
+
+    def evaluate(self, prompt: str, r: ManagedRepo, *, cancel=None) -> str:
+        text = super().evaluate(prompt, r, cancel=cancel)
+        self._on_return()
+        return text
+
+
+def test_a_cancel_racing_the_turns_return_leaves_no_report_anywhere(tmp_path):
+    """And when the cancel gets there first, the paid-for report is thrown away.
+
+    The mirror of the test above, at the same instant: the turn produced a report
+    but the operator's cancel reached the attempt before it sealed. The record is
+    ``cancelled`` — and that reading has to be true everywhere, so the evaluation
+    dir is removed by the all-or-nothing cleanup and the publication hook is never
+    reached. A cancelled attempt leaves nothing behind it to contradict itself.
+    """
+    cfg = config(tmp_path)
+    catalog = RecordingCatalog()
+    # Resolved when the turn runs, so the hook can name the manager built from it.
+    backend = CancellingBackend(lambda: mgr.cancel_job(target_repo, TASK))
+    target_repo, mgr = _real_stack(tmp_path, cfg, backend=backend, catalog=catalog)
+
+    mgr.start_job(target_repo, TASK)
+
+    job = mgr.get_job(target_repo, TASK)
+    assert job.status == STATUS_CANCELLED
+    assert job.evaluation_id is None
+    assert catalog.calls == []
+    # Nothing half-written for a later reconciliation to publish either.
+    assert list((cfg.data_dir / "evaluations" / "alpha" / TASK).glob("*")) == []
 
 
 def test_a_hung_turn_settles_failed_and_frees_the_slot_without_a_restart(tmp_path):

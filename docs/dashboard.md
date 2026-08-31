@@ -42,7 +42,9 @@ evaluation surfaces. Neither becomes repo health or a launch gate. The evaluatio
 queue's controls change only what gets *measured*: pausing holds the automatic
 drain (completions still enter the queue) and cancelling stops one job, killing
 its model turn if one is running — neither touches readiness, run state, or
-launch/intake admission.
+launch/intake admission. A Cancel pressed after that job's turn has already
+returned reports that the job is settling instead of stopping it; the row shows
+the outcome it reached on the next refresh.
 
 ## Starting a run
 

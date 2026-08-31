@@ -12,7 +12,9 @@ what its stdin was connected to.
 
 The cancellation tests need one most of all: what a canceller promises is that
 another thread's blocked call *ends* and its child is gone, and neither half is
-observable against a fake.
+observable against a fake. The canceller's own state machine — the seal that
+closes the window once a result is committed — is the exception: it needs no
+child at all, only two threads racing for one decision.
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ import time
 import pytest
 
 from orch_hub.subprocess_utils import (
+    CancelOutcome,
     CommandCancelled,
     CommandCanceller,
     CommandNotFoundError,
@@ -347,3 +350,67 @@ def test_a_cancel_landing_as_the_command_finishes_is_still_a_cancel(capped):
     # operator cancelled would outlive the record saying it was stopped.
     with pytest.raises(CommandCancelled):
         run_command(emit(10), max_stdout_bytes=capped, cancel=LateCanceller())
+
+
+# -- the end of the cancellation window ---------------------------------------
+#
+# A cancel stops being meaningful once the caller holds the result and is acting
+# on it: writing it, publishing it, settling a record on it. The seal is that
+# end, and it has to be a transition rather than a flag anybody reads, because
+# the whole difficulty is the instant where a cancel and a commit arrive
+# together. These cover the primitive; the semantic evaluator and job manager
+# are the callers that depend on it (tests/test_semantic.py,
+# tests/test_semantic_jobs.py).
+
+
+def test_a_seal_closes_the_window_and_refuses_every_later_cancel():
+    canceller = CommandCanceller()
+
+    assert canceller.seal() is True
+
+    # Refused rather than recorded: an asker told TOO_LATE can report the truth
+    # ("already finished") instead of a stop that did not happen.
+    assert canceller.cancel() is CancelOutcome.TOO_LATE
+    assert canceller.cancelled is False
+
+
+def test_a_cancel_that_arrived_first_refuses_the_seal():
+    canceller = CommandCanceller()
+
+    assert canceller.cancel() is CancelOutcome.NOTHING_TO_STOP
+
+    # The caller must discard the result rather than commit to it: the record
+    # already says stopped, so persisting it anyway is the divergence.
+    assert canceller.seal() is False
+    assert canceller.cancelled is True
+
+
+def test_only_one_of_cancel_and_seal_can_win_under_concurrency():
+    """The two transitions are exclusive however many threads race for them.
+
+    Not a timing test: whichever lands first, the other's answer must agree with
+    it. A window that could be both sealed and cancelled is exactly the state in
+    which a record and the artifacts behind it can disagree.
+    """
+    for _ in range(200):
+        canceller = CommandCanceller()
+        outcomes: list[object] = []
+        barrier = threading.Barrier(2)
+
+        def do(action):
+            barrier.wait()
+            outcomes.append(action())
+
+        threads = [
+            threading.Thread(target=do, args=(canceller.cancel,)),
+            threading.Thread(target=do, args=(canceller.seal,)),
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(PATIENCE)
+
+        sealed = True in outcomes
+        cancelled = CancelOutcome.NOTHING_TO_STOP in outcomes
+        assert sealed != cancelled  # exactly one, never both and never neither
+        assert canceller.cancelled is cancelled

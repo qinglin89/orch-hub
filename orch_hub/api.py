@@ -2308,11 +2308,20 @@ def create_app(
 
         From ``deferred``/``queued`` no model turn opens — the worker's own
         queued→running guard refuses a record this settled. From ``running`` the
-        turn is abandoned rather than killed (the hub holds no handle on the
-        subprocess): the record settles now, the slot frees, and the late worker
-        finds a non-transient record and returns without clobbering the outcome —
-        the arrangement the stuck sweep already rests on. The settled record's
-        ``started_ts`` is what tells the two apart afterwards.
+        model subprocess is **killed** through the handle the job manager registers
+        for each in-flight attempt, so the turn stops spending the subscription
+        window rather than running on behind a record that says it stopped; the
+        worker's call then raises, its partial evaluation dir is removed, and its
+        finalize writes nothing over this outcome. The settled record's
+        ``started_ts`` tells a turn that had opened from one that never did.
+
+        A ``running`` job also returns **409 once its turn has returned** and the
+        worker is settling the result (parsing, writing artifacts, publishing to
+        the report feed). That is the honest answer: the window is already spent
+        and the report is already being persisted, so nothing remains for a cancel
+        to stop, and accepting it would leave a ``cancelled`` record beside a
+        published report. Ask again is not needed — the job settles on its own
+        within seconds and the poll route shows what it became.
 
         Cancelling holds the task's once-per-task guard like any other terminal
         record, so the automatic path will not re-enqueue it; ``POST

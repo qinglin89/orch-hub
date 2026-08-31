@@ -444,8 +444,9 @@ Some properties worth knowing:
 The per-job counterpart, on the **Cancel** button beside each queue row, or
 `POST /api/repos/{repo}/evaluations/{task}/semantic/job/cancel`. It settles that
 task's job to terminal `cancelled` and frees its `(repo, task)` slot immediately.
-Legal from `deferred`, `queued`, and `running`; a record already at rest answers
-`409`, and a task that never had a job answers `404`.
+Legal from `deferred`, `queued`, and `running` — and, within `running`, only up to
+the moment the turn returns. A record already at rest, or one whose result is
+being settled, answers `409`; a task that never had a job answers `404`.
 
 The work stops before the record says it did — the turn is signalled first and
 the record is written only once it has been — so what you are told is never ahead
@@ -462,9 +463,20 @@ of what actually happened:
   this outcome — so a cancelled attempt leaves no artifacts and publishes no
   report.
 - From `running` with **no live turn in this hub process** — a record left by a
-  previous hub, or an attempt whose turn had just returned — there is nothing left
-  to kill and the record simply settles. That is not a compromise: the turn is not
-  running here.
+  previous hub — there is nothing left to kill and the record simply settles. That
+  is not a compromise: the turn is not running here.
+- From `running` once **the turn has already returned**, the answer is `409`. Past
+  that instant the subscription window is spent and the hub is parsing the report,
+  writing its two artifacts, publishing it to the report feed, and settling the
+  record — work a cancel cannot undo. Accepting it would leave a record reading
+  `cancelled` beside a report standing in the evaluations tree and in the global
+  feed. The message names the settling; the job reaches `completed` (or `failed`)
+  on its own within seconds, and the row shows what it became.
+
+That last boundary is exact rather than a narrow window: the attempt closes its
+own cancellation window the moment its turn returns, and the two decisions are
+taken together, so a cancel either arrives first — in which case nothing is
+persisted or published — or is refused.
 
 A cancelled record with a start timestamp is a turn that had opened; one without
 is a turn that never did. If the hub cannot stop a live turn, the cancel fails and

@@ -92,6 +92,7 @@ from orch_hub.static_metrics import (
     StaticEvaluator,
 )
 from orch_hub.subprocess_utils import (
+    CancelOutcome,
     CommandCancelled,
     CommandCanceller,
     CommandNotFoundError,
@@ -1585,6 +1586,78 @@ def test_evaluate_opens_no_model_turn_for_an_already_cancelled_attempt(tmp_path)
 
     assert backend.prompts == []
     assert not (config.data_dir / "evaluations" / "alpha" / TASK / FIXED_ID).exists()
+
+
+class CancellingBackend(FakeBackend):
+    """Fires the canceller as its turn returns — the post-model race, made exact.
+
+    Stands for every way a cancel can land after the model has finished but
+    before the evaluator has committed to its answer: the operator clicked while
+    the CLI was writing its last stream frame, or while the report was being
+    parsed. What the evaluator does with the result is the whole question, so the
+    test needs that instant to be a fixed point rather than a timing hope.
+    """
+
+    def evaluate(self, prompt: str, repo: ManagedRepo, *, cancel=None) -> str:
+        text = super().evaluate(prompt, repo, cancel=cancel)
+        cancel.cancel()
+        return text
+
+
+def test_a_cancel_racing_the_turns_return_persists_and_publishes_nothing(tmp_path):
+    """The turn produced a report; the operator stopped the attempt; neither lands.
+
+    Everything below the model call is durable — two artifact writes and a
+    publication to the cross-repo feed — so a cancel that arrives while the result
+    is merely *in hand* has to be honoured before any of it happens. Otherwise the
+    job record settles ``cancelled`` while the report it says was stopped sits in
+    the evaluations tree and in the global catalog, which is the exact
+    record-versus-reality divergence a cancel exists to prevent.
+    """
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    backend = CancellingBackend(envelope())
+    catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
+    ev = semantic_evaluator(config=config, service=_service(config), backend=backend,
+                            catalog=catalog)
+
+    with pytest.raises(SemanticEvaluationError, match="cancelled"):
+        ev.evaluate(repo, TASK, cancel=CommandCanceller())
+
+    # The turn really did run — this is the post-model race, not the pre-model one.
+    assert len(backend.prompts) == 1
+    # And nothing survived it: the all-or-nothing cleanup removed the reserved dir,
+    # so there is no report to read and none to reconcile into the feed later.
+    assert not (config.data_dir / "evaluations" / "alpha" / TASK / FIXED_ID).exists()
+    assert catalog.entries() == []
+    assert ReportCatalog(config).reconcile() == []
+
+
+def test_a_cancel_arriving_after_the_seal_cannot_stop_the_attempt(tmp_path):
+    """The other side of the same boundary: once sealed, the result is kept.
+
+    The window is spent the moment the turn returns, so from there on a cancel has
+    no spending left to stop — only a paid-for report to throw away. The evaluator
+    seals at that instant, and the seal is what makes the later cancel refusable:
+    the caller holding the handle (the job manager) is told the attempt is settling
+    rather than being allowed to write ``cancelled`` over a published report.
+    """
+    config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data",
+                    evaluation_enabled=True)
+    repo = _write_repo_and_run(config, tmp_path, archived=True)
+    catalog = ReportCatalog(config, clock=lambda: FIXED_TS)
+    canceller = CommandCanceller()
+    ev = semantic_evaluator(config=config, service=_service(config),
+                            backend=FakeBackend(envelope()), catalog=catalog)
+
+    report = ev.evaluate(repo, TASK, cancel=canceller)
+
+    assert canceller.cancel() is CancelOutcome.TOO_LATE
+    assert canceller.cancelled is False  # refused, not recorded and ignored
+    assert (config.data_dir / "evaluations" / "alpha" / TASK / report.evaluation_id
+            / SEMANTIC_REPORT_NAME).is_file()
+    assert [e.evaluation_id for e in catalog.entries()] == [report.evaluation_id]
 
 
 def test_evaluate_hands_the_canceller_to_the_backend(tmp_path):

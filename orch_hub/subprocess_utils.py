@@ -22,6 +22,7 @@ with different exceptions and mean different things to whoever reads the result.
 
 from __future__ import annotations
 
+import enum
 import os
 import selectors
 import subprocess
@@ -58,6 +59,29 @@ class CommandCancelled(Exception):
     """
 
 
+class CancelOutcome(enum.Enum):
+    """What a :meth:`CommandCanceller.cancel` actually achieved.
+
+    ``SIGNALLED`` and ``NOTHING_TO_STOP`` both mean the cancel *took*: the
+    canceller is fired, so a run that has not reached its child refuses to start
+    one, a caller between phases aborts at its next checkpoint, and a run whose
+    child finished in the race window reports a stop instead of a result. They
+    differ only in whether there was a live child to kill, which is a log line
+    rather than a decision.
+
+    ``TOO_LATE`` is the decision: the run had already :meth:`sealed
+    <CommandCanceller.seal>` its result, so the work this was meant to stop is
+    done and its caller is acting on it. Refusing — rather than firing a flag
+    nobody will read again — is what lets the asker tell "stopped" from "already
+    finished"; reporting the second as the first is exactly the divergence
+    between a record and reality that the seal exists to prevent.
+    """
+
+    SIGNALLED = "signalled"
+    NOTHING_TO_STOP = "nothing-to-stop"
+    TOO_LATE = "too-late"
+
+
 class CommandCanceller:
     """Handle letting one thread stop a command another thread is blocked running.
 
@@ -77,12 +101,23 @@ class CommandCanceller:
     expensive work of its own on the way to the command — so :attr:`cancelled` is
     the cooperative half of the same signal, checked by callers at whatever points
     they can abort cheaply.
+
+    A cancel eventually stops being meaningful in the other direction too. Once
+    the caller has the command's result in hand and is committing to it — writing
+    it, publishing it, settling a record on it — "cancel this" no longer has an
+    answer that is true. :meth:`seal` is that end of the window, and it is a
+    *transition* rather than a flag read precisely because it has to be atomic
+    against :meth:`cancel`: both take this one lock, exactly one of them wins, and
+    the loser is told so. Everything the caller does after a successful seal is
+    therefore work no cancel can claim to have prevented, and everything before it
+    is work a cancel makes it discard.
     """
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
         self._cancelled = False
+        self._sealed = False
 
     @property
     def cancelled(self) -> bool:
@@ -90,31 +125,52 @@ class CommandCanceller:
         with self._lock:
             return self._cancelled
 
-    def cancel(self) -> bool:
-        """Stop the run; return whether a live child was actually signalled.
+    def cancel(self) -> CancelOutcome:
+        """Stop the run; report which of the three things happened.
 
-        ``False`` means there was nothing to kill — the command had not started
-        yet, or had already finished — which is not a failure: the flag is set
-        either way, so a run that has not reached its child refuses to start one
-        and a caller between phases aborts at its next checkpoint.
+        See :class:`CancelOutcome`: the run is stopped (with or without a live
+        child to kill), or it had already sealed its result and this is refused.
 
-        The kill happens under the lock so it cannot race an :meth:`attach` or
-        :meth:`detach` from the running thread; ``os.kill`` does not block, so the
-        section stays short. A child that has already exited raises
-        :class:`ProcessLookupError`, which is the goal reached by other means and
-        reads as ``False``. Any other :class:`OSError` propagates: the caller asked
-        for the work to stop and it demonstrably did not, and reporting that as a
-        successful cancel would be the lie this returns a value to avoid.
+        The kill happens under the lock so it cannot race an :meth:`attach`, a
+        :meth:`detach`, or a :meth:`seal` from the running thread; ``os.kill``
+        does not block, so the section stays short. A child that has already
+        exited raises :class:`ProcessLookupError`, which is the goal reached by
+        other means and reads as ``NOTHING_TO_STOP``. Any other :class:`OSError`
+        propagates: the caller asked for the work to stop and it demonstrably did
+        not, and reporting that as a successful cancel would be the lie this
+        returns a value to avoid.
         """
         with self._lock:
+            if self._sealed:
+                return CancelOutcome.TOO_LATE
             self._cancelled = True
             proc = self._proc
             if proc is None:
-                return False
+                return CancelOutcome.NOTHING_TO_STOP
             try:
                 proc.kill()
             except ProcessLookupError:
+                return CancelOutcome.NOTHING_TO_STOP
+            return CancelOutcome.SIGNALLED
+
+    def seal(self) -> bool:
+        """Close the cancellation window on a finished run; ``False`` if cancelled.
+
+        Called by the thread holding the result, at the moment it starts acting on
+        it. ``True`` means the result is its to keep: every later :meth:`cancel`
+        is refused as :attr:`~CancelOutcome.TOO_LATE`, so nothing can afterwards
+        report this work as stopped. ``False`` means a cancel got here first and
+        the caller must discard the result rather than persist or publish it — the
+        window it was protecting is already spent, but the record, the artifacts,
+        and the downstream feed still say what the operator asked them to say.
+
+        One-shot and terminal, like :meth:`cancel`, and mutually exclusive with
+        it: the lock is the whole point.
+        """
+        with self._lock:
+            if self._cancelled:
                 return False
+            self._sealed = True
             return True
 
     def attach(self, proc: subprocess.Popen) -> bool:

@@ -1080,6 +1080,13 @@ class SemanticBackend(Protocol):
         process) and raise :class:`SemanticEvaluationError` rather than returning a
         report whose caller has already stopped waiting for it. ``None`` — the
         default, and every direct caller — runs to completion as before.
+
+        A backend must NOT seal the canceller
+        (:meth:`~orch_hub.subprocess_utils.CommandCanceller.seal`): closing the
+        cancellation window is the caller's decision, taken the instant this
+        returns (:meth:`SemanticEvaluator._seal_turn`), because it is the caller
+        that goes on to persist and publish. A backend that sealed would extend
+        that promise over its own teardown, where nothing yet depends on it.
         """
         ...
 
@@ -2025,7 +2032,13 @@ class SemanticEvaluator:
         than waiting it out. Either way the failure travels through the same
         all-or-nothing cleanup as any other, which is what keeps a cancelled
         attempt from leaving artifacts — or a published report — behind the record
-        that says it was stopped. ``None`` (the default, and every direct caller)
+        that says it was stopped.
+
+        The turn's *return* is where that window closes, atomically
+        (:meth:`_seal_turn`): a cancel racing it either wins and the result is
+        discarded unparsed, or loses and is refused from then on. Everything below
+        the seal — parse, both writes, publication, retention — is therefore work
+        no cancel can contradict. ``None`` (the default, and every direct caller)
         cannot be cancelled, exactly as before.
         """
         self._require_enabled()
@@ -2044,6 +2057,7 @@ class SemanticEvaluator:
             self._require_turn_window(turn_start_by)
             self._require_not_cancelled(cancel)
             text = self._backend.evaluate(prompt, repo, cancel=cancel)
+            self._seal_turn(cancel)
             report = parse_report(
                 text,
                 evaluation_id=pack.evaluation_id,
@@ -2124,6 +2138,46 @@ class SemanticEvaluator:
         raise SemanticEvaluationError(
             "semantic evaluation was cancelled before its model turn started;"
             " no turn was started"
+        )
+
+    def _seal_turn(self, cancel: CommandCanceller | None) -> None:
+        """Close the cancellation window the instant the turn produces a result.
+
+        The counterpart to :meth:`_require_not_cancelled`, at the other end of the
+        model call, and the reason both exist is the same: everything this method
+        stands in front of — parsing, two artifact writes, publication to the
+        global feed, retention — is *durable* work, and a cancel that lands over
+        it would otherwise settle the record ``cancelled`` while the report it
+        says was stopped went on being written and published.
+
+        So the two facts are decided together instead of being checked
+        separately. :meth:`~orch_hub.subprocess_utils.CommandCanceller.seal` is
+        atomic against :meth:`~orch_hub.subprocess_utils.CommandCanceller.cancel`,
+        and exactly one wins:
+
+        - the seal wins → the turn's result is committed, and every later cancel
+          is refused (the operator is told the attempt is settling, rather than
+          handed a ``cancelled`` record contradicted by a published report);
+        - the cancel wins → this raises, the all-or-nothing cleanup removes the
+          reserved dir, and nothing is parsed, persisted, or published.
+
+        Sealing *here* rather than before the first write is deliberate: the
+        window the operator was protecting is spent the moment the turn returns,
+        so from here on there is no spending left for a cancel to stop — only a
+        result to keep or throw away, and throwing away a paid-for report to
+        honour a cancel that arrived too late serves nobody. What remains after
+        the seal is bounded by the attempt deadline the record is reaped against
+        (:data:`orch_hub.semantic_jobs.SETTLE_GRACE_SECONDS`), so a settlement
+        that wedges is still settled — as ``failed``, by the sweep, not by a
+        cancel that would have lied about what it stopped.
+
+        ``None`` (every direct caller) has no window to close.
+        """
+        if cancel is None or cancel.seal():
+            return
+        raise SemanticEvaluationError(
+            "semantic evaluation was cancelled as its model turn returned; the"
+            " report was not parsed, persisted, or published"
         )
 
     def _catalog_report(
