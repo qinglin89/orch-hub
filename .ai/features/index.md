@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Features
@@ -11,7 +11,7 @@ below.
 
 | Feature | Status | Capability | Detail |
 |---|---|---|---|
-| Repo discovery and readiness | implemented | registry-driven repo list + fail-closed launch readiness + display-only commit/housekeeping metadata | core.md |
+| Repo discovery and readiness | implemented | registry-driven repo list + fail-closed launch readiness + mandrel-owned protocol-line/commit/housekeeping display metadata | core.md |
 | Task inventory | implemented | read-only `.ai-tasks` index/frontmatter inventory | core.md |
 | HTTP API foundation | implemented | FastAPI app: public shell/health + protected data routes | core.md |
 | Auth and private access | implemented | fail-closed bearer middleware; Tailscale-only exposure | core.md |

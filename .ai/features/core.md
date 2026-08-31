@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-19
-verified-against: 32aaddc46f593b0d3dacf543feb3886b9d150898
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Features: Core
@@ -12,9 +12,10 @@ evaluation layers: `evaluation.md` + `evaluation-reporting.md`.
 
 Status: implemented
 
-Description: Load managed repos from mandrel and report whether each is ready
-for orchestration. This validates the registry and target-repo deployment
-assumptions before service/UI work.
+Description: Load managed repos from mandrel, report whether each is ready for
+orchestration, and relay mandrel's current protocol-line placement for display.
+This validates the registry and target-repo deployment assumptions before
+service/UI work without deriving a second placement in the hub.
 
 Modules: config, registry, readiness, git_meta, housekeeping, models,
 subprocess_utils, cli.
@@ -30,8 +31,14 @@ Implemented behavior:
 - Registry data is a JSON array of `{name, path, manifest}`. Missing fallback file means no repos; invalid JSON or malformed entries raise an operational error.
 - Readiness runs seven checks in stable order: repo path, manifest, deployed
   orchestrator script, orchestrator venv Python, `.ai-tasks/index.md`, clean
-  `git status --porcelain`, and passing `mandrel status <repo>`; the public
-  key for the final check is `mandrel_status`, with no compatibility alias.
+  `git status --porcelain`, and passing `mandrel status --json <repo>`; the
+  public key for the final check is `mandrel_status`, with no compatibility
+  alias. The exit code remains the gate.
+- The same mandrel call relays schema-2 `targets[].placed_line` or the
+  structurally marked placement finding as an opaque, display-only
+  `ProtocolPlacement` passenger. The hub runs no second command, reads no
+  receipt, compares no revision, keeps no line-name dictionary, and invents no
+  value when the payload is old, absent, malformed, or structurally unexpected.
 - Public readiness JSON serializes `ready` and only failed checks as `{name, message}` reasons; ready repos have `checks: []`.
 - `git_meta` reads display-only commit history separately from readiness:
   `latest_commit(repo)` returns `CommitInfo | None`, and `read_commits(repo,
@@ -43,7 +50,8 @@ Implemented behavior:
   never changes launch readiness or run-start gating.
 - CLI `repos --json` and `GET /api/repos` share `repos_payload`; each repo now
   includes `commit: null` or `{hash, short_hash, committed_ts, subject}` plus
-  `housekeeping_pending`. Human CLI output remains unchanged.
+  `housekeeping_pending`, `placed_line`, and `placement_finding`. Placement is
+  separate from `readiness` and `commit`; human CLI output remains unchanged.
 - `GET /api/repos/{repo_id}/commits` returns recent commits for repo detail;
   unknown repos are 404, but commit lookup failure is HTTP 200 with
   `available: false` and an empty list.

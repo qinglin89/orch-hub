@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -25,7 +25,11 @@ Implemented behavior:
   reasons. Failed check names are user-visible labels rendered verbatim on repo
   cards, repo detail, intake refusal, and Overview Attention rows. Cards render
   a compact yellow "Housekeeping pending" warning when `/api/repos` reports
-  `housekeeping_pending`.
+  `housekeeping_pending`. Every repo card, ready or not-ready, also renders
+  mandrel's opaque `placed_line` or `placement_finding` as its own `protocol
+  line:` row; unknown values render escaped and verbatim, while absent or
+  unreadable placement renders no row. The label never joins commit metadata
+  because canonical protocol identity is not commit-string identity.
 - All-task and repo-detail views render task inventory from `/api/tasks` and
   `/api/repos/{repo_id}/tasks`, preserving frontmatter-authoritative status,
   `index_present`, and `missing`/`unknown` sentinel semantics. The all-tasks

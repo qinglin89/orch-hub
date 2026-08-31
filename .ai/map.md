@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Project Map
@@ -13,7 +13,7 @@ behavior and rationale stay in the owning doc.
 
 | Feature | Modules | Key Decisions |
 |---|---|---|
-| Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | registry = truth; fail-closed readiness; git/housekeeping display-only |
+| Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | registry = truth; fail-closed readiness; mandrel-owned opaque protocol placement; git/housekeeping display-only |
 | Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads |
 | Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v18 evidence packs; unanimous protocol identity; hub-owned artifacts; descriptor containment |
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
@@ -66,7 +66,7 @@ behavior and rationale stay in the owning doc.
 | config | env overrides; tokens/URLs; eval/usage settings; derived paths |
 | models | shared data shapes; run-record repo reconstruction |
 | registry | managed-repo discovery from `mandrel` or registry file |
-| readiness | fail-closed launch readiness checks |
+| readiness | fail-closed launch readiness checks + display-only protocol-placement relay from the same mandrel call |
 | git_meta | best-effort commit/patch metadata; display/evidence only |
 | housekeeping | display-only `.ai/.housekeeping-pending` state |
 | subprocess_utils | shared blocking command runs; capped streamed stdout |

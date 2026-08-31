@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Modules: Web UI Views
@@ -21,7 +21,10 @@ before the repo name (yellow waiting, green active, gray idle; state word only
 in title/aria text); display-ready cards add latest commit time and active task
 count from task inventory. Cards and repo detail show a yellow "Housekeeping
 pending" warning from the shared repo payload when `.ai/.housekeeping-pending`
-exists.
+exists. Repo cards independently render mandrel's `placed_line` or
+`placement_finding` as an escaped, opaque `protocol line:` row on both ready
+and not-ready cards; missing placement renders nothing, unknown values pass
+through, and the row stays separate from commit metadata.
 Task cards use only left-border run accents, with no dot/word row, distinct
 from frontmatter status badges. Repo detail adds a recent-commits section with
 unavailable and empty-history states.

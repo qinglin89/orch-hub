@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Architecture: Ownership and Boundaries
@@ -14,6 +14,7 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 |---|---|---|
 | Managed repos | mandrel registry / `mandrel` | hub reads/normalizes; never invents membership |
 | Launch readiness | computed from repo files, git state, `mandrel status` | fails closed; gates run launch |
+| Current repo protocol placement | `mandrel status --json` canonical-identity reading | hub relays opaque line/finding per request for display; never derives from git, receipt, manifest, revision, or frozen run provenance |
 | Task ids, summaries, status, blockers | target repo `.ai-tasks/index.md` + task frontmatter | read-only inventory; runtime overlays never replace task status |
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
@@ -34,6 +35,9 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 
 - Registry discovery performs no readiness checks; readiness launches no
   orchestrators.
+- Readiness may carry mandrel's protocol placement from its existing status
+  subprocess as a display-only passenger; only the exit code gates, and the hub
+  must not compute a second placement.
 - Git metadata and housekeeping marker state are display-only; never gate
   launch.
 - Task inventory reads task files but does not decide orchestrator turn state.

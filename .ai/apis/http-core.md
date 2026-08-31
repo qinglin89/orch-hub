@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-21
-verified-against: f627307360a3c3f63a1d77ee86a85ccc55288ad5
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # APIs: HTTP — Core
@@ -35,7 +35,11 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
 
 - Purpose: list managed repos with readiness and display metadata.
 - Source: same functions as CLI `repos --json`.
-- Shape: exactly the same top-level object as `python -m orch_hub.cli repos --json`, including best-effort `commit` and display-only `housekeeping_pending`.
+- Shape: exactly the same top-level object as `python -m orch_hub.cli repos
+  --json`, including best-effort `commit`, display-only `housekeeping_pending`,
+  and always-present nullable `placed_line` / `placement_finding`. The placement
+  values are mandrel-owned opaque facts beside `readiness`, never revisions or
+  hub-derived readiness reasons.
 
 ## `GET /api/repos/{repo_id}/commits`
 
@@ -192,8 +196,9 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   `IntakeInFlightError` returns `conflict: intake_in_flight` + `intake_id`.
 - The dashboard repo/task status layout consumes these APIs directly: repo
   cards use `/api/repos` for readiness/latest commit/housekeeping warning
-  state, `/api/runs` for the tri-state run signal, and `/api/tasks` for active
-  task counts; repo detail uses `/api/repos` for the housekeeping warning,
+  state and the unconditional protocol-line label, `/api/runs` for the
+  tri-state run signal, and `/api/tasks` for active task counts; repo detail
+  uses `/api/repos` for the housekeeping warning,
   uses `/api/repos/{repo_id}/commits` for recent commits, and treats
   `available:false` as a graceful unavailable state.
 - The dashboard task-detail run controls consume these existing run APIs

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Modules
@@ -21,9 +21,9 @@ Full responsibilities live in the detail files below.
 | Release interpreter | `orch_hub/release_python.py` | digest-pinned redistributable interpreter provisioning |
 | Release package | `orch_hub/release_package.py` | deterministic `.run`, target manifest, inventory, checksums |
 | Release publish | `orch_hub/release_publish.py` | tag/byte verification + filesystem/GitHub no-republish delivery |
-| Models | `orch_hub/models.py` | shared data shapes + payload helpers; run-record repo reconstruction |
+| Models | `orch_hub/models.py` | shared data shapes + payload helpers, including display-only protocol placement; run-record repo reconstruction |
 | Registry | `orch_hub/registry.py` | managed repo discovery from `mandrel` or registry file |
-| Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch readiness checks |
+| Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch checks + opaque placement relay from the same mandrel call |
 | Git metadata | `orch_hub/git_meta.py` | best-effort producer-capped commit reads and caller-capped path-patch streams for display/evidence |
 | Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |
 | Subprocess utilities | `orch_hub/subprocess_utils.py` | shared blocking wrappers; optional producer-capped stdout with whole-call timeout |

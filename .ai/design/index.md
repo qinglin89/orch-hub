@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Design Principles and Decisions
@@ -42,6 +42,9 @@ verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
 
 - Importing `.mandrel/orchestrator/orchestrator.py`.
 - Maintaining a second repo registry.
+- Re-deriving a repo's protocol-line placement from git, receipts, manifests,
+  revisions, or frozen run provenance instead of relaying mandrel's current
+  canonical-identity reading opaquely.
 - Treating GitHub as registry truth.
 - Starting orchestrator subprocesses before task inventory and readiness gates pass.
 - Reusing run/control dirs across runs.

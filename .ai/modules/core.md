@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # Modules: Core
@@ -16,7 +16,7 @@ Location: `orch_hub/cli.py`
 
 Responsibility: expose user-facing commands. Repo commands list managed repos
 and readiness; JSON output also carries best-effort latest commit metadata and
-housekeeping marker state:
+housekeeping marker state plus mandrel's display-only protocol placement:
 
 ```bash
 python -m orch_hub.cli repos
@@ -115,10 +115,13 @@ normalize Claude/Codex subscription-capacity display data; omitted provider
 fields stay `None` rather than zero so unavailable data cannot masquerade as
 unused quota.
 `CommitInfo` carries `hash`, `short_hash`, `committed_ts`, and `subject`;
+`ProtocolPlacement` carries mandrel's opaque placed-line or placement-finding
+answer as a passenger on `ReadinessReport` without entering `ready`, failures,
+or `ReadinessReport.to_dict()`;
 `repos_payload` accepts `(repo, report)`, `(repo, report, commit)`, or
 `(repo, report, commit, housekeeping_pending)` so CLI JSON and
 `GET /api/repos` stay identical and always include `commit` (`null` when
-unavailable) plus `housekeeping_pending`.
+unavailable), `housekeeping_pending`, `placed_line`, and `placement_finding`.
 `TaskSummary` carries `task_id`, task-file `status`, optional index summary,
 and blockers; `SessionSummary`/`SessionsSnapshot` describe per-protocol-session
 context usage parsed from orchestrator logs, and `SessionEst` is the typed
@@ -162,9 +165,12 @@ Validate and normalize JSON-array entries into `ManagedRepo`.
 Location: `orch_hub/readiness.py`
 
 Responsibility: check repo filesystem, deployed manifest, orchestrator script,
-venv Python, task index, clean git tree, and `mandrel status <repo>`. Reports
-keep all seven checks internally and fail closed when paths or tools are
-missing; the public key for the final check is `mandrel_status`.
+venv Python, task index, clean git tree, and `mandrel status --json <repo>`.
+Reports keep all seven checks internally and fail closed when paths or tools are
+missing; the public key for the final check is `mandrel_status`. The command's
+exit code remains the launch gate, while schema-2 placement rides the same
+result as opaque display data. Old/unreadable payloads produce no placement;
+the hub never invokes git or reads receipts to reconstruct one.
 
 ## Git Metadata
 

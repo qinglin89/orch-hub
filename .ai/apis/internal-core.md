@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-08-31
+verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 ---
 
 # APIs: Internal — Core and Usage
@@ -22,9 +22,16 @@ Behavior: command source first, registry-file fallback second. An exit-0 command
 
 Input: managed repo model.
 
-Output: readiness report with boolean `ready` and list of failed checks.
+Output: readiness report with boolean `ready`, failed checks, and a
+display-only `ProtocolPlacement` passenger.
 
-Behavior: pure inspection and subprocess checks only; no mutation. Missing repo path skips subprocess execution but records `git_clean` and `mandrel_status` as failed so launch readiness still fails closed.
+Behavior: pure inspection and subprocess checks only; no mutation. The one
+`mandrel status --json <repo>` call uses its exit code for the unchanged gate
+and relays schema-2 `placed_line` / structurally marked placement finding
+without git, receipt reads, revision comparisons, or a hub vocabulary. Missing
+repo path skips subprocess execution but records `git_clean` and
+`mandrel_status` as failed so launch readiness still fails closed; old,
+missing, malformed, or unexpected JSON produces no placement.
 
 ## Housekeeping Marker
 
@@ -103,8 +110,8 @@ manual semantic evaluation remains ungated.
 - Prefer absolute paths internally; avoid exposing more path data than the UI needs.
 - Keep JSON stable and explicit.
 - Include `ready: false` with reasons instead of raising for ordinary readiness failures.
-- Keep display metadata such as commit history and housekeeping marker state
-  separate from launch readiness.
+- Keep display metadata such as commit history, housekeeping marker state, and
+  mandrel-owned protocol placement separate from launch readiness.
 - Raise or return operational errors for invalid registry JSON, unreadable config, or malformed user requests.
 - Keep task `blocked` distinct from run `waiting`.
 - Never make API handlers call orchestrator internals directly.
