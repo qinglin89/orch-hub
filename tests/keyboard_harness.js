@@ -5965,6 +5965,138 @@ async function scenarioProtocolCensus() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// The protocol-line label on a repo card: which line `mandrel status` placed
+// this repo's deployed protocol on, relayed verbatim from `/api/repos`.
+//
+// The label is not derived here and must not be inferred anywhere: the hub keeps
+// no dictionary of line names, so an unrecognized value renders as itself, and a
+// payload that names nothing renders no label rather than a wrong one. It is also
+// unconditional — unlike the commit/task metadata line, which not-ready cards
+// drop — because a not-ready repo is exactly when the placement matters most.
+async function scenarioRepoProtocolLine() {
+  installRoutes({ waiting: false });
+  route("GET", "/api/runs", { runs: [] });
+
+  var reposWith = function (fields, readiness) {
+    return {
+      repos: [
+        {
+          name: REPO,
+          path: "/tmp/" + REPO,
+          readiness: readiness || { ready: true, checks: [] },
+          housekeeping_pending: false,
+          commit: null,
+          placed_line: fields.placed_line === undefined ? null : fields.placed_line,
+          placement_finding:
+            fields.placement_finding === undefined ? null : fields.placement_finding,
+        },
+      ],
+    };
+  };
+  var protocolEl = function () {
+    return doc.querySelector("#view .card.repo .repo-protocol");
+  };
+  var protocolText = function () {
+    var el = protocolEl();
+    return el ? el.textContent.trim().replace(/\s+/g, " ") : null;
+  };
+  var NOT_READY = {
+    ready: false,
+    checks: [{ name: "git_clean", message: "working tree has uncommitted changes" }],
+  };
+
+  // ---- 1) on base ----
+  route("GET", "/api/repos", reposWith({ placed_line: "base" }));
+  await navigate("#/repos");
+  eq("protocol: a repo on base names base", protocolText(), "protocol line: base");
+
+  // ---- 2) on a sealed candidate: the distinction the label exists for ----
+  route("GET", "/api/repos", reposWith({ placed_line: "candidate" }));
+  await navigate("#/repos");
+  eq(
+    "protocol: a repo on a sealed candidate names candidate",
+    protocolText(),
+    "protocol line: candidate"
+  );
+  // Still READY: standing on a candidate is exactly as correct as standing on
+  // base, so the label is the only thing that tells the two cards apart.
+  eq(
+    "protocol: a candidate repo is still ready",
+    (doc.querySelector("#view .card.repo .badges .badge") || {}).textContent,
+    "ready"
+  );
+
+  // ---- 3) on neither: mandrel's own finding, not a hub phrase ----
+  route(
+    "GET",
+    "/api/repos",
+    reposWith({ placement_finding: "off the source line" }, NOT_READY)
+  );
+  await navigate("#/repos");
+  eq(
+    "protocol: a repo on no line relays mandrel's finding",
+    protocolText(),
+    "protocol line: off the source line"
+  );
+  // Unconditional: the not-ready card drops its commit/task metadata line and
+  // keeps this one.
+  check(
+    "protocol: a not-ready card still carries the label",
+    !!protocolEl() && doc.querySelector("#view .card.repo .repo-meta") === null,
+    "the not-ready card kept meta or dropped the protocol line"
+  );
+
+  // ---- 4) a line this hub has never seen travels verbatim ----
+  route("GET", "/api/repos", reposWith({ placed_line: "successor" }));
+  await navigate("#/repos");
+  eq(
+    "protocol: an unrecognized line renders as itself",
+    protocolText(),
+    "protocol line: successor"
+  );
+
+  // ---- 5) nothing named → no label, rather than a wrong one ----
+  route("GET", "/api/repos", reposWith({}));
+  await navigate("#/repos");
+  check(
+    "protocol: a payload naming no line renders no label",
+    protocolEl() === null,
+    "a protocol line rendered with nothing to relay"
+  );
+
+  // A pre-`placed_line` hub payload has neither key at all; same absence, same
+  // silence, and no inference from the repo merely being ready.
+  route("GET", "/api/repos", {
+    repos: [
+      {
+        name: REPO,
+        path: "/tmp/" + REPO,
+        readiness: { ready: true, checks: [] },
+        housekeeping_pending: false,
+        commit: null,
+      },
+    ],
+  });
+  await navigate("#/repos");
+  check(
+    "protocol: a payload without the keys renders no label",
+    protocolEl() === null,
+    "a protocol line rendered from an absent field"
+  );
+
+  // ---- 6) the value is escaped like every other untrusted string ----
+  route("GET", "/api/repos", reposWith({ placed_line: "<img src=x onerror=1>" }));
+  await navigate("#/repos");
+  check(
+    "protocol: the relayed value is escaped, not parsed as markup",
+    doc.querySelector("#view .card.repo .repo-protocol img") === null &&
+      (protocolText() || "").indexOf("<img") !== -1,
+    "the relayed line value reached the DOM as markup"
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -5990,6 +6122,7 @@ async function scenarioProtocolCensus() {
     await scenarioEvaluationQueue();
     await scenarioProtocolCoverage();
     await scenarioProtocolCensus();
+    await scenarioRepoProtocolLine();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

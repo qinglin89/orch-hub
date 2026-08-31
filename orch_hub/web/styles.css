@@ -796,6 +796,18 @@ code {
   margin-top: 6px;
 }
 
+/* The protocol line mandrel placed the repo on. Its own row, never folded into
+   `.repo-meta`: that line answers "how current is this checkout", this one
+   answers "which protocol is it running", and the two are not one question. */
+.repo-protocol {
+  margin-top: 4px;
+}
+
+.protocol-value {
+  color: var(--text);
+  font-weight: 600;
+}
+
 .housekeeping-warning {
   display: flex;
   align-items: center;

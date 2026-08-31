@@ -64,6 +64,8 @@ def test_repos_json_ready(monkeypatch, capsys):
                 "readiness": {"ready": True, "checks": []},
                 "commit": None,
                 "housekeeping_pending": False,
+                "placed_line": None,
+                "placement_finding": None,
             }
         ]
     }

@@ -52,6 +52,7 @@ from orch_hub.models import (
     CommitInfo,
     IntakeDraft,
     ManagedRepo,
+    ProtocolPlacement,
     ReadinessCheck,
     ReadinessReport,
     RepoTaskInventory,
@@ -132,6 +133,8 @@ def test_repos_ready_matches_cli_shape(monkeypatch):
                 "readiness": {"ready": True, "checks": []},
                 "commit": None,
                 "housekeeping_pending": False,
+                "placed_line": None,
+                "placement_finding": None,
             }
         ]
     }
@@ -152,6 +155,58 @@ def test_repos_includes_latest_commit(monkeypatch):
 
     data = build_client().get("/api/repos").json()
     assert data["repos"][0]["commit"] == commit.to_dict()
+
+
+def test_repos_carries_the_protocol_line_beside_readiness(monkeypatch):
+    """The placement is a sibling of ``readiness``, not a passing check.
+
+    It could not ride a check even in principle: ``readiness`` serializes only
+    failures, so a passing check's message never leaves the process.
+    """
+    repo = make_repo()
+    report = ReadinessReport(
+        (ReadinessCheck("repo_path_exists", True, "ok"),),
+        ProtocolPlacement(line="candidate"),
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
+
+    entry = build_client().get("/api/repos").json()["repos"][0]
+    assert entry["placed_line"] == "candidate"
+    assert entry["placement_finding"] is None
+    assert entry["readiness"] == {"ready": True, "checks": []}
+
+
+def test_repos_carries_the_protocol_line_on_a_not_ready_repo(monkeypatch):
+    """Unconditional: a not-ready repo is when the placement matters most."""
+    repo = make_repo()
+    report = ReadinessReport(
+        (ReadinessCheck("git_clean", False, "working tree has uncommitted changes"),),
+        ProtocolPlacement(line="base"),
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
+
+    entry = build_client().get("/api/repos").json()["repos"][0]
+    assert entry["readiness"]["ready"] is False
+    assert entry["placed_line"] == "base"
+
+
+def test_repos_carries_mandrels_finding_when_no_line_was_named(monkeypatch):
+    repo = make_repo()
+    report = ReadinessReport(
+        (ReadinessCheck("mandrel_status", False, "mandrel status failed: drift"),),
+        ProtocolPlacement(finding="off the source line"),
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
+
+    entry = build_client().get("/api/repos").json()["repos"][0]
+    assert entry["placed_line"] is None
+    assert entry["placement_finding"] == "off the source line"
 
 
 def test_repos_reports_housekeeping_marker_present(tmp_path, monkeypatch):

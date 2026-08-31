@@ -40,6 +40,39 @@ class ReadinessCheck:
 
 
 @dataclass(frozen=True)
+class ProtocolPlacement:
+    """Which line ``mandrel`` placed a repo's deployed protocol on, verbatim.
+
+    Relayed, never derived. ``mandrel status`` owns the one canonical-identity
+    comparison — two commits carrying one deployable canonical tree are one
+    protocol and place identically — and it is the only thing entitled to run
+    it. The hub reads its answer out of the payload and renders it; a second
+    placement spelled here would be a second answer to a question that must have
+    exactly one. So no git call, no read of ``.ai-deploy-lock.json`` or the
+    manifest, no comparison of revisions, and no ordering of one line against
+    another happens on this path.
+
+    Two fields because ``mandrel``'s reading has two faces and publishes both
+    (its ``PlacementReading``): ``line`` is the name of the line whose protocol
+    the repo's receipt carries (``targets[].placed_line``), and ``finding`` is
+    what that same comparison becomes when there is no line to name — the
+    placement finding's ``kind``. Exactly one is set when ``mandrel`` said
+    anything about placement; both are ``None`` when it said nothing, which
+    covers a reading it never reached (no receipt at all), a line *this
+    checkout* could not resolve — a fact about the mandrel repository and not
+    about the target, so relaying it as the target's line would blame the wrong
+    one — and every way the payload was unavailable or unreadable.
+
+    Both values are ``mandrel``'s vocabulary and are kept opaque: the hub holds
+    no dictionary of line names to bucket them into, so a value it has never
+    seen travels through and renders as itself.
+    """
+
+    line: str | None = None
+    finding: str | None = None
+
+
+@dataclass(frozen=True)
 class ReadinessReport:
     """Aggregate launch readiness for a managed repo.
 
@@ -47,9 +80,17 @@ class ReadinessReport:
     full picture. ``ready`` is true only when all checks passed. The serialized
     form (:meth:`to_dict`) exposes just the failures as reasons, matching the
     documented ``{"ready": ..., "checks": [...]}`` API shape.
+
+    ``placement`` is a passenger, not a check: it rides here because it comes
+    back on the ``mandrel status`` call the readiness gate already makes (one
+    subprocess, not two), and it is deliberately absent from :meth:`to_dict`.
+    It never touches ``ready``, ``failures``, or any gate — display only. It
+    could not ride a check even if it wanted to: ``to_dict`` serializes only
+    failures, so a passing check's message never leaves the process.
     """
 
     checks: tuple[ReadinessCheck, ...]
+    placement: ProtocolPlacement = ProtocolPlacement()
 
     @property
     def ready(self) -> bool:
@@ -112,12 +153,28 @@ def repo_readiness_dict(
     ``housekeeping_pending`` reflects only the display marker
     ``.ai/.housekeeping-pending``. It is informational dashboard/API metadata
     and deliberately separate from readiness.
+
+    ``placed_line`` / ``placement_finding`` are siblings of ``readiness`` for
+    the same reason, and are taken from the report's passenger
+    (:class:`ProtocolPlacement`) rather than from a check — ``readiness`` lists
+    only failures, so a passing check's message never reaches a client. Both
+    keys are always present, ``null`` where ``mandrel`` named nothing: a field
+    that appears and vanishes by case is one every consumer has to branch on
+    before it can read anything.
+
+    ``placed_line`` is not a revision and does not answer ``commit``'s question.
+    Placement is canonical identity, so a repo whose receipt names a commit
+    other than base's, while its deployable canonical tree *is* base's, is on
+    base; pairing the two as though they were one fact would present that repo
+    as diverged.
     """
     return {
         **repo.to_dict(),
         "readiness": report.to_dict(),
         "commit": commit.to_dict() if commit is not None else None,
         "housekeeping_pending": housekeeping_pending,
+        "placed_line": report.placement.line,
+        "placement_finding": report.placement.finding,
     }
 
 

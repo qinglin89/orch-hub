@@ -816,6 +816,30 @@
     return `<div class="repo-meta muted">${parts.join(" · ")}</div>`;
   }
 
+  // The protocol-line label: which line `mandrel status` placed this repo's
+  // deployed protocol on, relayed verbatim. `placed_line` is the line's name
+  // when the repo stands on one; `placement_finding` is mandrel's own name for
+  // a reading that placed it on none. Exactly one is set when mandrel said
+  // anything, and neither when it said nothing — an absent, unreadable, or
+  // too-old payload — in which case nothing renders rather than a wrong label.
+  //
+  // Both values are printed as they arrive. The hub keeps no list of line names
+  // to translate them through, so a value it has never seen shows as itself.
+  // The prefix names the question, never the answer.
+  //
+  // This is not a revision and deliberately does not join the commit metadata
+  // line: placement is canonical identity, so a repo whose receipt names some
+  // other commit while carrying base's deployable tree is on base, and pairing
+  // the two would present it as diverged.
+  function protocolLine(repo) {
+    const value = repo.placed_line || repo.placement_finding;
+    if (typeof value !== "string" || !value) return "";
+    return (
+      `<div class="repo-protocol muted">protocol line: ` +
+      `<span class="protocol-value">${escapeHtml(value)}</span></div>`
+    );
+  }
+
   function housekeepingWarning(compact) {
     return (
       `<div class="housekeeping-warning${compact ? " compact" : ""}" role="status">` +
@@ -850,6 +874,9 @@
     // Display-ready repos surface at-a-glance metadata (latest commit + active
     // task count); not-ready repos keep their failure reasons instead.
     const meta = ready ? repoMetaLine(repo.commit, taskCount) : "";
+    // The protocol line is unconditional, unlike `meta`: a not-ready repo is
+    // exactly when which line it stands on matters most, and while somebody is
+    // trying a candidate this is the only place that difference is visible.
     return `
       <li class="card repo">
         <a class="card-link" href="${repoHash(repo.name)}">
@@ -860,6 +887,7 @@
             <span class="badges">${badges}</span>
           </div>
           <div class="path muted">${escapeHtml(repo.path)}</div>
+          ${protocolLine(repo)}
           ${repo.housekeeping_pending ? housekeepingWarning(true) : ""}
           ${meta}
           ${reasons}

@@ -475,6 +475,28 @@ def test_ready_repo_card_shows_commit_and_active_task_count():
     assert "active task" in body
 
 
+def test_repo_card_protocol_line_is_unconditional_and_its_own_row():
+    body = app_js()
+    # The protocol line is rendered straight into the card, NOT through the
+    # `ready ? … : ""` gate `meta` goes through: a not-ready repo is exactly when
+    # which line it stands on matters most.
+    assert "protocolLine" in body
+    assert "${protocolLine(repo)}" in body
+    assert "repo-protocol" in body
+    # Both faces of mandrel's one reading are consumed, and only those.
+    assert "placed_line" in body
+    assert "placement_finding" in body
+    # It is its own row and never joins the commit/task metadata line: placement
+    # is canonical identity, not a revision, so the two do not answer one
+    # question and must not read as though they did.
+    assert "repoMetaLine(commit, taskCount)" in body
+    meta_fn = body[
+        body.index("function repoMetaLine") : body.index('class="repo-meta muted"')
+    ]
+    assert "placed_line" not in meta_fn
+    assert "placement_finding" not in meta_fn
+
+
 def test_task_card_run_accent_is_border_only():
     body = app_js()
     # Run-state on a task card is ONLY a colour-coded left-border accent, never
