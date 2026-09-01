@@ -1053,6 +1053,66 @@ def test_eval_queue_says_when_the_store_cannot_be_walked(
     assert "Permission denied" in captured.err
 
 
+@pytest.mark.parametrize(
+    "blocked",
+    [
+        "a file stands at the jobs root",
+        "the data dir is a file",
+        "the path is unstatable",
+    ],
+)
+def test_eval_queue_says_when_the_store_path_is_not_a_queue(
+    monkeypatch, capsys, tmp_path, blocked
+):
+    """A store path that is not a directory is unread, not empty.
+
+    The walk opens on ``Path.is_dir()``, which returns False for an absent tree,
+    for a non-directory standing at the path, and for a path it could not stat at
+    all — three different answers flattened into one. Only the first is an empty
+    queue; without the strict read the other two come out of this command as a
+    zero census and exit 0, which is the same lie as a swallowed traversal error
+    and reads even more calmly.
+
+    The first two cases are real filesystem states rather than injected ones —
+    ``ENOTDIR`` is what any user gets for walking through a file, root included.
+    The third is injected, because the ways to make a path unstatable for real
+    (an unreadable parent, a symlink loop) are either root-dependent or noise.
+    """
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    for name in (EVAL_RETENTION_ENV, EVAL_AUTO_ENV, EVAL_QUEUE_MAX_AGE_ENV):
+        monkeypatch.delenv(name, raising=False)
+    data_dir = tmp_path / "data"
+    if blocked == "the data dir is a file":
+        data_dir.write_text("not a hub data dir", encoding="utf-8")
+    else:
+        data_dir.mkdir()
+    jobs_root = data_dir / "semantic-jobs"
+    if blocked == "a file stands at the jobs root":
+        jobs_root.write_text("not a queue", encoding="utf-8")
+    if blocked == "the path is unstatable":
+        jobs_root.mkdir()
+        real_stat = Path.stat
+
+        def refuse(self, **kwargs):
+            if self == jobs_root:
+                raise PermissionError(13, "Permission denied", str(self))
+            return real_stat(self, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", refuse)
+    monkeypatch.setenv(DATA_DIR_ENV, str(data_dir))
+
+    assert cli.main(["eval", "queue"]) == 1
+    assert cli.main(["eval", "queue", "--json"]) == 1
+
+    captured = capsys.readouterr()
+    # Same shape as the traversal failure above: no census, no partial JSON, one
+    # line naming the tree it could not read and what the filesystem said.
+    assert captured.out == ""
+    assert captured.err.count("error: cannot read the evaluation queue") == 2
+    assert str(jobs_root) in captured.err
+    assert "Not a directory" in captured.err or "Permission denied" in captured.err
+
+
 def test_eval_queue_leaves_every_record_and_the_control_untouched(
     monkeypatch, capsys, tmp_path
 ):

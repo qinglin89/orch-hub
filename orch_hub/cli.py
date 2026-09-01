@@ -943,7 +943,7 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
         return 1
     tree = jobs_root(config)
     try:
-        records = list_persisted_jobs(config)
+        records = list_persisted_jobs(config, strict=True)
     except OSError as exc:
         # A walk that could not finish knows nothing about how many jobs are
         # waiting, so it must not answer as though it did: "nothing waiting" is
@@ -951,6 +951,11 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
         # unreadable store is exactly the trouble it exists to report. Named as an
         # operational failure like the two above it, on stderr, with no partial
         # JSON — the shape ``eval catalog repair`` already uses.
+        #
+        # `strict=True` is what makes that promise reach the whole read rather than
+        # only its two ``iterdir`` levels: a store path that is not a directory, or
+        # cannot be stat-ed at all, would otherwise be swallowed by the walk's
+        # opening ``is_dir()`` and answer here as a zero census.
         #
         # Not the same thing as an unreadable *record*: `_load_record` turns a
         # broken ``job.json`` into its ``error`` record, which the census counts

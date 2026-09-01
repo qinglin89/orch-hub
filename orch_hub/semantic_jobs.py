@@ -142,11 +142,13 @@ partial artifacts are cleaned by the evaluator's own all-or-nothing dir removal)
 from __future__ import annotations
 
 import datetime as dt
+import errno
 import json
 import logging
 import os
 import re
 import secrets
+import stat
 import threading
 from collections.abc import Callable
 from dataclasses import replace
@@ -1551,7 +1553,7 @@ def jobs_root(config: Config) -> Path:
     return config.data_dir / SEMANTIC_JOBS_SUBDIR
 
 
-def list_persisted_jobs(config: Config) -> list[SemanticJob]:
+def list_persisted_jobs(config: Config, *, strict: bool = False) -> list[SemanticJob]:
     """Every persisted job record under ``config``, without a manager.
 
     The same walk :meth:`SemanticJobManager.list_jobs` takes, reachable from a
@@ -1562,14 +1564,61 @@ def list_persisted_jobs(config: Config) -> list[SemanticJob]:
     catalog) to walk a directory of small JSON files, and hold a manager that could
     start a turn it has no business starting.
 
+    ``strict`` binds what an **empty result** is allowed to mean. By default it
+    means "no record was found", which a caller that only wants the records it can
+    see is right to accept — the manager's in-process readers (the dispatch sweep,
+    the HTTP queue route, the startup reconcile) all want exactly that, and are
+    unchanged by this flag. A strict read narrows it to "the tree is genuinely not
+    there": anything else that stops the walk from happening raises instead
+    (:func:`_require_walkable_root`). The CLI queue read is strict because it
+    reports an *absence* as its headline answer, and "nothing waiting" about a
+    queue nobody managed to open is the one sentence that surface must never say.
+
     Safe against a live hub for the same reason ``eval catalog verify`` is: each
     ``job.json`` is written by an atomic same-dir rename, so a record either reads
     whole or is the previous whole one. The manager's lock is a *thread* lock and
     was never a cross-process guarantee — what a concurrent walk can see is a
     mixture of records at different instants, which is what any snapshot of a
-    moving queue is.
+    moving queue is. A strict read is a claim about the instant it looked, on the
+    same terms.
     """
-    return [_load_record(job_dir) for job_dir in _job_dirs_under(jobs_root(config))]
+    base = jobs_root(config)
+    if strict:
+        _require_walkable_root(base)
+    return [_load_record(job_dir) for job_dir in _job_dirs_under(base)]
+
+
+def _require_walkable_root(base: Path) -> None:
+    """Raise unless ``base`` is a directory or is genuinely not there.
+
+    :func:`_job_dirs_under` opens on ``base.is_dir()``, and ``Path.is_dir()``
+    answers False for three unrelated situations without telling them apart: the
+    tree is absent (an empty queue, honestly), something that is not a directory
+    stands at the path, or the path cannot be looked at at all — a parent that is
+    itself a file (``ENOTDIR``), an unreadable parent (``EACCES``), a symlink loop.
+    Only the first is an empty queue. The other two are a *failure to read one*,
+    and collapsing them into ``[]`` is how a store that cannot be walked comes out
+    as a calm zero census.
+
+    ``stat`` tells the three apart precisely because it raises where ``is_dir``
+    swallows: ``FileNotFoundError`` is the absence, any other ``OSError`` is the
+    filesystem refusing to answer and travels to the caller as it stands, and a
+    successful stat that is not a directory means something else is occupying the
+    tree's place. That last one is raised as ``ENOTDIR`` so every way this can fail
+    reaches the caller in one shape — the same ``OSError`` the two ``iterdir``
+    levels below already raise.
+
+    A path that resolves to nothing — including a dangling symlink, and including a
+    data dir that is itself absent — stays the absence. ``ENOENT`` is all the
+    filesystem will say about such a path, and "this hub has never written a job"
+    is the reading the empty-store behaviour already rests on.
+    """
+    try:
+        mode = base.stat().st_mode
+    except FileNotFoundError:
+        return
+    if not stat.S_ISDIR(mode):
+        raise NotADirectoryError(errno.ENOTDIR, os.strerror(errno.ENOTDIR), str(base))
 
 
 def _job_dirs_under(base: Path) -> list[Path]:

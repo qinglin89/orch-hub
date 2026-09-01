@@ -797,6 +797,49 @@ def test_the_manager_free_read_of_an_absent_store_creates_nothing(tmp_path):
     assert not cfg.data_dir.exists()
 
 
+@pytest.mark.parametrize("blocked", ["the jobs root", "the data dir"])
+def test_a_strict_read_refuses_a_store_path_that_is_not_a_directory(tmp_path, blocked):
+    """Strict narrows the empty result to genuine absence, nothing else.
+
+    ``_job_dirs_under`` opens on ``Path.is_dir()``, which is False for an absent
+    tree *and* for a path it could not stat *and* for a non-directory standing at
+    the path — so without this gate a store nobody could walk reads as a store
+    holding nothing. A caller reporting an absence as its headline answer (the CLI
+    queue read) has to be able to tell those apart.
+    """
+    cfg = config(tmp_path)
+    root = semantic_jobs.jobs_root(cfg)
+    if blocked == "the jobs root":
+        root.parent.mkdir(parents=True)
+        root.write_text("not a queue", encoding="utf-8")
+    else:
+        cfg.data_dir.write_text("not a hub data dir", encoding="utf-8")
+
+    with pytest.raises(OSError):
+        semantic_jobs.list_persisted_jobs(cfg, strict=True)
+
+
+@pytest.mark.parametrize("blocked", ["the jobs root", "the data dir"])
+def test_the_default_read_is_unchanged_for_the_manager_s_callers(tmp_path, blocked):
+    """The gate is opt-in: the in-process readers behave exactly as before.
+
+    The dispatch sweep, the HTTP queue route, and the startup reconcile all reach
+    the store through the manager, and all three want the records they can see —
+    a store path that will not open is a no-op for them, not a crash on a monitor
+    tick or at lifespan start. Turning the shared walk strict would have made it
+    one, which is why the strictness is a parameter the CLI asks for.
+    """
+    cfg = config(tmp_path)
+    root = semantic_jobs.jobs_root(cfg)
+    if blocked == "the jobs root":
+        root.parent.mkdir(parents=True)
+        root.write_text("not a queue", encoding="utf-8")
+    else:
+        cfg.data_dir.write_text("not a hub data dir", encoding="utf-8")
+
+    assert semantic_jobs.list_persisted_jobs(cfg) == []
+
+
 # -- operator cancel ----------------------------------------------------------
 #
 # The per-job lever, modelled on the intake manager's cancel. What it must get
