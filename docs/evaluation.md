@@ -476,7 +476,11 @@ of what actually happened:
 That last boundary is exact rather than a narrow window: the attempt closes its
 own cancellation window the moment its turn returns, and the two decisions are
 taken together, so a cancel either arrives first — in which case nothing is
-persisted or published — or is refused.
+persisted or published — or is refused. It holds even when the hub cannot write
+the outcome down: an attempt whose settlement never reaches `job.json` keeps
+refusing cancels instead of becoming cancellable again beside a report already
+published, and the [in-flight sweep](#when-a-turn-hangs) settles its record
+`failed` — the same bound every other wedged settlement has.
 
 A cancelled record with a start timestamp is a turn that had opened; one without
 is a turn that never did. If the hub cannot stop a live turn, the cancel fails and

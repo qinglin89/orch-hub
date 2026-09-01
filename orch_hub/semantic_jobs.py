@@ -942,12 +942,14 @@ class SemanticJobManager:
         cancel cannot undo and must not claim to have prevented. The attempt seals
         its canceller as the turn returns (:meth:`SemanticEvaluator._seal_turn
         <orch_hub.semantic.SemanticEvaluator._seal_turn>`) and stays registered
-        until its terminal record is written, so the two decisions are taken under
-        one lock and exactly one of them wins: either the cancel arrives first and
-        nothing is persisted or published, or it arrives second and is told the
-        attempt is settling. The alternative — accepting it — is precisely the
-        divergence this refuses to write: a record reading ``cancelled`` beside a
-        report standing in the evaluations tree and in the global feed.
+        until its terminal record is written — including when that write fails, so
+        a settlement the hub could not record still refuses rather than inviting a
+        cancel — so the two decisions are taken under one lock and exactly one of
+        them wins: either the cancel arrives first and nothing is persisted or
+        published, or it arrives second and is told the attempt is settling. The
+        alternative — accepting it — is precisely the divergence this refuses to
+        write: a record reading ``cancelled`` beside a report standing in the
+        evaluations tree and in the global feed.
 
         ``started_ts`` still distinguishes the two readings afterwards: a cancelled
         record carrying one is a turn that had opened; one without is a turn that
@@ -1048,6 +1050,17 @@ class SemanticJobManager:
         meets a *sealed* handle and is refused — instead of meeting no handle,
         being accepted, and writing ``cancelled`` over an evaluation the worker
         had already persisted and published.
+
+        And *written* means written. A finalize that raises before ``job.json`` is
+        replaced has not ended the attempt: the report is on disk and in the feed
+        while the durable record still reads ``running``, which is the one state
+        in which an accepted cancel is permanently wrong. So the release is the
+        last statement of a successful settle rather than a ``finally``, and a
+        settlement the hub could not record keeps the attempt non-cancellable —
+        bounded, like every other wedged settlement, by the sweep that reaps a
+        record past its deadline (:meth:`reconcile_stuck`) or by the startup sweep
+        after a restart, both of which settle it ``failed`` rather than claiming
+        anyone stopped it.
         """
         cancel = CommandCanceller()
         running = self._begin_running(job_dir, job_id, cancel)
@@ -1068,24 +1081,37 @@ class SemanticJobManager:
                     status=STATUS_FAILED,
                     error=_bound_error(f"semantic evaluation failed: {exc}"),
                 )
-                return
-            self._finalize(
-                job_dir,
+            else:
+                self._finalize(
+                    job_dir,
+                    job_id,
+                    status=STATUS_COMPLETED,
+                    evaluation_id=report.evaluation_id,
+                    backend=report.evaluator.backend,
+                    model=report.evaluator.model,
+                    schema_version=report.evaluator.schema_version,
+                )
+        except Exception:  # noqa: BLE001 - the settle failed; the handle stays
+            # The one exit that keeps the handle. This worker can do nothing more
+            # for the record, but the attempt it owns is settled — so the seal
+            # must outlive it rather than be dropped on the way out, and the
+            # operator is told the attempt is settling instead of being handed a
+            # cancel over a published report. Logged with the job named because
+            # the hub failing to write its own state is the operator's problem,
+            # not a stack trace the worker thread would otherwise print unowned.
+            _log.exception(
+                "semantic job %s for %s/%s could not record its terminal state;"
+                " the attempt stays non-cancellable until a sweep settles it",
                 job_id,
-                status=STATUS_COMPLETED,
-                evaluation_id=report.evaluation_id,
-                backend=report.evaluator.backend,
-                model=report.evaluator.model,
-                schema_version=report.evaluator.schema_version,
+                repo.name,
+                task_id,
             )
-        finally:
-            # AFTER the terminal write, not after the turn. The handle is what
-            # carries the attempt's seal, and a cancel that found no handle would
-            # be accepted — so releasing between the turn and the record would
-            # re-open, for exactly the width of a finalize, the window in which a
-            # ``cancelled`` record can be written over an evaluation that was
-            # already persisted and published.
-            self._release_attempt(job_dir, job_id)
+            return
+        # AFTER the terminal write, not after the turn, and not in a ``finally``:
+        # both would withdraw the handle while the durable record still says
+        # ``running``, and a cancel that finds no handle is accepted — writing
+        # ``cancelled`` over an evaluation already persisted and published.
+        self._release_attempt(job_dir, job_id)
 
     def _begin_running(
         self, job_dir: Path, job_id: str, cancel: CommandCanceller
@@ -1137,9 +1163,11 @@ class SemanticJobManager:
     def _release_attempt(self, job_dir: Path, job_id: str) -> None:
         """Withdraw this attempt's cancel handle once its record is terminal.
 
-        Not once its *turn* returns: the handle carries the attempt's settled
-        seal, so dropping it early would make a cancel arriving during the
-        finalize meet nothing and be accepted (:meth:`_run_job`).
+        Not once its *turn* returns, and not once its finalize has been
+        *attempted*: the handle carries the attempt's settled seal, so dropping it
+        while the durable record still reads ``running`` would make a cancel meet
+        nothing and be accepted (:meth:`_run_job`). Its caller therefore reaches
+        this only after a settle that returned.
 
         Keyed on ``job_id`` as well as the dir so a late release can never drop a
         *newer* attempt's handle: after a cancel, an operator may already have

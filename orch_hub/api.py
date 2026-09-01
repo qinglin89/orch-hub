@@ -2321,7 +2321,10 @@ def create_app(
         and the report is already being persisted, so nothing remains for a cancel
         to stop, and accepting it would leave a ``cancelled`` record beside a
         published report. Ask again is not needed — the job settles on its own
-        within seconds and the poll route shows what it became.
+        within seconds and the poll route shows what it became. The one settlement
+        that does not is one the hub could not *record* (a failed write of its own
+        job file): the refusal then stands, correctly, until the in-flight sweep
+        settles that record ``failed``.
 
         Cancelling holds the task's once-per-task guard like any other terminal
         record, so the automatic path will not re-enqueue it; ``POST

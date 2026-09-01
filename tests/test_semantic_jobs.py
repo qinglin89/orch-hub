@@ -28,7 +28,9 @@ test drives a *real* :class:`~orch_hub.semantic.SemanticEvaluator` (fake backend
 through the manager to confirm the completed job links a real evaluation dir and
 the target repo is untouched, and a second drives the real Claude backend over a
 hanging subprocess to confirm a turn that never returns settles ``failed`` with a
-deadline diagnostic. The protected HTTP surfaces live in
+deadline diagnostic. Real-stack tests also pin the post-model boundary: a
+settlement the hub cannot write down keeps the attempt non-cancellable, and the
+reap — never a cancel — frees its slot. The protected HTTP surfaces live in
 ``tests/test_api.py``.
 """
 
@@ -1809,15 +1811,21 @@ class RecordingCatalog:
         return None
 
 
-def _real_stack(tmp_path, cfg: Config, *, backend, catalog=None):
-    """Real evaluation service + evaluator + job manager over a fake backend."""
+def _real_stack(tmp_path, cfg: Config, *, backend, catalog=None, clock=None):
+    """Real evaluation service + evaluator + job manager over a fake backend.
+
+    ``clock`` is the *manager's*, so a test can advance past an attempt deadline
+    and drive the reap; the evidence and report stamps keep their own fixed ones.
+    """
     target_repo = _write_repo(cfg, tmp_path)
     service = EvaluationService(cfg, git_runner=_fake_git, clock=Clock())
     evaluator = SemanticEvaluator(
         cfg, evaluation_service=service, backend=backend, catalog=catalog,
         clock=Clock(),
     )
-    mgr = SemanticJobManager(cfg, evaluator=evaluator, clock=Clock(), executor=sync_executor)
+    mgr = SemanticJobManager(
+        cfg, evaluator=evaluator, clock=clock or Clock(), executor=sync_executor
+    )
     return target_repo, mgr
 
 
@@ -1899,6 +1907,67 @@ def test_a_cancel_racing_the_turns_return_leaves_no_report_anywhere(tmp_path):
     assert catalog.calls == []
     # Nothing half-written for a later reconciliation to publish either.
     assert list((cfg.data_dir / "evaluations" / "alpha" / TASK).glob("*")) == []
+
+
+def test_a_settle_that_cannot_be_written_keeps_the_attempt_non_cancellable(
+    tmp_path, monkeypatch
+):
+    """The seal has to outlive a terminal write that fails, or the window reopens.
+
+    The turn returned, sealed, and its report is on disk and in the global feed —
+    and then ``job.json`` could not be replaced. Withdrawing the attempt's handle
+    there (which an unconditional ``finally`` did) left the durable record reading
+    ``running`` with nothing registered behind it, so the next cancel met no
+    handle, was accepted, and wrote terminal ``cancelled`` beside the persisted,
+    published report: exactly the divergence the seal exists to prevent, reached
+    by the one path that stepped around it.
+
+    So the handle is withdrawn only once the terminal record is durable. A
+    settlement the hub could not record keeps the attempt non-cancellable, and the
+    slot is freed by the sweep that already bounds every other wedged settlement —
+    as ``failed``, which is true, rather than as a cancel that stopped nothing.
+    """
+    cfg = config(tmp_path, turn_timeout=30)
+    clock = Clock()
+    catalog = RecordingCatalog()
+    target_repo, mgr = _real_stack(
+        tmp_path, cfg, backend=FakeBackend(), catalog=catalog, clock=clock
+    )
+    real_write = semantic_jobs._write_record
+    failed_writes: list[str] = []
+
+    def fail_the_terminal_write(job_dir: Path, record) -> None:
+        # One shot, and only the settle: the queued/running writes that put the
+        # attempt in this state have to land, and so does the sweep's below.
+        if record.status == STATUS_COMPLETED and not failed_writes:
+            failed_writes.append(record.job_id)
+            raise OSError("no space left on device")
+        real_write(job_dir, record)
+
+    monkeypatch.setattr(semantic_jobs, "_write_record", fail_the_terminal_write)
+
+    mgr.start_job(target_repo, TASK)  # inline turn; its settle cannot be written
+
+    assert len(failed_writes) == 1  # the terminal write is the one that failed
+    job = mgr.get_job(target_repo, TASK)
+    assert job.status == STATUS_RUNNING  # the record never left the turn
+    assert len(catalog.calls) == 1  # ...while the report was published anyway
+    evaluation_id = catalog.calls[0][1]
+    report = cfg.data_dir / "evaluations" / "alpha" / TASK / evaluation_id
+    assert (report / "semantic_report.json").is_file()
+
+    with pytest.raises(SemanticJobStateError) as err:
+        mgr.cancel_job(target_repo, TASK)
+
+    assert "settling" in str(err.value)  # refused by the seal, not by the status
+    assert mgr.get_job(target_repo, TASK).status == STATUS_RUNNING  # not cancelled
+    assert (report / "semantic_report.json").is_file()
+    assert len(catalog.calls) == 1
+
+    # Still bounded: the reap settles the wedged attempt and frees its slot.
+    clock.advance(EVIDENCE_GRACE_SECONDS + 30 + SETTLE_GRACE_SECONDS + 1)
+    assert [settled.status for settled in mgr.reconcile_stuck()] == [STATUS_FAILED]
+    assert mgr.get_job(target_repo, TASK).status == STATUS_FAILED
 
 
 def test_a_hung_turn_settles_failed_and_frees_the_slot_without_a_restart(tmp_path):
