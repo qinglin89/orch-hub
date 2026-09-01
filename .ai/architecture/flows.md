@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Architecture: Core Flows
@@ -75,11 +75,13 @@ ordered read trace; semantic-schema-v2 retrieval effectiveness is distinct and
 grounds rediscovery risk. Missing/partial/unobserved parts and raw logs are
 recorded as omission or confidence degradation, never poor behavior. It persists
 `semantic_report.json` + `report.md` in the same dir and stamps the evidence
-schema cohort plus entry fidelity on the report. The default Claude CLI backend runs from an empty
-non-repo cwd with tools disabled, safe mode, no session persistence, and
-plan-mode writes blocked — the model cannot read live target-repo state outside
-the prompt. Protected routes expose availability, generation, async
-semantic job start/status, doctor readiness, history, and artifact readback.
+schema cohort plus entry fidelity on the report. The default Claude CLI backend
+runs from an empty non-repo cwd with tools disabled, safe mode, no session
+persistence, plan-mode writes blocked, and the configured turn deadline — the
+model cannot read live target-repo state outside the prompt or hold a worker
+past the attempt's enforced bound. Protected routes expose availability,
+generation, async semantic job start/status/cancel, queue pause/resume, doctor
+readiness, history, and artifact readback.
 The evaluations base may be reached through links for relocated storage, but
 creation, listing, artifact reads/writes, cleanup, and retention all open every
 repo/task/evaluation segment beneath it no-follow and act relative to contained
@@ -94,14 +96,21 @@ defaults true for legacy records; false writes terminal `skipped` with the
 closed `run-opt-out` reason, while true writes `deferred`. Later completing runs
 cannot overwrite either outcome; manual evaluation may replace a resting
 record. `SemanticJobManager` keeps the one current record per `(repo, task)`
-under `<ORCH_HUB_DATA_DIR>/semantic-jobs/` and reconciles restart-orphaned
-transient jobs to failed. `DeferredDispatcher` admits at most one held job per
-configured spacing only when current provider usage is fresh, attributable,
-and below the configured ceiling; uncertainty defers. Automatic L2 completion
-is quiet, while automatic failure notifies. Protected queue readback exposes an
-uncapped latest-attempt census, overdue/actionable rows, gate state, and the
-per-repo skipped tally without dispatching. The dashboard doctor-gates manual
-semantic actions, renders deferred/skipped/failed/current state, and keeps raw
+under `<ORCH_HUB_DATA_DIR>/semantic-jobs/`; startup fails orphaned transients,
+while the resident monitor reaps only records past the persisted deadline their
+workers are also held to. A cancellable attempt owns a collision-resistant id
+and live process handle until terminal state is durable; cancel kills or
+withholds uncommitted work, while a sealed/settling result refuses a false
+success. `DeferredDispatcher` admits at most one held job per configured spacing
+only when current provider usage is fresh, attributable, and below the
+configured ceiling; uncertainty defers. `<ORCH_HUB_DATA_DIR>/eval-control.json`
+persists a live pause that shares the dispatch-admission boundary, holds drain
+without stopping new deferred records, and reads fail-closed when damaged.
+Automatic L2 completion is quiet, while automatic failure notifies. Protected
+queue readback exposes an uncapped latest-attempt census, overdue/actionable
+rows, automatic/pause state, and the per-repo skipped tally without dispatching;
+`orch-hub eval queue` reads the same attempt projection directly from storage.
+The dashboard operates pause/resume/cancel beside that state and keeps raw
 artifacts behind Copy/Download.
 
 Global report publication: a coherent durable L1+L2 evaluation whose task is

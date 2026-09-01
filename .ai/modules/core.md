@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Modules: Core
@@ -42,18 +42,23 @@ exported them, sends one probe notification directly through
 `build_notifier(config)`, and reports delivery failure without printing the
 secret endpoint.
 
-Evaluation commands expose operator smoke checks:
+Evaluation commands expose operator smoke checks and persisted queue state:
 
 ```bash
 orch-hub eval doctor
+orch-hub eval queue [--json]
 ```
 
 `eval doctor` reports the optional evaluation gate, semantic backend/model/
 schema, retention setting, and backend availability without a model call; it
 exits 0 only when evaluation is enabled and the backend is available.
+`eval queue` reads semantic-job/control storage directly, reuses the HTTP queue
+projection, labels its census as attempts, and never writes. Its strict walk
+accepts only a genuinely absent jobs root as empty; unreadable, unstatable, or
+non-directory storage exits 1 with one bounded diagnostic and no partial output.
 
 Dependencies: config, registry, readiness, housekeeping, models, launchd,
-notifications, semantic.
+notifications, semantic, semantic_jobs, eval_control, eval_dispatch.
 
 ## Config
 
@@ -65,7 +70,7 @@ Responsibility: require `ORCH_HUB_MANDREL_PATH` (with
 `ORCH_HUB_HOST`, `ORCH_HUB_PORT`, `ORCH_HUB_DATA_DIR`, `ORCH_HUB_BARK_URL`,
 `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
-`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_EVAL_AUTO`,
+`ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_EVAL_TURN_TIMEOUT`, `ORCH_HUB_EVAL_AUTO`,
 `ORCH_HUB_EVAL_USAGE_CEILING`, `ORCH_HUB_EVAL_DISPATCH_SPACING`,
 `ORCH_HUB_EVAL_QUEUE_MAX_AGE`, `ORCH_HUB_CLAUDE_HOME`,
 `ORCH_HUB_CODEX_HOME`, and
@@ -93,7 +98,9 @@ defaults to `claude-opus-5`; `ORCH_HUB_EVAL_EFFORT` selects its reasoning
 effort and defaults to `max`. Blank/unset uses either default so the backend is
 constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
 to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
-values raise `ValueError`. `ORCH_HUB_EVAL_AUTO` independently defaults true.
+values raise `ValueError`. `ORCH_HUB_EVAL_TURN_TIMEOUT` defaults to 1800 seconds;
+`0` disables the Layer 2 subprocess deadline and the resident deadline reap.
+`ORCH_HUB_EVAL_AUTO` independently defaults true.
 The automatic Layer 2 policy defaults are an 80% ceiling, 900-second admission
 spacing, and a 21600-second queue-warning age; values are validated config, not
 dispatcher literals. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
@@ -110,6 +117,10 @@ commit metadata, housekeeping marker state, task inventory, control-dir
 questions, run state, run history, intake state, evaluation target/run links,
 static-metrics reports, semantic reports/jobs/queue snapshots, and semantic
 evaluator doctor output.
+`SemanticJob` carries the attempt's persisted `deadline_ts` and terminal
+`cancelled` state; `EvaluationControl` carries visible hub-wide pause state and
+its closed reason; `EvaluationQueueSnapshot` composes control with the complete
+attempt census and capped action rows.
 `UsageWindow`, `UsageCredits`, `ProviderUsage`, and `SubscriptionUsage`
 normalize Claude/Codex subscription-capacity display data; omitted provider
 fields stay `None` rather than zero so unavailable data cannot masquerade as
@@ -209,6 +220,10 @@ Responsibility: central wrapper for running commands with cwd, capture, timeout,
 and concise output extraction. Optional capped stdout mode streams and counts the
 whole output while retaining only its bounded head; one absolute deadline covers
 drain plus wait, and expiry kills/reaps the child before raising `TimeoutExpired`.
+All children receive `stdin=DEVNULL`; callers may replace the child environment.
+An optional `CommandCanceller` publishes a killable direct-child handle and
+raises `CommandCancelled`; `seal()` is atomic against cancel and makes a result
+too late to report as stopped.
 Missing executables are surfaced distinctly from ordinary command failures.
 Do not hide command failures that readiness or API callers need to report.
 The detached orchestrator launch is not routed through this blocking wrapper;

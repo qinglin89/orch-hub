@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Project Map
@@ -17,7 +17,7 @@ behavior and rationale stay in the owning doc.
 | Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads |
 | Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v18 evidence packs; unanimous protocol identity; hub-owned artifacts; descriptor containment |
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
-| Task semantic evaluator | completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | evidence-bounded Layer 2; completion-triggered L1; durable capacity-held L2; recorded skip; isolated backend |
+| Task semantic evaluator | completion_eval, eval_control, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | evidence-bounded Layer 2; deadline/reap bound; durable pause; exact cancel/settle boundary; recorded skip |
 | Global evaluation report feed | report_catalog, protocol_provenance, evaluation, semantic, task_store, models, api, cli, web | append-only catalog; seq + report_key identity; reconciliation; verify/repair CLI; consumers decide evolution |
 | Protocol identity coverage | protocol_provenance, runs, report_catalog, models, api, web | persisted run verdicts; check-owed lifecycle join; newest-published-report task denominator; read-only cross-store census |
 | Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, eval_dispatch, web, docs | fail-soft display; cache-primary Claude; model-free refresh; automatic-L2 pacing only |
@@ -26,7 +26,7 @@ behavior and rationale stay in the owning doc.
 | Run lifecycle | admission, runs, intake, orch_config, sessions, task_snapshots, protocol_provenance, api, config, control_dir, models, readiness, task_store | admission before readiness; per-repo serialization; detached launch; pre-spawn protocol capture + observed-end recheck |
 | Human question relay | control_dir, runs, api, notifications, models, web | fail-closed answer modes; metadata-only audit; one push per (run_id, seq) |
 | Log viewing | logs, runs, api | run-record located; bounded tails; bearer-header SSE |
-| Mobile dashboard | api, web | mobile-first SPA; display-only overlays; details in features/dashboard.md + dashboard-views.md |
+| Mobile dashboard | api, web | mobile-first SPA; scoped API-backed state and controls; details in features/dashboard.md + dashboard-views.md |
 | Remote intake-task | admission, intake, intake_agent, runs, api, web, models, readiness, task_store, notifications | hub-owned drafts; read-only until confirm; inventory-verified confirm |
 | Auth and private access | api, config | fail-closed bearer middleware; private network still required |
 | Notifications | notifications, config, runs, intake, semantic_jobs, monitor, launchd, api, cli | Bark backend; isolated best-effort delivery |
@@ -42,7 +42,7 @@ behavior and rationale stay in the owning doc.
 | Task inventory | `GET /api/tasks`; `GET /api/repos/{repo_id}/tasks[/{task_id}]` |
 | Task evaluation foundation | internal `EvaluationService`; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; `POST .../evidence`; batched state in `GET /api/history/runs`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | internal `StaticEvaluator`; `POST .../evaluations/{task_id}/metrics`; detail readback; dashboard Layer 1 |
-| Task semantic evaluator | internal `CompletionEvaluationTrigger` + `DeferredDispatcher` + `SemanticEvaluator` + `SemanticJobManager`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `GET /api/evaluation/doctor`; `GET /api/evaluation/queue`; `POST /api/runs` opt-out; CLI `orch-hub eval doctor`; report readback |
+| Task semantic evaluator | internal `CompletionEvaluationTrigger` + `EvaluationControlStore` + `DeferredDispatcher` + `SemanticEvaluator` + `SemanticJobManager`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `POST .../semantic/job/cancel`; `GET /api/evaluation/doctor`; `GET /api/evaluation/queue`; `POST /api/evaluation/queue/pause\|resume`; `POST /api/runs` opt-out; CLI `orch-hub eval doctor\|queue [--json]`; report readback |
 | Global evaluation report feed | internal `ReportCatalog`; CLI `orch-hub eval catalog verify\|repair [--json] [--confirm]`; `GET /api/evaluation/reports[?after=<seq>&limit=<n>]`; `GET /api/evaluation/reports/{report_key}[/artifacts/{name}]`; dashboard `#/reports` |
 | Protocol identity coverage | internal `run_coverage` + run/report-catalog censuses; `GET /api/protocol-coverage`; dashboard `#/protocol` + Run-history/report-feed rows |
 | Agent subscription usage | internal `UsageService` + collectors/parsers; legacy `orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage` |
@@ -69,8 +69,8 @@ behavior and rationale stay in the owning doc.
 | readiness | fail-closed launch readiness checks + display-only protocol-placement relay from the same mandrel call |
 | git_meta | best-effort commit/patch metadata; display/evidence only |
 | housekeeping | display-only `.ai/.housekeeping-pending` state |
-| subprocess_utils | shared blocking command runs; capped streamed stdout |
-| cli | human/JSON output; launchd/notify/eval/catalog dispatch |
+| subprocess_utils | blocking command runs; deadline/cancel; DEVNULL stdin; capped streamed stdout |
+| cli | human/JSON output; launchd/notify/eval-doctor/queue/catalog dispatch |
 | launchd | plist render/install; launchctl lifecycle; status probe |
 | resources | source/frozen resource-root resolution |
 | install | versioned payload placement/selection; setup/upgrade/rollback/uninstall |
@@ -94,8 +94,9 @@ behavior and rationale stay in the owning doc.
 | static_metrics | deterministic Layer 1 scores; `static_metrics.json` |
 | semantic | evidence-bounded Layer 2 reports; backend isolation; doctor |
 | completion_eval | isolated run-completion trigger; durable enqueue/skip + off-lock Layer 1 |
-| eval_dispatch | capacity/spacing policy; deferred queue sweep; queue projection |
-| semantic_jobs | persisted async/latest-outcome records; task once-guard; skip; orphan reconciliation |
+| eval_control | persisted hub-wide queue pause; unreadable state fails toward hold |
+| eval_dispatch | capacity/spacing/pause policy; admission barrier; queue projection |
+| semantic_jobs | persisted async/latest-outcome records; deadline reap; cancel; strict/lenient store reads |
 | report_catalog | append-only publication feed; audit/repair; retention guard |
 | usage | Claude cache/CLI + Codex rollout collection; fail-soft merge |
 | statusline | legacy optional statusLine fallback wrapper |

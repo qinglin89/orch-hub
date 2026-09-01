@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-28
-verified-against: d4a9de5969e397c7896d23299d73ed175bd83a61
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Modules: Task Evaluation Layers
@@ -137,6 +137,11 @@ boundary is load-bearing: the semantic model must judge only the persisted
 prompt/evidence and cannot read live repo files, raw logs, or secrets. It sees
 `.ai/` only as the bounded persisted copy in the prompt; a live reread would
 break artifact reproducibility.
+The backend routes the turn through `subprocess_utils.run_command` with
+`Config.eval_turn_timeout` and a per-attempt canceller. Timeout/cancel exceptions
+become bounded semantic failures without exposing the prompt-bearing argv.
+Immediately after backend return the evaluator atomically seals the result
+against cancellation before parsing, persisting, publishing, and pruning.
 Codex CLI 0.149.0 is not an admissible backend: its read-only sandbox still
 allows filesystem reads, and `codex exec` has no built-in-tool-disable equivalent;
 reconsideration requires re-verifying that structural gate in a newer CLI.
@@ -153,11 +158,29 @@ existing queued/running work and overwrites deferred or terminal state;
 automatic `enqueue_if_absent`/`skip_if_absent` refuses any existing task record,
 which is the durable once-per-task guard. Automatic attempts begin `deferred`;
 terminal `skipped` carries only a closed machine reason and no turn timestamps.
-The manager runs admitted turns off-lock/off-thread, reconciles only orphaned
-queued/running jobs to failed on startup, and links completed jobs to the fresh
-`evaluation_id`. Automatic success is notification-quiet; automatic failure and
-manual outcomes notify through isolated dispatch. The old synchronous
-`POST /semantic` route is retired.
+The manager runs admitted turns off-lock/off-thread, persists a whole-attempt
+`deadline_ts`, refuses to open a model turn after its enforced pre-turn window,
+and lets the resident monitor settle only expired transients; startup still
+reconciles process-orphaned queued/running jobs. `ORCH_HUB_EVAL_TURN_TIMEOUT=0`
+removes both turn deadline and live reap. Per-attempt live cancellers stop
+deferred/queued/running work; result sealing and handle retention through a
+successful terminal write make a settling attempt honestly non-cancellable.
+Attempt ids include collision-resistant entropy so late finalize/release cannot
+own an immediate retry. Completed jobs link the fresh `evaluation_id`;
+`cancelled` is terminal and action-row-ineligible. Automatic success is
+notification-quiet; automatic failure and manual outcomes notify through
+isolated dispatch. `list_persisted_jobs` exposes the same walk without a manager;
+strict mode lets CLI readers distinguish genuine absence from an unreadable or
+non-directory store. The old synchronous `POST /semantic` route is retired.
+
+## Evaluation Control
+
+`EvaluationControlStore` in `orch_hub/eval_control.py` owns the single persisted
+`<data_dir>/eval-control.json` pause state. Pause holds only automatic dispatch,
+not completion acceptance; missing state means running, while unreadable/corrupt
+state fails closed to paused with a distinct reason and `resume()` overwrites it.
+The dispatcher, queue projection, and CLI read this store; HTTP pause/resume are
+its writers.
 
 ## Completion Evaluation Trigger
 
@@ -177,6 +200,8 @@ over the mechanism above. A serialized sweep checks both automatic gates,
 durable spacing since the latest queued/running admission (manual included), and
 fresh attributable provider usage below the configurable ceiling, then promotes
 at most the oldest deferred job. Unknown/stale usage defers; held jobs survive
-restart and are retried by the resident monitor. `queue_snapshot` folds the same
-store into an uncapped latest-attempt census, per-repo skip tally, overdue count,
-and capped actionable rows without moving the queue.
+restart and are retried by the resident monitor. A cheap pause precheck avoids
+work, while a shared admission barrier re-reads control atomically with promotion
+so a completed pause cannot leak one stale dispatch. `queue_snapshot` folds the
+same store plus control value into an uncapped latest-attempt census, per-repo
+skip tally, overdue count, and capped actionable rows without moving the queue.

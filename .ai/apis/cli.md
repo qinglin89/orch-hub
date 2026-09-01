@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # APIs: CLI
@@ -175,6 +175,26 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   available; disabled, unavailable, or malformed config exits non-zero.
 - Non-goal: does not generate evaluation artifacts, call the model, inspect
   repos, start/stop runs, or gate run-control flows.
+
+## `orch-hub eval queue [--json]`
+
+- Purpose: read the persisted Layer 2 attempt lifecycle without requiring the
+  resident service or a bearer token.
+- Source: a manager-free semantic-job walk plus `EvaluationControlStore`, folded
+  through the same `queue_snapshot` projection as HTTP. The first human line
+  names the env-resolved store path so a shell pointed at another hub is visible.
+- Output: automatic-gate and pause state, complete known/unknown status census,
+  overdue count, per-repo skip tally, capped actionable rows, and truncation
+  state. Human output labels the population as attempts, one latest record per
+  `(repo, task)`, not an evaluated-corpus denominator; `--json` emits the queue
+  snapshot without HTTP's always-true `enabled` envelope.
+- Exit code: `0` for any successful read, including paused/failed/overdue/empty;
+  malformed config, disabled evaluation, or a queue tree that is non-directory,
+  unstatable, or untraversable returns `1` with one `error:` line and no partial
+  output. Only a genuinely absent jobs root is an empty queue; a malformed
+  `job.json` remains a counted `error` record.
+- Non-goal: read-only; pause/resume/cancel stay on the live HTTP/dashboard
+  control surface.
 
 ## `orch-hub eval catalog verify [--json]`
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Architecture
@@ -104,6 +104,9 @@ archives.
 - Every hub-observed completed task mechanically produces Layer 1 and a durable
   task-level Layer 2 outcome. Automatic Layer 2 waits on capacity; a per-run
   opt-out records `skipped` rather than creating an invisible absence.
+- Layer 2 turns and their resident reaping share one persisted whole-attempt
+  deadline. Queue pause stops dispatch but not completion acceptance; per-job
+  cancel cannot report success after result settlement has begun.
 - Global report entries are append-only and uniquely ordered; retained or pruned
   artifact state is reported explicitly, and publication never decides protocol
   evolution.

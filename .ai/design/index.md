@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Design Principles and Decisions
@@ -26,6 +26,9 @@ verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
   run-state, launch, or intake policy. The sole scheduling exception is the
   automatic Layer 2 sidecar: unknown/stale/high usage holds its durable queue;
   manual evaluation remains ungated.
+- Observable, bounded Layer 2: model turns carry configured deadlines; live
+  reaping uses the attempt's enforced persisted bound; pause holds dispatch but
+  not acceptance; cancel is honest only while the attempt remains stoppable.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Cross-kind repo admission: a live run and a non-terminal hub-driven intake
   cannot share a repo; admission is atomic and distinct from readiness.
@@ -75,7 +78,8 @@ verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
 - Starting model turns solely to refresh subscription usage, scraping provider
   UI/private endpoints, spending Codex reset credits, or treating quota data as
   repo health.
-- Adding watchdog or log-silence detection.
+- Adding heuristic watchdog or log-silence detection; semantic-job recovery must
+  use its enforced deadline rather than infer a hang from quiet output.
 - Hardcoding target repo paths in product code.
 - Using broad shell commands where structured subprocess arguments are practical.
 

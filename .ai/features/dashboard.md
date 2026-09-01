@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Features: Mobile Dashboard — Shell and Infrastructure
@@ -87,10 +87,14 @@ Implemented behavior:
   gates.
 - The Overview Evaluation queue section independently polls protected
   `GET /api/evaluation/queue` and renders the complete latest-attempt census,
-  held-gate/overdue explanations, capped actionable rows, and per-repo skipped
-  tally. Evaluation-disabled hides the section; read failure renders unavailable
-  without disturbing repo/activity/usage panels. Its route-scoped refresh shares
-  the Overview cancellation/generation guards and creates no Attention rows.
+  automatic-gate/pause/overdue explanations, capped actionable rows, and
+  per-repo skipped tally. Pause/Resume repaints this stable section from the full
+  control response; cancellable rows expose Cancel beside, not inside, their task
+  link. A paused queue is labelled paused rather than idle, and control errors use
+  a scoped live status region. Evaluation-disabled hides the section; read
+  failure renders unavailable without disturbing repo/activity/usage panels. Its
+  route-scoped refresh shares the Overview cancellation/generation guards and
+  creates no Attention rows.
 - Route generation is the stale-view ownership guard: router bumps it on every
   entry; routed handlers, `rerender`, and intake action success/error paths
   capture before their own await/POST and skip stale paints, landing, error

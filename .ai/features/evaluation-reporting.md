@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Features: Semantic Evaluation and Report Feed
@@ -16,7 +16,7 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot,
+Modules: completion_eval, eval_control, eval_dispatch, semantic_jobs, semantic, ai_snapshot,
 session_reads, static_metrics, evaluation, usage, runs, monitor, config, models,
 notifications, api, cli, web.
 
@@ -25,9 +25,11 @@ APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `CompletionEvaluationTrigger`, `DeferredDispatcher`, `SemanticJobManager`;
 protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`,
-`GET /api/evaluation/doctor`, `GET /api/evaluation/queue`, `POST /api/runs`
-`auto_semantic_eval`, CLI `orch-hub eval doctor`, dashboard Layer 2 controls,
-and evaluation detail readback of `semantic_report` and `report.md`.
+`POST .../semantic/job/cancel`, `GET /api/evaluation/doctor`,
+`GET /api/evaluation/queue`, `POST /api/evaluation/queue/pause|resume`,
+`POST /api/runs` `auto_semantic_eval`, CLI `orch-hub eval doctor|queue`,
+dashboard Layer 2 controls, and evaluation detail readback of
+`semantic_report` and `report.md`.
 
 Implemented behavior:
 
@@ -58,7 +60,10 @@ Implemented behavior:
 - The default Claude CLI backend is evidence-bounded structurally: it runs one
   stateless `claude -p` turn from a fresh empty cwd outside the target repo with
   `--tools ""`, `--safe-mode`, `--no-session-persistence`, and
-  `--permission-mode plan`.
+  `--permission-mode plan`. `ORCH_HUB_EVAL_TURN_TIMEOUT` defaults to 1800s and
+  bounds that subprocess through the shared runner; `0` disables both its
+  deadline and live deadline reaping. Timeout diagnostics never stringify the
+  evidence-bearing argv.
 - The semantic doctor is a cheap availability/config probe: HTTP returns
   `SemanticDoctor` and CLI exits 0 only when evaluation is enabled and the
   backend resolves. It never performs a model call or gates run control.
@@ -69,9 +74,18 @@ Implemented behavior:
   `<data_dir>/semantic-jobs/`. Manual starts reuse transient turns and overwrite
   resting records; automatic enqueue/skip refuses any existing record, giving a
   durable once-per-task guard across repeated completing runs. Lifecycle is
-  `deferred` → `queued` → `running` → `completed|failed`, plus terminal
-  `skipped` (no turn) and `error` (unreadable record). Restart reconciliation
-  fails only orphaned queued/running turns; held/skipped records survive.
+  `deferred` → `queued` → `running` → `completed|failed|cancelled`, plus terminal
+  `skipped` (no turn) and `error` (unreadable record). A running record persists
+  the whole-attempt deadline its worker is enforced against; the resident sweep
+  settles only expired transients, while startup reconciliation still fails
+  process-orphaned queued/running turns. Held/skipped records survive.
+- Per-attempt cancellation is legal only from deferred/queued/running. A live
+  canceller kills the direct model child or withholds a not-yet-opened turn; an
+  atomic seal at model return makes later cancel refuse while parsing,
+  persistence, publication, or terminal settlement finishes. Collision-resistant
+  attempt ids and job-id-keyed live ownership keep a late worker from settling or
+  unregistering a retry. A failed terminal record write retains sealed ownership
+  until deadline/startup reconciliation records the failure.
 - Every hub-observed run completion triggers evaluation after session, task, and
   deployed-protocol evidence settles. Layer 2 acceptance is an inline durable
   enqueue or skip; Layer 1 and the global dispatch sweep run off the run-manager
@@ -83,6 +97,12 @@ Implemented behavior:
   spacing only below the configured provider-usage ceiling; missing, stale,
   boundary-less, or otherwise unknown usage defers. The resident monitor retries
   automatically; both evaluation gates hold the durable queue closed.
+- `<data_dir>/eval-control.json` persists a separate live pause over queue drain.
+  Completions continue landing as deferred records; resume loses no held work.
+  Pause writes and dispatch promotion share an admission barrier, so a pause that
+  has returned cannot be followed by a stale-read promotion. Missing control is
+  running; corrupt/unreadable control fails closed to a visible paused state and
+  `resume` repairs it. Manual starts remain deliberately ungated.
 - `ORCH_HUB_EVAL_USAGE_CEILING` defaults 80%, dispatch spacing defaults 900s,
   and the queue warning age defaults 21600s. Spacing uses queued admission (and
   counts manual turns), so executor latency cannot admit a herd after rollover.
@@ -92,9 +112,16 @@ Implemented behavior:
   reason `run-opt-out`. The first completing run's task record wins in both
   directions; a manual semantic start may later replace the skip.
 - `GET /api/evaluation/queue` is a read-only cross-repo latest-attempt census
-  plus overdue/actionable rows, automatic-gate state, and a most-skipped-first
-  per-repo tally. Completed/skipped records stay out of the capped action rows;
-  unknown statuses remain counted.
+  plus overdue/actionable rows, automatic-gate/pause state, and a
+  most-skipped-first per-repo tally. Completed/skipped/cancelled records stay out
+  of the capped action rows; unknown statuses remain counted. The Overview
+  operates pause/resume beside the section and cancel beside cancellable rows;
+  paused is distinct from idle.
+- `orch-hub eval queue [--json]` takes the same projection over a manager-free
+  persisted-store read, labels the census as attempts rather than evaluated
+  corpus, prints both global holds, and changes nothing. Only a genuinely absent
+  jobs root reads empty; non-directory, unstatable, or untraversable storage is a
+  concise operational failure rather than a zero census.
 - Fresh manual completed/failed finalizers notify. Automatic completion is quiet
   to avoid duplicating the run-end push; automatic failure still notifies because
   the measured corpus shrank unexpectedly. Skip, transient/error states,

@@ -1,12 +1,12 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # APIs: HTTP — Task Evaluation
 
-Evaluation availability, doctor, global report feed/export, per-task
-listing/readback, evidence/metrics generation, and semantic-job routes.
+Evaluation availability, doctor, queue state/control, global report feed/export,
+per-task listing/readback, evidence/metrics generation, and semantic-job routes.
 Cross-cutting auth/app behavior: `http-core.md`.
 
 ## `GET /api/evaluation`
@@ -31,15 +31,30 @@ Cross-cutting auth/app behavior: `http-core.md`.
 - Purpose: read the cross-repo automatic Layer 2 queue without dispatching,
   reading usage, or triggering any refresh.
 - Shape: `{"enabled":true,"auto_enabled":bool,
+  "control":{"paused":bool,"paused_ts":string|null,"reason":string|null},
   "queue_max_age_seconds":int,"counts":object,"skipped_by_repo":object,
   "overdue":int,"entries":array,"truncated":bool}`.
   `counts` is the uncapped complete latest-attempt census (known zeroes included,
   unknown statuses retained); `skipped_by_repo` counts current terminal skips;
   `entries` is capped actionable deferred/queued/running/failed/error state with
-  live age/overdue projection. Completed and skipped are resting outcomes and
-  never consume action rows.
+  live age/overdue projection. Completed, skipped, and cancelled are resting
+  outcomes and never consume action rows.
 - Gate: protected and evaluation-enabled; deliberately not hidden when
   `ORCH_HUB_EVAL_AUTO=false`, because `auto_enabled:false` explains a held queue.
+
+## `POST /api/evaluation/queue/pause|resume`
+
+- Purpose: persistently hold/release automatic queue drain without changing the
+  completion trigger or losing newly accepted deferred records.
+- Shape: HTTP 200 full queue payload, including the resulting `control` state.
+- Semantics: pause is linearized with dispatch admission, so a returned pause
+  cannot be followed by a promotion from a stale control read. Repeated pause
+  preserves the original pause timestamp; resume rewrites even unreadable state
+  and is therefore its repair path. A missing control file means running;
+  unreadable/corrupt state reads fail-closed as paused with reason
+  `unreadable-control`.
+- Gate: protected and evaluation-enabled; neither route reads usage or starts a
+  turn itself.
 
 ## `GET /api/protocol-coverage`
 
@@ -181,22 +196,40 @@ Cross-cutting auth/app behavior: `http-core.md`.
   `SemanticEvaluator.evaluate` off-thread. The evaluator writes only hub-owned
   evidence/static/semantic/Markdown artifacts; backend/schema failures settle the
   job to `failed` with a bounded diagnostic and leave no partial evaluation.
+  Each running attempt carries the persisted whole-attempt deadline that the
+  worker and resident reap both enforce.
 - Shape: HTTP 201 `{"job": SemanticJob}`. `deferred`, `queued`, `running`, and
   terminal `skipped` jobs carry evaluator identity; `completed` carries
   `evaluation_id`; `failed` carries bounded `error`; `skipped` carries bounded
-  `skip_reason`. A manual start overrides deferred/skipped/other terminal state,
+  `skip_reason`. `cancelled` is a terminal operator-stopped outcome. A manual
+  start overrides deferred/skipped/other terminal state,
   while a duplicate queued/running start returns the existing job and starts no
   second model call.
 - Errors: unknown repo returns 404; unsafe repo/task segments return 400;
   disabled returns 404.
+
+## `POST /api/repos/{repo_id}/evaluations/{task_id}/semantic/job/cancel`
+
+- Purpose: stop one deferred/queued/running attempt and persist terminal
+  `cancelled` without mutating the target repo.
+- Semantics: queued/pre-model cancellation withholds the turn; a running cancel
+  kills the direct child. Model return atomically seals the result, after which
+  cancellation is refused while parsing/persistence/publication/terminal settle
+  proceeds. A failed terminal-record write retains that non-cancellable live
+  ownership until deadline/startup reconciliation records `failed`.
+- Shape: HTTP 200 `{"job": SemanticJob}` on a real cancellation.
+- Errors: unknown job/repo is 404; unsafe segments are 400; terminal, unknown,
+  or already-settling state is 409; disabled evaluation is 404. A failed process
+  kill is not reported as a successful cancellation.
 
 ## `GET /api/repos/{repo_id}/evaluations/{task_id}/semantic/job`
 
 - Purpose: read the current semantic-evaluation job state for page load and
   polling.
 - Shape: HTTP 200 `{"job": SemanticJob|null}`; states are `deferred`, `queued`,
-  `running`, `completed`, `failed`, `skipped`, or surfaced corrupt-record
-  `error`; `null` means the task has never had a semantic-job record.
+  `running`, `completed`, `failed`, `cancelled`, `skipped`, or surfaced
+  corrupt-record `error`; `null` means the task has never had a semantic-job
+  record.
 - Errors: unknown repo returns 404; unsafe repo/task segments return 400;
   disabled returns 404. Corrupt job records surface as terminal `error` jobs
   rather than hiding broken state.

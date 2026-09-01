@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Features
@@ -17,7 +17,7 @@ below.
 | Auth and private access | implemented | fail-closed bearer middleware; Tailscale-only exposure | core.md |
 | Task evaluation foundation | implemented | bounded read-only evidence packs for active/archived tasks | evaluation.md |
 | Task static metrics | implemented | deterministic Layer 1 score report beside the evidence pack | evaluation.md |
-| Task semantic evaluator | implemented | completion-triggered L1 + capacity-held async Layer 2 with recorded opt-out | evaluation-reporting.md |
+| Task semantic evaluator | implemented | completion-triggered L1 + bounded, pausable, cancellable async Layer 2 with recorded opt-out | evaluation-reporting.md |
 | Global evaluation report feed | implemented | append-only cross-repo publication catalog + verified reads | evaluation-reporting.md |
 | Protocol identity coverage | implemented | per-run verdict visibility + distinct published-task coverage census | run-observability.md, evaluation-reporting.md, dashboard-views.md |
 | Run lifecycle | implemented | admission-gated orchestrator subprocess start/stop/reattach | run-control.md |

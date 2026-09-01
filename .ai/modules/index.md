@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Modules
@@ -9,7 +9,7 @@ Full responsibilities live in the detail files below.
 
 | Module | Location | Description |
 |---|---|---|
-| CLI | `orch_hub/cli.py` | `repos` readiness output; launchd/notify/eval-doctor dispatch |
+| CLI | `orch_hub/cli.py` | `repos` readiness output; launchd/notify/eval doctor/queue/catalog dispatch |
 | Config | `orch_hub/config.py` | env defaults/overrides; token/Bark/eval/Claude/Codex settings; derived paths |
 | Launchd operations | `orch_hub/launchd.py` | deploy/update/lifecycle/status; Bark URL surfacing |
 | Runtime resources | `orch_hub/resources.py` | checkout/wheel/frozen resource-root resolution |
@@ -26,7 +26,7 @@ Full responsibilities live in the detail files below.
 | Readiness | `orch_hub/readiness.py` | fail-closed per-repo launch checks + opaque placement relay from the same mandrel call |
 | Git metadata | `orch_hub/git_meta.py` | best-effort producer-capped commit reads and caller-capped path-patch streams for display/evidence |
 | Housekeeping | `orch_hub/housekeeping.py` | display-only `.ai/.housekeeping-pending` detection |
-| Subprocess utilities | `orch_hub/subprocess_utils.py` | shared blocking wrappers; optional producer-capped stdout with whole-call timeout |
+| Subprocess utilities | `orch_hub/subprocess_utils.py` | blocking wrappers; whole-call timeout, cancellation, DEVNULL stdin, optional producer-capped stdout |
 | Task inventory | `orch_hub/task_store.py` | `.ai-tasks` index/frontmatter parsing; contained active/archive reads |
 | Repo admission | `orch_hub/admission.py` | per-repo atomic run↔intake admission; persisted occupancy probes; structured conflicts |
 | Evaluation | `orch_hub/evaluation.py` | evidence targets/packs; artifact persistence/retention/reads |
@@ -35,8 +35,9 @@ Full responsibilities live in the detail files below.
 | Static metrics | `orch_hub/static_metrics.py` | deterministic six-axis metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation incl. retrieval effectiveness; backend isolation; doctor |
 | Completion evaluation | `orch_hub/completion_eval.py` | isolated completed-task trigger; durable enqueue/skip; off-lock Layer 1 |
-| Evaluation dispatch | `orch_hub/eval_dispatch.py` | usage/spacing-gated deferred queue; operator snapshot |
-| Semantic jobs | `orch_hub/semantic_jobs.py` | one latest job/outcome per task; once-guard, skip, orphan reconciliation |
+| Evaluation control | `orch_hub/eval_control.py` | persisted hub-wide queue pause; fail-closed damaged-state read |
+| Evaluation dispatch | `orch_hub/eval_dispatch.py` | usage/spacing/pause-gated deferred queue; admission barrier; operator snapshot |
+| Semantic jobs | `orch_hub/semantic_jobs.py` | one latest job/outcome per task; deadline reap, cancellation, manager-free reads |
 | Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained reads; distinct-task protocol-coverage census |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
 | StatusLine writer | `orch_hub/statusline.py` | legacy optional statusLine fallback feeding the usage sink |

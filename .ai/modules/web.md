@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Modules: Web UI
@@ -79,6 +79,8 @@ failure. Subscription usage cards show Claude/Codex provider windows,
 used/remaining percentages, reset time, plan, freshness/stale and unavailable
 states, and aggregate reset-credit availability, but never create attention
 items or affect readiness/run/intake gates. The evaluation section shows the
-complete latest-attempt census, global gate/overdue state, capped actionable
-rows, and per-repo skip tally; disabled hides it and read failure degrades only
-that section.
+complete latest-attempt census, automatic/pause/overdue state, capped actionable
+rows, and per-repo skip tally. Its stable section slot lets Pause/Resume repaint
+only that panel, and cancellable rows offer Cancel outside the task link with
+scoped success/error announcement; paused is never rendered as idle. Disabled
+hides it and read failure degrades only that section.

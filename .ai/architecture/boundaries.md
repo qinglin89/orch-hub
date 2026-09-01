@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Architecture: Ownership and Boundaries
@@ -19,7 +19,8 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
-| Semantic job records | `<ORCH_HUB_DATA_DIR>/semantic-jobs/` | one latest attempt/outcome per `(repo, task)`; durable automatic queue and task-level skip census |
+| Semantic job records | `<ORCH_HUB_DATA_DIR>/semantic-jobs/` | one latest attempt/outcome per `(repo, task)`; durable automatic queue, whole-attempt deadline, cancellation state, and task-level skip census |
+| Evaluation dispatch control | `<ORCH_HUB_DATA_DIR>/eval-control.json` | hub-wide persisted pause; missing = running, unreadable = fail-closed paused; never stamped onto individual jobs |
 | Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; confirmed repair may remove only identity-preserving redundant/torn bytes after a durable non-overwriting backup; consumers decide protocol evolution |
 | Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only except automatic-L2 pacing; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
@@ -58,16 +59,19 @@ invariants: `index.md`. Runtime flows: `flows.md`.
   Layer 1 work plus durable Layer 2 enqueue/skip acceptance after run evidence
   settles; it cannot change run state, readiness, attention, or admission.
 - Semantic jobs own the one-record-per-task Layer 2 lifecycle, task-level
-  once-guard, capacity-held queue, bounded skip/failure reasons, and completed
-  `evaluation_id` linkage — not evaluation evidence or target state.
+  once-guard, capacity-held queue, enforced deadline/reaping, cancellation and
+  completed `evaluation_id` linkage — not evaluation evidence or target state.
+- Evaluation control owns one persisted hub-wide pause. Dispatch and pause share
+  an admission boundary; the pause holds only queue drain, never completion
+  acceptance or the queue projection.
 - Report catalog owns cross-repo publication identity/order, reconciliation,
   provenance/hash manifests, bundle containment, byte-exact artifact
   verification reads, publication-debt retention protection, and explicit local
   audit/identity-preserving repair—not evaluation judgment or protocol-evolution
   policy.
 - Evaluation API/dashboard presentation owns sidecar routing, readback, doctor
-  gating, job polling, history comparison; never gates run control or inlines
-  raw logs.
+  gating, job polling/cancel, queue pause/resume, and history comparison; never
+  gates run control or inlines raw logs.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end classification.
 - Control-dir handling owns only file-channel mechanics for questions,

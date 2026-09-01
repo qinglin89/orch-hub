@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # APIs: Internal — Evaluation Chain
@@ -125,6 +125,12 @@ the target repo; this enforces evidence-boundedness structurally rather than
 trusting prompt instructions. It accepts an optional usage observer called with
 stdout after the turn returns; observer failures are swallowed so usage
 bookkeeping cannot change semantic-evaluation outcomes.
+The command runs through `subprocess_utils.run_command` with the configured
+turn timeout, DEVNULL stdin, augmented environment, and an optional per-attempt
+`CommandCanceller`. Timeout/cancel diagnostics do not stringify prompt argv.
+`SemanticEvaluator` seals the result atomically against cancel immediately after
+backend return; a winning cancel takes the existing all-or-nothing cleanup path,
+while a winning seal makes all later persistence/publication non-cancellable.
 
 ## Automatic Completion And Semantic Jobs
 
@@ -132,8 +138,8 @@ Input: a completed `RunRecord`, config gates, persisted provider usage, or a
 manual managed-repo/task start.
 
 Output: immediate deterministic Layer 1 artifacts plus one durable current
-`SemanticJob` per `(repo, task)`; `EvaluationQueueSnapshot` for cross-repo
-operator readback.
+`SemanticJob` per `(repo, task)`; persisted hub-wide `EvaluationControl`;
+`EvaluationQueueSnapshot` for cross-repo operator readback.
 
 Behavior: `CompletionEvaluationTrigger` runs only when both evaluation gates
 are open and only after the run manager has settled terminal evidence. It writes
@@ -148,16 +154,33 @@ completing run decides in both directions; pre-field run records evaluate.
 it. `skip_if_absent` records no-turn terminal state; `start_job` is the manual,
 usage-ungated override for deferred/skipped/resting outcomes. Queued/running
 turns retain single-flight behavior, restart orphan reconciliation, bounded
-failure diagnostics, and completed `evaluation_id` linkage. Automatic success
-is notification-quiet; automatic failure notifies; skips never notify or pace.
+failure diagnostics, and completed `evaluation_id` linkage. Each running record
+persists the same whole-attempt deadline the worker is held to; a resident sweep
+settles only expired transients, while timeout `0` disables both deadline and
+live reap. `cancel_job` explicitly allows deferred/queued/running, kills or
+cooperatively withholds live work, and refuses after the evaluator seals its
+result. Live ownership remains registered through a successful terminal write
+and survives a failed one until reconciliation, so no standing report can be
+misreported as cancelled. Attempt ids are collision-resistant across immediate
+retry. Automatic success is notification-quiet; automatic failure notifies;
+skips and cancellation never notify or pace. `list_persisted_jobs` exposes the
+same store walk without constructing a manager; strict mode distinguishes a
+genuinely absent root from storage the caller could not read.
+
+`EvaluationControlStore` persists the pause in `<data_dir>/eval-control.json`.
+Missing means running; unreadable/corrupt means visibly paused and resume repairs
+it. Pausing holds only dispatch, not completion acceptance.
 
 `DeferredDispatcher` serializes sweeps, preserves held jobs across restarts,
-checks both automatic gates, and promotes at most the oldest eligible job. Its
+checks the automatic gate plus the live pause, and promotes at most the oldest
+eligible job. Its
 `CapacityGate` requires fresh, current, attributable provider windows below
 `eval_usage_ceiling`; unknown/stale data defers. Admission timestamps (including
 manual queued turns) enforce `eval_dispatch_spacing`, preventing rollover herds.
-`queue_snapshot` is read-only: uncapped latest-attempt counts, per-repo skipped
-counts, configured gate/age state, and capped actionable rows.
+A short admission barrier shared with pause rechecks control at promotion, so a
+returned pause cannot leak a stale dispatch. `queue_snapshot` is read-only:
+uncapped latest-attempt counts, per-repo skipped counts, configured gate/pause/
+age state, and capped actionable rows.
 
 ## Global Report Catalog
 

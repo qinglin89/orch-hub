@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-01
+verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
 ---
 
 # Project Overview
@@ -36,11 +36,13 @@ under the hub data dir for active or archived tasks, compute deterministic
 protocol/reliability/handoff/estimate/knowledge-maintenance/prefetch-reading
 static reports as
 `static_metrics.json` beside the evidence pack, run an evidence-bounded Claude
-CLI semantic evaluator through persisted async job records that prevent
-duplicate in-flight model calls and link completed jobs to `semantic_report.json`
-plus `report.md`, mechanically evaluate hub-observed task completions with
-immediate Layer 1 and capacity-deferred Layer 2, retain one durable latest
-Layer 2 outcome per task (including a countable per-run opt-out), and expose
+CLI semantic evaluator through deadline-bounded, cancellable persisted async
+job records that prevent duplicate in-flight model calls and link completed
+jobs to `semantic_report.json` plus `report.md`, mechanically evaluate
+hub-observed task completions with immediate Layer 1 and capacity-deferred
+Layer 2, retain one durable latest Layer 2 outcome per task (including a
+countable per-run opt-out), expose live persisted queue pause/resume and
+per-attempt cancel controls, and expose
 evaluation evidence/static/semantic artifacts
 through protected HTTP routes. Complete L1+L2 reports for archived tasks are
 published to one append-only, globally ordered catalog with stable keys,
@@ -65,10 +67,12 @@ attention, run state, or launch/intake gates; it only holds automatic Layer 2
 dispatch. The dashboard renders the
 task-evaluation sidecar with
 Layer 1 static metrics, doctor-gated Layer 2 semantic job
-deferred/running/skipped/failed/completed controls/report rendering, history model/version
+deferred/queued/running/skipped/cancelled/failed/completed controls/report rendering, history model/version
 comparison, and artifact copy/download affordances; later slices add IM bot
 control. Overview shows the automatic evaluation queue's latest-attempt census,
-overdue/actionable work, and per-repo skip tally. A central report view preserves
+pause/resume and per-job cancel controls, overdue/actionable work, and per-repo
+skip tally; `orch-hub eval queue` reads the same attempt lifecycle directly from
+hub storage. A central report view preserves
 the catalog's global publication order and links back to existing per-task detail.
 
 ## Users
@@ -115,7 +119,9 @@ the catalog's global publication order and links back to existing per-task detai
   off the run lock and durably hold Layer 2 until fresh subscription usage is
   below the configured ceiling and spacing permits one turn. The default-on
   per-run choice is hub-only; declining it records terminal `skipped` and never
-  reaches orchestrator argv.
+  reaches orchestrator argv. Bound each model turn and reap attempts only after
+  their persisted whole-attempt deadline; let operators pause/resume the drain
+  without losing newly accepted work and cancel one stoppable attempt.
 - Show Claude and Codex subscription usage as display capacity data:
   provider windows, used/remaining percentages, reset time, freshness, and
   unavailable/stale reasons, without starting model turns, directly opening
@@ -130,8 +136,9 @@ the catalog's global publication order and links back to existing per-task detai
 - Expose task evaluation as a sidecar HTTP workflow: availability, evidence
   generation/readback, static metrics generation/readback, semantic generation/
   readback, semantic doctor readiness, active or archived task targeting,
-  history selection with evaluator model/version identity, retention, and
-  artifact inspection without target-repo mutation.
+  history selection with evaluator model/version identity, queue state/control,
+  retention, and artifact inspection without target-repo mutation. Expose the
+  queue's persisted attempt census through a read-only local CLI as well.
 - Publish archived tasks' complete L1+L2 reports through one durable cross-repo
   feed with global order/identity, explicit artifact integrity/provenance
   (including the unanimous source-revision/payload-digest protocol pair), and
@@ -154,7 +161,8 @@ the catalog's global publication order and links back to existing per-task detai
 - Do not import `.mandrel/orchestrator/orchestrator.py`; launch it as a subprocess.
 - Do not add web, network, or orch-hub imports into the orchestrator itself.
 - Do not make the service public on the internet.
-- Do not implement watchdogs or hang/log-silence detection.
+- Do not infer orchestrator or evaluator hangs from log silence or elapsed-time
+  heuristics; semantic-job reaping rests only on its enforced persisted deadline.
 - Do not run more than one orchestrator at a time in the same target repo.
 - Do not treat unconfirmed intake drafts as active tasks or expose them through
   task inventory.
@@ -193,6 +201,8 @@ orch_hub/
   api.py
   cli.py
   config.py
+  eval_control.py
+  eval_dispatch.py
   evaluation.py
   history.py
   intake.py
@@ -202,6 +212,7 @@ orch_hub/
   readiness.py
   runs.py
   semantic.py
+  semantic_jobs.py
   static_metrics.py
   usage.py
   logs.py
