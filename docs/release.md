@@ -197,11 +197,12 @@ orch-hub launchd restart      # stop then start
 
 orch-hub notify test          # prove push delivery end to end
 orch-hub eval doctor          # Layer 2 semantic evaluator readiness
+orch-hub eval queue           # automatic Layer 2 queue: census, holds, stalled jobs
 orch-hub eval catalog verify  # global report catalog integrity
 ```
 
 Commands with a stable machine-readable form take `--json`, including `repos`,
-`version`, `versions`, `install`, and both `eval catalog` verbs.
+`version`, `versions`, `install`, `eval queue`, and both `eval catalog` verbs.
 
 `serve` exists because a compiled release ships **one** executable: the
 `orch-hub-api` console script a source install gets from packaging metadata

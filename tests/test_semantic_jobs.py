@@ -765,6 +765,38 @@ def test_list_jobs_walks_every_record_once(tmp_path):
     }
 
 
+def test_the_manager_free_read_returns_the_same_records_as_the_manager(tmp_path):
+    """``list_persisted_jobs`` is the walk a process owning no manager takes.
+
+    It exists for the CLI queue read: the manager's constructor requires an
+    evaluator, so a read-only surface would otherwise have to build the whole
+    Layer 2 chain to walk a directory of small JSON files — and would then be
+    holding a manager that could start a turn it has no business starting. The
+    guarantee worth pinning is that it is the *same* read, so the two surfaces
+    can never report different queues.
+    """
+    mgr = manager(tmp_path)
+    mgr.enqueue_if_absent(repo("alpha"), TASK)
+    mgr.enqueue_if_absent(repo("beta", Path("/repos/beta")), "2026-08-01-other")
+    # An unreadable record must surface as its `error` record here too: a broken
+    # dir that hides from the operator surface is the failure this store's own
+    # loader refuses to allow.
+    broken = config(tmp_path).data_dir / "semantic-jobs" / "gamma" / "2026-08-02-x"
+    broken.mkdir(parents=True)
+    (broken / "job.json").write_text("{not json", encoding="utf-8")
+
+    assert semantic_jobs.list_persisted_jobs(config(tmp_path)) == mgr.list_jobs()
+    assert {j.status for j in mgr.list_jobs()} == {STATUS_DEFERRED, STATUS_ERROR}
+
+
+def test_the_manager_free_read_of_an_absent_store_creates_nothing(tmp_path):
+    cfg = config(tmp_path)
+
+    assert semantic_jobs.list_persisted_jobs(cfg) == []
+    assert not semantic_jobs.jobs_root(cfg).exists()
+    assert not cfg.data_dir.exists()
+
+
 # -- operator cancel ----------------------------------------------------------
 #
 # The per-job lever, modelled on the intake manager's cancel. What it must get

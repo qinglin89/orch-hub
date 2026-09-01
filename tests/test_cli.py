@@ -17,20 +17,31 @@ import pytest
 
 from orch_hub import cli
 from orch_hub import __version__
+from orch_hub import semantic_jobs
 from orch_hub.config import (
     BARK_URL_ENV,
     DATA_DIR_ENV,
     DEFAULT_DATA_DIR,
+    EVAL_AUTO_ENV,
     EVAL_ENABLED_ENV,
+    EVAL_QUEUE_MAX_AGE_ENV,
     EVAL_RETENTION_ENV,
     LEGACY_MANDREL_PATH_ENV,
     MANDREL_PATH_ENV,
     PORT_ENV,
     TOKEN_ENV,
 )
+from orch_hub.eval_control import EVAL_CONTROL_NAME
+from orch_hub.eval_dispatch import QUEUE_ENTRY_LIMIT
 from orch_hub.install import InstallError
 from orch_hub.launchd import LaunchdError, PLIST_NAME
-from orch_hub.models import CommitInfo, ManagedRepo, ReadinessCheck, ReadinessReport
+from orch_hub.models import (
+    CommitInfo,
+    ManagedRepo,
+    ReadinessCheck,
+    ReadinessReport,
+    SemanticJob,
+)
 from orch_hub.registry import RegistryError
 from orch_hub.report_catalog import report_key
 
@@ -705,6 +716,339 @@ def test_eval_catalog_verify_reports_config_error(monkeypatch, capsys, tmp_path)
     monkeypatch.setenv(EVAL_RETENTION_ENV, "lots")
 
     rc = cli.main(["eval", "catalog", "verify"])
+
+    assert rc == 1
+    assert "error:" in capsys.readouterr().err
+
+
+# -- eval queue (the automatic Layer 2 path's read surface) -------------------
+#
+# Driven against a real hub data dir through the manager's own record writer, so
+# the CLI parses exactly the bytes the service persists rather than a shape a
+# fixture and the test agreed on between themselves. The projection underneath
+# (``queue_snapshot``) is covered in test_eval_dispatch; what is asserted here is
+# this command's own contract — what an operator reads, that the census carries
+# its attempts caveat, that both holds on the drain are always stated, and that
+# a read changes nothing on disk.
+
+
+def queue_env(monkeypatch, tmp_path: Path) -> Path:
+    """Point the CLI at an empty hub data dir; return its semantic-jobs root."""
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
+    for name in (EVAL_RETENTION_ENV, EVAL_AUTO_ENV, EVAL_QUEUE_MAX_AGE_ENV):
+        monkeypatch.delenv(name, raising=False)
+    return tmp_path / "semantic-jobs"
+
+
+def write_queue_job(jobs_root: Path, repo_name: str, task_id: str, **fields) -> Path:
+    """Persist one job record through the writer the manager itself uses."""
+    job_dir = jobs_root / repo_name / task_id
+    job_dir.mkdir(parents=True, exist_ok=True)
+    semantic_jobs._write_record(
+        job_dir,
+        SemanticJob(
+            job_id=f"{task_id}-job",
+            repo_name=repo_name,
+            repo_path=Path("/repos") / repo_name,
+            task_id=task_id,
+            **fields,
+        ),
+    )
+    return job_dir
+
+
+def test_eval_queue_reports_the_census_the_holds_and_the_waiting_jobs(
+    monkeypatch, capsys, tmp_path
+):
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="deferred",
+        defer_reason="capacity",
+        auto=True,
+        created_ts="2026-08-31T20:00:00+00:00",
+    )
+    write_queue_job(
+        jobs_root,
+        "beta",
+        "2026-08-02-b-task",
+        status="completed",
+        created_ts="2026-08-30T09:00:00+00:00",
+    )
+    write_queue_job(
+        jobs_root,
+        "gamma",
+        "2026-07-01-c-task",
+        status="skipped",
+        skip_reason="run-opt-out",
+        created_ts="2026-08-01T09:00:00+00:00",
+    )
+
+    rc = cli.main(["eval", "queue"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    # Where it was read from: the data dir is env-resolved, so a shell pointed
+    # somewhere other than the service's own hub must be able to tell.
+    assert str(jobs_root) in out
+    # The full census, zeros included — every status stated so the line is stable
+    # and greppable across reads.
+    assert "attempts: deferred 1, queued 0, running 0, completed 1, failed 0" in out
+    assert "cancelled 0, skipped 1, error 0" in out
+    # Both holds on the drain, stated whether or not they are engaged.
+    assert "automatic dispatch: on" in out
+    assert "pause: not paused" in out
+    # A resting outcome is counted, split per repo, and kept out of the rows.
+    assert "skipped by repo (Layer 2 declined at launch): gamma 1" in out
+    assert "2026-07-01-c-task" not in out
+    assert "2026-08-02-b-task" not in out
+    # The one job still owed a turn, with the machine reason it is waiting.
+    assert "deferred" in out and "alpha/2026-08-01-a-task" in out
+    assert "reason=capacity" in out
+
+
+def test_eval_queue_labels_the_census_as_attempts_not_reports(
+    monkeypatch, capsys, tmp_path
+):
+    """The caveat travels with the figures, on every surface that prints them.
+
+    One record per (repo, task) holding that task's LATEST attempt: a manual
+    re-run overwrites a completed record while the report it pointed at stays in
+    the task's evaluation history, so reading `completed` as an evaluated-corpus
+    denominator is wrong in both directions. A count without that sentence beside
+    it is the misreading waiting to happen.
+    """
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="completed",
+        evaluation_id="20260801T090000Z",
+        created_ts="2026-08-01T08:00:00+00:00",
+    )
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    out = capsys.readouterr().out
+    assert "latest attempt" in out
+    assert "not a count of tasks carrying a report" in out
+
+
+def test_eval_queue_counts_a_status_this_build_does_not_know(
+    monkeypatch, capsys, tmp_path
+):
+    """A record from a newer build, or a damaged one, is counted under its own key
+    rather than dropped — the census's own rule, and the whole point of a surface
+    whose job is to make absences countable."""
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="reticulating",
+        created_ts="2026-08-31T20:00:00+00:00",
+    )
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    out = capsys.readouterr().out
+    # The known lifecycle first, in its own order; the unknown after it.
+    assert "error 0, reticulating 1" in out
+    assert "reticulating  alpha/2026-08-01-a-task" in out
+
+
+def test_eval_queue_json_is_the_queue_snapshot_payload(monkeypatch, capsys, tmp_path):
+    """``--json`` is the HTTP payload's model, minus the ``enabled`` envelope field
+    a disabled subsystem never gets this far to contradict — so one parser reads
+    the route and the command."""
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="deferred",
+        defer_reason="pacing",
+        auto=True,
+        created_ts="2026-08-31T20:00:00+00:00",
+    )
+
+    assert cli.main(["eval", "queue", "--json"]) == 0
+
+    data = json.loads(capsys.readouterr().out)
+    assert set(data) == {
+        "auto_enabled",
+        "control",
+        "queue_max_age_seconds",
+        "counts",
+        "skipped_by_repo",
+        "overdue",
+        "entries",
+        "truncated",
+    }
+    assert data["counts"]["deferred"] == 1
+    assert data["control"] == {"paused": False, "paused_ts": None, "reason": None}
+    entry = data["entries"][0]
+    assert entry["job"]["task_id"] == "2026-08-01-a-task"
+    assert entry["job"]["defer_reason"] == "pacing"
+
+
+def test_eval_queue_reports_an_operator_pause_and_when_it_started(
+    monkeypatch, capsys, tmp_path
+):
+    queue_env(monkeypatch, tmp_path)
+    (tmp_path / EVAL_CONTROL_NAME).write_text(
+        json.dumps(
+            {
+                "paused": True,
+                "paused_ts": "2026-09-01T08:14:00+00:00",
+                "reason": "operator",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    out = capsys.readouterr().out
+    assert "pause: paused since 2026-09-01T08:14:00+00:00 (operator)" in out
+    # The difference from ORCH_HUB_EVAL_AUTO=false, which is the whole reason the
+    # pause exists: a paused queue keeps filling.
+    assert "completions still enter the queue" in out
+
+
+def test_eval_queue_names_an_unreadable_control_as_damage_not_a_decision(
+    monkeypatch, capsys, tmp_path
+):
+    """An unreadable control record holds the queue — the fail-toward-deferral
+    direction — but it is nobody's choice, and reporting it as one sends the
+    operator looking for a decision they never made."""
+    queue_env(monkeypatch, tmp_path)
+    (tmp_path / EVAL_CONTROL_NAME).write_text("{not json", encoding="utf-8")
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    out = capsys.readouterr().out
+    assert "unreadable-control" in out
+    assert "could not read its pause control" in out
+    assert "resume rewrites it" in out
+
+
+def test_eval_queue_flags_a_job_stalled_past_the_configured_bound(
+    monkeypatch, capsys, tmp_path
+):
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(EVAL_QUEUE_MAX_AGE_ENV, "3600")
+    write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="deferred",
+        defer_reason="usage-unknown",
+        auto=True,
+        # Long before any clock this test could run under.
+        created_ts="2026-08-01T09:00:00+00:00",
+    )
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    out = capsys.readouterr().out
+    assert "overdue: 1 waiting longer than 1h" in out
+    assert "the queue is not draining" in out
+    assert "[stalled]" in out
+
+
+def test_eval_queue_says_when_the_row_list_was_capped(monkeypatch, capsys, tmp_path):
+    """The rows are capped for readability; the counts are not. A surface that
+    silently showed the first N would report a deep queue as calm."""
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    for index in range(QUEUE_ENTRY_LIMIT + 3):
+        write_queue_job(
+            jobs_root,
+            "alpha",
+            f"2026-08-{index + 1:02d}-task",
+            status="deferred",
+            defer_reason="capacity",
+            auto=True,
+            created_ts="2026-08-31T20:00:00+00:00",
+        )
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    out = capsys.readouterr().out
+    assert f"attempts: deferred {QUEUE_ENTRY_LIMIT + 3}" in out
+    assert f"showing the first {QUEUE_ENTRY_LIMIT}" in out
+    assert "the counts above are complete" in out
+
+
+def test_eval_queue_on_an_empty_store_reads_calm_and_writes_nothing(
+    monkeypatch, capsys, tmp_path
+):
+    """A read must not be the thing that creates the tree it reports on: an
+    operator running this against the wrong data dir should learn that, not
+    silently materialize a second hub's worth of empty state."""
+    data_dir = tmp_path / "never-used"
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "1")
+    monkeypatch.setenv(DATA_DIR_ENV, str(data_dir))
+    monkeypatch.delenv(EVAL_RETENTION_ENV, raising=False)
+
+    assert cli.main(["eval", "queue"]) == 0
+
+    assert not data_dir.exists()
+    out = capsys.readouterr().out
+    assert "attempts: deferred 0" in out
+    assert "jobs: nothing waiting" in out
+
+
+def test_eval_queue_leaves_every_record_and_the_control_untouched(
+    monkeypatch, capsys, tmp_path
+):
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    job_dir = write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="running",
+        started_ts="2026-08-31T20:01:00+00:00",
+        deadline_ts="2026-08-31T20:31:00+00:00",
+        created_ts="2026-08-31T20:00:00+00:00",
+    )
+    record = (job_dir / "job.json").read_bytes()
+    control = tmp_path / EVAL_CONTROL_NAME
+    control.write_text(json.dumps({"paused": False}), encoding="utf-8")
+    control_bytes = control.read_bytes()
+
+    assert cli.main(["eval", "queue"]) == 0
+    assert cli.main(["eval", "queue", "--json"]) == 0
+
+    assert (job_dir / "job.json").read_bytes() == record
+    assert control.read_bytes() == control_bytes
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        EVAL_CONTROL_NAME,
+        "semantic-jobs",
+    ]
+
+
+def test_eval_queue_disabled_exits_nonzero(monkeypatch, capsys, tmp_path):
+    queue_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(EVAL_ENABLED_ENV, "0")
+
+    rc = cli.main(["eval", "queue"])
+
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "error:" in err
+    assert "no evaluation queue" in err
+
+
+def test_eval_queue_reports_config_error(monkeypatch, capsys, tmp_path):
+    queue_env(monkeypatch, tmp_path)
+    monkeypatch.setenv(EVAL_QUEUE_MAX_AGE_ENV, "a while")
+
+    rc = cli.main(["eval", "queue"])
 
     assert rc == 1
     assert "error:" in capsys.readouterr().err

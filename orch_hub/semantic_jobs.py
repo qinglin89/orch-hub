@@ -591,7 +591,7 @@ class SemanticJobManager:
 
     @property
     def jobs_dir(self) -> Path:
-        return self._config.data_dir / SEMANTIC_JOBS_SUBDIR
+        return jobs_root(self._config)
 
     # -- start ----------------------------------------------------------------
 
@@ -1014,9 +1014,14 @@ class SemanticJobManager:
         consumes the same window as an automatic one), and an operator view of the
         queue needs the same walk. Reads only; an unreadable record surfaces as its
         ``error`` record rather than being skipped, so a broken dir cannot hide.
+
+        The walk itself is :func:`list_persisted_jobs`, which a process owning no
+        manager can take too; this is that read taken under the manager's lock, so
+        an in-process caller is serialized against the writes the same way every
+        other manager read is.
         """
         with self._lock:
-            return [_load_record(job_dir) for job_dir in self._job_dirs()]
+            return list_persisted_jobs(self._config)
 
     def _run_job(
         self, job_dir: Path, job_id: str, repo: ManagedRepo, task_id: str
@@ -1528,22 +1533,8 @@ class SemanticJobManager:
         return target
 
     def _job_dirs(self) -> list[Path]:
-        """Every ``<repo-slug>/<task-id>/`` dir holding a job record (for reconcile).
-
-        Two-level walk of the jobs tree (repo slug, then task id), returning only
-        dirs that actually contain a ``job.json``. An absent tree is an empty list.
-        """
-        base = self.jobs_dir
-        if not base.is_dir():
-            return []
-        dirs: list[Path] = []
-        for repo_dir in sorted(base.iterdir()):
-            if not repo_dir.is_dir():
-                continue
-            for task_dir in sorted(repo_dir.iterdir()):
-                if task_dir.is_dir() and (task_dir / SEMANTIC_JOB_NAME).is_file():
-                    dirs.append(task_dir)
-        return dirs
+        """Every ``<repo-slug>/<task-id>/`` dir holding a job record (for reconcile)."""
+        return _job_dirs_under(self.jobs_dir)
 
     def _load_if_present(self, job_dir: Path) -> SemanticJob | None:
         """Load a job record, or ``None`` when the task has no job dir/file yet."""
@@ -1553,6 +1544,51 @@ class SemanticJobManager:
 
 
 # -- persistence --------------------------------------------------------------
+
+
+def jobs_root(config: Config) -> Path:
+    """The semantic-jobs tree under the hub data dir. Creates nothing."""
+    return config.data_dir / SEMANTIC_JOBS_SUBDIR
+
+
+def list_persisted_jobs(config: Config) -> list[SemanticJob]:
+    """Every persisted job record under ``config``, without a manager.
+
+    The same walk :meth:`SemanticJobManager.list_jobs` takes, reachable from a
+    process that owns no manager — a CLI reading the queue of a hub running
+    elsewhere. It exists because the manager's constructor requires an
+    ``evaluator``: a read-only surface would otherwise have to build the whole
+    Layer 2 chain (evaluation service, static evaluator, CLI backend, report
+    catalog) to walk a directory of small JSON files, and hold a manager that could
+    start a turn it has no business starting.
+
+    Safe against a live hub for the same reason ``eval catalog verify`` is: each
+    ``job.json`` is written by an atomic same-dir rename, so a record either reads
+    whole or is the previous whole one. The manager's lock is a *thread* lock and
+    was never a cross-process guarantee — what a concurrent walk can see is a
+    mixture of records at different instants, which is what any snapshot of a
+    moving queue is.
+    """
+    return [_load_record(job_dir) for job_dir in _job_dirs_under(jobs_root(config))]
+
+
+def _job_dirs_under(base: Path) -> list[Path]:
+    """Every ``<repo-slug>/<task-id>/`` dir under ``base`` holding a job record.
+
+    Two-level walk of the jobs tree (repo slug, then task id), returning only dirs
+    that actually contain a ``job.json``, in deterministic order. An absent tree is
+    an empty list.
+    """
+    if not base.is_dir():
+        return []
+    dirs: list[Path] = []
+    for repo_dir in sorted(base.iterdir()):
+        if not repo_dir.is_dir():
+            continue
+        for task_dir in sorted(repo_dir.iterdir()):
+            if task_dir.is_dir() and (task_dir / SEMANTIC_JOB_NAME).is_file():
+                dirs.append(task_dir)
+    return dirs
 
 
 def _turn_start_by(record: SemanticJob) -> dt.datetime | None:

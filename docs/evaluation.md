@@ -377,6 +377,69 @@ Both surfaces are reads. Opening them never dispatches, holds, or rewrites a job
 and never consults the usage service (a usage read can trigger a background
 refresh, which a passive dashboard poll has no business causing).
 
+### From the command line
+
+```
+orch-hub eval queue [--json]
+```
+
+The same projection the dashboard section renders, without a running service or a
+bearer token — which is the point. The moment the queue matters most is the moment
+the hub itself is misbehaving, and that is exactly when the HTTP route may be what
+does not answer. So this reads the durable store directly:
+
+```
+queue: /Users/you/Library/Application Support/orch-hub/semantic-jobs
+automatic dispatch: on (ORCH_HUB_EVAL_AUTO)
+pause: paused since 2026-09-01T08:14:00+00:00 (operator) - completions still enter the queue
+attempts: deferred 3, queued 0, running 1, completed 812, failed 2, cancelled 0, skipped 5, error 0
+  one record per repo/task holding that task's latest attempt; not a count of tasks carrying a report
+overdue: 2 waiting longer than 6h (ORCH_HUB_EVAL_QUEUE_MAX_AGE); the queue is not draining
+skipped by repo (Layer 2 declined at launch): alpha 4, beta 1
+jobs:
+  deferred   alpha/2026-08-01-a-task   waiting 7h 12m   reason=capacity   [stalled]
+  running    beta/2026-08-02-b-task    age 13m
+  failed     gamma/2026-07-30-c-task   age 47h 43m   semantic evaluation failed: claude exited 1 …
+  showing the first 20; the counts above are complete
+```
+
+Worth knowing:
+
+- **It reads the store, not the running hub.** The records come from whichever
+  `ORCH_HUB_DATA_DIR` your shell resolves, which is why the first line prints the
+  tree that was walked: a shell whose data dir differs from the launchd service's
+  will answer honestly about a hub nobody is running. It is safe against a live
+  hub for the same reason [`eval catalog verify`](#verifying-and-repairing-the-catalog)
+  is — each `job.json` is written by an atomic rename, so a record reads whole or
+  not at all, and what a concurrent walk sees is a mixture of instants, which is
+  what any snapshot of a moving queue is.
+- **The census is the attempt lifecycle**, and the line under it says so. One
+  record per `(repo, task)` holding that task's *latest* attempt — not a count of
+  tasks carrying a report. Unlike the dashboard's one-liner it prints every status
+  including the zeros, because a terminal has room and a stable line is greppable.
+- **Both holds are always printed**, engaged or not. A reader scanning for why
+  nothing is draining should find both switches stated rather than inferred from a
+  line that is not there.
+- **The exit code says whether the queue could be *read*,** not whether it is
+  draining. A pause is somebody's deliberate choice and a `failed` record is a
+  retained outcome, so a health-style exit code would have to lie about one of
+  them. What "not draining" looks like is in the output: `overdue`, the dispatch
+  switch, and the pause. Only an operational failure — a malformed service env, or
+  evaluation disabled — exits non-zero.
+- **A failed row's diagnostic is collapsed to one capped line** so a single record
+  cannot own the view; `--json` carries it whole.
+- **It changes nothing**, including creating nothing: run it against a data dir
+  that has never held a hub and you get an empty queue and an empty disk, not a
+  new tree.
+
+`--json` emits the same model the HTTP route does, minus the route's `enabled`
+envelope field (a disabled subsystem exits non-zero here instead), so one parser
+reads both.
+
+The command is deliberately read-only. Pause, resume, and cancel are writes to
+live service state and stay on the [HTTP and dashboard](#pausing-and-resuming-the-queue)
+surface, where the operator watching a stalled queue already is.
+
 ## Pausing and resuming the queue
 
 Sometimes the right answer is not "this turn is stuck" but "not right now" — you

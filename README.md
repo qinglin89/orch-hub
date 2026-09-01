@@ -233,6 +233,7 @@ launchd deployment currently uses the defaults.
 # Optional subsystems
 .venv/bin/orch-hub notify test
 .venv/bin/orch-hub eval doctor
+.venv/bin/orch-hub eval queue
 .venv/bin/orch-hub eval catalog verify
 ```
 
