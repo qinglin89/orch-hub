@@ -424,8 +424,12 @@ Worth knowing:
   draining. A pause is somebody's deliberate choice and a `failed` record is a
   retained outcome, so a health-style exit code would have to lie about one of
   them. What "not draining" looks like is in the output: `overdue`, the dispatch
-  switch, and the pause. Only an operational failure — a malformed service env, or
-  evaluation disabled — exits non-zero.
+  switch, and the pause. Only an operational failure — a malformed service env,
+  evaluation disabled, or a `semantic-jobs` tree that cannot be walked — exits
+  non-zero, with one `error:` line on stderr and no partial output in either form.
+  A store that will not open is deliberately *not* reported as an empty queue: it
+  is the trouble you ran this to find. A single broken `job.json` is a different
+  thing and stays a reading — it is counted and shown as an `error` record.
 - **A failed row's diagnostic is collapsed to one capped line** so a single record
   cannot own the view; `--json` carries it whole.
 - **It changes nothing**, including creating nothing: run it against a data dir

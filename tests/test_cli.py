@@ -1003,6 +1003,56 @@ def test_eval_queue_on_an_empty_store_reads_calm_and_writes_nothing(
     assert "jobs: nothing waiting" in out
 
 
+@pytest.mark.parametrize("refused", ["the jobs root", "a repo dir"])
+def test_eval_queue_says_when_the_store_cannot_be_walked(
+    monkeypatch, capsys, tmp_path, refused
+):
+    """A tree that cannot be traversed is an operational failure, not a calm queue.
+
+    The counterpart to the test above it: an *absent* store is honestly empty, an
+    unreadable one is not, and the walk is two ``iterdir()`` levels (repo slug,
+    then task id) either of which can fault. Getting this wrong is worse here than
+    anywhere else in the CLI — the moment the store will not open is the moment
+    this command is being run *because* the hub is misbehaving, and the two ways
+    to be wrong are a traceback and, if the error were swallowed, the sentence
+    "nothing waiting" about a queue nobody managed to read.
+
+    Injected at the syscall boundary rather than through ``chmod``, which root
+    ignores; the real walk, the real reader, and the real command all run.
+    """
+    jobs_root = queue_env(monkeypatch, tmp_path)
+    write_queue_job(
+        jobs_root,
+        "alpha",
+        "2026-08-01-a-task",
+        status="deferred",
+        defer_reason="capacity",
+        auto=True,
+        created_ts="2026-08-31T20:00:00+00:00",
+    )
+    blocked = jobs_root if refused == "the jobs root" else jobs_root / "alpha"
+    real_iterdir = Path.iterdir
+
+    def refuse(self):
+        if self == blocked:
+            raise PermissionError(13, "Permission denied", str(self))
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", refuse)
+
+    assert cli.main(["eval", "queue"]) == 1
+    assert cli.main(["eval", "queue", "--json"]) == 1
+
+    captured = capsys.readouterr()
+    # Nothing on stdout in either form: no census over records that were never
+    # counted, and no partial JSON for a parser to read as a queue.
+    assert captured.out == ""
+    assert captured.err.count("error: cannot read the evaluation queue") == 2
+    # The tree it failed on, and what the filesystem said about it.
+    assert str(jobs_root) in captured.err
+    assert "Permission denied" in captured.err
+
+
 def test_eval_queue_leaves_every_record_and_the_control_untouched(
     monkeypatch, capsys, tmp_path
 ):

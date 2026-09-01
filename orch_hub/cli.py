@@ -914,7 +914,8 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
     is a retained outcome, and both would make a health-style exit code lie. What
     "not draining" looks like is in the payload the command prints: ``overdue``,
     ``auto_enabled``, and ``control``. Only an operational failure (malformed
-    service env, evaluation disabled) exits non-zero.
+    service env, evaluation disabled, a store that cannot be walked) exits
+    non-zero.
 
     Deliberately read-only. Pause, resume, and cancel are writes to live service
     state and stay on the HTTP/dashboard surface, where the operator watching a
@@ -940,9 +941,29 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    tree = jobs_root(config)
+    try:
+        records = list_persisted_jobs(config)
+    except OSError as exc:
+        # A walk that could not finish knows nothing about how many jobs are
+        # waiting, so it must not answer as though it did: "nothing waiting" is
+        # the one reading this command can never be allowed to invent, and an
+        # unreadable store is exactly the trouble it exists to report. Named as an
+        # operational failure like the two above it, on stderr, with no partial
+        # JSON — the shape ``eval catalog repair`` already uses.
+        #
+        # Not the same thing as an unreadable *record*: `_load_record` turns a
+        # broken ``job.json`` into its ``error`` record, which the census counts
+        # and the rows show. That is a reading of the queue; this is a failure to
+        # take one. An absent tree stays the empty queue it honestly is.
+        print(
+            f"error: cannot read the evaluation queue under {tree}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
     snapshot = queue_snapshot(
         config,
-        list_persisted_jobs(config),
+        records,
         control=EvaluationControlStore(config.data_dir).state(),
     )
     if args.json:
@@ -951,7 +972,7 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
         # above). Same model, so one parser reads both.
         print(json.dumps(snapshot.to_dict(), indent=2))
         return 0
-    _print_queue(snapshot, jobs_root(config))
+    _print_queue(snapshot, tree)
     return 0
 
 
