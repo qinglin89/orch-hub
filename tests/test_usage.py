@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from orch_hub import api
+from orch_hub import api, usage
 from orch_hub.config import Config
 from orch_hub.models import (
     PROVIDER_CLAUDE,
@@ -49,7 +49,6 @@ from orch_hub.usage import (
     UsageService,
     WindowBoundary,
     claude_usage,
-    current_used_percent,
     merge_observations,
     merge_window_boundaries,
     parse_claude_stream_boundaries,
@@ -2424,99 +2423,23 @@ def test_service_usage_route_never_gates_and_never_leaks(tmp_path: Path) -> None
         assert secret not in body
 
 
-# -- the decision read: one number, or an honest unknown ----------------------
-# ``current_used_percent`` is what a consumer that must *act* on capacity reads
-# (automatic Layer 2 dispatch). Every explicit degraded display state collapses
-# to None here, because a consumer asking "is there room" cannot answer it from
-# the windows that happen to be readable while another is not.
 
+def test_usage_exposes_no_capacity_decision_read() -> None:
+    """Display-only, structurally: there is no "is there room" read to call.
 
-def _decision_window(
-    key: str = "five_hour",
-    *,
-    used: float | None = 10.0,
-    resets_in: float | None = 3600.0,
-    figure_behind: float = 0.0,
-) -> UsageWindow:
-    resets = None if resets_in is None else CACHE_NOW + dt.timedelta(seconds=resets_in)
-    figure = None if resets is None else resets - dt.timedelta(seconds=figure_behind)
-    return UsageWindow(
-        key=key,
-        used_percent=used,
-        resets_at=None if resets is None else resets.isoformat(),
-        figure_instant=None if figure is None else figure.isoformat(),
-    )
+    Two helpers existed solely for the retired automatic Layer 2 dispatcher —
+    ``current_used_percent`` (one number or an honest unknown, every degraded
+    display state collapsing to ``None``) and ``UsageService.provider_usage``
+    (one provider without paying for the Codex rollout scan). Both are gone with
+    their consumer.
 
-
-def _decision_usage(*windows, **kw) -> ProviderUsage:
-    return ProviderUsage(
-        provider=PROVIDER_CLAUDE,
-        available=kw.pop("available", True),
-        windows=tuple(windows),
-        observed_ts=CACHE_NOW.isoformat(),
-        stale=kw.pop("stale", False),
-    )
-
-
-def test_current_used_percent_is_the_most_exhausted_open_window() -> None:
-    snapshot = _decision_usage(
-        _decision_window("five_hour", used=12.5),
-        _decision_window("seven_day", used=67.0, resets_in=3 * 86400),
-    )
-
-    assert current_used_percent(snapshot, now=CACHE_NOW) == 67.0
-
-
-@pytest.mark.parametrize(
-    "snapshot, label",
-    [
-        (_decision_usage(_decision_window(), available=False), "unavailable"),
-        (_decision_usage(_decision_window(), stale=True), "stale observation"),
-        (_decision_usage(), "no windows"),
-        (_decision_usage(_decision_window(used=None)), "no figure: not zero usage"),
-        (_decision_usage(_decision_window(resets_in=None)), "boundary unknown"),
-        (_decision_usage(_decision_window(resets_in=-1)), "boundary already passed"),
-        (
-            _decision_usage(_decision_window(figure_behind=6 * 3600)),
-            "figure predates the open window",
-        ),
-        (
-            _decision_usage(_decision_window(used=3.0), _decision_window("seven_day", used=None)),
-            "one window unreadable makes the whole read unknown",
-        ),
-    ],
-)
-def test_current_used_percent_is_unknown_rather_than_optimistic(snapshot, label) -> None:
-    assert current_used_percent(snapshot, now=CACHE_NOW) is None, label
-
-
-# -- reading one provider without paying for the other ------------------------
-
-
-def test_provider_usage_reads_only_the_asked_for_provider(tmp_path: Path) -> None:
-    # The decision path spends against Claude, so it must not pay for the Codex
-    # rollout scan -- and it must still see the freshest figures on disk.
-    service, _, _ = poll_service(tmp_path, cache=usage_cache())
-
-    claude = service.provider_usage(PROVIDER_CLAUDE)
-
-    assert claude.provider == PROVIDER_CLAUDE
-    assert claude.available is True
-    assert {w.key: w.used_percent for w in claude.windows} == {
-        "five_hour": 8.0,
-        "seven_day": 43.0,
-    }
-    # Uncached: a decision read must not be served a snapshot the Overview cached.
-    assert service.provider_usage(PROVIDER_CODEX).provider == PROVIDER_CODEX
-
-
-def test_provider_usage_of_an_unknown_provider_is_unavailable_not_an_error(
-    tmp_path: Path,
-) -> None:
-    service, _, _ = poll_service(tmp_path, cache=usage_cache())
-
-    unknown = service.provider_usage("gemini")
-
-    assert unknown.available is False
-    assert unknown.windows == ()
-    assert "gemini" in (unknown.detail or "")
+    Pinned as an absence because that is the guarantee. A reader who wants to
+    make a scheduling decision from a quota figure must first build the read,
+    and building it is where the question "should anything spend on its own?"
+    gets asked again — which is the question this task answered no to. Leaving a
+    ready-made fail-closed capacity read lying around invites the opposite: a
+    new consumer wired to it inherits semantics that were justified by pacing
+    that no longer exists.
+    """
+    assert not hasattr(usage, "current_used_percent")
+    assert not hasattr(UsageService, "provider_usage")

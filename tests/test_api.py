@@ -5533,9 +5533,6 @@ def test_a_broken_usage_feed_leaves_the_whole_app_standing(tmp_path):
     card and nothing else. The app must still build and serve.
     """
     class BrokenUsage:
-        def provider_usage(self, provider):
-            raise OSError("usage store unreadable")
-
         def get_usage(self):
             raise OSError("usage store unreadable")
 
