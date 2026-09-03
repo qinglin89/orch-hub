@@ -20,10 +20,10 @@ layers over the same bounded evidence:
 | 1 | Static metrics | Free, instant, no model | Deterministic protocol/reliability/handoff/estimate/knowledge scores computed from the task file and run history. |
 | 2 | Semantic evaluation | A model call (real cost, slow) | A Claude model's judgment of what a deterministic check cannot see — knowledge-signal density, handoff/decision-trace completeness, acceptance coverage, protocol soft-failures — with scored axes, findings, and suggested improvements. |
 
-Both run automatically when a task reaches `completed`
-([Automatic evaluation](#automatic-evaluation-of-completed-tasks)), and both can
-also be generated on demand at any time. Either way they are persisted as
-hub-owned artifacts under
+Layer 1 runs automatically when a run's own evidence says it completed its task
+([Automatic Layer 1](#automatic-layer-1-on-completed-tasks)); Layer 2 runs only
+when somebody asks for it. Both can be generated on demand at any time. Either
+way they are persisted as hub-owned artifacts under
 `<ORCH_HUB_DATA_DIR>/evaluations/<repo>/<task>/<evaluation-id>/`. Nothing under
 a managed target repo is written. A completed Layer 1 + Layer 2 report of an
 archived task is additionally published to a cross-repo
@@ -70,13 +70,10 @@ of the hub — for the launchd service they live in the plist's
 | Variable | Default | Purpose |
 |---|---|---|
 | `ORCH_HUB_EVAL_ENABLED` | `true` (enabled) | Master switch. A falsy token (`0`/`false`/`no`/`off`, case-insensitive) disables the whole subsystem. Unset/blank means the default; an unrecognized value fails startup rather than guessing. |
-| `ORCH_HUB_EVAL_AUTO` | `true` (on) | Whether a task that reaches `completed` is evaluated automatically (see [Automatic evaluation](#automatic-evaluation-of-completed-tasks)). Falsy disables *only* the trigger — every manual route, control, and artifact stays exactly as it was. Subordinate to `ORCH_HUB_EVAL_ENABLED`: a disabled subsystem has nothing to trigger. |
+| `ORCH_HUB_EVAL_AUTO` | `true` (on) | Whether a task a run completes gets its **Layer 1** metrics without being asked (see [Automatic Layer 1](#automatic-layer-1-on-completed-tasks)). Falsy disables *only* that trigger — every manual route, control, and artifact stays exactly as it was. It gates no model turn: Layer 2 has no automatic path. Subordinate to `ORCH_HUB_EVAL_ENABLED`: a disabled subsystem has nothing to trigger. |
 | `ORCH_HUB_EVAL_MODEL` | `claude-opus-5` | Model the **Layer 2** semantic evaluator drives through the Claude CLI. Only matters when evaluation is enabled and a semantic evaluation is requested; Layer 1 makes no model call. |
 | `ORCH_HUB_EVAL_EFFORT` | `max` | Reasoning effort for that same Layer 2 turn (`--effort`). Unset/blank means the default. Not validated at startup — an effort the installed `claude` rejects fails that one semantic job, not the service. |
 | `ORCH_HUB_EVAL_RETENTION` | `20` | Per-task cap on retained evaluations (see [Retention](#retention)). `0` disables retention (keep everything); a positive integer is the cap. A negative or non-integer value fails startup. |
-| `ORCH_HUB_EVAL_USAGE_CEILING` | `80` | Subscription utilization (percent) at or above which an **automatic** Layer 2 turn waits instead of running (see [When an automatic Layer 2 turn actually runs](#when-an-automatic-layer-2-turn-actually-runs)). Compared against the most exhausted currently-measured window. Only the automatic path consults it; a manual evaluation is never capacity-gated. A value outside 0-100, or a non-number, fails startup. |
-| `ORCH_HUB_EVAL_DISPATCH_SPACING` | `900` (15 min) | Minimum seconds between two automatic Layer 2 turns, measured from the last turn admitted to spend (manual turns included). `0` drains the queue as fast as capacity allows. A negative or non-integer value fails startup. |
-| `ORCH_HUB_EVAL_QUEUE_MAX_AGE` | `21600` (6 h) | How long a job may wait for capacity before the hub logs it as a stalled queue and flags it on the dashboard (see [Seeing the queue](#seeing-the-queue)). Visibility only — it changes no dispatch decision. `0` disables the flag. A negative or non-integer value fails startup. |
 | `ORCH_HUB_EVAL_TURN_TIMEOUT` | `1800` (30 min) | How long one Layer 2 CLI turn may run before it is killed and recorded as a failed job (see [When a turn hangs](#when-a-turn-hangs)). Plus the two fixed ten-minute allowances bracketing it, it is also the whole-attempt deadline each job is stamped with and reaped against. `0` removes the deadline *and* that detection. A negative or non-integer value fails startup. |
 
 To exclude evaluation from a deployment, set `ORCH_HUB_EVAL_ENABLED=false`. No
@@ -137,13 +134,15 @@ the time. Runs that ended before this capture existed stay `reconstructed`;
 nothing backfills them, and the marker is there so work built on those reports
 can weight them accordingly.
 
-## Automatic evaluation of completed tasks
+## Automatic Layer 1 on completed tasks
 
-By default nobody decides which completed tasks get a report: when a run's own
-evidence says it finished its task, the hub evaluates that task on the spot.
-This exists to keep the evaluated corpus from being *selected* — an operator who
-evaluates the tasks that felt problematic produces a corpus that cannot support
-recurrence or base-rate claims, however carefully it is later consumed.
+By default nobody decides which completed tasks get deterministic metrics: when
+a run's own evidence says it finished its task, the hub measures that task on the
+spot. This exists to keep the measured corpus from being *selected* — an
+operator who measures the tasks that felt problematic produces a corpus that
+cannot support recurrence or base-rate claims, however carefully it is later
+consumed. Layer 1 is free, so nothing has to weigh whether a given task is worth
+measuring.
 
 What fires, and when:
 
@@ -151,21 +150,23 @@ What fires, and when:
   whose end classifies **completed** — the same verdict the dashboard shows,
   read from that run's own frozen run-dir evidence.
 - **Layer 1 needs no queue.** It is deterministic and makes no model call, so
-  there is nothing to schedule — it simply runs.
-- **Layer 2 is enqueued, not started.** It becomes an ordinary semantic job —
-  the same persisted per-task record a manual Layer 2 creates — but it lands in a
-  new `deferred` state first, because *when* it may spend a turn is a policy
-  question (see [below](#when-an-automatic-layer-2-turn-actually-runs)). Cost is
-  not the concern; contention is: an L2 turn can land in the same subscription
-  rate window a dev session needs.
-- **That job record is written before the trigger hands off any work.** A run's
-  end is observed exactly once and then settled forever, so the hub records the
-  job first and decides about the turn afterwards. A hub stopped or crashed
-  before the turn runs therefore still owes that task an evaluation and pays it:
-  a held job is untouched by the startup sweep and picked up by the next dispatch
-  sweep. (A job interrupted *mid-turn* is still settled `failed` at startup —
-  *"semantic evaluation abandoned (hub restarted during queued)"* — visible in the
-  task's Layer 2 panel and retryable from its button.)
+  there is nothing to schedule. It runs off the run manager's thread, once that
+  run's session, task, and deployed-protocol evidence has settled.
+- **Layer 2 is not triggered at all.** A completed task gets no semantic job —
+  none enqueued, none skipped, none started. The
+  [button](#using-it-from-the-dashboard) and the route behind it are the only
+  things in the hub that can open a model turn; see
+  [why](#why-layer-2-is-not-on-this-path).
+- **Nothing durable is owed.** The whole trigger is one hand-off to a worker: no
+  record is written first, because there is no obligation to record. A hub
+  stopped or crashed before the metrics are written loses a free artifact, not a
+  debt — the next completion of that task regenerates it, and so does one press
+  of **Generate metrics**.
+- **A repeated completion is not a duplicate.** The signal is per *run*, not per
+  task: a task that completes without being archived stays launchable, and the
+  close-out-only re-run that follows classifies `completed` again. That simply
+  produces a fresher deterministic report beside the older one. Only a complete
+  Layer 1 + Layer 2 set is ever published to the feed.
 - **A hub that stops mid-transition resumes it, rather than losing the
   completion.** The end write itself is what the trigger sits behind, and it is
   irreversible: nothing re-observes a run that already has an end time. So the
@@ -181,16 +182,6 @@ What fires, and when:
   nothing reaches back into already archived history. The run-end push and the
   usage refresh are *not* replayed — they describe a moment that has passed — and
   the audit trail keeps exactly one `run_ended` event.
-- **A task gets at most one automatic Layer 2, ever.** The completion signal is
-  per *run*, not per task (a task that completes without being archived stays
-  launchable, and the close-out-only re-run that follows classifies `completed`
-  again), so the durable per-`(repo, task)` job record is the guard. Any existing
-  record — held, in-flight, completed, or failed — means the automatic path
-  accepts nothing. A `failed` job is therefore *recorded*, not retried forever;
-  retrying it is the operator's explicit Layer 2 button.
-- Layer 1 is not guarded that way. It is free and deterministic, so a repeated
-  completion signal simply produces a fresher deterministic report; only the
-  complete Layer 1 + Layer 2 set is ever published to the feed.
 
 What it can never do:
 
@@ -198,184 +189,132 @@ What it can never do:
   the ending run is already persisted, off the run manager's thread, and every
   failure is logged and dropped.
 - Reach a task that completed **outside** a hub run. There is no signal for
-  those, and their evidence would be near-empty anyway; they are the backfill
-  problem, not the trigger's.
+  those, and their evidence would be near-empty anyway.
+- Spend anything. It makes no model call and consults no quota.
 
-One further quiet: an automatic job settling to **completed** sends no push.
-Every completed task now produces one, it carries nothing to act on, and it would
-arrive right behind the run-end push that does. An automatic **failure** still
-pushes — that is the corpus quietly shrinking. A manual evaluation pushes on
-both outcomes, as before.
+Set `ORCH_HUB_EVAL_AUTO=false` to make Layer 1 on-demand too, with the subsystem
+otherwise untouched. The variable's name predates the split and still reads
+correctly — it is the switch for *evaluate a completed task without being asked*
+— but what it gates is now Layer 1 alone, because Layer 2 has no automatic path
+to disable.
 
-Set `ORCH_HUB_EVAL_AUTO=false` to return to on-demand-only evaluation with the
-subsystem otherwise untouched. Any jobs already accepted stay held rather than
-running or failing; see [below](#when-an-automatic-layer-2-turn-actually-runs).
+### Why Layer 2 is not on this path
 
-### Declining Layer 2 for one run
+Automatic Layer 2 used to live here, and it was a considerable amount of
+machinery: a durable queue of `deferred` jobs, a subscription-utilization
+ceiling, spacing between turns, a resident dispatch sweep, an operator pause over
+the drain, and a per-run opt-out checkbox on the launch dialog. All of it was
+policy over one question — *may the hub spend a model turn on measurement right
+now?* — and all of it has been removed.
 
-The launch dialog carries an **Evaluate on completion** checkbox, on by default.
-Unchecking it declines the automatic Layer 2 turn for a task *this run* completes.
-It exists for weeks when the subscription budget has to go to development rather
-than to measuring it — deferral cannot serve that, since it moves spend inside the
-weekly bucket rather than out of it.
+Two things it got wrong:
 
-Three things bound it, and they are what make it admissible at all:
+- **It spent from the window the work needs.** An L2 turn draws on the same
+  Claude subscription window an interactive dev session draws on. Deferral was an
+  attempt to make that invisible, and it could not be: it moves spend *within*
+  the weekly bucket rather than out of it, so a busy week still paid for measuring
+  itself out of the budget it was busy with. Worse, the queue's failure mode was
+  the network — a hub that reconnected after an outage had a backlog and a fresh
+  window at the same moment.
+- **It bought coverage nobody consumes.** The queue existed for *population*
+  measurement: evaluate everything, so the corpus supports base-rate claims. The
+  consumer these reports are published for works from evaluated **samples** — it
+  looks for actionable improvements, not for a census. Paying a standing
+  scheduler, a capacity reader, a pause control, and a launch checkbox for
+  coverage nothing reads is the wrong trade for a one-operator hub.
 
-- **Layer 1 still runs.** It makes no model call, so declining it would save
-  nothing and forfeit the whole deterministic layer.
-- **The skip is a record, not an absence.** The task gets a terminal `skipped` job
-  with a bounded machine reason (`run-opt-out` — never free text, which would be
-  unanalyzable and would leak repo content into a persisted surface). It is
-  counted in the queue census and broken out per repo, so a corpus that is being
-  thinned says so. An opt-out whose entries simply vanished would hand back, at
-  production time, exactly the selection automatic evaluation exists to remove —
-  and skips do not thin a corpus evenly, they cluster on the expensive,
-  remediation-heavy tail.
-- **It never reaches the orchestrator.** The choice rides the start request
-  (`auto_semantic_eval`, beside `acknowledge_blocked`) and is persisted on the run
-  record. It is not orchestrator argv: the orchestrator parses argv strictly and
-  an unknown flag would abort the launch. A run record written before the field
-  existed reads as *on*, so no earlier run is retroactively excluded.
+What survives is the half that was worth having. The deterministic layer keeps
+the property that mattered — every completed task is measured, and *which* tasks
+get measured is not an operator's judgment call — because it is free. Layer 2
+keeps the property it needs: a model turn is spent only when a person decides it
+is worth spending.
 
-When two runs of one task disagree — a task stays launchable until it is archived,
-so it can complete more than once — the run that **completes the task** writes the
-record and decides, in both directions: a later completing run can neither enqueue
-over a skip nor skip over an accepted job. A run that does not complete the task
-never reaches the trigger, so unchecking the box on session 1 of a three-session
-task decides nothing.
+## Seeing what Layer 2 is doing
 
-Un-skipping is an operator action, never a mechanical one: the task's Layer 2
-panel still offers the button, and running it produces the report the launch
-declined.
-
-## When an automatic Layer 2 turn actually runs
-
-An automatically enqueued Layer 2 job starts `deferred` and is promoted to a real
-turn by a background sweep — on the resident 30-second tick, and once immediately
-after the completion that created it, so an uncontended completion still becomes
-a turn within milliseconds.
-
-Three rules decide, all of them tunable (see
-[Configuration](#configuration)) so the policy can change without a code change:
-
-1. **A utilization ceiling.** If the evaluator's subscription provider (Claude,
-   today) reports `ORCH_HUB_EVAL_USAGE_CEILING` percent or more used on its most
-   exhausted currently-measured window, the job waits. One L2 turn measures ~32k
-   input tokens against tasks that consumed several dev sessions of up to 200k
-   context each — under 1% of the work it measures — so the default 80% leaves
-   roughly twenty times the turn's own cost in headroom. The ceiling is not there
-   to make the turn *fit*; it is there so measurement never competes with work in
-   a window the operator has started rationing.
-2. **Unknown capacity waits.** Missing, unavailable, stale, rolled-over, or
-   otherwise unreadable usage defers the job — an unknown window is not an empty
-   window. This is deliberately permanent when a usage feed dies: the queue stops
-   visibly rather than quietly spending a window nobody can see.
-3. **Spacing between turns.** At most one held job is promoted per
-   `ORCH_HUB_EVAL_DISPATCH_SPACING`, measured from the last turn *admitted* to
-   spend — a manual evaluation counts, since it draws on the same window, and a
-   turn counts from the moment it was admitted rather than from the moment its
-   worker got going, so two sweeps in quick succession cannot both find "no turn
-   has started yet". Without this, a queue that accumulated under sustained
-   pressure would become dispatchable *all at once* the moment the window rolled,
-   spending the fresh window's opening capacity exactly when the operator comes
-   back to work.
-
-The queue is **durable and never dropped**. A held job survives a hub restart
-untouched — nothing fails it, and the next sweep resumes it — and the oldest held
-job always goes first, so the corpus fills in completion order.
-
-Durable also means it outlives the switches. A queue accepted while automatic
-evaluation was on stays exactly where it is if the hub is restarted with
-`ORCH_HUB_EVAL_AUTO` or `ORCH_HUB_EVAL_ENABLED` off: nothing is promoted (that
-would be a model turn in a deployment that said manual-only) and nothing is
-failed (with the subsystem off, a promotion would settle the record `failed` and
-spend the task's one automatic attempt on a turn that never ran). Turn both back
-on and the next sweep drains what was always there — the switches need no
-recovery step, because "deferred" already means "not now".
-
-**None of this applies to the Layer 2 button.** An operator asking for an
-evaluation now is not the production-side selection this policy exists to remove,
-so a manual start ignores the ceiling, the spacing, and any held record for that
-task. That is also the escape hatch if a broken usage feed ever holds the queue
-indefinitely.
-
-If a job waits longer than `ORCH_HUB_EVAL_QUEUE_MAX_AGE` (default six hours — one
-full five-hour window plus slack), the hub logs a warning naming the repo, task,
-and reason. It stays a held job, not a failed one; the bound exists so a queue
-that has stopped draining — usually because the usage feed broke, which defers
-forever by design — cannot stay invisible for a week.
-
-## Seeing the queue
-
-A log line is enough only if someone is reading the log. Automatic evaluation's
-failure modes are all *absences* — a queue nobody drains, a turn that failed, a
-switch left off — and an absence is exactly what nobody notices. So the state of
-the automatic path is a section on the dashboard's Operations Overview, on the
-same footing as Subscription usage: its own block below the operational panels,
-display-only, never a **Needs attention** row and never a gate. Nothing is
-blocked by a stalled evaluation queue; only the measuring has stopped.
+A semantic evaluation runs for minutes, and it is usually started from a phone —
+so by the time it settles, the person who asked is somewhere else. Every other
+evaluation surface is scoped to a single `(repo, task)`, which cannot answer *is
+anything running?* or *did one of these fail while I was away?* without opening
+tasks one at a time. So there is one cross-repo view: a **Layer 2 evaluations**
+section on the dashboard's Operations Overview, its own block below the
+operational panels, on the same footing as Subscription usage. Display-only —
+never a **Needs attention** row and never a gate.
 
 It shows:
 
 - **The census** — *the latest attempt per task*: how many completed, how many
-  are waiting, how many failed, how many were cancelled, how many were skipped.
-  These counts are over *every* persisted job
-  record and are never truncated; a figure that quietly meant "the first twenty"
-  would report a twenty-deep queue as calm, which is the silence this section
-  exists to break.
+  are waiting, how many failed, how many were cancelled. These counts are over
+  *every* persisted job record and are never truncated; a figure that quietly
+  meant "the first twenty" would report a twenty-deep backlog as calm, which is
+  the silence this section exists to break.
 
   It counts **attempts, not reports**, and the line says so. The store keeps one
-  record per task holding its latest attempt, and a manual re-run overwrites a
-  terminal one — so a task whose report completed and whose later retry failed
-  counts here as `failed`, while that first report is still there in the task's
-  evaluation history. That is the right answer for a queue view: the retry did
-  fail, and this section reports on the automatic path, not on the corpus. For
-  what a task actually carries, open its evaluation view or the
-  [report feed](#the-global-report-feed); a task completed before automatic
-  evaluation existed has no record here at all.
-- **Skips per repo** — the tasks that completed and were deliberately not
-  evaluated, split by repo, because that is the shape a thinning corpus has.
-  Repos with no skipped record are absent rather than shown as zero: the job store
-  knows nothing about repos it holds no record for. Like the rest of the census
-  this counts *current records*, so it is never a share of a repo's tasks.
-- **The outstanding jobs**, oldest first: which task, which repo, how long it has
-  waited, and — for a held job — the reason in prose (`capacity`,
-  `usage-unknown`, `pacing`). Each row links to that task's evaluation view. The
-  row list *is* capped for readability; when it is, the section says so.
-  Completed, skipped, and cancelled jobs are counted but not listed: all three are
-  resting outcomes with nothing to act on, and one row per opted-out or
-  deliberately stopped task would crowd out what is actually stuck. Each job still
-  owed a turn also carries a **Cancel** button — see
+  record per task holding its latest attempt, and a re-run overwrites a terminal
+  one — so a task whose report completed and whose later retry failed counts here
+  as `failed`, while that first report is still there in the task's evaluation
+  history. That is the right answer for this view: the retry did fail, and this
+  section reports on attempts. For what a task actually carries, open its
+  evaluation view or the [report feed](#the-global-report-feed); a task nobody
+  has asked to evaluate has no record here at all.
+- **The rows**, ordered by what you can do about them: the **running** turn
+  first, then anything **queued**, then unresolved **failures** newest-first.
+  Each row names the task and repo, says how long the attempt has been open, and
+  links to that task's evaluation view — where the full diagnostic and the retry
+  control live, so "which one failed" is one tap from the landing screen. While
+  an attempt is still stoppable the row also carries a **Cancel** button; see
   [cancelling one job](#cancelling-one-job).
-- **Why nothing is draining.** Three reasons are on the records themselves
-  (`capacity`, `usage-unknown`, `pacing`). Two are not: `ORCH_HUB_EVAL_ENABLED` or
-  `ORCH_HUB_EVAL_AUTO` switched off, and an
-  [operator pause](#pausing-and-resuming-the-queue). Both are global facts rather
-  than facts about a job — stamping either on the records would churn the whole
-  queue on a toggle and leave every record claiming a reason that stopped being
-  true the moment it was undone — so the section names them from the payload's own
-  state instead. They are independent and both are reported: a queue can be off
-  *and* paused, and naming only one sends you to fix the wrong switch.
-- **A stall flag** on any held job past `ORCH_HUB_EVAL_QUEUE_MAX_AGE`, with the
-  bound spelled out. It is the same population the service log warns about, by
-  the same rule, so the two never disagree.
 
-A read failure renders as *unavailable* rather than an empty queue — an unknown
-queue is not a calm one — and it degrades only this section. With
-`ORCH_HUB_EVAL_ENABLED` falsy the section is absent entirely: there is no queue,
-and a permanent "disabled" notice about a deliberate configuration is noise.
+  Completed and cancelled jobs are counted but not listed: both are resting
+  outcomes with nothing to act on, and one row per finished task would crowd out
+  what is actually live.
 
-A single task's held state is visible where you would expect it too: the Layer 2
-panel of that task's evaluation view shows a queued-and-waiting job with its
-reason, instead of the "never evaluated" trigger it used to show. The button
-stays available there, relabelled — running it now is the documented way past a
-queue a broken usage feed would otherwise hold indefinitely. A skipped task reads
-the same way: the panel says the run declined the turn, rather than showing the
-never-evaluated trigger, and still offers to run it.
+  The list is capped for readability, and when the cap bites the section says so.
+  The cap cuts from the bottom, which is why the order is actionable-first rather
+  than oldest-first: a page spent on records nothing will act on, with the one
+  live turn pushed off the end, would fail at exactly the question the section
+  exists to answer.
 
-Both surfaces are reads. Opening them never dispatches, holds, or rewrites a job,
-and never consults the usage service (a usage read can trigger a background
-refresh, which a passive dashboard poll has no business causing).
+A read failure renders as *unavailable* rather than an empty list — an unknown
+state is not a calm one — and it degrades only this section. With
+`ORCH_HUB_EVAL_ENABLED` falsy the section is absent entirely: there is nothing to
+report, and a permanent "disabled" notice about a deliberate configuration is
+noise.
+
+There are no standing notices above the rows. A queue that moved by itself needed
+them — it could be still for reasons no individual record explained (a switch
+off, an operator pause, a capacity hold). Nothing moves by itself now: every
+record is either something somebody asked for or a leftover, so each row explains
+itself.
+
+A single task's state is visible where you would expect it too: the Layer 2 panel
+of that task's evaluation view shows a running, failed, or completed job in place
+of the "never evaluated" trigger, and survives a reload.
+
+Both surfaces are reads. Opening them never starts, promotes, rewrites, or
+settles a job.
+
+### Records from the automatic era
+
+A hub that ran the automatic path may still hold two record shapes nothing can
+produce any more. Both are shown rather than hidden, and both are labelled as
+history:
+
+- **`deferred`** — an evaluation an earlier hub accepted and never got to. The
+  row reads *legacy hold*, names the reason it was held for at the time, and says
+  in as many words that it will not start on its own. Nothing promotes one: not a
+  restart, not a monitor tick, not a usage recovery, not a network reconnection.
+  It rests until an explicit Layer 2 start for that task supersedes it. It is
+  also ranked below every live and failed record, so a store full of them can
+  never crowd a running turn off the page.
+- **`skipped`** — a completed task whose run was launched with automatic Layer 2
+  declined, back when the launch dialog offered that choice. The task's Layer 2
+  panel says so, and still offers to run it.
+
+Both are counted in the census under their own names — *legacy held* and
+*skipped* — rather than folded into "waiting", because waiting is a claim that
+something is coming. Neither record is; the only thing that moves either one is
+somebody starting an evaluation for that task. Cancelling a held record is legal
+and is how you clear one without spending a turn.
 
 ### From the command line
 
@@ -384,23 +323,17 @@ orch-hub eval queue [--json]
 ```
 
 The same projection the dashboard section renders, without a running service or a
-bearer token — which is the point. The moment the queue matters most is the moment
-the hub itself is misbehaving, and that is exactly when the HTTP route may be what
+bearer token — which is the point. The moment this matters most is the moment the
+hub itself is misbehaving, and that is exactly when the HTTP route may be what
 does not answer. So this reads the durable store directly:
 
 ```
 queue: /Users/you/Library/Application Support/orch-hub/semantic-jobs
-automatic dispatch: on (ORCH_HUB_EVAL_AUTO)
-pause: paused since 2026-09-01T08:14:00+00:00 (operator) - completions still enter the queue
-attempts: deferred 3, queued 0, running 1, completed 812, failed 2, cancelled 0, skipped 5, error 0
+attempts: deferred 0, queued 0, running 1, completed 812, failed 2, cancelled 0, skipped 0, error 0
   one record per repo/task holding that task's latest attempt; not a count of tasks carrying a report
-overdue: 2 waiting longer than 6h (ORCH_HUB_EVAL_QUEUE_MAX_AGE); the queue is not draining
-skipped by repo (Layer 2 declined at launch): alpha 4, beta 1
 jobs:
-  deferred   alpha/2026-08-01-a-task   waiting 7h 12m   reason=capacity   [stalled]
-  running    beta/2026-08-02-b-task    age 13m
-  failed     gamma/2026-07-30-c-task   age 47h 43m   semantic evaluation failed: claude exited 1 …
-  showing the first 20; the counts above are complete
+  running    beta/2026-08-02-b-task  age 13m
+  failed     gamma/2026-07-30-c-task  age 47h 43m  semantic evaluation failed: claude exited 1 …
 ```
 
 Worth knowing:
@@ -412,112 +345,52 @@ Worth knowing:
   hub for the same reason [`eval catalog verify`](#verifying-and-repairing-the-catalog)
   is — each `job.json` is written by an atomic rename, so a record reads whole or
   not at all, and what a concurrent walk sees is a mixture of instants, which is
-  what any snapshot of a moving queue is.
+  what any snapshot of a moving store is.
 - **The census is the attempt lifecycle**, and the line under it says so. One
   record per `(repo, task)` holding that task's *latest* attempt — not a count of
   tasks carrying a report. Unlike the dashboard's one-liner it prints every status
   including the zeros, because a terminal has room and a stable line is greppable.
-- **Both holds are always printed**, engaged or not. A reader scanning for why
-  nothing is draining should find both switches stated rather than inferred from a
-  line that is not there.
-- **The exit code says whether the queue could be *read*,** not whether it is
-  draining. A pause is somebody's deliberate choice and a `failed` record is a
-  retained outcome, so a health-style exit code would have to lie about one of
-  them. What "not draining" looks like is in the output: `overdue`, the dispatch
-  switch, and the pause. Only an operational failure — a malformed service env,
-  evaluation disabled, or a `semantic-jobs` tree that cannot be walked — exits
-  non-zero, with one `error:` line on stderr and no partial output in either form.
-  A store that will not open is deliberately *not* reported as an empty queue: it
-  is the trouble you ran this to find. That covers a `semantic-jobs` path that is
-  not a directory at all as much as one that refuses to be traversed — point
+  A [record from the automatic era](#records-from-the-automatic-era) prints under
+  its own status with `legacy hold … never starts on its own` on the row, so a
+  `deferred` token cannot be read as a queue position.
+- **The exit code says whether the store could be *read*,** not whether anything
+  is running. A `failed` record is a retained outcome, so a health-style exit code
+  would have to lie about it. Only an operational failure — a malformed service
+  env, evaluation disabled, or a `semantic-jobs` tree that cannot be walked —
+  exits non-zero, with one `error:` line on stderr and no partial output in either
+  form. A store that will not open is deliberately *not* reported as an empty one:
+  it is the trouble you ran this to find. That covers a `semantic-jobs` path that
+  is not a directory at all as much as one that refuses to be traversed — point
   `ORCH_HUB_DATA_DIR` at a file and you get the `error:` line, not a zero census.
-  Only a tree that is genuinely *absent* reads as an empty queue. A single broken
+  Only a tree that is genuinely *absent* reads as empty. A single broken
   `job.json` is a different thing again and stays a reading — it is counted and
   shown as an `error` record.
 - **A failed row's diagnostic is collapsed to one capped line** so a single record
   cannot own the view; `--json` carries it whole.
 - **It changes nothing**, including creating nothing: run it against a data dir
-  that has never held a hub and you get an empty queue and an empty disk, not a
+  that has never held a hub and you get an empty census and an empty disk, not a
   new tree.
 
 `--json` emits the same model the HTTP route does, minus the route's `enabled`
 envelope field (a disabled subsystem exits non-zero here instead), so one parser
 reads both.
 
-The command is deliberately read-only. Pause, resume, and cancel are writes to
-live service state and stay on the [HTTP and dashboard](#pausing-and-resuming-the-queue)
-surface, where the operator watching a stalled queue already is.
-
-## Pausing and resuming the queue
-
-Sometimes the right answer is not "this turn is stuck" but "not right now" — you
-are about to spend the afternoon in a dev session and would rather the hub did not
-draw on the same rate window to measure the last one.
-
-`ORCH_HUB_EVAL_AUTO=false` is the wrong instrument for that, twice over. It is
-read from the environment, so changing it means editing the launchd plist and
-restarting the service, which nobody does at the moment they notice. And it is the
-*trigger* gate: with it off, completions are not accepted into the queue at all,
-and because a task's job record is its once-per-task guard, every task that
-completes while it is off is permanently absent from the corpus. The queue does
-not pause; it stops existing.
-
-So there is a second lever, and the difference is the whole point:
-
-| | `ORCH_HUB_EVAL_AUTO=false` | a pause |
-|---|---|---|
-| changed by | editing config, then a restart | one request, live |
-| completions still accepted | no | **yes** |
-| held records | held | held |
-| what the corpus loses | those tasks, permanently | nothing |
-
-A pause holds only the *drain*. Completed tasks keep landing as `deferred`
-records, so the queue keeps its shape, and resuming spends it in the same
-completion order it would have had. Pausing costs the corpus time, not entries.
-
-From the dashboard it is the **Pause** / **Resume** button beside the *Evaluation
-queue* heading; the button always names the action rather than the state. A paused
-queue says so above its rows, and says that completions still enter it — a pause
-must never become one more silent reason the queue is sitting still. From the API
-it is `POST /api/evaluation/queue/pause` and `POST /api/evaluation/queue/resume`,
-both of which answer with the whole queue read, so a client renders the result of
-pressing the button through the same code path as every poll.
-
-Some properties worth knowing:
-
-- **It is persisted**, in `<data-dir>/eval-control.json`, so a launchd restart
-  does not silently undo it. That is the same reason the environment variable was
-  the wrong home for it.
-- **"Held since" means what it says.** Pausing an already-paused queue keeps the
-  original instant rather than restamping it, so repeated presses (or a second
-  browser session) cannot make a queue held for hours read as freshly paused.
-- **Manual evaluation stays ungated.** `POST .../semantic/job` — and the Layer 2
-  button on a task's evaluation view — still runs, exactly as it still runs above
-  the usage ceiling. A human asking for one evaluation is not the production-side
-  selection any of these gates exist to shape, and it remains the escape hatch.
-- **A pause takes effect at once, not at the next tick.** The pause and the queue
-  are two different stores written by two different threads, so the write is
-  serialized against the step that promotes a job. A sweep already deciding when
-  you press Pause either promotes before the pause is durable — and the queue you
-  get back shows it — or sees the pause and holds. What cannot happen is a turn
-  starting after you were told the queue was held.
-- **The stuck sweep is not paused.** Reaping a turn that has outlived its
-  deadline is a liveness mechanism, not a dispatch decision; a pause must not
-  leave a hung job holding its slot.
-- **An unreadable control record reads as paused.** If the hub cannot read
-  `eval-control.json`, it holds the queue rather than spend a window it cannot
-  account for — the same fail-toward-deferral direction unknown usage gets. The
-  section says so explicitly (it names the damage, not a decision nobody made),
-  and **Resume** rewrites the file and releases it.
+The command is deliberately read-only. Cancelling an attempt is a write to live
+service state and stays on the [HTTP and dashboard](#cancelling-one-job) surface,
+where the operator watching it already is.
 
 ## Cancelling one job
 
-The per-job counterpart, on the **Cancel** button beside each queue row, or
+Stopping one attempt: the **Cancel** button beside a row in the
+[Layer 2 evaluations](#seeing-what-layer-2-is-doing) section, or
 `POST /api/repos/{repo}/evaluations/{task}/semantic/job/cancel`. It settles that
 task's job to terminal `cancelled` and frees its `(repo, task)` slot immediately.
-Legal from `deferred`, `queued`, and `running` — and, within `running`, only up to
-the moment the turn returns. A record already at rest, or one whose result is
-being settled, answers `409`; a task that never had a job answers `404`.
+Legal from `queued` and `running` — and, within `running`, only up to the moment
+the turn returns — and from a
+[legacy `deferred` record](#records-from-the-automatic-era), which is how you
+clear one of those without spending a turn. A record already at rest, or one
+whose result is being settled, answers `409`; a task that never had a job answers
+`404`.
 
 The work stops before the record says it did — the turn is signalled first and
 the record is written only once it has been — so what you are told is never ahead
@@ -557,12 +430,12 @@ A cancelled record with a start timestamp is a turn that had opened; one without
 is a turn that never did. If the hub cannot stop a live turn, the cancel fails and
 the record is left as it was, rather than reporting an outcome that did not happen.
 
-A cancelled record is terminal, so it holds the task's once-per-task guard: the
-automatic path will not quietly re-enqueue what you just stopped. Asking again is
-the ordinary manual start, which overwrites it like any other resting record — so
-cancelling is not a verdict on the task, and the corpus can still gain the report
-later. Cancelling notifies nothing: unlike a failure, it is exactly what you asked
-for, at the surface already showing you the outcome.
+A cancelled record is terminal and nothing reverses it on its own — which is the
+whole guarantee now that asking is the only way any attempt starts. Asking again
+is the ordinary Layer 2 start, which overwrites the record like any other resting
+one, so cancelling is not a verdict on the task and the corpus can still gain the
+report later. Cancelling notifies nothing: unlike a failure, it is exactly what
+you asked for, at the surface already showing you the outcome.
 
 ## When a turn hangs
 
@@ -625,7 +498,7 @@ finds a settled record and writes nothing, and its evaluation was read-only over
 target state throughout. If it does eventually succeed, its artifacts are still
 written and still publishable — only the job record, which reports the *attempt*,
 no longer points at them, which is the same attempts-not-reports reading the
-[queue census](#seeing-the-queue) already carries. Holding a slot until somebody
+[attempt census](#seeing-what-layer-2-is-doing) already carries. Holding a slot until somebody
 notices and restarts the hub is the worse outcome.
 
 A swept job notifies like any other fresh failure (the startup sweep stays
@@ -1139,9 +1012,7 @@ All routes are protected by the bearer token like every non-health route.
 |---|---|
 | `GET /api/evaluation` | Availability — the only evaluation route that answers (`200 {enabled}`) while disabled. |
 | `GET /api/evaluation/doctor` | Layer 2 readiness probe (no model call). `404` when disabled. |
-| `GET /api/evaluation/queue` | Cross-repo state of the automatic path: a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus a per-repo tally of skipped tasks, the jobs still owed a turn (capped, `truncated` says when), the configured stall bound, whether the trigger gate is open, and the `control` block reporting any [operator pause](#pausing-and-resuming-the-queue). Read-only — it never dispatches. `404` when disabled. |
-| `POST /api/evaluation/queue/pause` | [Hold automatic dispatch](#pausing-and-resuming-the-queue) live, without a restart; completions keep entering the queue. Idempotent. Answers with the queue read. |
-| `POST /api/evaluation/queue/resume` | Release the pause; the next sweep drains what was held. Also repairs an unreadable control record. Answers with the queue read. |
+| `GET /api/evaluation/queue` | [Cross-repo Layer 2 state](#seeing-what-layer-2-is-doing): a complete per-status census of every job record — each task's *latest attempt*, not a count of tasks carrying a report — plus the rows worth acting on, actionable-first and capped (`truncated` says when). Read-only, and there is no companion write: it can neither start nor promote anything. `404` when disabled. |
 | `GET /api/evaluation/reports` | One cursor-paginated page of the [global report feed](#the-global-report-feed), oldest-published first. |
 | `GET /api/evaluation/reports/{report_key}` | One published report's import bundle by global key; pruned artifacts answer `200 {"available": false}`. |
 | `GET /api/evaluation/reports/{report_key}/artifacts/{name}` | One published artifact's [byte-exact persisted content](#verifying-one-artifact-byte-for-byte) for independent digest verification; pruned answers `410`. |
@@ -1151,8 +1022,8 @@ All routes are protected by the bearer token like every non-health route.
 | `POST /api/repos/{repo}/evaluations/{task}/evidence` | Generate a bounded evidence pack only. |
 | `POST /api/repos/{repo}/evaluations/{task}/metrics` | Generate evidence + Layer 1 static metrics. |
 | `POST /api/repos/{repo}/evaluations/{task}/semantic/job` | Start or reuse the current async Layer 2 job; duplicate in-flight starts return the same job. |
-| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`deferred`/`queued`/`running`/`completed`/`failed`/`cancelled`/`skipped`; `null` when none exists). |
-| `POST /api/repos/{repo}/evaluations/{task}/semantic/job/cancel` | [Cancel](#cancelling-one-job) a `deferred`/`queued`/`running` job, freeing its slot. `409` from a resting record, `404` when the task has no job. |
+| `GET /api/repos/{repo}/evaluations/{task}/semantic/job` | Read the current Layer 2 job (`queued`/`running`/`completed`/`failed`/`cancelled`, plus [legacy](#records-from-the-automatic-era) `deferred`/`skipped`; `null` when none exists). |
+| `POST /api/repos/{repo}/evaluations/{task}/semantic/job/cancel` | [Cancel](#cancelling-one-job) a `queued`/`running` — or legacy `deferred` — job, freeing its slot. `409` from a resting record, `404` when the task has no job. |
 
 When disabled, every route except `GET /api/evaluation` answers `404` with the
 fail-closed reason.

@@ -197,7 +197,7 @@ orch-hub launchd restart      # stop then start
 
 orch-hub notify test          # prove push delivery end to end
 orch-hub eval doctor          # Layer 2 semantic evaluator readiness
-orch-hub eval queue           # automatic Layer 2 queue: census, holds, stalled jobs
+orch-hub eval queue           # Layer 2 attempts: census plus the rows worth reading
 orch-hub eval catalog verify  # global report catalog integrity
 ```
 

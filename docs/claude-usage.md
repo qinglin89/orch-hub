@@ -167,26 +167,23 @@ Subscription usage never stands between you and your work:
 
 A quota you are about to exhaust is information for you, not a gate for the hub.
 
-### The one thing that reads it as a decision
+### Nothing reads it as a decision
 
-Automatic Layer 2 task evaluation is the exception, and it exists to get *out* of
-your way. When a task completes, the hub schedules a semantic evaluation for it —
-one `claude -p` turn, drawing on the same Claude window you are working in. So
-the dispatcher consults these figures before spending it: a turn waits while the
-most exhausted measured window is at or above `ORCH_HUB_EVAL_USAGE_CEILING`
-(default 80%), and successive turns are spaced by
-`ORCH_HUB_EVAL_DISPATCH_SPACING` (default 900s). See
-[When an automatic Layer 2 turn actually runs](evaluation.md#when-an-automatic-layer-2-turn-actually-runs).
+There used to be one exception. Automatic Layer 2 task evaluation scheduled a
+`claude -p` turn for every completed task, and a dispatcher consulted these
+figures before spending it: a turn waited while the most exhausted measured
+window was above a configured ceiling, and successive turns were spaced apart.
+That whole path is gone — a semantic evaluation now runs only when a person asks
+for one, so there is nothing left for a capacity reader to pace. See
+[why Layer 2 is not on the automatic path](evaluation.md#why-layer-2-is-not-on-this-path).
 
-The four guarantees above still hold, because this is not a gate on anything you
-asked for:
+With it went the two settings that tuned it (`ORCH_HUB_EVAL_USAGE_CEILING` and
+`ORCH_HUB_EVAL_DISPATCH_SPACING`) and the code that read a quota figure as a
+number to act on. What remains is display: these figures are rendered, and
+nothing in the hub consults them to decide anything at all.
 
-- it delays only work the **hub scheduled for itself**. The Layer 2 button, and
-  every other manual evaluation path, ignores capacity entirely — that is also
-  the escape hatch if a broken usage feed ever holds the queue.
-- unknown capacity **defers**, never dispatches. A missing, stale, or unreadable
-  figure stops the hub's own spending, not yours.
-- a deferred turn is never dropped: it waits, and the queue drains oldest-first
-  when capacity returns.
-- `ORCH_HUB_EVAL_AUTO=false` removes this reader altogether, and a queue already
-  accepted stays put until you turn it back on.
+That is the stronger version of the four guarantees above, not a weaker one. A
+figure that only ever gets drawn cannot be wrong in a way that costs you a run, a
+report, or a window — the worst a broken usage feed can now do is leave a card
+saying it does not know.
+

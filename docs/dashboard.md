@@ -25,7 +25,7 @@ replacement for that network boundary.
 
 | View | What it shows |
 |---|---|
-| Overview | Repos ready, active tasks, current activity, outcomes needing attention, display-only Claude/Codex capacity, and the automatic Layer 2 evaluation queue with its pause/resume and per-job cancel controls |
+| Overview | Repos ready, active tasks, current activity, outcomes needing attention, display-only Claude/Codex capacity, and the cross-repo Layer 2 evaluation state with its per-job cancel control |
 | Repos | Registry-backed repo cards with readiness, live-run state, active-task counts, latest commit, and housekeeping warnings |
 | Repo detail | One repo's readiness, commits, task inventory, live run, and remote-intake entry point |
 | Tasks | Cross-repo active task inventory with repo, status, text, and blocker filters |
@@ -38,13 +38,14 @@ replacement for that network boundary.
 
 The Overview refreshes while visible. Missing subscription-usage data degrades
 only its own panel; evaluation failures remain isolated to history and
-evaluation surfaces. Neither becomes repo health or a launch gate. The evaluation
-queue's controls change only what gets *measured*: pausing holds the automatic
-drain (completions still enter the queue) and cancelling stops one job, killing
-its model turn if one is running — neither touches readiness, run state, or
-launch/intake admission. A Cancel pressed after that job's turn has already
-returned reports that the job is settling instead of stopping it; the row shows
-the outcome it reached on the next refresh.
+evaluation surfaces. Neither becomes repo health or a launch gate. The Layer 2
+section is a read with one control, and it changes only what gets *measured*:
+cancelling stops one attempt, killing its model turn if one is running, and
+touches neither readiness, run state, nor launch/intake admission. A Cancel
+pressed after that job's turn has already returned reports that the job is
+settling instead of stopping it; the row shows the outcome it reached on the next
+refresh. Nothing on this section can start an evaluation — a Layer 2 turn begins
+only from a task's own evaluation view.
 
 ## Starting a run
 
