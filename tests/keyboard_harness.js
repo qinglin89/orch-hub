@@ -2530,13 +2530,17 @@ async function scenarioTaskEval() {
     pickOpt && pickOpt.textContent.indexOf("claude-opus-4-8") !== -1,
     "picker option text: " + (pickOpt && pickOpt.textContent)
   );
-  // A DEFERRED job is neither in flight nor settled: the completion trigger has
-  // already accepted this task and the dispatch policy is holding the turn. Before
-  // this branch existed it fell through to the idle trigger, so the page read
-  // "never evaluated" for a task the corpus already owes a report — the exact
-  // absence automatic evaluation exists to remove. The manual override stays
-  // offered, relabelled, because it is the documented escape from a queue a broken
-  // usage feed would otherwise hold forever.
+  // A DEFERRED job is neither in flight nor settled: an attempt an earlier hub
+  // accepted and never ran. Before this branch existed it fell through to the idle
+  // trigger, so the page read "never evaluated" for a task that already carries a
+  // stale acceptance — a different fact, and the record is the only thing that
+  // states it.
+  //
+  // What it must NOT read as is a queue position. The dispatcher that would have
+  // picked this up is gone, so the panel says the record will not start on its own
+  // and offers the manual run as the only way; wording that promised a policy would
+  // start it ("it starts on its own when the policy allows", "skip the wait") would
+  // leave the operator waiting for a turn that is never coming.
   route("GET", jobPath, {
     job: jobRecord({ status: "deferred", auto: true, defer_reason: "capacity" }),
   });
@@ -2547,25 +2551,36 @@ async function scenarioTaskEval() {
     !!doc.querySelector(".eval-sem-held"),
     "no held panel for a deferred job"
   );
+  var heldText = (doc.querySelector(".eval-sem-status") || {}).textContent || "";
   check(
-    "eval: the held state explains why the turn is waiting",
-    (doc.querySelector(".eval-sem-status") || {}).textContent &&
-      doc.querySelector(".eval-sem-status").textContent.indexOf(
-        "subscription capacity is at the configured ceiling"
-      ) !== -1,
-    "the hold reason was not rendered: " +
-      (doc.querySelector(".eval-sem-status") || {}).textContent
+    "eval: the held state names the recorded reason, in the past tense",
+    heldText.indexOf("subscription capacity was over the ceiling that policy enforced") !== -1,
+    "the hold reason was not rendered as history: " + heldText
+  );
+  check(
+    "eval: the held state says nothing will start the record on its own",
+    heldText.indexOf("nothing will start this record on its own") !== -1,
+    heldText
+  );
+  check(
+    // The exact misreading this branch used to create: a wait implies something is
+    // coming, and nothing is.
+    "eval: the held state never presents itself as a wait for a policy",
+    heldText.indexOf("waiting") === -1 &&
+      heldText.indexOf("skip the wait") === -1 &&
+      heldText.indexOf("starts on its own when") === -1,
+    heldText
   );
   var heldBtn = doc.querySelector(".eval-sem-held .eval-sem-btn");
   check(
-    "eval: the held state still offers the manual override",
-    !!heldBtn && heldBtn.textContent.indexOf("now") !== -1,
-    "no run-now override: " + (heldBtn && heldBtn.textContent)
+    "eval: the held state offers the manual run as the only way to Layer 2",
+    !!heldBtn && heldBtn.textContent.indexOf("Run semantic evaluation") !== -1,
+    "no manual trigger: " + (heldBtn && heldBtn.textContent)
   );
   check(
     // Navigation tears down handles (so the count may drop), but it must not
-    // schedule a new one: a 3-second poll against an hours-scale wait is pure burn.
-    "eval: a held job is not polled (a hold is an hours-scale wait)",
+    // schedule a new one: nothing is in flight to poll for.
+    "eval: a held job is not polled (nothing is coming)",
     pendingTimers() <= timersBeforeHeld,
     "a deferred job scheduled a poll timer"
   );
@@ -4464,39 +4479,66 @@ async function scenarioEvaluationQueue() {
     section().textContent
   );
 
-  // ---- 3) the rows: what is outstanding, and why.
+  // ---- 3) the rows: what is outstanding, and why. Entries arrive in the order
+  // the projection ranked them (actionable first, inert legacy records last —
+  // orch_hub/eval_dispatch.py, pinned in tests/test_eval_dispatch.py) and the
+  // client renders them as given: re-sorting here would silently undo the cap's
+  // whole point, since the server already dropped what did not fit.
   route("GET", "/api/evaluation/queue", queuePayload({
     counts: { deferred: 2, queued: 0, running: 0, completed: 7, failed: 1, error: 0 },
     entries: [
-      { job: queueJob({}), age_seconds: 5400 },
-      { job: queueJob({ job_id: "job-r", task_id: "2026-08-02-other", defer_reason: "pacing" }),
-        age_seconds: 600 },
       { job: queueJob({ job_id: "job-f", task_id: "2026-08-03-broken", status: "failed",
                         defer_reason: null, error: "claude backend exited 1" }),
         age_seconds: 90000 },
+      { job: queueJob({}), age_seconds: 5400 },
+      { job: queueJob({ job_id: "job-r", task_id: "2026-08-02-other", defer_reason: "pacing" }),
+        age_seconds: 600 },
     ],
   }));
   await navigate("#/overview");
-  eq("evalqueue: the summary counts what is waiting and what failed",
-     textOf(".evq-summary"), "Latest attempt per task: 7 completed · 2 waiting · 1 failed");
+  // Legacy holds are counted under their own name. Folding them into "waiting"
+  // makes the census line claim two turns are coming when nothing will start
+  // either — the same false lifecycle the rows below were fixed to stop telling.
+  eq("evalqueue: legacy holds are counted as such, never as waiting",
+     textOf(".evq-summary"),
+     "Latest attempt per task: 7 completed · 1 failed · 2 legacy held");
   eq("evalqueue: one row per outstanding job", doc.querySelectorAll("#view .evq-row").length, 3);
-  var firstRow = doc.querySelectorAll("#view .evq-row")[0];
+  // Actionable first: the unresolved failure leads, and the two inert legacy
+  // records trail it. (The cap cuts from the bottom — case 5b.)
+  var rowsOrder = doc.querySelectorAll("#view .evq-row");
+  check(
+    "evalqueue: the served order is rendered as given, unresolved failure first",
+    (rowsOrder[0].textContent || "").indexOf("2026-08-03-broken") !== -1 &&
+      (rowsOrder[2].textContent || "").indexOf("2026-08-02-other") !== -1,
+    rowsOrder[0].textContent + " | " + rowsOrder[2].textContent
+  );
+  var firstRow = rowsOrder[1];
   check(
     "evalqueue: a row names its task",
     (firstRow.textContent || "").indexOf(QUEUE_TASK) !== -1,
     firstRow.textContent
   );
   // A legacy `deferred` record still carries the machine reason the retired
-  // dispatcher wrote, and still renders it in prose: the row has to say what it
-  // is, or it reads as a turn that is about to start.
+  // dispatcher wrote, and still renders it in prose — but framed as history, and
+  // beside a plain statement that nothing will pick the record up. Without both,
+  // the row reads as a turn that is about to start.
   check(
-    "evalqueue: a legacy held row explains its recorded reason in prose",
-    (firstRow.textContent || "").indexOf("subscription capacity is at the configured ceiling") !== -1,
+    "evalqueue: a legacy held row explains its recorded reason in the past tense",
+    (firstRow.textContent || "").indexOf(
+      "subscription capacity was over the ceiling that policy enforced"
+    ) !== -1,
     firstRow.textContent
   );
   check(
-    "evalqueue: a held row shows how long it has waited",
-    (firstRow.textContent || "").indexOf("waiting 1h 30m") !== -1,
+    "evalqueue: a legacy held row says it will not start on its own",
+    (firstRow.textContent || "").indexOf("legacy hold, never ran") !== -1 &&
+      (firstRow.textContent || "").indexOf("will not start on its own") !== -1,
+    firstRow.textContent
+  );
+  check(
+    "evalqueue: a held row shows its age, and never calls it a wait",
+    (firstRow.textContent || "").indexOf("1h 30m") !== -1 &&
+      (firstRow.textContent || "").indexOf("waiting") === -1,
     firstRow.textContent
   );
   check(
@@ -4506,7 +4548,7 @@ async function scenarioEvaluationQueue() {
         "#/evaluations/" + REPO + "/" + QUEUE_TASK,
     firstRow.querySelector("a") && firstRow.querySelector("a").getAttribute("href")
   );
-  var failedRow = doc.querySelectorAll("#view .evq-row")[2];
+  var failedRow = rowsOrder[0];
   check(
     "evalqueue: a failed row shows its bounded diagnostic",
     (failedRow.textContent || "").indexOf("exited 1") !== -1,
@@ -4576,8 +4618,8 @@ async function scenarioEvaluationQueue() {
     section().textContent
   );
   check(
-    "evalqueue: the complete census still reports every outstanding job",
-    (textOf(".evq-summary") || "").indexOf("40 waiting") !== -1,
+    "evalqueue: the complete census still reports every record the page cut",
+    (textOf(".evq-summary") || "").indexOf("40 legacy held") !== -1,
     textOf(".evq-summary")
   );
 

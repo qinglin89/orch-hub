@@ -95,13 +95,20 @@
   // this map so a held record is named identically wherever it shows. An unknown
   // token falls through verbatim rather than vanishing, so a record from a build
   // this one does not know is still legible.
+  //
+  // Written in the PAST tense throughout, and each call site frames it as history.
+  // These conditions were true once, when a dispatcher was deciding whether to
+  // spend a turn; none of them is checked any more and none of them is what keeps
+  // the record where it is. Present-tense prose here ("capacity is at the
+  // ceiling") reads as a live hold and invites the operator to wait for capacity
+  // to free up, which is a wait that never ends.
   const DEFER_REASON_TEXT = {
-    capacity: "subscription capacity is at the configured ceiling",
-    "usage-unknown": "subscription usage could not be read",
-    pacing: "another evaluation turn ran recently",
+    capacity: "subscription capacity was over the ceiling that policy enforced",
+    "usage-unknown": "subscription usage could not be read at the time",
+    pacing: "another evaluation turn had run too recently",
   };
   const deferReasonText = (reason) =>
-    reason ? DEFER_REASON_TEXT[reason] || reason : "held by a retired dispatch policy";
+    reason ? DEFER_REASON_TEXT[reason] || reason : "no reason was recorded";
 
   // `skipped` is the fifth state, and likewise legacy: a task that completed and
   // deliberately got no model turn, because its run was launched with automatic
@@ -4374,27 +4381,33 @@
           )}</span></span>`;
   }
 
-  // The held (`deferred`) panel content: this task's automatic Layer 2 is already
-  // accepted and durably queued — it is waiting for the dispatch policy, not for
-  // an operator. Without this branch a held job falls through to the idle trigger
-  // and the page reads "never evaluated", which is exactly backwards: it hides
-  // that the corpus already owes this task a report, and invites a manual turn
-  // that duplicates one already scheduled.
+  // The held (`deferred`) panel content: an attempt an earlier hub accepted for
+  // this task and never ran. Without this branch a held job falls through to the
+  // idle trigger and the page reads "never evaluated", which is a different fact
+  // from "accepted once and abandoned" — the record is the only thing that says a
+  // stale acceptance is sitting on this task, and it stays until a fresh start
+  // supersedes it.
   //
-  // The trigger is still offered, relabelled, because a manual evaluation is the
-  // documented escape hatch from a queue a broken usage feed would otherwise hold
-  // forever (it is ungated by design — a human choosing to look is not the
-  // production-side selection automatic evaluation removes). No polling: a held
-  // job waits on capacity, which is an hours-scale wait, so a 3-second poll would
-  // burn the page for no news.
+  // It must read as history, not as a queue position. The automatic dispatcher
+  // that would have picked this up is gone: no startup sweep, no monitor tick, no
+  // usage recovery and no reconnection promotes a held record, and the manager's
+  // only production start path is the explicit POST behind the button below. So
+  // the panel states plainly that nothing will start it and offers the manual run
+  // as the only way — the earlier wording ("it starts on its own when the policy
+  // allows", "run it now to skip the wait") described a mechanism that no longer
+  // exists and would leave the operator waiting for a turn that is never coming.
+  //
+  // No polling, for the same reason a skipped job is not polled: nothing is in
+  // flight to poll for.
   function evalSemHeld(job, unavailable, doctor) {
     const reason = job && job.defer_reason ? deferReasonText(job.defer_reason) : "";
-    return `<span class="control-status eval-sem-status" role="status">This task is
-          queued for automatic semantic evaluation and is waiting${
-            reason ? " because " + escapeHtml(reason) : ""
-          }. It starts on its own when the policy allows; this page will not update
-          itself. Run it now to skip the wait.</span>
-        ${evalSemTrigger("Run semantic evaluation now…", unavailable, doctor)}`;
+    return `<span class="control-status eval-sem-status" role="status">An earlier
+          hub accepted an automatic semantic evaluation for this task and never ran
+          it${reason ? " — " + escapeHtml(reason) : ""}. Automatic Layer 2 has been
+          retired, so nothing will start this record on its own: running it below is
+          the only way to get a Layer 2 report. The deterministic Layer 1 metrics
+          above are unaffected.</span>
+        ${evalSemTrigger("Run semantic evaluation…", unavailable, doctor)}`;
   }
 
   // The terminal-`skipped` panel content: this task completed and deliberately got
@@ -4436,9 +4449,10 @@
   // model (a real cost, and slow) but is a read-only analysis bounded to the
   // persisted evidence — not an orchestrator run, and it mutates nothing. Its
   // action region is state-driven by the current async job: a transient job shows
-  // the running panel (survives reload); a deferred job shows why it is held plus
-  // a run-now override; a failed/error job shows the bounded diagnostic + Retry;
-  // a skipped job shows who declined it plus the same trigger;
+  // the running panel (survives reload); a deferred job shows the legacy hold, that
+  // nothing will start it, and the manual trigger; a failed/error job shows the
+  // bounded diagnostic + Retry; a skipped job shows who declined it plus the same
+  // trigger;
   // no job or a completed one shows the idle trigger. All of them share one
   // `.eval-actions` wrapper with a state modifier so the layout is a single
   // (never nested) flex container.
@@ -4453,7 +4467,7 @@
       modifier = " eval-sem-running";
       actions = evalSemRunning(job);
     } else if (status === "deferred") {
-      // Accepted and owed, held by the dispatch policy — neither in flight nor
+      // Accepted by the retired dispatcher and never run — neither in flight nor
       // settled, and emphatically not "no job".
       modifier = " eval-sem-held";
       actions = evalSemHeld(job, unavailable, doctor);
@@ -6641,18 +6655,28 @@
     const job = entry.job || {};
     const status = job.status || "unknown";
     // `deferred` is legacy only: an attempt an earlier hub accepted and never got
-    // to. Nothing promotes one now, so it is shown with its recorded reason and
-    // left alone until somebody supersedes it from the task's own view.
+    // to. Nothing promotes one now, so the row says so in as many words and leaves
+    // it alone until somebody supersedes it from the task's own view (the link).
+    // Naming it a hold without naming it retired is what makes the row read as a
+    // queue position — the status token already reads that way on its own.
     const held = status === "deferred";
     const age =
       entry.age_seconds === null || entry.age_seconds === undefined
         ? ""
         : fmtDuration(entry.age_seconds);
     const bits = [];
-    if (held) bits.push(deferReasonText(job.defer_reason));
+    if (held)
+      bits.push(
+        "legacy hold, never ran (" +
+          deferReasonText(job.defer_reason) +
+          ") — it will not start on its own"
+      );
     else if (status === "failed" || status === "error")
       bits.push(job.error || "the evaluation failed");
-    if (age) bits.push((held || status === "queued" ? "waiting " : "") + age);
+    // "waiting" belongs only to a job something is going to pick up. A held record
+    // has waited for nothing since the dispatcher was removed, so its figure is an
+    // age like a settled record's, not a queue wait.
+    if (age) bits.push((status === "queued" ? "waiting " : "") + age);
     const repoName = job.repo_name || "";
     const taskId = job.task_id || "";
     // Offered only for a job that is actually stoppable AND identifiable: the
@@ -6703,7 +6727,12 @@
   // read against, so dropping it would read as a section that forgot to look.
   function evalQueueSummary(counts) {
     const c = counts || {};
-    const waiting = (c.deferred || 0) + (c.queued || 0) + (c.running || 0);
+    // `deferred` is deliberately NOT folded in here. "Waiting" is a claim that
+    // something is going to happen, true of the two transient states and of
+    // nothing else: a legacy held record waits for no one, and counting it as
+    // waiting turns the census line itself into the false promise the rows below
+    // were fixed to stop making.
+    const waiting = (c.queued || 0) + (c.running || 0);
     const parts = [(c.completed || 0) + " completed"];
     if (waiting) parts.push(waiting + " waiting");
     const failed = (c.failed || 0) + (c.error || 0);
@@ -6714,6 +6743,10 @@
     // what makes them legible; neither can be produced any more.
     if (c.cancelled) parts.push(c.cancelled + " cancelled");
     if (c.skipped) parts.push(c.skipped + " skipped");
+    // Same era, same reason to be countable: an acceptance that was never spent.
+    // Named for what it is rather than for the state token, so the line does not
+    // have to be read against a lifecycle that was removed.
+    if (c.deferred) parts.push(c.deferred + " legacy held");
     return "Latest attempt per task: " + parts.join(" · ");
   }
 

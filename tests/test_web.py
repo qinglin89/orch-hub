@@ -2610,6 +2610,17 @@ def test_overview_evaluation_queue_explains_the_records_it_shows():
     assert "DEFER_REASON_TEXT" in body
     for token in ("capacity", "usage-unknown", "pacing"):
         assert token in body, token
+    # In the past tense, and framed as a dead record: these conditions were true
+    # once, while a dispatcher was deciding whether to spend a turn. Present-tense
+    # prose reads as a live hold and sends the operator off to wait for capacity
+    # that nothing is watching.
+    assert "subscription capacity is at the configured ceiling" not in body
+    assert "will not start on its own" in body
+    assert "legacy hold, never ran" in body
+    # "waiting" is a claim that something is coming, so it stays off the census
+    # line and off a held row; only an admitted job is waiting for anything.
+    assert '(c.queued || 0) + (c.running || 0)' in body
+    assert 'c.deferred + " legacy held"' in body
     # A capped page must not read as "this is everything".
     assert "queue.truncated" in body
     assert "counts above are complete" in body
@@ -2634,17 +2645,22 @@ def test_overview_evaluation_queue_carries_the_control_it_still_has():
     assert 'c.cancelled + " cancelled"' in body
 
 
-def test_task_evaluation_view_renders_a_held_layer_2_job():
+def test_task_evaluation_view_renders_a_held_layer_2_job_as_a_dead_record():
     body = app_js()
-    # A deferred job is accepted and durably owed, not absent: without its own
-    # branch it fell through to the idle trigger and the page read "never
-    # evaluated" for a task the corpus already owes a report.
+    # A deferred job is an acceptance an earlier hub never ran, not an absence:
+    # without its own branch it fell through to the idle trigger and the page read
+    # "never evaluated" for a task that already carries a stale acceptance.
     assert 'status === "deferred"' in body
     assert "evalSemHeld" in body
     assert "eval-sem-held" in body
-    # The manual override stays offered — it is the documented escape from a queue
-    # a broken usage feed would otherwise hold forever.
-    assert "Run semantic evaluation now…" in body
+    # But it is not a queue position either. Nothing promotes a held record, so the
+    # panel must say so and offer the manual run as the only route to Layer 2 —
+    # the retired wording invited the operator to wait for a policy that no longer
+    # exists.
+    assert "nothing will start this record on its own" in body
+    assert "Run semantic evaluation now…" not in body
+    assert "starts on its own when the policy allows" not in body
+    assert "Run it now to skip the wait" not in body
 
 
 def test_overview_evaluation_queue_styles():

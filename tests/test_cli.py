@@ -755,7 +755,7 @@ def write_queue_job(jobs_root: Path, repo_name: str, task_id: str, **fields) -> 
     return job_dir
 
 
-def test_eval_queue_reports_the_census_and_the_jobs_still_owed_a_turn(
+def test_eval_queue_reports_the_census_and_the_records_worth_looking_at(
     monkeypatch, capsys, tmp_path
 ):
     jobs_root = queue_env(monkeypatch, tmp_path)
@@ -802,9 +802,14 @@ def test_eval_queue_reports_the_census_and_the_jobs_still_owed_a_turn(
     # A resting legacy outcome is counted and kept out of the rows.
     assert "2026-07-01-c-task" not in out
     assert "2026-08-02-b-task" not in out
-    # The one job still owed a turn, with the machine reason it is waiting.
+    # The one non-resting record, named for what it is. The status token alone
+    # reads as a queue position, so the row has to say that the retired dispatcher
+    # accepted it and that nothing will pick it up — otherwise the operator waits
+    # for a turn that is never coming.
     assert "deferred" in out and "alpha/2026-08-01-a-task" in out
-    assert "reason=capacity" in out
+    assert "legacy hold, reason=capacity; never starts on its own" in out
+    # And it is not a wait: "waiting" is reserved for a job something admitted.
+    assert "waiting" not in out
 
 
 def test_eval_queue_labels_the_census_as_attempts_not_reports(
@@ -909,8 +914,11 @@ def test_eval_queue_reports_a_legacy_held_record_without_calling_it_late(
 
     out = capsys.readouterr().out
     assert "deferred" in out and "alpha/2026-08-01-a-task" in out
-    assert "reason=usage-unknown" in out
-    assert "waiting " in out  # the age is still reported
+    assert "legacy hold, reason=usage-unknown; never starts on its own" in out
+    # The interval is still reported, as an age. Calling it a wait would state the
+    # one thing this record is not doing.
+    assert "age " in out
+    assert "waiting" not in out
     assert "overdue" not in out
     assert "[stalled]" not in out
     assert "not draining" not in out

@@ -1012,7 +1012,7 @@ def _print_queue(snapshot: EvaluationQueueSnapshot, jobs_dir: Path) -> None:
 
 
 def _queue_row(entry: EvaluationQueueEntry) -> str:
-    """One job: what state, which task, how long, and — when held or failed — why.
+    """One job: what state, which task, how long, and — when legacy or failed — why.
 
     A failed record's diagnostic is bounded at 2000 characters and may be several
     lines, which is a paragraph in the middle of a table; it is collapsed to one
@@ -1025,15 +1025,24 @@ def _queue_row(entry: EvaluationQueueEntry) -> str:
     parts = [f"{job.status:9}", target or job.job_id or "?"]
     if entry.age_seconds is not None:
         # Always measured from ``created_ts`` — how long this attempt has been
-        # open — so it is a wait only while the job is still owed a turn. A settled
-        # record's figure is the same interval and not a wait, and saying "waiting"
-        # over a failed row would claim it is still in the queue.
-        waiting = job.status in (STATUS_DEFERRED, STATUS_QUEUED)
+        # open — so it is a wait only while something is going to pick the job up.
+        # ``deferred`` is deliberately not in that set even though it reads like a
+        # queue position: it is a legacy acceptance no code path promotes, so
+        # "waiting 26d" would promise a turn that is never coming. A settled
+        # record's figure is the same interval and not a wait either.
+        waiting = job.status == STATUS_QUEUED
         parts.append(
             ("waiting " if waiting else "age ") + _fmt_age(entry.age_seconds)
         )
-    if job.status == STATUS_DEFERRED and job.defer_reason:
-        parts.append(f"reason={job.defer_reason}")
+    if job.status == STATUS_DEFERRED:
+        # The status token alone reads as a queue position, so the row has to say
+        # what the record actually is: an acceptance the retired automatic
+        # dispatcher wrote and never got to. The recorded reason is kept because it
+        # says why it was held then, but it is framed as history — nothing is
+        # holding it now, and the only thing that moves it is an explicit
+        # `POST .../semantic/job` for that task.
+        reason = f", reason={job.defer_reason}" if job.defer_reason else ""
+        parts.append(f"legacy hold{reason}; never starts on its own")
     elif job.error:
         parts.append(_one_line(job.error))
     return "  ".join(parts)

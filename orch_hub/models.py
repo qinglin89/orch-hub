@@ -2348,8 +2348,11 @@ class SemanticJob:
     :data:`orch_hub.semantic_jobs.SKIP_RUN_OPT_OUT`, never operator prose — free
     text would be unanalyzable and would leak repo content into a persisted
     surface. All three reason fields are mutually exclusive per record and answer
-    different questions: why a *waiting* job waits, why an *attempt* failed, and
-    why no attempt was made. ``backend``/``model``/
+    different questions, the first two of them about a mechanism that is gone: why
+    a held record was never admitted, why no attempt was made at all, and why an
+    *attempt* failed. Operator surfaces must frame the first two as history — a
+    held record is not waiting for anything, so prose that reads as a live hold
+    promises a turn that will never start. ``backend``/``model``/
     ``schema_version`` are the selected evaluator identity (the
     :class:`SemanticEvaluatorInfo` triple), stamped at creation so the
     queued/running UI shows which model is running before any report exists.
