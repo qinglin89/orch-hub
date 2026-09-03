@@ -57,7 +57,12 @@ of the store, and a hub that ran the automatic path carries one legacy held
 record per task it accepted. Capping the rows keeps the surface readable; keeping
 ``counts`` a full census keeps it honest, which is the half that actually matters
 here — a figure that quietly meant "the first twenty" would report a twenty-deep
-queue as calm. ``truncated`` says when the cap bit."""
+queue as calm. ``truncated`` says when the cap bit.
+
+It is also why the rows are ordered actionable-first rather than oldest-first
+across the whole set: a hub carrying twenty legacy held records would otherwise
+spend the entire page on records nothing will act on and drop the one turn that
+is running — the exact question this surface exists to answer."""
 
 
 def _utc_now() -> dt.datetime:
@@ -90,23 +95,31 @@ def _parse_ts(value: str | None) -> dt.datetime | None:
 # for all look identical from outside — nothing happens, quietly.
 
 
-_WAITING_ORDER = (STATUS_DEFERRED, STATUS_QUEUED, STATUS_RUNNING)
-"""Statuses whose jobs are still owed a turn, in the order a reader wants them.
+_LIVE_ORDER = (STATUS_RUNNING, STATUS_QUEUED)
+"""Statuses of an attempt somebody started that has not settled yet.
 
-They lead the queue view, and within it a legacy held record precedes an admitted
-one: "what is not going to happen by itself" is the question this surface exists
-to answer, and an admitted turn is already answering itself."""
+They lead the view, ``running`` first: a live turn is the only record on this
+surface that is spending something at this moment, and its row carries the Cancel
+that stops it. Everything below it is a record to read, not one to act on."""
 
 
-def _waiting_key(job: SemanticJob) -> tuple:
-    """Oldest-first within the waiting group, so the reader meets the longest-
-    unanswered record first."""
+def _live_key(job: SemanticJob) -> tuple:
+    """Running before queued, oldest-first inside each rank, so the reader meets
+    the turn that has been open longest."""
     return (
-        _WAITING_ORDER.index(job.status),
+        _LIVE_ORDER.index(job.status),
         job.created_ts or "",
         job.repo_name,
         job.task_id,
     )
+
+
+def _legacy_key(job: SemanticJob) -> tuple:
+    """Oldest-first among the legacy held records.
+
+    They are a flat set that nothing will act on, so the only order with any
+    meaning is the one that puts the longest-abandoned acceptance first."""
+    return (job.created_ts or "", job.repo_name, job.task_id)
 
 
 def _settled_key(job: SemanticJob) -> tuple:
@@ -155,22 +168,37 @@ def queue_snapshot(
     ``skipped`` is a legacy record for a completion the retired launch opt-out
     declined. All three remain in ``counts``, which is where a reader looks for
     what the store holds rather than for what to do next.
+
+    What survives is ordered by what the reader can do about it, because ``limit``
+    cuts from the bottom: live attempts first (a turn spending now, and the Cancel
+    that stops it), then unresolved outcomes worth reading (``failed``/``error``,
+    newest first), then the legacy ``deferred`` records last. A held record is
+    inert — no code path promotes one, and it changes only when somebody starts a
+    fresh evaluation from that task's own view — so it may never displace a live
+    turn from the page. Ranking it first, as the automatic era did, was correct
+    only while something was going to pick it up.
     """
     moment = now or _utc_now()
     counts: dict[str, int] = {status: 0 for status in STATUSES}
-    pending: list[SemanticJob] = []
+    live: list[SemanticJob] = []
+    unresolved: list[SemanticJob] = []
+    legacy: list[SemanticJob] = []
     for job in jobs:
         counts[job.status] = counts.get(job.status, 0) + 1
-        if job.status not in (STATUS_COMPLETED, STATUS_CANCELLED, STATUS_SKIPPED):
-            pending.append(job)
-    # Two groups with opposite senses, so they are sorted apart and concatenated
-    # rather than forced into one comparator.
-    pending = sorted(
-        (job for job in pending if job.status in _WAITING_ORDER), key=_waiting_key
-    ) + sorted(
-        (job for job in pending if job.status not in _WAITING_ORDER),
-        key=_settled_key,
-        reverse=True,
+        if job.status in (STATUS_COMPLETED, STATUS_CANCELLED, STATUS_SKIPPED):
+            continue
+        if job.status in _LIVE_ORDER:
+            live.append(job)
+        elif job.status == STATUS_DEFERRED:
+            legacy.append(job)
+        else:
+            unresolved.append(job)
+    # Three groups with different senses, so they are sorted apart and
+    # concatenated rather than forced into one comparator.
+    pending = (
+        sorted(live, key=_live_key)
+        + sorted(unresolved, key=_settled_key, reverse=True)
+        + sorted(legacy, key=_legacy_key)
     )
     entries = [
         EvaluationQueueEntry(job=job, age_seconds=_age_seconds(job, moment))

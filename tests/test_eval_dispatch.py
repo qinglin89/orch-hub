@@ -4,9 +4,10 @@ This module used to own the automatic Layer 2 dispatch policy — a capacity gat
 spacing between turns, a sweep that promoted held records — and this file used to
 test it. All of that is gone (:mod:`orch_hub.completion_eval` says why), and what
 is left is the read-only fold ``queue_snapshot`` takes over the persisted job
-store: a complete census the row cap never shrinks, the two-group order, legacy
-records reported as they rest, a read that moves nothing — and what the census is
-*not*, pinned from a real completed-then-failed retry.
+store: a complete census the row cap never shrinks, the actionable-first order
+(and the cap boundary that order exists to protect), legacy records reported as
+they rest, a read that moves nothing — and what the census is *not*, pinned from a
+real completed-then-failed retry.
 
 Nothing here can start a turn, which is now a property of the module rather than
 of the tests: there is no dispatcher left to drive.
@@ -29,7 +30,7 @@ from orch_hub.semantic import (
     SemanticEvaluator,
 )
 from orch_hub.subprocess_utils import CommandResult
-from orch_hub.eval_dispatch import queue_snapshot
+from orch_hub.eval_dispatch import QUEUE_ENTRY_LIMIT, queue_snapshot
 from orch_hub.models import (
     ManagedRepo,
     SemanticJob,
@@ -257,12 +258,15 @@ def test_completed_jobs_are_counted_but_not_listed(tmp_path):
     assert [e.job.task_id for e in snap.entries] == ["b"]
 
 
-def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
-    """Two groups with opposite senses: a queue, then a log.
+def test_rows_are_ordered_by_what_the_reader_can_act_on(tmp_path):
+    """Three groups: a live turn, then a log, then the leftovers.
 
-    The waiting group leads with the longest-open record, so the top row is the
-    one that has been unanswered longest; the settled group leads with the newest
-    failure, which is the one still worth reading.
+    Live attempts lead — they are the only records still moving, and the only ones
+    carrying a Cancel. Unresolved outcomes follow, newest failure first, which is
+    the one still worth reading. Legacy ``deferred`` records come last: nothing
+    promotes one, so being at the bottom of the page costs the reader nothing,
+    while being at the top would cost them the turn that is running (the cap cuts
+    from the bottom — see the test below).
     """
     older = NOW - dt.timedelta(hours=3)
     newer = NOW - dt.timedelta(hours=1)
@@ -271,6 +275,7 @@ def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
             job("fail-old", STATUS_FAILED, created=older, updated=older),
             job("held-new", STATUS_DEFERRED, created=newer),
             job("running", STATUS_RUNNING, created=newer),
+            job("queued", STATUS_QUEUED, created=older),
             job("fail-new", STATUS_FAILED, created=older, updated=newer),
             job("held-old", STATUS_DEFERRED, created=older),
         ],
@@ -278,12 +283,44 @@ def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
     )
 
     assert [e.job.task_id for e in snap.entries] == [
-        "held-old",
-        "held-new",
         "running",
+        "queued",
         "fail-new",
         "fail-old",
+        "held-old",
+        "held-new",
     ]
+
+
+def test_legacy_held_records_cannot_cap_a_live_turn_off_the_page(tmp_path):
+    """The cap must never spend the page on records nothing will act on.
+
+    A hub that ran the automatic path carries one legacy held record per task it
+    accepted, so a full page of them is the ordinary shape rather than a
+    pathological one. While held records sorted first, ``limit`` legacy rows
+    pushed the running turn out of ``entries`` entirely: the census still said
+    ``running: 1``, but the row naming which task was spending, and the Cancel
+    beside it, were gone — which defeats the reason this cross-repo surface is
+    kept at all.
+    """
+    records = [
+        job(f"held-{i:02d}", STATUS_DEFERRED, created=NOW - dt.timedelta(days=30, seconds=i))
+        for i in range(QUEUE_ENTRY_LIMIT)
+    ]
+    records.append(job("live", STATUS_RUNNING, created=NOW - dt.timedelta(minutes=2)))
+
+    snap = queue_snapshot(records, now=NOW)
+
+    assert snap.counts[STATUS_RUNNING] == 1
+    assert snap.counts[STATUS_DEFERRED] == QUEUE_ENTRY_LIMIT
+    assert len(snap.entries) == QUEUE_ENTRY_LIMIT
+    assert snap.truncated is True
+    # The live turn is on the page, and first on it; the newest legacy record is
+    # what the cap drops instead (they list oldest-first).
+    listed = [e.job.task_id for e in snap.entries]
+    assert listed[0] == "live"
+    assert listed[1] == "held-19"  # the longest-abandoned acceptance leads them
+    assert "held-00" not in listed
 
 
 def test_the_age_is_measured_from_acceptance_not_from_a_turn(tmp_path):
