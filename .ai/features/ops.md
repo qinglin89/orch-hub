@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Features: Operations Surfaces
@@ -61,12 +61,10 @@ Implemented behavior:
   emit. A `None` notifier is a no-op and backend failures are swallowed without
   changing `intake.json` or `events.jsonl`.
 - Semantic-job notifications fire exactly once from `SemanticJobManager`'s
-  guarded fresh finalizer after `job.json` is persisted. Manual completed/failed
-  outcomes notify; automatic completion is quiet because the run-end push just
-  fired, while automatic failure still notifies because the corpus shrank
-  unexpectedly. Payloads carry only repo, task id, outcome, and completed
-  evaluation id; backend diagnostics/model output stay out. Deferred/queued/
-  running/skipped/error records, duplicate settles, and restart reconciliation
+  guarded fresh finalizer after `job.json` is persisted. Explicit
+  completed/failed outcomes notify. Payloads carry only repo, task id, outcome,
+  and completed evaluation id; backend diagnostics/model output stay out.
+  Deferred/queued/running/skipped/error records, duplicate settles, and restart reconciliation
   do not emit. Delivery failure cannot change the settled job record.
 - API/dashboard reads still refresh run status, but they are no longer required
   for timely pushes because the resident monitor drives the same status path.

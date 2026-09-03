@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules: Boundary Rules
@@ -35,12 +35,11 @@ detail files.
 - Semantic evaluation reads only the bounded evidence/static prompt; writes
   only `semantic_report.json` + `report.md` under the evaluation dir; backends
   enforce read isolation structurally.
-- Completion evaluation receives only settled completed runs; it durably
-  enqueues/skips Layer 2 before dispatching Layer 1/sweep work, and cannot mutate
+- Completion evaluation receives only settled completed runs; it submits Layer
+  1 work with no semantic-job collaborator or durable debt, and cannot mutate
   run/readiness/attention/admission state.
-- Semantic jobs own one current record per task and the automatic once-guard;
-  dispatch policy alone promotes deferred records, while manual starts remain
-  usage-ungated.
+- Semantic jobs own one current record per task and explicit Layer 2 starts;
+  legacy deferred/skipped records remain inert until superseded manually.
 - Report catalog publishes complete archived-task artifacts with stable global
   identity/order and explicit provenance/integrity; it does not judge reports or
   decide protocol evolution. Its retention guard preserves unpublished debt.
@@ -48,9 +47,8 @@ detail files.
   may run Claude's local `/usage` command only when its envelope proves zero
   model activity. The legacy statusLine writer captures only whitelisted
   capacity fields and passes the operator command through; neither directly
-  opens credentials/endpoints or spends reset credits. Automatic Layer 2
-  dispatch is the sole policy consumer and treats uncertainty as deferral;
-  usage never gates readiness, attention, run state, launch, or intake.
+  opens credentials/endpoints or spends reset credits. Usage is display-only
+  and never gates readiness, attention, run state, launch, intake, or evaluation.
 - Intake manager owns intake state, intake-ready trigger timing, and the
   confirmation postcondition; API/web neither treat drafts as tasks nor decide
   confirm outcomes.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Architecture
@@ -101,12 +101,11 @@ archives.
 - Hub-owned run dirs stay outside target repo working trees.
 - Hub-owned evaluation artifacts stay outside target trees and do not mutate
   task/run/protocol state.
-- Every hub-observed completed task mechanically produces Layer 1 and a durable
-  task-level Layer 2 outcome. Automatic Layer 2 waits on capacity; a per-run
-  opt-out records `skipped` rather than creating an invisible absence.
-- Layer 2 turns and their resident reaping share one persisted whole-attempt
-  deadline. Queue pause stops dispatch but not completion acceptance; per-job
-  cancel cannot report success after result settlement has begun.
+- Every hub-observed completed task mechanically produces Layer 1; completion
+  never creates, skips, enqueues, or starts a Layer 2 job.
+- Layer 2 starts only through an explicit per-task request. Its turns and
+  resident reaping share one persisted whole-attempt deadline; per-job cancel
+  cannot report success after result settlement has begun.
 - Global report entries are append-only and uniquely ordered; retained or pruned
   artifact state is reported explicitly, and publication never decides protocol
   evolution.
@@ -122,9 +121,8 @@ archives.
 - Notification delivery must never corrupt run, intake, history, or
   control-dir state.
 - Bark URLs embed device-key secrets and must not be logged.
-- Subscription usage is never a launch or health gate. Unavailable/stale data
-  is shown as such, never as zero; only automatic Layer 2 dispatch consumes it
-  as a fail-toward-deferral scheduling signal.
+- Subscription usage is display-only, never a launch, health, or evaluation
+  gate. Unavailable/stale data is shown as such, never as zero.
 - Claude usage requires no statusLine setup. A legacy statusLine hook remains
   operator-installed; orch-hub never edits `~/.claude/**`, and the wrapper
   preserves the operator's visible statusline behavior.

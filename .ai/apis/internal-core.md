@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # APIs: Internal — Core and Usage
@@ -100,10 +100,9 @@ serializes store writes, asynchronously requests refresh when its stored Claude
 observation is older than the collector horizon, aggregates behind a 30s cache,
 and returns fail-soft unavailable snapshots. The app gives the same request
 callable to `RunManager` for terminal transitions.
-`provider_usage(provider)` exposes the raw normalized provider object to the
-automatic-L2 capacity gate; missing/stale/current-window ambiguity means defer.
-No usage data may affect readiness, attention, run state, launch, or intake, and
-manual semantic evaluation remains ungated.
+No capacity-decision or single-provider scheduler read is exported: usage is
+display-only. No usage data may affect readiness, attention, run state, launch,
+intake, or semantic evaluation.
 
 ## API Conventions
 

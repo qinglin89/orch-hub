@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Project Map
@@ -17,10 +17,10 @@ behavior and rationale stay in the owning doc.
 | Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads |
 | Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v18 evidence packs; unanimous protocol identity; hub-owned artifacts; descriptor containment |
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
-| Task semantic evaluator | completion_eval, eval_control, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | evidence-bounded Layer 2; deadline/reap bound; durable pause; exact cancel/settle boundary; recorded skip |
+| Task semantic evaluator | completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | automatic Layer 1 only; explicit evidence-bounded Layer 2; deadline/reap bound; exact cancel/settle boundary; inert legacy holds |
 | Global evaluation report feed | report_catalog, protocol_provenance, evaluation, semantic, task_store, models, api, cli, web | append-only catalog; seq + report_key identity; reconciliation; verify/repair CLI; consumers decide evolution |
 | Protocol identity coverage | protocol_provenance, runs, report_catalog, models, api, web | persisted run verdicts; check-owed lifecycle join; newest-published-report task denominator; read-only cross-store census |
-| Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, eval_dispatch, web, docs | fail-soft display; cache-primary Claude; model-free refresh; automatic-L2 pacing only |
+| Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, web, docs | fail-soft display only; cache-primary Claude; model-free refresh |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | thin routes over shared helpers; only health + shell public |
 | Control-dir file channel | control_dir, models | file-channel only; atomic answers; idempotent stop.flag |
 | Run lifecycle | admission, runs, intake, orch_config, sessions, task_snapshots, protocol_provenance, api, config, control_dir, models, readiness, task_store | admission before readiness; per-repo serialization; detached launch; pre-spawn protocol capture + observed-end recheck |
@@ -42,7 +42,7 @@ behavior and rationale stay in the owning doc.
 | Task inventory | `GET /api/tasks`; `GET /api/repos/{repo_id}/tasks[/{task_id}]` |
 | Task evaluation foundation | internal `EvaluationService`; `ORCH_HUB_EVAL_RETENTION`; `GET /api/evaluation`; `GET /api/repos/{repo_id}/evaluations/{task_id}[/{evaluation_id}]`; `POST .../evidence`; batched state in `GET /api/history/runs`; dashboard `#/evaluations/{repo}/{task}` |
 | Task static metrics | internal `StaticEvaluator`; `POST .../evaluations/{task_id}/metrics`; detail readback; dashboard Layer 1 |
-| Task semantic evaluator | internal `CompletionEvaluationTrigger` + `EvaluationControlStore` + `DeferredDispatcher` + `SemanticEvaluator` + `SemanticJobManager`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `POST .../semantic/job/cancel`; `GET /api/evaluation/doctor`; `GET /api/evaluation/queue`; `POST /api/evaluation/queue/pause\|resume`; `POST /api/runs` opt-out; CLI `orch-hub eval doctor\|queue [--json]`; report readback |
+| Task semantic evaluator | internal `CompletionEvaluationTrigger` + `SemanticEvaluator` + `SemanticJobManager` + `queue_snapshot`; `POST`/`GET .../evaluations/{task_id}/semantic/job`; `POST .../semantic/job/cancel`; `GET /api/evaluation/doctor`; `GET /api/evaluation/queue`; CLI `orch-hub eval doctor\|queue [--json]`; report readback |
 | Global evaluation report feed | internal `ReportCatalog`; CLI `orch-hub eval catalog verify\|repair [--json] [--confirm]`; `GET /api/evaluation/reports[?after=<seq>&limit=<n>]`; `GET /api/evaluation/reports/{report_key}[/artifacts/{name}]`; dashboard `#/reports` |
 | Protocol identity coverage | internal `run_coverage` + run/report-catalog censuses; `GET /api/protocol-coverage`; dashboard `#/protocol` + Run-history/report-feed rows |
 | Agent subscription usage | internal `UsageService` + collectors/parsers; legacy `orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`; protected `GET /api/usage` |
@@ -93,14 +93,13 @@ behavior and rationale stay in the owning doc.
 | session_reads | bounded transcript prefetch facts + ordered read traces |
 | static_metrics | deterministic Layer 1 scores; `static_metrics.json` |
 | semantic | evidence-bounded Layer 2 reports; backend isolation; doctor |
-| completion_eval | isolated run-completion trigger; durable enqueue/skip + off-lock Layer 1 |
-| eval_control | persisted hub-wide queue pause; unreadable state fails toward hold |
-| eval_dispatch | capacity/spacing/pause policy; admission barrier; queue projection |
+| completion_eval | isolated run-completion trigger; off-lock Layer 1 only; no durable debt |
+| eval_dispatch | read-only Layer 2 attempt projection; legacy holds last/inert |
 | semantic_jobs | persisted async/latest-outcome records; deadline reap; cancel; strict/lenient store reads |
 | report_catalog | append-only publication feed; audit/repair; retention guard |
 | usage | Claude cache/CLI + Codex rollout collection; fail-soft merge |
 | statusline | legacy optional statusLine fallback wrapper |
-| monitor | resident run-status scan plus isolated retry sweeps |
+| monitor | resident run-status scan plus isolated stuck-attempt reconciliation |
 | history | per-run JSONL events; metadata only |
 | control_dir | question/answer/stop file mechanics |
 | logs | run-record log location/tails/streams |

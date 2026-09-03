@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -68,10 +68,9 @@ Implemented behavior:
   profiles remain visibly disabled. Submit posts split
   `dev_mode`/`review_mode` launch data, including the complete agent/model/effort
   tuple for each Custom cc-codex role, while shared backend and plan-gate remain
-  orthogonal. Evaluate-on-completion is a separate hub-only checkbox: it defaults
-  on and resets on every dialog open; false declines only automatic Layer 2 for
-  a task this run completes, still runs Layer 1, records/counts the skip, and
-  never joins orchestrator argv. Stop posts to
+  orthogonal. The launch dialog has no evaluation choice; completed runs take
+  the config-gated automatic Layer 1 path, while Layer 2 starts only from the
+  per-task evaluation view. Stop posts to
   `POST /api/runs/{run_id}/stop`. `blocked` tasks require explicit
   acknowledgement; stale/raced starts render the backend 409 response.
 - Start is hidden or replaced with an explanation when the dashboard already
@@ -157,8 +156,9 @@ Implemented behavior:
   model judgments. Generate posts `/metrics`; Run semantic evaluation posts
   `/semantic/job`, reads persisted job state on every load, replaces the trigger
   with a running panel while `queued`/`running`, polls with navigation teardown,
-  shows capacity-held `deferred`, recorded `skipped`, and bounded failed/error
-  states with a manual run/retry escape, and selects the completed job's
+  shows legacy `deferred` as inert and never auto-starting, explains recorded
+  legacy `skipped`, and presents bounded failed/error states with a manual
+  run/retry escape, then selects the completed job's
   `evaluation_id` so the fresh semantic report paints.
   The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
   semantic backend disables only the Layer 2 trigger with an explanation while

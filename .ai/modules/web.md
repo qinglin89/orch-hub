@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules: Web UI
@@ -69,7 +69,7 @@ responsible for streams, intake polling, and Overview refresh.
 The Overview route (`#/overview`) aggregates protected repo/task/run/
 escalation/history/usage/evaluation-queue payloads into summary metrics,
 prioritized attention, live activity, recent outcomes, and separate Subscription
-usage/Evaluation queue sections; each
+usage/Layer 2 evaluation sections; each
 non-401 source failure degrades only its panel/section, and its chained
 background refresh is registered before the initial load so router teardown
 cancels stale paints and polling after navigation. Its repos ready metric and
@@ -79,8 +79,7 @@ failure. Subscription usage cards show Claude/Codex provider windows,
 used/remaining percentages, reset time, plan, freshness/stale and unavailable
 states, and aggregate reset-credit availability, but never create attention
 items or affect readiness/run/intake gates. The evaluation section shows the
-complete latest-attempt census, automatic/pause/overdue state, capped actionable
-rows, and per-repo skip tally. Its stable section slot lets Pause/Resume repaint
-only that panel, and cancellable rows offer Cancel outside the task link with
-scoped success/error announcement; paused is never rendered as idle. Disabled
-hides it and read failure degrades only that section.
+complete latest-attempt census and capped actionable-first rows, with inert
+legacy holds explicit and last. Cancellable rows offer Cancel outside the task
+link with scoped success/error announcement; nothing on the section starts or
+promotes a job. Disabled hides it and read failure degrades only that section.

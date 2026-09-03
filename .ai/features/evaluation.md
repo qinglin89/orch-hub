@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Features: Task Evaluation
@@ -153,10 +153,10 @@ Implemented behavior:
   deterministic evidence+static refresh and returns the new report; the detail
   route can later read the paired `evidence` and `static_metrics` artifacts.
 - A hub-observed task completion automatically runs the same
-  `generate_metrics` path off the run-manager lock, regardless of the run's
-  Layer 2 opt-out. Layer 1 is deliberately per completion signal rather than
-  task-once: repeats produce fresher free L1-only dirs, while publication still
-  requires a complete L1+L2 artifact set.
+  `generate_metrics` path off the run-manager lock. Layer 1 is deliberately per
+  completion signal rather than task-once: repeats produce fresher free L1-only
+  dirs, while publication still requires a complete L1+L2 artifact set. The
+  trigger creates no semantic job or durable retry debt.
 - The dashboard renders deterministic Layer 1 reports as distinct from Layer 2
   semantic reports and offers raw JSON only through copy/download affordances
   rather than inline log/evidence display.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Features: Run Control
@@ -27,8 +27,7 @@ APIs: internal `RunManager`; `POST /api/runs`, `GET /api/runs`,
 
 Implemented behavior:
 
-- `RunManager.start_run(repo, task_id, extra_args=(), acknowledge_blocked=False,
-  auto_semantic_eval=True)`
+- `RunManager.start_run(repo, task_id, extra_args=(), acknowledge_blocked=False)`
   gates launches fail-closed: no non-terminal intake through shared repo
   admission, same-repo live run, task inventory/status from `list_repo_tasks`,
   then readiness from `check_readiness`.
@@ -78,10 +77,10 @@ Implemented behavior:
   structured `launch`.
 - `run.json` is the file-backed source of truth and is atomically rewritten;
   it persists the internal `spawn_out` path so reattached runs and pre-field
-  records can still surface startup diagnostics. It also persists the hub-only
-  Layer 2 completion choice; absent or malformed legacy values read true. The
-  choice never joins orchestrator argv. In-memory `Popen` handles only capture
-  exit codes while the hub is the parent process.
+  records can still surface startup diagnostics. Legacy files carrying the
+  retired `auto_semantic_eval` key remain readable and the value is ignored.
+  In-memory `Popen` handles only capture exit codes while the hub is the parent
+  process.
 - Reattach scans run dirs and probes pid liveness. If a run ended while the hub
   was down, `ended_ts` is persisted with `exit_code=None`.
 - Live status is `active` or `waiting` based on pending control-dir questions

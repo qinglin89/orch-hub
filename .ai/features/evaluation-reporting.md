@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Features: Semantic Evaluation and Report Feed
@@ -16,18 +16,17 @@ Description: Run optional Layer 2 semantic task-quality evaluation over bounded
 evidence plus deterministic static metrics and persist model-judged JSON and
 Markdown reports without mutating target repos.
 
-Modules: completion_eval, eval_control, eval_dispatch, semantic_jobs, semantic, ai_snapshot,
+Modules: completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot,
 session_reads, static_metrics, evaluation, usage, runs, monitor, config, models,
 notifications, api, cli, web.
 
 APIs: internal `SemanticEvaluator.evaluate`, `build_semantic_evidence`,
 `build_prompt`, `parse_report`, `render_report_md`, `ClaudeSemanticBackend`,
-`CompletionEvaluationTrigger`, `DeferredDispatcher`, `SemanticJobManager`;
+`CompletionEvaluationTrigger`, `SemanticJobManager`, `queue_snapshot`;
 protected `POST`/`GET`
 `/api/repos/{repo_id}/evaluations/{task_id}/semantic/job`,
 `POST .../semantic/job/cancel`, `GET /api/evaluation/doctor`,
-`GET /api/evaluation/queue`, `POST /api/evaluation/queue/pause|resume`,
-`POST /api/runs` `auto_semantic_eval`, CLI `orch-hub eval doctor|queue`,
+`GET /api/evaluation/queue`, CLI `orch-hub eval doctor|queue`,
 dashboard Layer 2 controls, and evaluation detail readback of
 `semantic_report` and `report.md`.
 
@@ -71,14 +70,13 @@ Implemented behavior:
   backend/model/schema identity distinguishes comparable reports and is surfaced
   in dashboard history picker labels.
 - `SemanticJobManager` persists one current job per `(repo, task)` under
-  `<data_dir>/semantic-jobs/`. Manual starts reuse transient turns and overwrite
-  resting records; automatic enqueue/skip refuses any existing record, giving a
-  durable once-per-task guard across repeated completing runs. Lifecycle is
-  `deferred` → `queued` → `running` → `completed|failed|cancelled`, plus terminal
-  `skipped` (no turn) and `error` (unreadable record). A running record persists
-  the whole-attempt deadline its worker is enforced against; the resident sweep
-  settles only expired transients, while startup reconciliation still fails
-  process-orphaned queued/running turns. Held/skipped records survive.
+  `<data_dir>/semantic-jobs/`. Explicit starts reuse transient turns and
+  overwrite resting records. Lifecycle is `queued` → `running` →
+  `completed|failed|cancelled`, plus `error` for an unreadable record. A running
+  record persists the whole-attempt deadline its worker is enforced against; the
+  resident sweep settles only expired transients, while startup reconciliation
+  still fails process-orphaned queued/running turns. Legacy `deferred`/`skipped`
+  records remain readable and inert until an explicit start supersedes them.
 - Per-attempt cancellation is legal only from deferred/queued/running. A live
   canceller kills the direct model child or withholds a not-yet-opened turn; an
   atomic seal at model return makes later cancel refuse while parsing,
@@ -86,46 +84,28 @@ Implemented behavior:
   attempt ids and job-id-keyed live ownership keep a late worker from settling or
   unregistering a retry. A failed terminal record write retains sealed ownership
   until deadline/startup reconciliation records the failure.
-- Every hub-observed run completion triggers evaluation after session, task, and
-  deployed-protocol evidence settles. Layer 2 acceptance is an inline durable
-  enqueue or skip; Layer 1 and the global dispatch sweep run off the run-manager
-  lock. Failures are logged/recorded and cannot change run state, readiness,
-  attention, or launch/intake admission. Completions outside hub runs remain a
-  separate reconstructed backfill population.
-- Automatic Layer 2 is gated independently by `ORCH_HUB_EVAL_AUTO` and enters
-  `deferred`. `DeferredDispatcher` admits at most one oldest job per configured
-  spacing only below the configured provider-usage ceiling; missing, stale,
-  boundary-less, or otherwise unknown usage defers. The resident monitor retries
-  automatically; both evaluation gates hold the durable queue closed.
-- `<data_dir>/eval-control.json` persists a separate live pause over queue drain.
-  Completions continue landing as deferred records; resume loses no held work.
-  Pause writes and dispatch promotion share an admission barrier, so a pause that
-  has returned cannot be followed by a stale-read promotion. Missing control is
-  running; corrupt/unreadable control fails closed to a visible paused state and
-  `resume` repairs it. Manual starts remain deliberately ungated.
-- `ORCH_HUB_EVAL_USAGE_CEILING` defaults 80%, dispatch spacing defaults 900s,
-  and the queue warning age defaults 21600s. Spacing uses queued admission (and
-  counts manual turns), so executor latency cannot admit a herd after rollover.
-- `auto_semantic_eval` is a default-true hub-only per-run launch field, persisted
-  in `run.json`; absent legacy values read true and it never reaches orchestrator
-  argv. False still generates Layer 1 but writes terminal `skipped` with closed
-  reason `run-opt-out`. The first completing run's task record wins in both
-  directions; a manual semantic start may later replace the skip.
+- Every hub-observed run completion triggers deterministic Layer 1 after
+  session, task, and deployed-protocol evidence settles. The whole build runs
+  off the run-manager lock; failures are logged/dropped and cannot change run
+  state, readiness, attention, or launch/intake admission. The trigger holds no
+  semantic-job or dispatch collaborator and records no durable retry debt.
+- Layer 2 has no automatic path: completion, startup, monitor ticks, usage
+  changes, and network reconnection cannot create, skip, enqueue, promote, or
+  start a turn. `ORCH_HUB_EVAL_AUTO` gates automatic Layer 1 only. Layer 2 begins
+  only through `SemanticJobManager.start_job` from the per-task action/API.
 - `GET /api/evaluation/queue` is a read-only cross-repo latest-attempt census
-  plus overdue/actionable rows, automatic-gate/pause state, and a
-  most-skipped-first per-repo tally. Completed/skipped/cancelled records stay out
-  of the capped action rows; unknown statuses remain counted. The Overview
-  operates pause/resume beside the section and cancel beside cancellable rows;
-  paused is distinct from idle.
+  plus actionable-first capped rows: running, queued, unresolved outcomes
+  newest-first, then legacy deferred records. Completed/skipped/cancelled stay
+  out of the row cap; unknown statuses remain counted. The Overview offers
+  per-job cancel and no queue-level control.
 - `orch-hub eval queue [--json]` takes the same projection over a manager-free
   persisted-store read, labels the census as attempts rather than evaluated
-  corpus, prints both global holds, and changes nothing. Only a genuinely absent
+  corpus, labels legacy holds as never auto-starting, and changes nothing. Only a genuinely absent
   jobs root reads empty; non-directory, unstatable, or untraversable storage is a
   concise operational failure rather than a zero census.
-- Fresh manual completed/failed finalizers notify. Automatic completion is quiet
-  to avoid duplicating the run-end push; automatic failure still notifies because
-  the measured corpus shrank unexpectedly. Skip, transient/error states,
-  duplicate settles, and startup orphan reconciliation stay silent.
+- Fresh explicit completed/failed finalizers notify. Cancellation,
+  transient/error states, duplicate settles, and startup orphan reconciliation
+  stay silent.
 - Backend/model failures or non-conforming output remove the reserved evaluation
   dir and surface as persisted failed jobs with bounded diagnostics; disabled
   mode still fails closed at service/API boundaries.

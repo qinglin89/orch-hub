@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules: Core
@@ -52,13 +52,13 @@ orch-hub eval queue [--json]
 `eval doctor` reports the optional evaluation gate, semantic backend/model/
 schema, retention setting, and backend availability without a model call; it
 exits 0 only when evaluation is enabled and the backend is available.
-`eval queue` reads semantic-job/control storage directly, reuses the HTTP queue
+`eval queue` reads semantic-job storage directly, reuses the HTTP queue
 projection, labels its census as attempts, and never writes. Its strict walk
 accepts only a genuinely absent jobs root as empty; unreadable, unstatable, or
 non-directory storage exits 1 with one bounded diagnostic and no partial output.
 
 Dependencies: config, registry, readiness, housekeeping, models, launchd,
-notifications, semantic, semantic_jobs, eval_control, eval_dispatch.
+notifications, semantic, semantic_jobs, eval_dispatch.
 
 ## Config
 
@@ -71,8 +71,7 @@ Responsibility: require `ORCH_HUB_MANDREL_PATH` (with
 `ORCH_HUB_INTAKE_MODEL`, `ORCH_HUB_INTAKE_EFFORT`,
 `ORCH_HUB_EVAL_ENABLED`, `ORCH_HUB_EVAL_MODEL`, `ORCH_HUB_EVAL_EFFORT`,
 `ORCH_HUB_EVAL_RETENTION`, `ORCH_HUB_EVAL_TURN_TIMEOUT`, `ORCH_HUB_EVAL_AUTO`,
-`ORCH_HUB_EVAL_USAGE_CEILING`, `ORCH_HUB_EVAL_DISPATCH_SPACING`,
-`ORCH_HUB_EVAL_QUEUE_MAX_AGE`, `ORCH_HUB_CLAUDE_HOME`,
+`ORCH_HUB_CLAUDE_HOME`,
 `ORCH_HUB_CODEX_HOME`, and
 derived Claude transcript, Mandrel executable, and registry file paths. The
 Mandrel checkout has no portable default; a process without either current or
@@ -100,10 +99,8 @@ constructible without launching anything. `ORCH_HUB_EVAL_RETENTION` defaults
 to 20 newest evaluations per task; `0` keeps all, and negative/non-integer
 values raise `ValueError`. `ORCH_HUB_EVAL_TURN_TIMEOUT` defaults to 1800 seconds;
 `0` disables the Layer 2 subprocess deadline and the resident deadline reap.
-`ORCH_HUB_EVAL_AUTO` independently defaults true.
-The automatic Layer 2 policy defaults are an 80% ceiling, 900-second admission
-spacing, and a 21600-second queue-warning age; values are validated config, not
-dispatcher literals. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
+`ORCH_HUB_EVAL_AUTO` independently defaults true and gates automatic Layer 1
+only. `ORCH_HUB_CODEX_HOME` defaults to `~/.codex` and is
 used only for read-only subscription-usage scans of Codex session rollouts.
 `ORCH_HUB_CLAUDE_HOME` defaults to `~/.claude`; evaluation derives its
 `projects/` transcript root from it for bounded session-read evidence.
@@ -118,9 +115,8 @@ questions, run state, run history, intake state, evaluation target/run links,
 static-metrics reports, semantic reports/jobs/queue snapshots, and semantic
 evaluator doctor output.
 `SemanticJob` carries the attempt's persisted `deadline_ts` and terminal
-`cancelled` state; `EvaluationControl` carries visible hub-wide pause state and
-its closed reason; `EvaluationQueueSnapshot` composes control with the complete
-attempt census and capped action rows.
+`cancelled` state; `EvaluationQueueSnapshot` carries the complete attempt census
+and capped actionable-first rows.
 `UsageWindow`, `UsageCredits`, `ProviderUsage`, and `SubscriptionUsage`
 normalize Claude/Codex subscription-capacity display data; omitted provider
 fields stay `None` rather than zero so unavailable data cannot masquerade as

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules: Service Surface
@@ -60,8 +60,6 @@ intake routes are `POST /api/intakes`, `GET /api/intakes`,
 agent-turn failures are returned as auditable intake records rather than 5xx.
 The evaluation routes are `GET /api/evaluation`,
 `GET /api/evaluation/queue`,
-`POST /api/evaluation/queue/pause`,
-`POST /api/evaluation/queue/resume`,
 `GET /api/evaluation/reports`,
 `GET /api/evaluation/reports/{report_key}`,
 `GET /api/repos/{repo_id}/evaluations/{task_id}`,
@@ -81,9 +79,8 @@ Evaluation detail returns `evidence`, `static_metrics`,
 best-effort semantic evaluator identity for history comparison, and the doctor
 route reports Layer 2 backend availability without a model call.
 The queue route is a read-only latest-attempt census/action projection; it does
-not dispatch or read usage and exposes automatic/pause state plus per-repo
-skips. Pause and dispatch promotion share the dispatcher's admission barrier;
-resume repairs unreadable control. Job cancel maps unknown to 404, illegal or
+not dispatch or read usage, and orders live/unresolved state ahead of inert
+legacy holds. Job cancel maps unknown to 404, illegal or
 already-settling state to 409, and never claims a failed child kill succeeded.
 The default `ReportCatalog` is composed before the evaluation stack: its
 `unpublished_ids` guard prevents retention from deleting publication debt, the
@@ -102,11 +99,10 @@ Mutating intake routes return transient records
 The default intake backend is `ClaudeIntakeAgent`, constructed with
 `Config.intake_model` / `Config.intake_effort`; the default semantic backend is
 `ClaudeSemanticBackend`, constructed at app startup but only launched by the
-semantic job manager. The app composes `EvaluationControlStore`, `CapacityGate`,
-`DeferredDispatcher`, and `CompletionEvaluationTrigger` over the same job manager
-before creating the default run manager; the trigger is its settled-completion
-hook and the resident monitor reaps expired semantic attempts before retrying the
-deferred queue. Injected run managers are deliberately not
+semantic job manager. The app composes `CompletionEvaluationTrigger` only with
+the static evaluator before creating the default run manager; the trigger is its
+settled-completion hook, and the resident monitor only reconciles expired
+semantic attempts. Injected run managers are deliberately not
 given a live trigger. The default `UsageService` is composed with a live
 `ClaudeUsageCollector` before the Claude backends. It ingests the CLI's local
 utilization cache first, retains the opt-in statusLine sink as a fallback,
@@ -136,8 +132,8 @@ audits the mode without copying answer text into history. The orchestrator-confi
 route is protected, not readiness-gated, and maps missing/old deployment,
 nonzero, malformed, or unsupported `--print-config` responses to 502 so Start
 fails closed instead of using hub defaults. `POST /api/runs` accepts either
-structured `launch` (server-built argv) or legacy `extra_args`, never both; its
-default-true `auto_semantic_eval` is hub-only and persisted on the run record.
+structured `launch` (server-built argv) or legacy `extra_args`, never both;
+unknown request keys are ignored for cached-client compatibility.
 
 ## Launchd Operations
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Architecture: Ownership and Boundaries
@@ -19,10 +19,9 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 | Run records and audit history | `<ORCH_HUB_DATA_DIR>/runs/` | run dirs stay outside target trees, fresh per run; `protocol.json` freezes the validated deployed commit/payload before spawn and records the bounded actual-file check at an observed end |
 | Intake records and audit history | `<ORCH_HUB_DATA_DIR>/intake/` | unconfirmed drafts are hub-owned, not active tasks; no target-repo writes |
 | Evaluation artifacts | `<ORCH_HUB_DATA_DIR>/evaluations/` | sidecar analysis state; never mutates tasks, runs, `.ai/`, `.ai-tasks/` |
-| Semantic job records | `<ORCH_HUB_DATA_DIR>/semantic-jobs/` | one latest attempt/outcome per `(repo, task)`; durable automatic queue, whole-attempt deadline, cancellation state, and task-level skip census |
-| Evaluation dispatch control | `<ORCH_HUB_DATA_DIR>/eval-control.json` | hub-wide persisted pause; missing = running, unreadable = fail-closed paused; never stamped onto individual jobs |
+| Semantic job records | `<ORCH_HUB_DATA_DIR>/semantic-jobs/` | one latest explicit attempt/outcome per `(repo, task)`; whole-attempt deadline and cancellation state; legacy deferred/skipped records remain readable but inert |
 | Evaluation report catalog | `<ORCH_HUB_DATA_DIR>/report-catalog/catalog.jsonl` | append-only publication identity/order + hashes/provenance; entries outlive artifacts; confirmed repair may remove only identity-preserving redundant/torn bytes after a durable non-overwriting backup; consumers decide protocol evolution |
-| Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only except automatic-L2 pacing; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback |
+| Agent subscription usage | Codex local rollouts + Claude local utilization cache + optional statusLine figures + Claude stream boundaries + hub `<data_dir>/usage/claude.json` | display-only; cache = primary Claude figure carrier; bounded model-free CLI refresh; statusLine = fallback |
 | Human questions and answers | per-run control-dir files | answer text lives in answer files; history is metadata-only |
 | Orchestrator logs | deployed orchestrator log dir, resolved from run records | clients never supply log paths |
 | Startup diagnostics | hub-owned run dir capture | scoped to the persisted run record |
@@ -55,23 +54,20 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 - Semantic evaluation owns model-judged reports over bounded evidence plus
   static metrics; read isolation is enforced in the backend, not by prompt
   alone.
-- Completion evaluation owns the isolated run-end sidecar trigger: immediate
-  Layer 1 work plus durable Layer 2 enqueue/skip acceptance after run evidence
-  settles; it cannot change run state, readiness, attention, or admission.
-- Semantic jobs own the one-record-per-task Layer 2 lifecycle, task-level
-  once-guard, capacity-held queue, enforced deadline/reaping, cancellation and
-  completed `evaluation_id` linkage — not evaluation evidence or target state.
-- Evaluation control owns one persisted hub-wide pause. Dispatch and pause share
-  an admission boundary; the pause holds only queue drain, never completion
-  acceptance or the queue projection.
+- Completion evaluation owns the isolated run-end sidecar trigger: automatic
+  Layer 1 after run evidence settles, with no semantic-job dependency or durable
+  debt; it cannot change run state, readiness, attention, or admission.
+- Semantic jobs own the one-record-per-task explicit Layer 2 lifecycle,
+  single-flight guard, enforced deadline/reaping, cancellation and completed
+  `evaluation_id` linkage — not evaluation evidence or target state.
 - Report catalog owns cross-repo publication identity/order, reconciliation,
   provenance/hash manifests, bundle containment, byte-exact artifact
   verification reads, publication-debt retention protection, and explicit local
   audit/identity-preserving repair—not evaluation judgment or protocol-evolution
   policy.
 - Evaluation API/dashboard presentation owns sidecar routing, readback, doctor
-  gating, job polling/cancel, queue pause/resume, and history comparison; never
-  gates run control or inlines raw logs.
+  gating, job polling/cancel, cross-repo attempt projection, and history
+  comparison; never gates run control or inlines raw logs.
 - Run control owns subprocess lifecycle, run records, same-repo serialization,
   and live/end classification.
 - Control-dir handling owns only file-channel mechanics for questions,
@@ -79,12 +75,11 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 - History stores run/answer-audit metadata; it does not decide event timing.
 - Logs are located from run records only; callers never pass local paths.
 - Notification delivery is isolated from run/intake state persistence.
-- Usage collection owns capacity data; it may run the Claude CLI's
+- Usage collection owns display data; it may run the Claude CLI's
   local `/usage` command only with per-turn zero-model accounting, but never
   starts a model turn, directly opens provider endpoints/credentials, scrapes
   UI, spends reset credits, or influences readiness/attention/run/intake
-  decisions. Its only policy consumer is automatic Layer 2 dispatch, which
-  defers on unknown/stale/high usage; manual turns remain ungated.
+  or evaluation decisions.
 - API, CLI, dashboard, launchd, and future bot surfaces stay adapters over
   shared services.
 - Runtime resource lookup is the only source/frozen filesystem abstraction;

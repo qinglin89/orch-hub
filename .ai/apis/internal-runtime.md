@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # APIs: Internal — Runtime
@@ -68,8 +68,7 @@ so the manager records failed intakes.
 
 ## Run Manager
 
-Input: repo id, task id, orchestrator start flags, blocked acknowledgement, and
-the hub-only default-true automatic-semantic-evaluation choice.
+Input: repo id, task id, orchestrator start flags, and blocked acknowledgement.
 
 Output: `RunRecord` from `start_run`, `RunStatus` from list/get operations,
 read-only `(run_dir, RunRecord)` records from `load_records`, and idempotent
@@ -86,9 +85,8 @@ fresh `<data_dir>/runs/<run_id>/` dir with `control/`, starts the target repo's
 deployed orchestrator through `/usr/bin/caffeinate -i` with `--control-dir`,
 an explicit subprocess `PATH` for user-installed agent CLIs, persists
 `run.json` with launch-time task status and the internal `spawn_out` path,
-the `auto_semantic_eval` choice, appends `run_started`, and records stdout/stderr
-in `spawn.out`. The choice never reaches orchestrator argv; absent/non-boolean
-legacy values load true.
+appends `run_started`, and records stdout/stderr in `spawn.out`. Legacy records
+carrying `auto_semantic_eval` remain readable, but the field is ignored.
 `list_runs` and `get_run` refresh
 live/end state and support reattach from disk by pid probe; observed ends append
 `run_ended`, fire the isolated terminal notification path, and invoke an

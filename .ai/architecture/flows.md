@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Architecture: Core Flows
@@ -80,8 +80,8 @@ runs from an empty non-repo cwd with tools disabled, safe mode, no session
 persistence, plan-mode writes blocked, and the configured turn deadline — the
 model cannot read live target-repo state outside the prompt or hold a worker
 past the attempt's enforced bound. Protected routes expose availability,
-generation, async semantic job start/status/cancel, queue pause/resume, doctor
-readiness, history, and artifact readback.
+generation, async semantic job start/status/cancel, cross-repo attempt state,
+doctor readiness, history, and artifact readback.
 The evaluations base may be reached through links for relocated storage, but
 creation, listing, artifact reads/writes, cleanup, and retention all open every
 repo/task/evaluation segment beneath it no-follow and act relative to contained
@@ -89,29 +89,23 @@ descriptors; linked interior state is damage, never a source/target of bytes or
 an alias for ordinary pruning.
 After a run's terminal session/task/protocol snapshots settle, a completed
 classification invokes an isolated sidecar trigger. With evaluation and its
-automatic gate enabled, it accepts exactly one durable task-level outcome
-inline, then builds free Layer 1 metrics and asks the global dispatcher to sweep
-off the run-manager lock. The run's persisted `auto_semantic_eval` choice
-defaults true for legacy records; false writes terminal `skipped` with the
-closed `run-opt-out` reason, while true writes `deferred`. Later completing runs
-cannot overwrite either outcome; manual evaluation may replace a resting
-record. `SemanticJobManager` keeps the one current record per `(repo, task)`
-under `<ORCH_HUB_DATA_DIR>/semantic-jobs/`; startup fails orphaned transients,
-while the resident monitor reaps only records past the persisted deadline their
+automatic gate enabled, it submits a fresh free Layer 1 build off the run-manager
+lock. The trigger holds no semantic-job manager or dispatcher, writes no job
+record, and promises no durable retry: a stopped worker loses a reproducible
+artifact that the next completion or manual metrics request regenerates.
+`SemanticJobManager.start_job` is the only production Layer 2 start path and
+keeps one current record per `(repo, task)` under
+`<ORCH_HUB_DATA_DIR>/semantic-jobs/`; startup fails orphaned transients, while
+the resident monitor reaps only records past the persisted deadline their
 workers are also held to. A cancellable attempt owns a collision-resistant id
 and live process handle until terminal state is durable; cancel kills or
 withholds uncommitted work, while a sealed/settling result refuses a false
-success. `DeferredDispatcher` admits at most one held job per configured spacing
-only when current provider usage is fresh, attributable, and below the
-configured ceiling; uncertainty defers. `<ORCH_HUB_DATA_DIR>/eval-control.json`
-persists a live pause that shares the dispatch-admission boundary, holds drain
-without stopping new deferred records, and reads fail-closed when damaged.
-Automatic L2 completion is quiet, while automatic failure notifies. Protected
-queue readback exposes an uncapped latest-attempt census, overdue/actionable
-rows, automatic/pause state, and the per-repo skipped tally without dispatching;
-`orch-hub eval queue` reads the same attempt projection directly from storage.
-The dashboard operates pause/resume/cancel beside that state and keeps raw
-artifacts behind Copy/Download.
+success. Legacy `deferred`/`skipped` records are never promoted; an explicit
+start supersedes them. Protected queue readback is a read-only uncapped
+latest-attempt census plus capped actionable-first rows, with inert holds last;
+`orch-hub eval queue` reads the same projection directly from storage. The
+dashboard offers per-job cancel beside that state and keeps raw artifacts behind
+Copy/Download.
 
 Global report publication: a coherent durable L1+L2 evaluation whose task is
 archived → semantic-completion hook or deterministic startup reconciliation →
@@ -152,9 +146,8 @@ so fallback writers cannot lower same-window usage while genuine rollovers still
 replace old figures. Legacy stores self-heal, and partial merges do not overstate
 freshness. The stream-json observer remains a boundary-only fallback on verified
 versions. Protected `GET /api/usage` returns both providers fail-soft;
-missing/stale/failed sources never feed attention, readiness, run state, or
-launch/intake gates. The separate automatic-L2 dispatcher is the only policy
-consumer and treats those states as deferral, never as available capacity.
+missing/stale/failed sources never feed attention, readiness, run state,
+launch/intake gates, or evaluation decisions.
 
 Release production: a pinned standalone ARM64 CPython plus the project sources
 and resources enter a PyInstaller onedir build. The producer audits the

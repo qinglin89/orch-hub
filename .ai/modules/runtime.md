@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules: Runtime
@@ -56,9 +56,8 @@ prepends common user agent-CLI locations (`~/.local/bin`, `~/.claude/local`,
 `~/.npm-global/bin`, `~/.cargo/bin`) while preserving the inherited environment
 and baseline macOS paths. `run.json` is the source of truth,
 stores launch-time task frontmatter status plus the internal `spawn_out` path,
-the hub-only default-true `auto_semantic_eval` completion choice, and is rewritten
-atomically; the choice never becomes orchestrator argv and absent legacy values
-load true. In-memory `Popen` handles exist only to capture exit codes for runs
+and is rewritten atomically. Legacy records with `auto_semantic_eval` remain
+readable and the value is ignored. In-memory `Popen` handles capture exit codes for runs
 that end while the hub process is alive. `load_records`
 returns `(run_dir, RunRecord)` pairs without refresh, pid probing, or writes for
 historical/evaluation consumers that must not mutate run state.
@@ -161,9 +160,9 @@ Location: `orch_hub/monitor.py`
 
 Responsibility: run one resident daemon thread that periodically calls a
 scanner's `list_runs()` method plus configured sweeps, normally the app's single
-`RunManager` and automatic-evaluation dispatcher, so run-ended notifications,
-pending-question notifications, terminal usage refresh requests, and deferred
-Layer 2 retry happen without dashboard/API polling. `RunMonitor.start()` and
+`RunManager` and the semantic-job stuck-attempt reconciler, so run-ended
+notifications, pending-question notifications, terminal usage refresh requests,
+and deadline reaping happen without dashboard/API polling. `RunMonitor.start()` and
 `stop()` are idempotent; `stop()` uses a bounded join, and scan failures are
 logged and swallowed so the service keeps running. The default interval is 30
 seconds and intentionally not an environment setting.

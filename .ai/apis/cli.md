@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # APIs: CLI
@@ -180,21 +180,20 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 
 - Purpose: read the persisted Layer 2 attempt lifecycle without requiring the
   resident service or a bearer token.
-- Source: a manager-free semantic-job walk plus `EvaluationControlStore`, folded
-  through the same `queue_snapshot` projection as HTTP. The first human line
+- Source: a manager-free semantic-job walk folded through the same
+  `queue_snapshot` projection as HTTP. The first human line
   names the env-resolved store path so a shell pointed at another hub is visible.
-- Output: automatic-gate and pause state, complete known/unknown status census,
-  overdue count, per-repo skip tally, capped actionable rows, and truncation
-  state. Human output labels the population as attempts, one latest record per
+- Output: complete known/unknown status census, actionable-first capped rows,
+  and truncation state. Legacy `deferred` rows are last and explicitly inert.
+  Human output labels the population as attempts, one latest record per
   `(repo, task)`, not an evaluated-corpus denominator; `--json` emits the queue
   snapshot without HTTP's always-true `enabled` envelope.
-- Exit code: `0` for any successful read, including paused/failed/overdue/empty;
+- Exit code: `0` for any successful read, including failed/legacy-held/empty;
   malformed config, disabled evaluation, or a queue tree that is non-directory,
   unstatable, or untraversable returns `1` with one `error:` line and no partial
   output. Only a genuinely absent jobs root is an empty queue; a malformed
   `job.json` remains a counted `error` record.
-- Non-goal: read-only; pause/resume/cancel stay on the live HTTP/dashboard
-  control surface.
+- Non-goal: read-only; per-job cancel stays on the live HTTP/dashboard surface.
 
 ## `orch-hub eval catalog verify [--json]`
 

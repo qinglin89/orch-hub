@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-27
-verified-against: c86cb40b5f7880c1876147c32c428fd8ef51d474
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -11,7 +11,7 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 ## `POST /api/runs`
 
 - Purpose: start an orchestrator run for `{repo_id, task_id, launch|extra_args,
-  acknowledge_blocked, auto_semantic_eval}`.
+  acknowledge_blocked}`.
 - Source: resolves `repo_id` through registry discovery, then delegates launch
   gates and subprocess start to the app's single `RunManager`.
 - Dashboard caller: the task-detail Start dialog sends structured `launch`
@@ -23,10 +23,9 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
   selection to both roles and rejects the newer `review_agent`. Raw `extra_args`
   callers remain supported verbatim, but `launch` plus non-empty `extra_args`
   is 400.
-- `acknowledge_blocked` and default-true `auto_semantic_eval` are hub-only.
-  The latter is persisted in `run.json`; false records terminal skipped Layer 2
-  if this run completes the task, while Layer 1 still runs. Neither field joins
-  the strictly parsed orchestrator argv.
+- `acknowledge_blocked` is hub-only and never joins the strictly parsed
+  orchestrator argv. Unknown request keys remain ignored for compatibility with
+  cached clients that still send the retired `auto_semantic_eval` field.
 - Shape: returns the new run's serialized `RunStatus` with HTTP 201.
 - Admission error: a non-terminal remote intake returns HTTP 409 before any
   run record or subprocess exists:

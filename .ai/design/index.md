@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Design Principles and Decisions
@@ -23,12 +23,10 @@ verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
   evaluation artifacts, identity, hashes, and provenance; downstream consumers
   alone interpret them, decide protocol evolution, and create improvement work.
 - Display-only capacity: agent subscription usage is not readiness, attention,
-  run-state, launch, or intake policy. The sole scheduling exception is the
-  automatic Layer 2 sidecar: unknown/stale/high usage holds its durable queue;
-  manual evaluation remains ungated.
+  run-state, launch, intake, or evaluation policy.
 - Observable, bounded Layer 2: model turns carry configured deadlines; live
-  reaping uses the attempt's enforced persisted bound; pause holds dispatch but
-  not acceptance; cancel is honest only while the attempt remains stoppable.
+  reaping uses the attempt's enforced persisted bound; starts are explicit and
+  cancel is honest only while the attempt remains stoppable.
 - Per-repo serialization: one active run per target repo to protect the working tree.
 - Cross-kind repo admission: a live run and a non-terminal hub-driven intake
   cannot share a repo; admission is atomic and distinct from readiness.

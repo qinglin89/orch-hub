@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Features: Mobile Dashboard — Shell and Infrastructure
@@ -65,8 +65,8 @@ Implemented behavior:
   minimum target sizes cover dashboard controls and keyboard-scrollable blocks.
 - The Operations Overview is the default authenticated landing route
   (`#/overview`). It remains client-side over existing protected APIs,
-  parallel-fetching repos, tasks, live runs, escalations, run history, and
-  subscription usage, and the evaluation queue into summary metrics, prioritized
+  parallel-fetching repos, tasks, live runs, escalations, run history,
+  subscription usage, and Layer 2 attempt state into summary metrics, prioritized
   attention items, current activity, recent outcomes, and sidecar capacity/state.
   Waiting questions,
   display-readiness failures, housekeeping, live runs, and ended runs deep-link
@@ -85,13 +85,11 @@ Implemented behavior:
   It is display-only: source failures degrade only that section, never create
   Needs attention items, and never affect readiness, run state, or run/intake
   gates.
-- The Overview Evaluation queue section independently polls protected
-  `GET /api/evaluation/queue` and renders the complete latest-attempt census,
-  automatic-gate/pause/overdue explanations, capped actionable rows, and
-  per-repo skipped tally. Pause/Resume repaints this stable section from the full
-  control response; cancellable rows expose Cancel beside, not inside, their task
-  link. A paused queue is labelled paused rather than idle, and control errors use
-  a scoped live status region. Evaluation-disabled hides the section; read
+- The Overview Layer 2 evaluations section independently polls protected
+  `GET /api/evaluation/queue` and renders the complete latest-attempt census plus
+  actionable-first capped rows; inert legacy holds are explicit and last.
+  Cancellable rows expose Cancel beside, not inside, their task link. Nothing in
+  the section starts or promotes a job. Evaluation-disabled hides it; read
   failure renders unavailable without disturbing repo/activity/usage panels. Its
   route-scoped refresh shares the Overview cancellation/generation guards and
   creates no Attention rows.

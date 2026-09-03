@@ -1,11 +1,11 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # APIs: HTTP — Task Evaluation
 
-Evaluation availability, doctor, queue state/control, global report feed/export,
+Evaluation availability, doctor, Layer 2 attempt state, global report feed/export,
 per-task listing/readback, evidence/metrics generation, and semantic-job routes.
 Cross-cutting auth/app behavior: `http-core.md`.
 
@@ -28,33 +28,16 @@ Cross-cutting auth/app behavior: `http-core.md`.
 
 ## `GET /api/evaluation/queue`
 
-- Purpose: read the cross-repo automatic Layer 2 queue without dispatching,
-  reading usage, or triggering any refresh.
-- Shape: `{"enabled":true,"auto_enabled":bool,
-  "control":{"paused":bool,"paused_ts":string|null,"reason":string|null},
-  "queue_max_age_seconds":int,"counts":object,"skipped_by_repo":object,
-  "overdue":int,"entries":array,"truncated":bool}`.
+- Purpose: read the cross-repo Layer 2 latest-attempt lifecycle without
+  dispatching, reading usage, or triggering any refresh.
+- Shape: `{"enabled":true,"counts":object,"entries":array,"truncated":bool}`.
   `counts` is the uncapped complete latest-attempt census (known zeroes included,
-  unknown statuses retained); `skipped_by_repo` counts current terminal skips;
-  `entries` is capped actionable deferred/queued/running/failed/error state with
-  live age/overdue projection. Completed, skipped, and cancelled are resting
-  outcomes and never consume action rows.
-- Gate: protected and evaluation-enabled; deliberately not hidden when
-  `ORCH_HUB_EVAL_AUTO=false`, because `auto_enabled:false` explains a held queue.
-
-## `POST /api/evaluation/queue/pause|resume`
-
-- Purpose: persistently hold/release automatic queue drain without changing the
-  completion trigger or losing newly accepted deferred records.
-- Shape: HTTP 200 full queue payload, including the resulting `control` state.
-- Semantics: pause is linearized with dispatch admission, so a returned pause
-  cannot be followed by a promotion from a stale control read. Repeated pause
-  preserves the original pause timestamp; resume rewrites even unreadable state
-  and is therefore its repair path. A missing control file means running;
-  unreadable/corrupt state reads fail-closed as paused with reason
-  `unreadable-control`.
-- Gate: protected and evaluation-enabled; neither route reads usage or starts a
-  turn itself.
+  unknown statuses retained); `entries` is capped actionable state ordered
+  running, queued, unresolved outcomes newest-first, then inert legacy
+  `deferred` records. Completed, skipped, and cancelled are resting outcomes and
+  never consume rows. Legacy holds are explicit history and never auto-start.
+- Gate: protected and evaluation-enabled. Read-only: there is no companion queue
+  write or queue-level control.
 
 ## `GET /api/protocol-coverage`
 

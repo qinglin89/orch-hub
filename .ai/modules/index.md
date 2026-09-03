@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules
@@ -34,9 +34,8 @@ Full responsibilities live in the detail files below.
 | Session read evidence | `orch_hub/session_reads.py` | bounded transcript-derived prefetch facts and ordered `.ai/` read traces |
 | Static metrics | `orch_hub/static_metrics.py` | deterministic six-axis metrics over evidence packs; `static_metrics.json` |
 | Semantic evaluator | `orch_hub/semantic.py` | evidence-bounded model evaluation incl. retrieval effectiveness; backend isolation; doctor |
-| Completion evaluation | `orch_hub/completion_eval.py` | isolated completed-task trigger; durable enqueue/skip; off-lock Layer 1 |
-| Evaluation control | `orch_hub/eval_control.py` | persisted hub-wide queue pause; fail-closed damaged-state read |
-| Evaluation dispatch | `orch_hub/eval_dispatch.py` | usage/spacing/pause-gated deferred queue; admission barrier; operator snapshot |
+| Completion evaluation | `orch_hub/completion_eval.py` | isolated completed-task trigger; off-lock Layer 1 only; no durable debt |
+| Evaluation dispatch | `orch_hub/eval_dispatch.py` | read-only cross-repo Layer 2 attempt projection; legacy holds inert |
 | Semantic jobs | `orch_hub/semantic_jobs.py` | one latest job/outcome per task; deadline reap, cancellation, manager-free reads |
 | Report catalog | `orch_hub/report_catalog.py` | append-only global publication feed; reconciliation; retention guard; contained reads; distinct-task protocol-coverage census |
 | Usage | `orch_hub/usage.py` | Claude cache parser/poller + fallback merging; Codex normalization; fail-soft |
@@ -64,7 +63,7 @@ Full responsibilities live in the detail files below.
 | File | Contains |
 |---|---|
 | core.md | CLI, config, models, registry, readiness, git metadata, housekeeping, subprocess utilities, task inventory |
-| evaluation.md | Evaluation foundation, AI snapshot/static/semantic layers, completion trigger, semantic jobs, capacity dispatch |
+| evaluation.md | Evaluation foundation, AI snapshot/static/semantic layers, Layer 1 completion trigger, semantic jobs/attempt projection |
 | report-catalog.md | Global report catalog publication |
 | usage.md | Subscription usage collection, statusLine writer |
 | intake.md | Intake manager, intake agent |

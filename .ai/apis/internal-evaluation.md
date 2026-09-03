@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # APIs: Internal — Evaluation Chain
@@ -134,53 +134,38 @@ while a winning seal makes all later persistence/publication non-cancellable.
 
 ## Automatic Completion And Semantic Jobs
 
-Input: a completed `RunRecord`, config gates, persisted provider usage, or a
-manual managed-repo/task start.
+Input: a completed `RunRecord` for automatic Layer 1, or an explicit managed-
+repo/task start for Layer 2.
 
-Output: immediate deterministic Layer 1 artifacts plus one durable current
-`SemanticJob` per `(repo, task)`; persisted hub-wide `EvaluationControl`;
-`EvaluationQueueSnapshot` for cross-repo operator readback.
+Output: deterministic Layer 1 artifacts plus one durable current `SemanticJob`
+per `(repo, task)` for explicit Layer 2 attempts; `EvaluationQueueSnapshot` for
+cross-repo operator readback.
 
 Behavior: `CompletionEvaluationTrigger` runs only when both evaluation gates
-are open and only after the run manager has settled terminal evidence. It writes
-the task-level Layer 2 decision inline, then asks `DeferredDispatcher.sweep`
-and runs `StaticEvaluator.generate_metrics` through its executor; all failures
-are isolated from run state. A default-true `RunRecord.auto_semantic_eval`
-enqueues `deferred`; false writes terminal `skipped` with closed reason
-`run-opt-out`. Both paths refuse any existing task record, so the first
-completing run decides in both directions; pre-field run records evaluate.
+are open and only after the run manager has settled terminal evidence. It owns
+only `StaticEvaluator.generate_metrics`, submits the whole build through its
+executor, and holds no semantic-job manager or dispatcher reference; failures
+are isolated from run state. No completion path writes, skips, enqueues, or
+starts a semantic job, and no durable Layer 1 debt is recorded.
 
-`SemanticJobManager.enqueue_if_absent` accepts automatic work without starting
-it. `skip_if_absent` records no-turn terminal state; `start_job` is the manual,
-usage-ungated override for deferred/skipped/resting outcomes. Queued/running
+`SemanticJobManager.start_job` is the only production Layer 2 start path. It
+overwrites resting and legacy deferred/skipped records while queued/running
 turns retain single-flight behavior, restart orphan reconciliation, bounded
 failure diagnostics, and completed `evaluation_id` linkage. Each running record
-persists the same whole-attempt deadline the worker is held to; a resident sweep
+persists the whole-attempt deadline the worker is held to; a resident sweep
 settles only expired transients, while timeout `0` disables both deadline and
-live reap. `cancel_job` explicitly allows deferred/queued/running, kills or
+live reap. `cancel_job` allows legacy-deferred/queued/running, kills or
 cooperatively withholds live work, and refuses after the evaluator seals its
-result. Live ownership remains registered through a successful terminal write
-and survives a failed one until reconciliation, so no standing report can be
-misreported as cancelled. Attempt ids are collision-resistant across immediate
-retry. Automatic success is notification-quiet; automatic failure notifies;
-skips and cancellation never notify or pace. `list_persisted_jobs` exposes the
-same store walk without constructing a manager; strict mode distinguishes a
-genuinely absent root from storage the caller could not read.
+result. Live ownership remains registered through terminal write and survives a
+failed write until reconciliation. Fresh manual completed/failed outcomes
+notify; cancellation does not. `list_persisted_jobs` exposes the same store walk
+without constructing a manager; strict mode distinguishes a genuinely absent
+root from storage the caller could not read.
 
-`EvaluationControlStore` persists the pause in `<data_dir>/eval-control.json`.
-Missing means running; unreadable/corrupt means visibly paused and resume repairs
-it. Pausing holds only dispatch, not completion acceptance.
-
-`DeferredDispatcher` serializes sweeps, preserves held jobs across restarts,
-checks the automatic gate plus the live pause, and promotes at most the oldest
-eligible job. Its
-`CapacityGate` requires fresh, current, attributable provider windows below
-`eval_usage_ceiling`; unknown/stale data defers. Admission timestamps (including
-manual queued turns) enforce `eval_dispatch_spacing`, preventing rollover herds.
-A short admission barrier shared with pause rechecks control at promotion, so a
-returned pause cannot leak a stale dispatch. `queue_snapshot` is read-only:
-uncapped latest-attempt counts, per-repo skipped counts, configured gate/pause/
-age state, and capped actionable rows.
+`queue_snapshot` is pure/read-only: uncapped latest-attempt counts plus capped
+rows ordered live first, unresolved outcomes newest-first, and inert legacy
+deferred records last. It takes no config, exposes no automatic gate or pause,
+and cannot admit or promote a job.
 
 ## Global Report Catalog
 

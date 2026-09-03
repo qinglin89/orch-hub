@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-01
-verified-against: 722d0b05347bf2afad1a90c36752058c2e36d683
+last-updated: 2026-09-03
+verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 ---
 
 # Modules: Task Evaluation Layers
@@ -153,11 +153,10 @@ a gated `GET /api/evaluation/doctor` readiness route.
 
 `SemanticJobManager` in `orch_hub/semantic_jobs.py` persists one current
 `job.json` per `(repo, task)` under
-`<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`. Manual `start_job` returns
-existing queued/running work and overwrites deferred or terminal state;
-automatic `enqueue_if_absent`/`skip_if_absent` refuses any existing task record,
-which is the durable once-per-task guard. Automatic attempts begin `deferred`;
-terminal `skipped` carries only a closed machine reason and no turn timestamps.
+`<data_dir>/semantic-jobs/<repo-slug>/<task-id>/`. Explicit `start_job` is the
+only production Layer 2 start: it returns existing queued/running work and
+overwrites deferred or terminal state. `deferred` and `skipped` are read-only
+legacy vocabulary; no writer or promoter remains.
 The manager runs admitted turns off-lock/off-thread, persists a whole-attempt
 `deadline_ts`, refuses to open a model turn after its enforced pre-turn window,
 and lets the resident monitor settle only expired transients; startup still
@@ -167,41 +166,26 @@ deferred/queued/running work; result sealing and handle retention through a
 successful terminal write make a settling attempt honestly non-cancellable.
 Attempt ids include collision-resistant entropy so late finalize/release cannot
 own an immediate retry. Completed jobs link the fresh `evaluation_id`;
-`cancelled` is terminal and action-row-ineligible. Automatic success is
-notification-quiet; automatic failure and manual outcomes notify through
-isolated dispatch. `list_persisted_jobs` exposes the same walk without a manager;
+`cancelled` is terminal and action-row-ineligible. Fresh explicit completed and
+failed outcomes notify through isolated dispatch. `list_persisted_jobs` exposes
+the same walk without a manager;
 strict mode lets CLI readers distinguish genuine absence from an unreadable or
 non-directory store. The old synchronous `POST /semantic` route is retired.
-
-## Evaluation Control
-
-`EvaluationControlStore` in `orch_hub/eval_control.py` owns the single persisted
-`<data_dir>/eval-control.json` pause state. Pause holds only automatic dispatch,
-not completion acceptance; missing state means running, while unreadable/corrupt
-state fails closed to paused with a distinct reason and `resume()` overwrites it.
-The dispatcher, queue projection, and CLI read this store; HTTP pause/resume are
-its writers.
 
 ## Completion Evaluation Trigger
 
 `CompletionEvaluationTrigger` in `orch_hub/completion_eval.py` is the isolated
 sidecar hook for a run classified completed after terminal evidence settles.
-When both evaluation gates are open it durably enqueues or skips Layer 2 inline,
-based on persisted default-true `RunRecord.auto_semantic_eval`, then runs the
-global dispatch sweep and Layer 1 generation through an executor. Each half
-swallows/logs its own failures and cannot alter run state, readiness, attention,
-or admission. Repeated completing runs regenerate free Layer 1 but cannot
-replace the first task-level Layer 2 record.
+When both evaluation gates are open it submits the entire Layer 1 generation
+through an executor. It holds no semantic-job manager or dispatcher reference,
+writes no job record, and swallows/logs failures so it cannot alter run state,
+readiness, attention, or admission. Repeated completing runs regenerate free
+Layer 1; interruption loses only a reproducible artifact, not durable debt.
 
-## Automatic Evaluation Dispatch
+## Layer 2 Attempt Projection
 
-`CapacityGate` and `DeferredDispatcher` in `orch_hub/eval_dispatch.py` own policy
-over the mechanism above. A serialized sweep checks both automatic gates,
-durable spacing since the latest queued/running admission (manual included), and
-fresh attributable provider usage below the configurable ceiling, then promotes
-at most the oldest deferred job. Unknown/stale usage defers; held jobs survive
-restart and are retried by the resident monitor. A cheap pause precheck avoids
-work, while a shared admission barrier re-reads control atomically with promotion
-so a completed pause cannot leak one stale dispatch. `queue_snapshot` folds the
-same store plus control value into an uncapped latest-attempt census, per-repo
-skip tally, overdue count, and capped actionable rows without moving the queue.
+`queue_snapshot` in `orch_hub/eval_dispatch.py` is pure/read-only. It folds
+persisted records into an uncapped latest-attempt census and capped rows ordered
+running, queued, unresolved outcomes newest-first, then inert legacy deferred
+records. It takes no config and has no admission, usage, spacing, pause, or
+promotion seam.
