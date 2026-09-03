@@ -3603,25 +3603,38 @@ def test_evaluation_doctor_requires_auth(tmp_path, monkeypatch):
 # -- queue (automatic Layer 2 visibility) --------------------------------------
 
 
-def queue_store(tmp_path, **overrides) -> SemanticJobManager:
-    """A job manager over the same data dir the eval client uses, so a test can
-    seed persisted records without going through an HTTP start."""
-    return SemanticJobManager(
-        eval_config(tmp_path, **overrides),
-        evaluator=SemanticEvaluator(
-            eval_config(tmp_path, **overrides),
-            evaluation_service=EvaluationService(
-                eval_config(tmp_path, **overrides),
-                record_loader=lambda cfg: [],
-                git_runner=fake_eval_git,
-                clock=lambda: EVAL_CLOCK,
-            ),
-            backend=FakeSemanticBackend(),
-            clock=lambda: EVAL_CLOCK,
-        ),
-        clock=lambda: EVAL_CLOCK,
-        executor=lambda run: None,  # never run a turn from a seeding helper
-    )
+def seed_queue_record(
+    tmp_path,
+    repo,
+    *,
+    status: str,
+    task_id: str = None,
+    repo_name: str = None,
+    **fields,
+) -> Path:
+    """Write one persisted job record straight to disk.
+
+    ``deferred`` and ``skipped`` are legacy statuses: the automatic path that wrote
+    them is gone, so there is no API left that produces one, and seeding is exactly
+    what an upgraded hub finds on disk. Used for the transient/terminal statuses
+    too where a test only needs a record to read back.
+    """
+    name = repo_name if repo_name is not None else repo.name
+    task = task_id if task_id is not None else RUN_TASK_ID
+    job_dir = eval_config(tmp_path).data_dir / "semantic-jobs" / name / task
+    job_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "job_id": f"J-{task}",
+        "repo_name": name,
+        "repo_path": str(repo.path),
+        "task_id": task,
+        "status": status,
+        "created_ts": EVAL_CLOCK.isoformat(),
+        "updated_ts": EVAL_CLOCK.isoformat(),
+        **fields,
+    }
+    (job_dir / "job.json").write_text(json.dumps(payload), encoding="utf-8")
+    return job_dir
 
 
 def test_evaluation_queue_reports_a_calm_empty_store(tmp_path, monkeypatch):
@@ -3640,9 +3653,7 @@ def test_evaluation_queue_reports_a_calm_empty_store(tmp_path, monkeypatch):
 def test_evaluation_queue_lists_held_jobs_with_their_reason(tmp_path, monkeypatch):
     # The cross-repo question no per-task route answers: what is owed and why.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    jobs = queue_store(tmp_path)
-    jobs.enqueue_if_absent(repo, RUN_TASK_ID)
-    jobs.hold_deferred(jobs.get_job(repo, RUN_TASK_ID), "capacity")
+    seed_queue_record(tmp_path, repo, status="deferred", auto=True, defer_reason="capacity")
 
     body = client.get("/api/evaluation/queue").json()
 
@@ -3663,8 +3674,9 @@ def test_evaluation_queue_counts_skips_per_repo(tmp_path, monkeypatch):
     # The countable half of the launch-time opt-out: a skipped task is a record,
     # not an absence, and the per-repo split is where a thinning corpus shows up.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    jobs = queue_store(tmp_path)
-    jobs.skip_if_absent(repo, RUN_TASK_ID, SKIP_RUN_OPT_OUT)
+    seed_queue_record(
+        tmp_path, repo, status="skipped", auto=True, skip_reason=SKIP_RUN_OPT_OUT
+    )
 
     body = client.get("/api/evaluation/queue").json()
 
@@ -3687,7 +3699,7 @@ def test_evaluation_queue_reports_a_closed_trigger_gate(tmp_path, monkeypatch):
     # queue sits still that leaves no trace on the records, so it travels in the
     # payload instead of hiding the records that prove it.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch, eval_auto=False)
-    queue_store(tmp_path, eval_auto=False).enqueue_if_absent(repo, RUN_TASK_ID)
+    seed_queue_record(tmp_path, repo, status="deferred", auto=True)
 
     body = client.get("/api/evaluation/queue").json()
 
@@ -3695,12 +3707,12 @@ def test_evaluation_queue_reports_a_closed_trigger_gate(tmp_path, monkeypatch):
     assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
 
 
-def test_evaluation_queue_reading_it_does_not_dispatch_anything(tmp_path, monkeypatch):
+def test_evaluation_queue_reading_it_moves_nothing(tmp_path, monkeypatch):
     # Asking about the queue must never move it.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    jobs = queue_store(tmp_path)
-    jobs.enqueue_if_absent(repo, RUN_TASK_ID)
-    record = jobs.jobs_dir / repo.name / RUN_TASK_ID / "job.json"
+    record = (
+        seed_queue_record(tmp_path, repo, status="deferred", auto=True) / "job.json"
+    )
     before = record.read_bytes()
 
     assert client.get("/api/evaluation/queue").status_code == 200
@@ -3728,7 +3740,7 @@ def test_evaluation_queue_requires_auth(tmp_path, monkeypatch):
 
 def test_pausing_holds_the_drain_and_reports_itself(tmp_path, monkeypatch):
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+    seed_queue_record(tmp_path, repo, status="deferred", auto=True)
 
     body = client.post("/api/evaluation/queue/pause").json()
 
@@ -3765,7 +3777,7 @@ def test_pausing_is_idempotent_on_the_instant_the_drain_stopped(tmp_path, monkey
 
 def test_resuming_releases_the_queue_without_a_restart(tmp_path, monkeypatch):
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+    seed_queue_record(tmp_path, repo, status="deferred", auto=True)
     client.post("/api/evaluation/queue/pause")
 
     body = client.post("/api/evaluation/queue/resume").json()
@@ -3785,40 +3797,6 @@ def test_the_pause_survives_a_restart_of_the_service(tmp_path, monkeypatch):
     reborn, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo)
 
     assert reborn.get("/api/evaluation/queue").json()["control"]["paused"] is True
-
-
-def test_the_pause_route_writes_under_the_dispatcher_admission_barrier(tmp_path, monkeypatch):
-    """The composition the route owes the dispatcher.
-
-    The pause lives in its own store and the drain in the job store, written by two
-    different threads. Unless the write is serialized against the promotion step, a
-    sweep that read an unpaused control a moment earlier can promote a job *after*
-    this route has answered that the queue is held — the one thing a pause exists
-    to prevent. The dispatcher lends the lock (it must not acquire the ability to
-    write the control); taking it is this route's job, so this pins that it does.
-    """
-    client, *_ = make_eval_client(tmp_path, monkeypatch)
-    dispatcher = client.app.state.eval_dispatcher
-    answered = threading.Event()
-
-    def press_pause() -> None:
-        client.post("/api/evaluation/queue/pause")
-        answered.set()
-
-    with dispatcher.admission_barrier():
-        presser = threading.Thread(target=press_pause)
-        presser.start()
-        # It cannot have answered: whatever a sweep is doing right now, this write
-        # waits for it rather than landing beside it.
-        assert not answered.wait(0.2)
-
-    presser.join(PAUSE_ROUTE_PATIENCE)
-    assert answered.is_set()
-    assert client.get("/api/evaluation/queue").json()["control"]["paused"] is True
-
-
-PAUSE_ROUTE_PATIENCE = 5
-"""Seconds the threaded pause-route test waits before calling the request stuck."""
 
 
 def test_the_queue_controls_are_gated_and_protected(tmp_path, monkeypatch):
@@ -4403,7 +4381,7 @@ def test_semantic_job_routes_disabled_are_404(tmp_path, monkeypatch):
 
 def test_cancelling_a_held_job_settles_it_and_frees_the_queue(tmp_path, monkeypatch):
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+    seed_queue_record(tmp_path, repo, status="deferred", auto=True, defer_reason="capacity")
 
     body = client.post(
         f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel"
@@ -4494,7 +4472,7 @@ def test_an_operator_can_ask_again_after_cancelling(tmp_path, monkeypatch):
     # cancelled record like any other terminal one, so the corpus gains the report
     # the cancel declined.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    queue_store(tmp_path).enqueue_if_absent(repo, RUN_TASK_ID)
+    seed_queue_record(tmp_path, repo, status="deferred", auto=True)
     client.post(f"/api/repos/{repo.name}/evaluations/{RUN_TASK_ID}/semantic/job/cancel")
 
     body = client.post(
@@ -5563,36 +5541,20 @@ def test_the_app_wires_completion_triggered_evaluation(tmp_path):
     assert trigger.enabled is True
 
 
-def test_the_app_wires_the_dispatch_policy_onto_the_resident_tick(tmp_path):
-    """A held Layer 2 job is picked back up by nothing else.
+def test_no_resident_sweep_can_start_a_layer_2_turn(tmp_path):
+    """The resident tick is unattended, so nothing it drives may spend a window.
 
-    Structural, like the trigger above: the dispatcher exists, it gates on the
-    Claude subscription (the provider the shipped Layer 2 backend spends
-    against), and the resident monitor drives its sweep — which is also what
-    resumes the queue after a restart, so no startup step owns that.
+    It used to drive the automatic dispatch sweep, which promoted a held job into
+    a ``claude`` turn on a timer. That sweep is gone; what remains is the in-flight
+    reaper, which only ever *settles* a transient record whose own persisted
+    deadline has passed. Structural rather than behavioural: a sweep that could
+    start a turn would have to be added here to run at all.
     """
     app = api.create_app(eval_config(tmp_path))
 
-    dispatcher = app.state.eval_dispatcher
-    assert dispatcher is not None
-    assert dispatcher._gate.provider == PROVIDER_CLAUDE
-    assert dispatcher.sweep in app.state.run_monitor._sweeps
-
-
-def test_the_app_wires_in_flight_stuck_reconciliation_onto_the_resident_tick(tmp_path):
-    """The startup orphan sweep only runs when no worker can exist, so a turn that
-    hangs while the service is up needs the resident counterpart — otherwise its
-    (repo, task) slot is held until somebody restarts the hub.
-
-    Reaping is ordered before the dispatch sweep so a slot freed on this tick is
-    already free when the dispatcher reads the store.
-    """
-    app = api.create_app(eval_config(tmp_path))
-
+    assert not hasattr(app.state, "eval_dispatcher")
     sweeps = app.state.run_monitor._sweeps
-    reaps = [s for s in sweeps if getattr(s, "__name__", "") == "reconcile_stuck"]
-    assert len(reaps) == 1
-    assert sweeps.index(reaps[0]) < sweeps.index(app.state.eval_dispatcher.sweep)
+    assert [getattr(s, "__name__", "") for s in sweeps] == ["reconcile_stuck"]
 
 
 def test_the_apps_semantic_backend_carries_the_configured_turn_deadline(
@@ -5617,8 +5579,13 @@ def test_the_apps_semantic_backend_carries_the_configured_turn_deadline(
     assert [b.timeout for b in built] == [77]
 
 
-def test_the_dispatch_gate_reads_usage_without_ever_gating_run_control(tmp_path):
-    """Usage is display-only, so a broken feed must hold evaluation and nothing else."""
+def test_a_broken_usage_feed_leaves_the_whole_app_standing(tmp_path):
+    """Usage is display-only again: nothing consults it to decide anything.
+
+    It had exactly one decision consumer — the automatic dispatcher's capacity
+    gate — and that is gone, so a feed that cannot be read now costs a dashboard
+    card and nothing else. The app must still build and serve.
+    """
     class BrokenUsage:
         def provider_usage(self, provider):
             raise OSError("usage store unreadable")
@@ -5634,10 +5601,8 @@ def test_the_dispatch_gate_reads_usage_without_ever_gating_run_control(tmp_path)
 
     app = api.create_app(eval_config(tmp_path), usage_service=BrokenUsage())
 
-    # The gate degrades to deferral rather than raising into the caller...
-    assert app.state.eval_dispatcher._gate.check() == "usage-unknown"
-    # ...and one sweep over an empty queue is still a clean no-op.
-    assert app.state.eval_dispatcher.sweep() is None
+    assert app.state.completion_trigger.enabled is True
+    assert app.state.run_monitor is not None
 
 
 @pytest.mark.parametrize(
@@ -5657,11 +5622,6 @@ def test_the_apps_trigger_honors_both_gates(tmp_path, overrides, expected):
     app = api.create_app(config)
 
     assert app.state.completion_trigger.enabled is expected
-    # Both halves of the automatic path, because the queue is durable: the sweep
-    # is wired onto the resident tick unconditionally, so a switch honored only at
-    # acceptance would still promote whatever an earlier enabled process accepted.
-    # What a closed gate then does to a pre-existing queue: tests/test_eval_dispatch.py.
-    assert app.state.eval_dispatcher.enabled is expected
 
 
 def test_an_injected_run_manager_is_never_handed_the_apps_evaluator(

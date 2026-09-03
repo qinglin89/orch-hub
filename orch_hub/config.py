@@ -126,24 +126,27 @@ DEFAULT_EVAL_ENABLED = True
 """Task evaluation is enabled by default (local use); disable it explicitly."""
 
 EVAL_AUTO_ENV = "ORCH_HUB_EVAL_AUTO"
-"""Environment variable gating *automatic* evaluation of completed tasks.
+"""Environment variable gating *automatic* Layer 1 evaluation of completed tasks.
 
 The trigger gate, orthogonal to :data:`EVAL_ENABLED_ENV` (the subsystem gate):
-with it on, a run whose end classifies as ``completed`` evaluates its task
-without operator action, so the evaluated corpus is mechanical rather than a
-product of which tasks felt worth measuring. Turning it off leaves the whole
-evaluation subsystem — routes, dashboard controls, manual generation — intact and
-returns it to on-demand-only operation; turning the *subsystem* off disables this
-too, since there is nothing to trigger. Falsy tokens disable, unset/blank means
-the default, an unrecognized value fails loudly."""
+with it on, a run whose end classifies as ``completed`` generates its task's
+evidence pack and deterministic static metrics without operator action. Turning it
+off leaves the whole evaluation subsystem — routes, dashboard controls, manual
+generation — intact and returns it to on-demand-only operation; turning the
+*subsystem* off disables this too, since there is nothing to trigger. Falsy tokens
+disable, unset/blank means the default, an unrecognized value fails loudly.
+
+It gates no model spend. Layer 2 was once triggered here too and is not any more
+(:mod:`orch_hub.completion_eval`), so with this on the automatic path is
+filesystem work only."""
 
 DEFAULT_EVAL_AUTO = True
-"""Automatic completion-triggered evaluation is on by default.
+"""Automatic completion-triggered Layer 1 evaluation is on by default.
 
-The point of the trigger is that nobody decides which completed tasks get a
-report; a default of *off* would leave that selection with the operator, which is
-the bias the trigger exists to remove. Opting out is explicit and per-deployment
-(``ORCH_HUB_EVAL_AUTO=false``)."""
+Layer 1 is deterministic, makes no model call, and opens no socket, so the only
+cost of generating it unasked is a small artifact dir — while the cost of *not*
+having it is a click at exactly the moment nobody is looking at the task any
+more. Opting out is explicit and per-deployment (``ORCH_HUB_EVAL_AUTO=false``)."""
 
 EVAL_MODEL_ENV = "ORCH_HUB_EVAL_MODEL"
 """Environment variable selecting the model for the semantic task evaluator.
@@ -216,61 +219,6 @@ DEFAULT_EVAL_RETENTION = 20
 prune older ones on the next generation. Generous enough for trend analysis over
 a task's evaluation history, bounded enough to avoid unbounded growth."""
 
-EVAL_USAGE_CEILING_ENV = "ORCH_HUB_EVAL_USAGE_CEILING"
-"""Subscription-utilization ceiling above which an automatic Layer 2 turn waits.
-
-Cost is not what makes an automatic semantic evaluation risky; *contention* is.
-One Layer 2 turn is a bounded ``claude -p`` call, but it draws on the same
-subscription rate window a dev session needs, so a turn that fires while the
-operator is rationing the window spends the work budget on measuring the work.
-This is the observed used-percentage (0-100) at or above which the automatic
-dispatcher holds a job in the deferred queue instead of running it; below it,
-the turn is invisible against the window it shares.
-
-Compared against the *highest* currently-measured window of the evaluator's
-provider, so an exhausted weekly window holds a job even while the five-hour one
-is fresh. A malformed or out-of-range value fails loudly rather than silently
-picking a policy. Only the automatic path consults it: an operator asking for an
-evaluation now is not the production-side selection this gate exists to shape."""
-
-DEFAULT_EVAL_USAGE_CEILING = 80.0
-"""Default utilization ceiling for automatic Layer 2 dispatch, in percent.
-
-One Layer 2 turn measures ~32k input tokens against a window that absorbs
-several dev sessions of up to 200k context each — under 1% of the work it
-measures — so 20 points of headroom is roughly twenty times the turn's own cost.
-The ceiling is therefore not sized to make the turn *fit*; it is sized so the
-turn never *competes*: below 80% the operator has not started rationing, and
-above it measurement can wait for the rollover. Keeping it high also matters in
-the other direction — a low ceiling would hold every job until the window rolled
-and then hand the queue a whole backlog at once, recreating the herd the
-dispatch spacing exists to prevent."""
-
-EVAL_DISPATCH_SPACING_ENV = "ORCH_HUB_EVAL_DISPATCH_SPACING"
-"""Minimum seconds between two automatic Layer 2 turns (the rollover-herd guard).
-
-A ceiling plus a queue has a failure mode the ceiling alone does not: under
-sustained pressure the deferred queue accumulates, and the moment the window
-rolls every held job becomes dispatchable at once — spending the fresh window's
-opening capacity exactly when the operator comes back to work. Single-flight
-prevents double-spending one task, not a herd across tasks. The dispatcher
-therefore drains at most one held job per this interval, measured from the last
-turn that actually started (manual turns included — they consume the same
-window). Unset or blank means :data:`DEFAULT_EVAL_DISPATCH_SPACING`; ``0``
-drains as fast as the queue allows; a negative or non-integer value fails
-loudly."""
-
-DEFAULT_EVAL_DISPATCH_SPACING = 900
-"""Default spacing between automatic Layer 2 turns: 15 minutes.
-
-Drains a post-rollover backlog at four turns an hour — roughly four points of
-window budget an hour, a trickle against the fresh window rather than a burst.
-It is also longer than the usage collector's freshness horizon (300s), so the
-capacity read that admits the next turn already reflects the previous one
-instead of deciding on pre-dispatch figures. On an ordinary week completions
-arrive further apart than this, so the spacing binds only during the burst it
-exists for."""
-
 EVAL_QUEUE_MAX_AGE_ENV = "ORCH_HUB_EVAL_QUEUE_MAX_AGE"
 """Seconds a job may sit in the deferred queue before it is surfaced as stalled.
 
@@ -341,33 +289,12 @@ def _parse_retention(raw: str | None) -> int:
     return retention
 
 
-def _parse_percent(raw: str | None, *, default: float, env_name: str) -> float:
-    """Parse a 0-100 percentage env var: unset/blank is ``default``, bad is loud.
-
-    Mirrors :func:`_parse_retention`: a typo in a dispatch threshold must surface
-    at startup, because the quiet failure mode is a policy nobody chose — a
-    ceiling read as ``0`` would hold every automatic evaluation forever, and one
-    read as ``1000`` would disable the gate the operator asked for."""
-    value = (raw or "").strip()
-    if not value:
-        return default
-    try:
-        percent = float(value)
-    except ValueError:
-        raise ValueError(
-            f"{env_name} must be a number between 0 and 100, got {value!r}"
-        ) from None
-    if not 0.0 <= percent <= 100.0:
-        raise ValueError(f"{env_name} must be between 0 and 100, got {percent}")
-    return percent
-
-
 def _parse_seconds(raw: str | None, *, default: int, env_name: str) -> int:
     """Parse a non-negative seconds env var: unset/blank is ``default``, bad is loud.
 
-    Same contract as :func:`_parse_retention` for the two duration thresholds
-    (dispatch spacing, deferred-queue age bound); ``0`` is a meaningful value for
-    both (no spacing / no age bound) and a negative one is a typo, not a policy."""
+    Same contract as :func:`_parse_retention` for the duration thresholds
+    (the turn deadline, the held-job age bound); ``0`` is a meaningful value for
+    each and a negative one is a typo, not a policy."""
     value = (raw or "").strip()
     if not value:
         return default
@@ -534,26 +461,12 @@ class Config:
     is the cap. Only meaningful when evaluation is enabled.
     """
 
-    eval_usage_ceiling: float = DEFAULT_EVAL_USAGE_CEILING
-    """Utilization percent at or above which automatic Layer 2 defers.
-
-    Selected by ``ORCH_HUB_EVAL_USAGE_CEILING``. Read only by the automatic
-    dispatcher, against the evaluator provider's highest currently-measured
-    window; a manual evaluation ignores it entirely.
-    """
-
-    eval_dispatch_spacing: int = DEFAULT_EVAL_DISPATCH_SPACING
-    """Minimum seconds between two automatic Layer 2 turns (herd guard).
-
-    Selected by ``ORCH_HUB_EVAL_DISPATCH_SPACING``; ``0`` drains the deferred
-    queue as fast as capacity allows.
-    """
-
     eval_queue_max_age: int = DEFAULT_EVAL_QUEUE_MAX_AGE
-    """Seconds after which a still-deferred Layer 2 job is surfaced as stalled.
+    """Seconds after which a legacy held Layer 2 job is surfaced as stalled.
 
     Selected by ``ORCH_HUB_EVAL_QUEUE_MAX_AGE``; ``0`` disables the bound. It
-    affects visibility only, never a dispatch decision.
+    affects visibility only: no record it flags is waiting on anything the hub
+    will do by itself.
     """
 
     @classmethod
@@ -625,16 +538,6 @@ class Config:
                 default=DEFAULT_EVAL_TURN_TIMEOUT,
                 env_name=EVAL_TURN_TIMEOUT_ENV,
             ),
-            eval_usage_ceiling=_parse_percent(
-                env.get(EVAL_USAGE_CEILING_ENV),
-                default=DEFAULT_EVAL_USAGE_CEILING,
-                env_name=EVAL_USAGE_CEILING_ENV,
-            ),
-            eval_dispatch_spacing=_parse_seconds(
-                env.get(EVAL_DISPATCH_SPACING_ENV),
-                default=DEFAULT_EVAL_DISPATCH_SPACING,
-                env_name=EVAL_DISPATCH_SPACING_ENV,
-            ),
             eval_queue_max_age=_parse_seconds(
                 env.get(EVAL_QUEUE_MAX_AGE_ENV),
                 default=DEFAULT_EVAL_QUEUE_MAX_AGE,
@@ -669,19 +572,16 @@ class Config:
 
     @property
     def auto_evaluation_enabled(self) -> bool:
-        """Whether the completion-triggered evaluation path may act at all.
+        """Whether the completion-triggered Layer 1 path may act at all.
 
-        The conjunction of the subsystem gate and the trigger gate, derived here
-        rather than in each consumer because the automatic path is more than one
-        step: the completion hook accepts a job, and a background sweep later
-        turns it into a model turn. Two steps re-deriving the same predicate is
-        exactly how one of them ends up ungated — and the ungated half is the
-        *dispatching* one, so the failure mode is an automatic model turn in a
-        deployment that switched automatic evaluation off.
+        The conjunction of the subsystem gate and the trigger gate. Read by
+        :class:`~orch_hub.completion_eval.CompletionEvaluationTrigger`, the one
+        consumer left now that automatic Layer 2 dispatch is gone, and reported by
+        the queue projection so a reader can see the switch rather than infer it
+        from silence.
 
-        Read by :class:`~orch_hub.completion_eval.CompletionEvaluationTrigger` and
-        :class:`~orch_hub.eval_dispatch.DeferredDispatcher`. Every manual
-        evaluation route is unaffected: it is gated by ``evaluation_enabled``
-        alone, which is what "manual-only operation" means.
+        Every manual evaluation route is unaffected: those are gated by
+        ``evaluation_enabled`` alone, which is what "manual-only operation" means
+        for Layer 2 — it is now the only mode Layer 2 has.
         """
         return self.evaluation_enabled and self.eval_auto

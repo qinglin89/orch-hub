@@ -1,18 +1,18 @@
 """Tests for completion-triggered task evaluation (:mod:`orch_hub.completion_eval`).
 
-Covers the trigger's own contract over fake layers — both gates (subsystem and
+Covers the trigger's own contract over a fake Layer 1 — both gates (subsystem and
 ``ORCH_HUB_EVAL_AUTO``) checked before any work is dispatched, work handed to the
 executor rather than run on the caller's thread, an unattributable run record
-refused, Layer 1 run immediately, Layer 2 accepted through the once-per-task
-guard and then handed to the dispatch policy off the lock, and every failure
-isolated from every other — plus one end-to-end integration test that
-drives a *real* run manager, evaluation service, static evaluator, semantic
-evaluator (fake backend, so no model call), job manager and dispatcher: a run
-that finishes its task lands both layers' artifacts with no operator action, and
-a second completed run of the same task adds no second semantic turn. The
-dispatch policy's own rules (ceiling, spacing, unknown-usage deferral) are
-``tests/test_eval_dispatch.py``; here it is wired permissively so the completion
-path is what is under test.
+refused, and a failure isolated from run state — plus end-to-end tests that drive
+a *real* run manager, evaluation service, static evaluator and job manager.
+
+The load-bearing half of this file is negative. Layer 2 is no longer part of the
+automatic path, so these tests assert what a completion must **not** do: no job
+record is written, no model turn opens, and none of the things that used to be
+able to start one — a restart, a resident sweep, a legacy ``deferred`` record
+left over from the automatic era — can start one now. The fake backend below
+exists so that a test which *does* reach the evaluator would produce a report
+rather than a network call; that no test reaches it without asking is the point.
 """
 
 from __future__ import annotations
@@ -27,18 +27,14 @@ import pytest
 
 from orch_hub.completion_eval import CompletionEvaluationTrigger
 from orch_hub.config import Config
-from orch_hub.eval_dispatch import CapacityGate, DeferredDispatcher
 from orch_hub.evaluation import EVIDENCE_NAME, EvaluationService
 from orch_hub.models import (
-    PROVIDER_CLAUDE,
     ManagedRepo,
-    ProviderUsage,
     ReadinessCheck,
     ReadinessReport,
     RunRecord,
     SemanticEvaluatorInfo,
     SemanticJob,
-    UsageWindow,
 )
 from orch_hub.runs import RunManager
 from orch_hub.semantic import (
@@ -47,12 +43,8 @@ from orch_hub.semantic import (
     SemanticEvaluator,
 )
 from orch_hub.semantic_jobs import (
-    SKIP_RUN_OPT_OUT,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
-    STATUS_FAILED,
-    STATUS_QUEUED,
-    STATUS_SKIPPED,
     SemanticJobManager,
 )
 from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
@@ -125,69 +117,6 @@ class FakeStatic:
         return StubReport()
 
 
-class FakeJobs:
-    """Stands in for :class:`SemanticJobManager`: the two acceptance seams.
-
-    ``calls`` records enqueues and ``skips`` records the opt-out path, kept apart
-    so a test can state which of the two durable records a completion produced —
-    they are mutually exclusive per completion and the whole point of the opt-out
-    is that neither is an absence.
-    """
-
-    def __init__(self, *, error: Exception | None = None, already_recorded: bool = False):
-        self.calls: list[tuple[ManagedRepo, str]] = []
-        self.skips: list[tuple[ManagedRepo, str, str]] = []
-        self._error = error
-        self._already_recorded = already_recorded
-
-    def enqueue_if_absent(self, r: ManagedRepo, task_id: str) -> SemanticJob | None:
-        self.calls.append((r, task_id))
-        if self._error is not None:
-            raise self._error
-        if self._already_recorded:
-            return None
-        return SemanticJob(
-            job_id="20260809T030000Z",
-            repo_name=r.name,
-            repo_path=r.path,
-            task_id=task_id,
-            status=STATUS_DEFERRED,
-            auto=True,
-        )
-
-    def skip_if_absent(
-        self, r: ManagedRepo, task_id: str, reason: str
-    ) -> SemanticJob | None:
-        self.skips.append((r, task_id, reason))
-        if self._error is not None:
-            raise self._error
-        if self._already_recorded:
-            return None
-        return SemanticJob(
-            job_id="20260809T030000Z",
-            repo_name=r.name,
-            repo_path=r.path,
-            task_id=task_id,
-            status=STATUS_SKIPPED,
-            skip_reason=reason,
-            auto=True,
-        )
-
-
-class FakeDispatcher:
-    """Stands in for :class:`DeferredDispatcher`: the ``sweep`` seam."""
-
-    def __init__(self, *, error: Exception | None = None):
-        self.sweeps = 0
-        self._error = error
-
-    def sweep(self):
-        self.sweeps += 1
-        if self._error is not None:
-            raise self._error
-        return None
-
-
 class DeferredExecutor:
     """Captures submitted work without running it (the production thread's stand-in)."""
 
@@ -210,46 +139,38 @@ def trigger(
     tmp_path: Path,
     *,
     static=None,
-    jobs=None,
-    dispatcher=None,
     executor=sync_executor,
     enabled: bool = True,
     auto: bool = True,
-) -> tuple[CompletionEvaluationTrigger, FakeStatic, FakeJobs]:
+) -> tuple[CompletionEvaluationTrigger, FakeStatic]:
     static = static if static is not None else FakeStatic()
-    jobs = jobs if jobs is not None else FakeJobs()
     return (
         CompletionEvaluationTrigger(
             config(tmp_path, enabled=enabled, auto=auto),
             static_evaluator=static,
-            job_manager=jobs,
-            dispatcher=dispatcher if dispatcher is not None else FakeDispatcher(),
             executor=executor,
         ),
         static,
-        jobs,
     )
 
 
 # -- the happy path -----------------------------------------------------------
 
 
-def test_a_completed_task_gets_layer_1_now_and_layer_2_enqueued(tmp_path):
-    dispatcher = FakeDispatcher()
-    trig, static, jobs = trigger(tmp_path, dispatcher=dispatcher)
+def test_a_completed_task_gets_layer_1_and_only_layer_1(tmp_path):
+    trig, static = trigger(tmp_path)
 
     trig.on_task_completed(completed_record())
 
     assert [(r.name, t) for r, t in static.calls] == [("alpha", TASK)]
-    assert [(r.name, t) for r, t in jobs.calls] == [("alpha", TASK)]
-    # Accepted, then immediately offered to the dispatch policy: an uncontended
-    # completion must not wait for the resident sweep's next tick.
-    assert dispatcher.sweeps == 1
+    # Structural, not behavioural: the trigger holds no semantic collaborator at
+    # all, so there is nothing here that a completion could ask for a model turn.
+    assert not hasattr(trig, "_jobs") and not hasattr(trig, "_dispatcher")
 
 
 def test_the_repo_is_reconstructed_from_the_run_record_alone(tmp_path):
     """No registry lookup: the record carries everything the evaluation needs."""
-    trig, static, _ = trigger(tmp_path)
+    trig, static = trigger(tmp_path)
 
     trig.on_task_completed(completed_record())
 
@@ -272,58 +193,51 @@ def test_the_repo_is_reconstructed_from_the_run_record_alone(tmp_path):
 )
 def test_gates_compose_as_subsystem_and_trigger(tmp_path, enabled, auto, expect_enabled):
     executor = DeferredExecutor()
-    trig, static, jobs = trigger(
-        tmp_path, executor=executor, enabled=enabled, auto=auto
-    )
+    trig, static = trigger(tmp_path, executor=executor, enabled=enabled, auto=auto)
 
     assert trig.enabled is expect_enabled
 
     trig.on_task_completed(completed_record())
 
-    # A closed gate does no work at all — not even a dispatch.
+    # A closed gate does no work at all — not even a submission.
     assert bool(executor.pending) is expect_enabled
     executor.run_all()
     assert bool(static.calls) is expect_enabled
-    assert bool(jobs.calls) is expect_enabled
 
 
 def test_automatic_triggering_is_switchable_without_disabling_the_subsystem(tmp_path):
     """``ORCH_HUB_EVAL_AUTO=false`` leaves manual evaluation completely intact."""
-    trig, static, jobs = trigger(tmp_path, auto=False)
+    trig, static = trigger(tmp_path, auto=False)
     cfg = config(tmp_path, auto=False)
 
     trig.on_task_completed(completed_record())
 
-    assert static.calls == [] and jobs.calls == []
+    assert static.calls == []
     assert cfg.evaluation_enabled is True  # the subsystem, and its routes, stay on
 
 
 # -- dispatch -----------------------------------------------------------------
 
 
-def test_the_layer_2_job_is_recorded_before_the_hook_returns(tmp_path):
-    """The completion signal is one-shot: acceptance may not wait on a thread.
+def test_nothing_runs_on_the_callers_thread(tmp_path):
+    """The caller holds the run-manager lock, so all of it goes to the executor.
 
-    The caller holds the run-manager lock, so only O(1) work may run inline — and
-    the durable Layer 2 record is exactly that, while Layer 1's evidence build is
-    what gets detached.
+    Layer 1 walks the task file, every related run's records/events/sessions, a
+    bounded git window and the ``.ai/`` snapshot — none of which may happen under
+    the lock every run read in the process queues behind. There is nothing left to
+    do inline: Layer 2's durable acceptance was the one O(1) step that had to
+    settle before the hook returned, and it is gone with the automatic path.
     """
     executor = DeferredExecutor()
-    dispatcher = FakeDispatcher()
-    trig, static, jobs = trigger(tmp_path, executor=executor, dispatcher=dispatcher)
+    trig, static = trigger(tmp_path, executor=executor)
 
     trig.on_task_completed(completed_record())
 
-    assert len(jobs.calls) == 1  # durable acceptance, before returning
-    assert static.calls == []  # the slow layer did not run on the caller's thread
-    # Admission reads subscription usage — a file read that can start background
-    # work — so it stays off the run-manager lock along with Layer 1.
-    assert dispatcher.sweeps == 0
+    assert static.calls == []
     assert len(executor.pending) == 1
 
     executor.run_all()
     assert len(static.calls) == 1
-    assert dispatcher.sweeps == 1
 
 
 # -- refusals and isolation ---------------------------------------------------
@@ -338,150 +252,63 @@ def test_the_layer_2_job_is_recorded_before_the_hook_returns(tmp_path):
 )
 def test_an_unattributable_record_evaluates_nothing(tmp_path, record):
     executor = DeferredExecutor()
-    dispatcher = FakeDispatcher()
-    trig, static, jobs = trigger(tmp_path, executor=executor, dispatcher=dispatcher)
+    trig, static = trigger(tmp_path, executor=executor)
 
     trig.on_task_completed(record)  # must not raise
 
     assert executor.pending == []
-    assert static.calls == [] and jobs.calls == []
-    assert dispatcher.sweeps == 0
+    assert static.calls == []
 
 
-def test_a_layer_1_failure_leaves_the_durable_layer_2_job_standing(tmp_path):
-    """The two layers are separate artifacts over separately generated evidence."""
-    trig, static, jobs = trigger(
+def test_a_layer_1_failure_never_reaches_run_state(tmp_path):
+    """Isolation is the invariant: the run is already persisted when this runs."""
+    trig, static = trigger(
         tmp_path, static=FakeStatic(error=OSError("evidence unreadable"))
     )
 
     trig.on_task_completed(completed_record())  # must not raise
 
     assert len(static.calls) == 1
-    assert len(jobs.calls) == 1  # already accepted, and untouched by the failure
 
 
-def test_a_layer_2_enqueue_failure_is_isolated(tmp_path):
-    trig, static, jobs = trigger(
-        tmp_path, jobs=FakeJobs(error=RuntimeError("job store broken"))
-    )
+def test_a_repeated_completion_regenerates_layer_1(tmp_path):
+    """Per completion signal, not task-once — deliberately, and cheaply.
 
-    trig.on_task_completed(completed_record())  # must not raise
-
-    assert len(jobs.calls) == 1
-    # A broken job store costs this task its Layer 2, not its deterministic layer.
-    assert len(static.calls) == 1
-
-
-def test_a_failing_dispatch_sweep_still_leaves_layer_1(tmp_path):
-    """A policy that cannot read usage must not cost the task its free layer."""
-    dispatcher = FakeDispatcher(error=OSError("usage store unreadable"))
-    trig, static, jobs = trigger(tmp_path, dispatcher=dispatcher)
-
-    trig.on_task_completed(completed_record())  # must not raise
-
-    assert dispatcher.sweeps == 1
-    assert len(jobs.calls) == 1  # already durable, untouched
-    assert len(static.calls) == 1
-
-
-def test_a_task_that_already_has_a_job_record_enqueues_no_second_turn(tmp_path):
-    """The once-per-task guard lives in the job manager; the trigger just obeys it."""
-    trig, static, jobs = trigger(tmp_path, jobs=FakeJobs(already_recorded=True))
+    The signal is per *run*: a task that reaches ``completed`` without being
+    archived is still launchable, and the close-out-only re-run classifies
+    ``completed`` again. There is no durable once-guard here because the guard
+    only ever existed to stop a *model turn* running twice; a free deterministic
+    artifact is simply regenerated fresher.
+    """
+    trig, static = trigger(tmp_path)
 
     trig.on_task_completed(completed_record())
     trig.on_task_completed(completed_record())
 
-    assert len(jobs.calls) == 2  # asked twice
-    # Layer 1 is never skipped: it makes no model call, so a repeated completion
-    # signal costs nothing and the deterministic layer stays complete.
     assert len(static.calls) == 2
 
 
-# -- the per-run Layer 2 opt-out ----------------------------------------------
-#
-# One boolean chosen at launch, hub-only, default on. It is admissible only
-# because the skip it produces is a *record*: an opt-out that left nothing behind
-# would re-open, at production time, the same selection automatic evaluation
-# exists to close — and skips do not thin a corpus evenly, they cluster on the
-# expensive, remediation-heavy tail.
+# -- the retired per-run Layer 2 opt-out --------------------------------------
 
 
-def test_an_opted_out_run_records_a_skip_instead_of_enqueueing(tmp_path):
-    dispatcher = FakeDispatcher()
-    trig, static, jobs = trigger(tmp_path, dispatcher=dispatcher)
+def test_the_launch_time_opt_out_no_longer_changes_anything(tmp_path):
+    """``auto_semantic_eval=False`` is inert: there is nothing left to opt out of.
 
-    trig.on_task_completed(completed_record(auto_semantic_eval=False))
-
-    assert jobs.calls == []  # no Layer 2 turn is owed
-    assert [(r.name, t, reason) for r, t, reason in jobs.skips] == [
-        ("alpha", TASK, SKIP_RUN_OPT_OUT)
-    ]
-    # Layer 1 is never skipped: it makes no model call, so declining it would save
-    # nothing and forfeit the whole deterministic layer.
-    assert [(r.name, t) for r, t in static.calls] == [("alpha", TASK)]
-    # The queue is global, so a completion that added nothing to it still frees
-    # capacity for the jobs already waiting.
-    assert dispatcher.sweeps == 1
-
-
-def test_the_skip_is_recorded_before_the_hook_returns(tmp_path):
-    """Same acceptance contract as an enqueue: the completion signal is one-shot.
-
-    A skip that were only *intended* would be indistinguishable, forever after,
-    from a task the trigger never saw — which is the difference between measuring
-    less on purpose and a corpus that cannot state its own denominator.
+    The field selected between an accepted Layer 2 job and a recorded ``skipped``
+    one. Both halves are gone, so a run launched with the box unchecked and one
+    launched with it checked now take the identical path — Layer 1, nothing else.
+    Kept as a regression guard while the field itself is still persisted: it must
+    not grow a second meaning on the way out.
     """
-    executor = DeferredExecutor()
-    trig, static, jobs = trigger(tmp_path, executor=executor)
+    opted_out, static_out = trigger(tmp_path)
+    opted_out.on_task_completed(completed_record(auto_semantic_eval=False))
 
-    trig.on_task_completed(completed_record(auto_semantic_eval=False))
+    opted_in, static_in = trigger(tmp_path)
+    opted_in.on_task_completed(completed_record(auto_semantic_eval=True))
 
-    assert len(jobs.skips) == 1  # durable, inline
-    assert static.calls == []  # the slow layer still went to the executor
-    executor.run_all()
-    assert len(static.calls) == 1
-
-
-def test_a_record_with_no_choice_recorded_evaluates(tmp_path):
-    """Default on, including for a run record written before the field existed.
-
-    ``RunRecord`` defaults the field to true and the loader reads an absent one as
-    true, so the pre-field cohort keeps its automatic evaluation instead of being
-    excluded from the corpus by a change nobody made a decision about.
-    """
-    trig, _, jobs = trigger(tmp_path)
-
-    trig.on_task_completed(RunRecord(
-        run_id="20260809T030000Z-alpha-legacy",
-        repo_name="alpha",
-        repo_path=REPO_PATH,
-        task_id=TASK,
-        ended_ts=FIXED_TS.isoformat(),
-    ))
-
-    assert len(jobs.calls) == 1 and jobs.skips == []
-
-
-def test_a_failing_skip_record_costs_only_the_skip(tmp_path):
-    """Isolated exactly like the enqueue path: a broken job store never reaches run state."""
-    jobs = FakeJobs(error=OSError("job store unwritable"))
-    trig, static, _ = trigger(tmp_path, jobs=jobs)
-
-    trig.on_task_completed(completed_record(auto_semantic_eval=False))  # must not raise
-
-    assert len(jobs.skips) == 1
-    assert len(static.calls) == 1
-
-
-def test_an_already_recorded_task_is_not_re_skipped(tmp_path):
-    """The once-per-task guard is the job manager's; the trigger just obeys it."""
-    trig, static, jobs = trigger(tmp_path, jobs=FakeJobs(already_recorded=True))
-
-    trig.on_task_completed(completed_record(auto_semantic_eval=False))
-    trig.on_task_completed(completed_record(auto_semantic_eval=False))
-
-    assert len(jobs.skips) == 2  # asked twice, accepted neither time
-    assert len(static.calls) == 2
+    reached = [(r.name, t) for r, t in static_out.calls]
+    assert reached == [("alpha", TASK)]
+    assert [(r.name, t) for r, t in static_in.calls] == reached
 
 
 # -- integration: a real completed run through the real layers ----------------
@@ -599,29 +426,6 @@ def _snapshot_tree(root: Path) -> dict[str, bytes]:
     }
 
 
-def _open_window() -> ProviderUsage:
-    """A quiet subscription window, so the dispatch policy admits the turn.
-
-    The policy's own rules are ``tests/test_eval_dispatch.py``; these tests are
-    about the completion path, so the capacity read is wired permissively and
-    synthetically — no test here touches the operator's real usage data.
-    """
-    resets = (FIXED_TS + dt.timedelta(hours=4)).isoformat()
-    return ProviderUsage(
-        provider=PROVIDER_CLAUDE,
-        available=True,
-        windows=(
-            UsageWindow(
-                key="five_hour",
-                used_percent=5.0,
-                resets_at=resets,
-                figure_instant=resets,
-            ),
-        ),
-        observed_ts=FIXED_TS.isoformat(),
-    )
-
-
 class Stack(NamedTuple):
     """The evaluation collaborators one hub process builds over one data dir."""
 
@@ -629,16 +433,20 @@ class Stack(NamedTuple):
     static: StaticEvaluator
     semantic: SemanticEvaluator
     jobs: SemanticJobManager
-    dispatcher: DeferredDispatcher
     trigger: CompletionEvaluationTrigger
 
 
-def _stack(cfg: Config, *, executor=sync_executor, usage=None) -> Stack:
+def _stack(cfg: Config, *, executor=sync_executor) -> Stack:
     """Build the real evaluation stack, with only the model call faked.
 
     A function of the config alone, so a test can build it twice over the same
     data dir and get what a *restarted* hub gets: fresh in-memory managers over
     the same persisted records.
+
+    The job manager is built and the semantic evaluator behind it works — a
+    manual ``start_job`` in these tests produces a real report set. It is simply
+    not wired to the trigger, which is the whole change: nothing connects a run
+    ending to a model turn.
     """
     service = EvaluationService(cfg, git_runner=_fake_git, clock=lambda: FIXED_TS)
     static = StaticEvaluator(cfg, evaluation_service=service, clock=lambda: FIXED_TS)
@@ -652,23 +460,12 @@ def _stack(cfg: Config, *, executor=sync_executor, usage=None) -> Stack:
     jobs = SemanticJobManager(
         cfg, evaluator=semantic, clock=lambda: FIXED_TS, executor=executor
     )
-    read_usage = usage if usage is not None else _open_window
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=jobs,
-        gate=CapacityGate(
-            cfg, usage_reader=read_usage, clock=lambda: FIXED_TS
-        ),
-        clock=lambda: FIXED_TS,
-    )
     trig = CompletionEvaluationTrigger(
         cfg,
         static_evaluator=static,
-        job_manager=jobs,
-        dispatcher=dispatcher,
         executor=executor,
     )
-    return Stack(service, static, semantic, jobs, dispatcher, trig)
+    return Stack(service, static, semantic, jobs, trig)
 
 
 def _run_manager(
@@ -693,6 +490,10 @@ def _wire(tmp_path: Path):
     return cfg, stack.service, stack.jobs, manager, spawner
 
 
+def _jobs_root(cfg: Config) -> Path:
+    return cfg.data_dir / "semantic-jobs"
+
+
 def test_a_finished_run_evaluates_its_task_without_operator_action(tmp_path):
     cfg, service, jobs, manager, spawner = _wire(tmp_path)
     target = _write_repo(tmp_path)
@@ -703,30 +504,23 @@ def test_a_finished_run_evaluates_its_task_without_operator_action(tmp_path):
     spawner.procs[0].returncode = 0
     assert manager.list_runs()[0].state == "completed"
 
-    # Layer 2 settled (synchronous executor) and links a complete report set.
-    job = jobs.get_job(target, TASK)
-    assert job.status == STATUS_COMPLETED and job.evaluation_id
-    semantic_dir = (
-        cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
-    )
-    assert (semantic_dir / EVIDENCE_NAME).is_file()
-    assert (semantic_dir / STATIC_METRICS_NAME).is_file()
-    assert (semantic_dir / SEMANTIC_REPORT_NAME).is_file()
-    assert (semantic_dir / SEMANTIC_REPORT_MD_NAME).is_file()
-
-    # Layer 1 ran on its own, immediately: a second, deterministic-only evaluation.
+    # Exactly one evaluation, and it is the deterministic pair.
     stored = service.list_evaluations(target, TASK)
-    assert len(stored) == 2
-    layer_1 = [s for s in stored if s.evaluation_id != job.evaluation_id]
-    assert len(layer_1) == 1
-    assert set(layer_1[0].artifacts) == {EVIDENCE_NAME, STATIC_METRICS_NAME}
+    assert len(stored) == 1
+    assert set(stored[0].artifacts) == {EVIDENCE_NAME, STATIC_METRICS_NAME}
+
+    # Nothing asked the semantic layer for anything: no job record was written at
+    # all, so there is not even a deferred one for a later sweep to find.
+    assert jobs.list_jobs() == []
+    assert not _jobs_root(cfg).exists()
 
     # Read-only: the target repo is byte-identical apart from the log we wrote.
     after = _snapshot_tree(target.path)
     assert {k: v for k, v in after.items() if not k.startswith(".mandrel/")} == before
 
 
-def test_a_second_completed_run_of_the_same_task_spends_no_second_model_turn(tmp_path):
+def test_a_second_completed_run_of_the_same_task_regenerates_layer_1_only(tmp_path):
+    """The close-out-only re-run: the same task completes again, from its own evidence."""
     cfg, service, jobs, manager, spawner = _wire(tmp_path)
     target = _write_repo(tmp_path)
 
@@ -734,92 +528,75 @@ def test_a_second_completed_run_of_the_same_task_spends_no_second_model_turn(tmp
     _write_orch_log(target)
     spawner.procs[0].returncode = 0
     manager.list_runs()
-    first_job = jobs.get_job(target, TASK)
 
-    # The close-out-only re-run: the same task completes again from its own
-    # evidence, because the completion signal is per run, not per task.
     manager.start_run(target, TASK)
     spawner.procs[1].returncode = 0
     assert [s.state for s in manager.list_runs()] == ["completed", "completed"]
 
-    assert jobs.get_job(target, TASK).job_id == first_job.job_id
-    # One semantic report set, ever; the extra L1-only dir is deterministic and free.
     stored = service.list_evaluations(target, TASK)
-    assert sum(1 for s in stored if SEMANTIC_REPORT_NAME in s.artifacts) == 1
-    assert sum(1 for s in stored if SEMANTIC_REPORT_NAME not in s.artifacts) == 2
+    assert len(stored) == 2
+    assert all(SEMANTIC_REPORT_NAME not in s.artifacts for s in stored)
+    assert jobs.list_jobs() == []
 
 
-def test_a_run_launched_with_the_opt_out_gets_layer_1_and_a_recorded_skip(tmp_path):
-    """End to end, through the real manager: no model turn, and no silent absence."""
+@pytest.mark.parametrize("opt_out", [True, False])
+def test_the_launch_flag_does_not_change_what_a_completion_produces(tmp_path, opt_out):
+    """End to end: the retired opt-out reaches nothing, in either position."""
     cfg, service, jobs, manager, spawner = _wire(tmp_path)
     target = _write_repo(tmp_path)
 
-    manager.start_run(target, TASK, auto_semantic_eval=False)
+    manager.start_run(target, TASK, auto_semantic_eval=not opt_out)
     _write_orch_log(target)
     spawner.procs[0].returncode = 0
     assert manager.list_runs()[0].state == "completed"
 
-    job = jobs.get_job(target, TASK)
-    assert job.status == STATUS_SKIPPED
-    assert job.skip_reason == SKIP_RUN_OPT_OUT
-    assert job.evaluation_id is None
-    # Layer 1 ran regardless, and no semantic report exists anywhere for this task.
     stored = service.list_evaluations(target, TASK)
     assert len(stored) == 1
     assert set(stored[0].artifacts) == {EVIDENCE_NAME, STATIC_METRICS_NAME}
+    # Neither an accepted job nor a recorded skip: the whole vocabulary is unused.
+    assert jobs.list_jobs() == []
 
 
-@pytest.mark.parametrize("first_run_evaluates", [True, False])
-def test_the_run_that_completes_the_task_decides_and_a_later_one_cannot_undo_it(
-    tmp_path, first_run_evaluates
-):
-    """Multi-run disagreement, settled by the record rather than by precedence rules.
+def test_layer_2_still_produces_a_complete_report_when_somebody_asks(tmp_path):
+    """The manual path is untouched, and it is now the only path.
 
-    A task can complete more than once (it stays launchable until archived, and the
-    close-out-only re-run classifies ``completed`` again), so two runs of one task
-    can carry opposite choices. Whichever completing run writes the record decides,
-    in both directions — and a run that does *not* complete the task never reaches
-    the trigger at all, which is why unchecking the box on session 1 of a
-    three-session task decides nothing.
+    The same completed task the trigger measured deterministically becomes a full
+    L1+L2 report set the moment an operator starts a job for it — which is what
+    keeps "automatic Layer 2 is gone" from meaning "Layer 2 is gone".
     """
-    cfg, service, jobs, manager, spawner = _wire(tmp_path)
+    cfg = config(tmp_path)
+    stack = _stack(cfg)
+    spawner = FakeSpawner()
+    manager = _run_manager(cfg, hook=stack.trigger.on_task_completed, spawner=spawner)
     target = _write_repo(tmp_path)
 
-    manager.start_run(target, TASK, auto_semantic_eval=first_run_evaluates)
+    manager.start_run(target, TASK)
     _write_orch_log(target)
     spawner.procs[0].returncode = 0
-    manager.list_runs()
-    decided = jobs.get_job(target, TASK)
+    assert manager.list_runs()[0].state == "completed"
+    assert stack.jobs.list_jobs() == []
 
-    # The second completing run disagrees with the first.
-    manager.start_run(target, TASK, auto_semantic_eval=not first_run_evaluates)
-    spawner.procs[1].returncode = 0
-    assert [s.state for s in manager.list_runs()] == ["completed", "completed"]
+    stack.jobs.start_job(target, TASK)  # the explicit manual action
 
-    settled = jobs.get_job(target, TASK)
-    assert settled.job_id == decided.job_id
-    assert settled.status == (STATUS_COMPLETED if first_run_evaluates else STATUS_SKIPPED)
-    # Exactly one semantic report if the first run wanted one, none if it did not.
-    reports = [
-        s for s in service.list_evaluations(target, TASK)
-        if SEMANTIC_REPORT_NAME in s.artifacts
-    ]
-    assert len(reports) == (1 if first_run_evaluates else 0)
+    job = stack.jobs.get_job(target, TASK)
+    assert job.status == STATUS_COMPLETED and job.evaluation_id
+    assert job.auto is False
+    report_dir = cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
+    assert (report_dir / EVIDENCE_NAME).is_file()
+    assert (report_dir / STATIC_METRICS_NAME).is_file()
+    assert (report_dir / SEMANTIC_REPORT_NAME).is_file()
+    assert (report_dir / SEMANTIC_REPORT_MD_NAME).is_file()
 
 
 def test_a_completion_survives_a_hub_that_stops_before_the_evaluation_runs(tmp_path):
-    """The completion signal settles once, so acceptance must outlive the process.
+    """A hub that stops mid-hook loses a free artifact and promises nothing else.
 
-    ``_refresh`` persists ``ended_ts`` and never revisits that run: a completion
-    held only in a pending closure would be gone when the hub stops — silently,
-    with nothing on disk left to reconcile — and the restarted manager returns
-    early for the already-ended run rather than announcing it again. Here neither
-    layer ever runs: both executors are left holding their work, exactly as an
-    interpreter exit leaves its daemon threads.
-
-    The held record is what the restarted hub finds, and because acceptance now
-    lands ``deferred`` the outcome is stronger than a recorded failure: the task
-    is still owed its evaluation, and the resident sweep pays it.
+    ``_refresh`` persists ``ended_ts`` and never revisits that run, so a completion
+    held only in a pending closure is gone when the hub stops. That used to be the
+    argument for writing Layer 2's acceptance inline: a promise that outlived the
+    process. With nothing durable owed, the loss is one deterministic artifact that
+    the next run of this task — or one click — regenerates, and crucially the
+    restarted hub finds no record that would make it spend anything.
     """
     cfg = config(tmp_path)
     held = DeferredExecutor()
@@ -833,45 +610,101 @@ def test_a_completion_survives_a_hub_that_stops_before_the_evaluation_runs(tmp_p
     spawner.procs[0].returncode = 0
     assert manager.list_runs()[0].state == "completed"
 
-    # No evaluation work has run at all — and the completion is durable anyway.
     assert stack.service.list_evaluations(target, TASK) == []
-    accepted = stack.jobs.get_job(target, TASK)
-    assert accepted.status == STATUS_DEFERRED and accepted.auto is True
-    assert (cfg.data_dir / "semantic-jobs" / "alpha" / TASK / "job.json").is_file()
+    assert stack.jobs.list_jobs() == []
 
-    # The hub stops: whatever those threads were holding is dropped, never run.
+    # The hub stops: whatever that thread was holding is dropped, never run.
     held.pending.clear()
 
-    # Restart. The ended run is settled, so it is never announced a second time...
+    # Restart. The ended run is settled, so it is never announced a second time.
     announced: list[RunRecord] = []
     restarted = _run_manager(cfg, hook=announced.append)
     assert [s.state for s in restarted.list_runs()] == ["completed"]
     assert announced == []
 
-    # ...which leaves the durable record as the only thing still speaking for this
-    # completion. The startup sweep must NOT fail it — there is no abandoned turn,
-    # only a queue — and the resident dispatch sweep then pays what is owed.
+    # Startup reconciliation finds nothing to settle and starts nothing.
     fresh = _stack(cfg)
     assert fresh.jobs.reconcile_orphans() == []
-    assert fresh.jobs.get_job(target, TASK).job_id == accepted.job_id
+    assert fresh.jobs.reconcile_stuck() == []
+    assert fresh.jobs.list_jobs() == []
+    assert fresh.service.list_evaluations(target, TASK) == []
 
-    assert fresh.dispatcher.sweep() is not None
+
+def test_a_legacy_deferred_job_is_never_started_by_a_restart_or_a_sweep(tmp_path):
+    """The records the retired automatic path left behind stay exactly where they are.
+
+    A hub that ran the automatic era holds one ``deferred`` record per task it
+    accepted and never dispatched — jobs that were, by construction, waiting for a
+    hub-side decision to spend. Nothing may make that decision now: not startup
+    reconciliation, not the resident tick's sweeps, not a usage feed coming back,
+    not a network reconnecting. The only thing that turns such a record into a
+    turn is a person starting one.
+    """
+    cfg = config(tmp_path)
+    target = _write_repo(tmp_path)
+    legacy = SemanticJob(
+        job_id="20260808T120000Z-legacy",
+        repo_name=target.name,
+        repo_path=target.path,
+        task_id=TASK,
+        status=STATUS_DEFERRED,
+        defer_reason="capacity",
+        auto=True,
+        created_ts=(FIXED_TS - dt.timedelta(days=2)).isoformat(),
+        updated_ts=(FIXED_TS - dt.timedelta(days=2)).isoformat(),
+    )
+    job_dir = _jobs_root(cfg) / "alpha" / TASK
+    job_dir.mkdir(parents=True)
+    (job_dir / "job.json").write_text(
+        json.dumps(
+            {
+                "job_id": legacy.job_id,
+                "repo_name": legacy.repo_name,
+                "repo_path": str(legacy.repo_path),
+                "task_id": legacy.task_id,
+                "status": legacy.status,
+                "defer_reason": legacy.defer_reason,
+                "auto": True,
+                "created_ts": legacy.created_ts,
+                "updated_ts": legacy.updated_ts,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    # A restarted hub: both reconciliations plus the resident tick's sweeps.
+    fresh = _stack(cfg)
+    assert fresh.jobs.reconcile_orphans() == []
+    assert fresh.jobs.reconcile_stuck() == []
+    held = fresh.jobs.get_job(target, TASK)
+    assert held.status == STATUS_DEFERRED and held.job_id == legacy.job_id
+    assert fresh.service.list_evaluations(target, TASK) == []
+
+    # And a completion arriving afterwards measures Layer 1 without touching it.
+    spawner = FakeSpawner()
+    manager = _run_manager(cfg, hook=fresh.trigger.on_task_completed, spawner=spawner)
+    manager.start_run(target, TASK)
+    _write_orch_log(target)
+    spawner.procs[0].returncode = 0
+    assert manager.list_runs()[0].state == "completed"
+    assert fresh.jobs.get_job(target, TASK).status == STATUS_DEFERRED
+    assert len(fresh.service.list_evaluations(target, TASK)) == 1
+
+    # The one door out: an operator asking, which supersedes the held record.
+    fresh.jobs.start_job(target, TASK)
     settled = fresh.jobs.get_job(target, TASK)
     assert settled.status == STATUS_COMPLETED
-    assert settled.evaluation_id is not None
+    assert settled.job_id != legacy.job_id and settled.auto is False
 
 
-def test_a_hub_that_dies_before_the_job_record_still_evaluates_the_task(tmp_path):
-    """The window between the irreversible end write and durable acceptance.
+def test_a_hub_that_dies_before_the_evaluation_still_measures_the_task(tmp_path):
+    """The window between the irreversible end write and the evaluation.
 
     ``run.json`` gets ``ended_ts`` first — and nothing re-observes a run that
-    carries one — while the job record is written by the hook several settles
-    later. A process that died in between used to leave *nothing*: the restarted
-    manager returned early for the already-ended run, no record existed for the
-    startup sweep to reconcile, and the task left the corpus with no trace that
-    it had ever completed. The end is two-phase now, so the restarted hub resumes
-    the interrupted tail instead. Interrupting here is the real thing rather than
-    a held executor: this dies *before* Layer 2 is enqueued at all.
+    carries one — while the evaluation happens several settles later. The end is
+    two-phase, so a restarted hub resumes the interrupted tail and the completion
+    still gets measured. Interrupting here is the real thing rather than a held
+    executor: this dies before any evaluation work begins.
     """
     cfg = config(tmp_path)
     spawner = FakeSpawner()
@@ -880,7 +713,7 @@ def test_a_hub_that_dies_before_the_job_record_still_evaluates_the_task(tmp_path
         """A hub dying: nothing on the end tail catches BaseException."""
 
     def dying_hook(record: RunRecord) -> None:
-        raise Interrupt("killed between the end write and the job record")
+        raise Interrupt("killed between the end write and the evaluation")
 
     manager = _run_manager(cfg, hook=dying_hook, spawner=spawner)
     target = _write_repo(tmp_path)
@@ -890,28 +723,23 @@ def test_a_hub_that_dies_before_the_job_record_still_evaluates_the_task(tmp_path
     with pytest.raises(Interrupt):
         manager.list_runs()
 
-    # The end is already permanent, and nothing anywhere has accepted it.
+    # The end is already permanent, and nothing has been evaluated.
     run_json = cfg.data_dir / "runs" / record.run_id / "run.json"
     assert json.loads(run_json.read_text(encoding="utf-8"))["ended_ts"] is not None
-    assert not (cfg.data_dir / "semantic-jobs" / "alpha" / TASK / "job.json").exists()
 
     # Restart: fresh managers, same data dir, same run records.
     fresh = _stack(cfg)
     restarted = _run_manager(cfg, hook=fresh.trigger.on_task_completed)
     assert [s.state for s in restarted.list_runs()] == ["completed"]
 
-    # The completion is durable and fully evaluated — both layers, no operator.
-    job = fresh.jobs.get_job(target, TASK)
-    assert job.status == STATUS_COMPLETED and job.evaluation_id
-    semantic_dir = cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
-    assert (semantic_dir / SEMANTIC_REPORT_NAME).is_file()
     stored = fresh.service.list_evaluations(target, TASK)
-    assert len(stored) == 2  # the resumed tail ran the whole announcement
+    assert len(stored) == 1  # the resumed tail ran the whole announcement
+    assert set(stored[0].artifacts) == {EVIDENCE_NAME, STATIC_METRICS_NAME}
+    assert fresh.jobs.list_jobs() == []
 
-    # Settled for good: rescanning spends no second turn.
+    # Settled for good: rescanning re-announces nothing.
     restarted.list_runs()
-    assert fresh.jobs.get_job(target, TASK).job_id == job.job_id
-    assert len(fresh.service.list_evaluations(target, TASK)) == 2
+    assert len(fresh.service.list_evaluations(target, TASK)) == 1
 
 
 def test_a_resumed_tail_hands_over_settled_entry_evidence(tmp_path, monkeypatch):
@@ -962,11 +790,11 @@ def test_a_resumed_tail_hands_over_settled_entry_evidence(tmp_path, monkeypatch)
     restarted = _run_manager(cfg, hook=fresh.trigger.on_task_completed)
     assert [s.state for s in restarted.list_runs()] == ["completed"]
 
-    job = fresh.jobs.get_job(target, TASK)
-    assert job.status == STATUS_COMPLETED
+    stored = fresh.service.list_evaluations(target, TASK)
+    assert len(stored) == 1
     evidence = json.loads(
         (
-            cfg.data_dir / "evaluations" / "alpha" / TASK / job.evaluation_id
+            cfg.data_dir / "evaluations" / "alpha" / TASK / stored[0].evaluation_id
             / EVIDENCE_NAME
         ).read_text(encoding="utf-8")
     )

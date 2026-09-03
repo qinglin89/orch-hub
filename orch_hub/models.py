@@ -2348,17 +2348,15 @@ class SemanticJob:
     ``completed``, ``failed``, and ``skipped`` are terminal. ``defer_reason``
     is the bounded machine reason a deferred job is still waiting (never operator
     prose), and ``auto`` records whether this attempt was produced mechanically by
-    the completion trigger or asked for by an operator — the provenance that says
-    whether a report's existence was a choice. ``skip_reason`` is the bounded
-    machine token on a ``skipped`` record — a task that completed and deliberately
-    got no model turn, because its run was launched with the Layer 2 opt-out
-    (``RunRecord.auto_semantic_eval``). The skip is a record rather than an
-    absence on purpose: an opt-out that left nothing behind would re-open, at
-    production time, exactly the selection automatic evaluation exists to close.
-    The vocabulary is closed (:data:`orch_hub.semantic_jobs.SKIP_REASONS`) and
-    never operator prose, which is unanalyzable, leaks repo content into a
-    persisted surface, and invites recording the rationalization that is itself
-    the bias. All three reason fields are mutually exclusive per record and answer
+    the retired completion trigger or asked for by an operator. Every record a
+    current hub writes carries ``auto=False``; the field remains because persisted
+    records from the automatic era do not. ``skip_reason`` is likewise
+    legacy-only: the bounded machine token on a ``skipped`` record, written when a
+    task completed under a run launched with the automatic Layer 2 opt-out
+    (``RunRecord.auto_semantic_eval``). Its vocabulary is the single token
+    :data:`orch_hub.semantic_jobs.SKIP_RUN_OPT_OUT`, never operator prose — free
+    text would be unanalyzable and would leak repo content into a persisted
+    surface. All three reason fields are mutually exclusive per record and answer
     different questions: why a *waiting* job waits, why an *attempt* failed, and
     why no attempt was made. ``backend``/``model``/
     ``schema_version`` are the selected evaluator identity (the
@@ -2503,10 +2501,10 @@ class EvaluationQueueEntry:
     than as zero.
 
     ``overdue`` is deliberately narrow: it flags a **deferred** job past the
-    bound and nothing else, matching exactly what
-    :meth:`orch_hub.eval_dispatch.DeferredDispatcher._log_stalled` warns about,
-    so the dashboard and the service log never disagree about which jobs are
-    stalled. A ``queued``/``running`` job that has hung is a different failure
+    bound and nothing else. Only legacy records reach that status now — nothing
+    accepts new ones — so the flag reads as "this has been resting since the
+    automatic path was retired". A ``queued``/``running`` job that has hung is a
+    different failure
     with its own recovery — its ``deadline_ts`` settles it, at startup or on the
     resident sweep — and giving one threshold two meanings is how a threshold
     stops meaning anything.
@@ -2580,16 +2578,13 @@ class EvaluationQueueSnapshot:
     overwrites a skipped record like any other terminal one).
 
     ``auto_enabled``, ``control``, and ``queue_max_age_seconds`` are the pieces of
-    state a queue reader cannot infer from records. The first is a reason a queue
-    can sit still — both switches closed holds every deferred job with no
-    per-record trace, deliberately (see
-    :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep`) — the second is the
-    live operator pause, which holds the drain the same way and for the same
-    reason travels here rather than being stamped on records
-    (:class:`EvaluationControl`), and the last is the bound ``overdue`` was
-    measured against, so the reader renders the real threshold instead of a
-    literal that drifts from it. The two holds are independent and both are
-    reported: a queue can be off *and* paused, and telling an operator only one of
+    state a queue reader cannot infer from records. The first says whether
+    completed runs are generating Layer 1 unasked; the second is the persisted
+    operator pause (:class:`EvaluationControl`), which held the retired automatic
+    drain and is reported rather than stamped on records; and the last is the bound
+    ``overdue`` was measured against, so the reader renders the real threshold
+    instead of a literal that drifts from it. Both are reported independently:
+    telling an operator only one of
     those sends them to fix the wrong switch.
     """
 

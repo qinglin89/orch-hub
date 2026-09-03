@@ -44,7 +44,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .completion_eval import CompletionEvaluationTrigger
 from .eval_control import EvaluationControlStore
-from .eval_dispatch import CapacityGate, DeferredDispatcher, queue_snapshot
+from .eval_dispatch import queue_snapshot
 from .config import TOKEN_ENV, Config
 from .control_dir import (
     DEFAULT_RESPONDER,
@@ -72,7 +72,6 @@ from .intake import (
 from .intake_agent import ClaudeIntakeAgent
 from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import (
-    PROVIDER_CLAUDE,
     LaunchSpec,
     ManagedRepo,
     repos_payload,
@@ -344,12 +343,14 @@ class StartRunRequest(BaseModel):
     like ``GET /api/repos/{repo_id}/tasks``). ``acknowledge_blocked`` opts into
     launching a ``blocked`` task despite the §5.4 resume caveat.
 
-    ``auto_semantic_eval`` (default true) is the second hub-only field beside it:
-    false declines the automatic Layer 2 semantic evaluation for a task this run
-    completes, which is then recorded as a terminal ``skipped`` job rather than
-    left as an absence. Hub-only is a hard constraint, not a convenience — it must
-    never become orchestrator argv, which is parsed strictly and would abort the
-    launch on an unknown flag. Layer 1 is unaffected: it makes no model call.
+    ``auto_semantic_eval`` (default true) is the second hub-only field beside it,
+    and it is **inert**: it declined the automatic Layer 2 evaluation of a task
+    this run completed, and no completion starts a semantic turn any more. It is
+    still accepted and still persisted on the run record so existing callers do
+    not break and historical records stay readable; it is retired with the rest of
+    the automatic path's surface. Hub-only remains a hard constraint while it
+    exists — it must never become orchestrator argv, which is parsed strictly and
+    would abort the launch on an unknown flag.
 
     Launch arguments come from exactly one of two mutually exclusive paths: the
     structured ``launch`` mode selector (server-built argv, the dashboard path) or
@@ -577,12 +578,12 @@ def create_app(
     prevent. The chosen coordinator is exposed on ``app.state.repo_admission``.
 
     A :class:`~orch_hub.completion_eval.CompletionEvaluationTrigger` over the
-    static evaluator and semantic-job manager is wired into the app-built run
-    manager as its ``task_completed_hook``, so a run that finishes its task is
-    evaluated without operator action (``ORCH_HUB_EVAL_AUTO`` switches that off
-    independently of the subsystem gate). An injected ``run_manager`` keeps its
-    own hooks — the usage-refresh convention — so a hermetic run test is never
-    handed a live evaluator.
+    static evaluator alone is wired into the app-built run manager as its
+    ``task_completed_hook``, so a run that finishes its task gets Layer 1 without
+    operator action (``ORCH_HUB_EVAL_AUTO`` switches that off independently of the
+    subsystem gate). Deliberately *only* Layer 1: nothing wired here can start a
+    model turn. An injected ``run_manager`` keeps its own hooks — the usage-refresh
+    convention — so a hermetic run test is never handed a live evaluator.
 
     ``report_catalog`` is the single :class:`~orch_hub.report_catalog.ReportCatalog`
     the global report feed publishes through. The default semantic evaluator is
@@ -694,53 +695,30 @@ def create_app(
             resolved, evaluator=semantic, notifier=build_notifier(resolved)
         )
     )
-    # The completion trigger closes the evaluation loop: a run that finishes its
-    # task gets Layer 1 immediately and a Layer 2 job enqueued, so the evaluated
-    # corpus is mechanical rather than a selection of the tasks that felt worth
-    # measuring. It is built over the two layers above — inject a fake
-    # ``static_evaluator``/``semantic_job_manager`` and the trigger drives the
-    # fakes — and gates itself on ``ORCH_HUB_EVAL_AUTO`` (plus the subsystem
-    # gate), so it is constructed unconditionally like every other evaluation
-    # collaborator and simply does nothing when off. This is also why the whole
-    # evaluation stack is built *above* the run manager: the hook is a
-    # constructor argument, so an injected (test) run manager keeps its own
-    # hooks and can never be handed a live evaluator — the same convention the
+    # The completion trigger closes the deterministic half of the evaluation loop:
+    # a run that finishes its task gets Layer 1 immediately, so no click stands
+    # between a completed task and its static metrics. Layer 2 is deliberately not
+    # here — a semantic turn is a model call on the operator's own subscription
+    # window and needs a working network, so it starts only when somebody asks
+    # (:mod:`orch_hub.completion_eval` says why at length). It is built over the
+    # static layer above — inject a fake ``static_evaluator`` and the trigger
+    # drives the fake — and gates itself on ``ORCH_HUB_EVAL_AUTO`` (plus the
+    # subsystem gate), so it is constructed unconditionally like every other
+    # evaluation collaborator and simply does nothing when off. This is also why
+    # the whole evaluation stack is built *above* the run manager: the hook is a
+    # constructor argument, so an injected (test) run manager keeps its own hooks
+    # and can never be handed a live evaluator — the same convention the
     # usage-refresh hook already follows.
-    # Automatic Layer 2 turns are gated on observed subscription capacity: the
-    # gate reads the provider the Layer 2 backend actually spends against
-    # (Claude, matching ``ClaudeSemanticBackend``) through the display-only usage
-    # service, and the dispatcher drains the deferred queue at the configured
-    # ceiling/spacing. Both are pure policy over the job store — they persist
-    # nothing of their own — so an injected ``semantic_job_manager`` fake is
-    # driven by the real policy, and an injected usage service supplies the
-    # capacity read without touching the operator's subscription data.
     #
-    # The pause is the operator's own hold on that same drain, and the one piece of
-    # this policy that IS persisted (under the hub data dir, so it survives a
-    # restart the way the queue it holds does). Deliberately not
-    # ``ORCH_HUB_EVAL_AUTO``: that switch is environment-read (a plist edit and a
-    # restart) and stops the completion trigger from *accepting* completions at
-    # all, so every task finishing while it is off is permanently absent from the
-    # corpus. A pause holds only the dispatch sweep, so the queue keeps filling and
-    # resuming spends it in completion order. Its own store rather than a field on
-    # the dispatcher, which keeps the sweep stateless: the dispatcher reads it, the
-    # HTTP control routes write it, and the queue projection reports it.
+    # The pause control is the operator's persisted hold. It held the automatic
+    # dispatch sweep, which no longer exists; the store and its routes remain while
+    # the surfaces that report it are retired, and it is read by the queue
+    # projection only. Nothing consults it to decide whether a turn may start,
+    # because nothing decides that any more.
     eval_control = EvaluationControlStore(resolved.data_dir)
-    capacity_gate = CapacityGate(
-        resolved,
-        usage_reader=lambda: usage.provider_usage(PROVIDER_CLAUDE),
-    )
-    eval_dispatcher = DeferredDispatcher(
-        resolved,
-        job_manager=semantic_jobs,
-        gate=capacity_gate,
-        control=eval_control.state,
-    )
     completion_trigger = CompletionEvaluationTrigger(
         resolved,
         static_evaluator=static_metrics,
-        job_manager=semantic_jobs,
-        dispatcher=eval_dispatcher,
     )
     manager = (
         run_manager
@@ -776,19 +754,14 @@ def create_app(
     # the same repo. Safe here: no request thread exists until the app is served.
     manager.use_admission(admission)
     intake.use_admission(admission)
-    # The resident tick also carries the evaluation queue's two upkeep jobs. The
-    # stuck sweep runs first: it is the in-flight counterpart of the startup
-    # orphan reconcile, settling a transient job that has outlived the whole-attempt
-    # deadline persisted on its own record, so a hung turn stops holding its
-    # (repo, task) slot without a hub restart. Then the dispatch sweep retries the
-    # deferred queue — a job held
-    # for capacity is picked back up by nothing else, and a hub restart resumes
-    # the queue through this sweep rather than through a startup step of its own.
-    # In this order a slot freed by the reap is already free when the dispatcher
-    # reads the store on the same tick.
-    monitor = RunMonitor(
-        manager, sweeps=(semantic_jobs.reconcile_stuck, eval_dispatcher.sweep)
-    )
+    # The resident tick also carries the evaluation store's one upkeep job: the
+    # in-flight counterpart of the startup orphan reconcile, settling a transient
+    # job that has outlived the whole-attempt deadline persisted on its own record,
+    # so a hung turn stops holding its (repo, task) slot without a hub restart. It
+    # only ever *settles* work; no tick can start a Layer 2 turn, which is what
+    # keeps a hub left running (or restarted, or reconnected) from spending a model
+    # window nobody asked it to spend.
+    monitor = RunMonitor(manager, sweeps=(semantic_jobs.reconcile_stuck,))
 
     @asynccontextmanager
     async def lifespan(app_: FastAPI):
@@ -828,9 +801,6 @@ def create_app(
     # through a run ending, so this is how a test inspects that it exists and how
     # its gates resolved without driving a real orchestrator to completion.
     app.state.completion_trigger = completion_trigger
-    # Same reason as the trigger: the dispatcher is reachable only through a
-    # background tick, so this is how a test drives one sweep deterministically.
-    app.state.eval_dispatcher = eval_dispatcher
 
     @app.exception_handler(RegistryError)
     async def _registry_error(request: Request, exc: RegistryError) -> JSONResponse:
@@ -1727,9 +1697,7 @@ def create_app(
         The pause routes answer with the same shape rather than a bare
         acknowledgement so a client renders the result of pressing the button and
         every subsequent poll through one code path — the same reason
-        ``POST``/``GET .../semantic/job`` share the ``{"job": ...}`` envelope. It
-        also closes the obvious race: reading the queue back separately after a
-        pause could observe a sweep that slipped in between.
+        ``POST``/``GET .../semantic/job`` share the ``{"job": ...}`` envelope.
         """
         return {
             "enabled": True,
@@ -1740,30 +1708,27 @@ def create_app(
 
     @app.get("/api/evaluation/queue")
     def evaluation_queue() -> dict:
-        """Report the cross-repo state of automatic Layer 2 evaluation.
+        """Report the cross-repo state of the semantic-job store.
 
         The counterpart to every other evaluation route, which is scoped to one
         ``(repo, task)``: right for asking "how did this task go?", useless for
-        the question automatic evaluation creates — "is the corpus still filling?"
-        Its failure modes are silent by construction (a queue that stops draining,
-        a turn that failed, a switch left off all look like nothing happening), and
-        answering them by opening tasks one at a time means never asking. So this
-        is one walk of the semantic-job store folded into a census plus the jobs
-        still owed a turn, which the Overview renders as a display-only section.
+        "what happened to every evaluation I started, and what is left over?" A
+        job's failure modes are silent by construction (a turn that failed, a
+        legacy record nobody will ever promote), and answering by opening tasks one
+        at a time means never asking. So this is one walk of the semantic-job store
+        folded into a census, which the Overview renders as a display-only section.
 
         Read-only and cheap: it lists persisted records and reads config. It does
-        **not** sweep, dispatch, publish, or consult the usage service — asking
-        about the queue must never move it, and a usage read has side effects (it
-        can trigger a background refresh) that a passive dashboard poll has no
-        business causing.
+        **not** start, settle, publish, or consult the usage service — asking about
+        the store must never move it.
 
-        Deliberately **not** gated on ``ORCH_HUB_EVAL_AUTO``: a closed trigger gate
-        is one of the four reasons the queue can sit still, and it is the only one
-        that leaves no trace on the records, so it travels in the payload as
-        ``auto_enabled`` rather than hiding the queue that proves it. The subsystem
-        gate is a different matter — with evaluation off there is no queue to
-        report — so this 404s while disabled like every other evaluation route,
-        leaving ``GET /api/evaluation`` the single availability answer.
+        Deliberately **not** gated on ``ORCH_HUB_EVAL_AUTO``, which now switches
+        automatic *Layer 1* and no longer has anything to do with these records; it
+        travels in the payload as ``auto_enabled`` for the reader rather than
+        filtering anything. The subsystem gate is a different matter — with
+        evaluation off there is nothing to report — so this 404s while disabled like
+        every other evaluation route, leaving ``GET /api/evaluation`` the single
+        availability answer.
 
         Shape: ``{"enabled": true, **EvaluationQueueSnapshot}`` — ``counts`` is a
         complete census by status over every persisted record, while ``entries``
@@ -1780,60 +1745,38 @@ def create_app(
 
     @app.post("/api/evaluation/queue/pause")
     def pause_evaluation_queue() -> dict:
-        """Hold automatic Layer 2 dispatch, live, without restarting the hub.
+        """Set the persisted pause flag. It currently holds nothing.
 
-        The operator lever this subsystem was missing. ``ORCH_HUB_EVAL_AUTO`` is
-        the only other way to stop automatic evaluation and it is the wrong
-        instrument twice over: it is environment-read (plist edit plus restart, not
-        something anyone does at the moment they notice a turn is drawing on the
-        window they need), and it gates the *completion trigger*, so every task that
-        completes while it is off is refused entry to the queue and — through the
-        once-per-task guard — permanently absent from the corpus.
-
-        This holds only the dispatch sweep. Completions keep landing as ``deferred``
-        records, so the queue keeps its shape and resuming spends it in the same
-        completion order; pausing costs the corpus nothing but time. Manual
-        ``POST .../semantic/job`` is deliberately still ungated, exactly as it is
-        ungated on capacity: a human asking for one evaluation is not the
-        production-side selection any of these gates exist to shape.
+        This was the live lever over automatic Layer 2 dispatch: it held the drain
+        while completions kept landing as ``deferred`` records, so resuming spent
+        the queue in completion order. There is no drain now — a semantic turn
+        starts only when somebody asks for one — so the write persists and is
+        reported back, and nothing about the hub's behaviour changes. The route is
+        retained with the rest of the automatic path's surface pending its removal.
 
         Idempotent — pausing an already-paused queue keeps the original
-        ``paused_ts``, so "held since" answers when the drain stopped rather than
-        when the button was last pressed. Returns the same payload as
-        ``GET /api/evaluation/queue``, whose ``control`` block now reports the
-        pause; disabled → 404 like every other evaluation route.
+        ``paused_ts``. Returns the same payload as ``GET /api/evaluation/queue``,
+        whose ``control`` block reports the pause; disabled → 404 like every other
+        evaluation route.
 
-        The write is taken under the dispatcher's admission barrier so it cannot
-        interleave with a promotion: without it a sweep already past its own pause
-        check goes on to spend a turn after this route has answered that the queue
-        is held, which is the one outcome a pause exists to prevent. The barrier
-        covers the control write only — the payload is read after it, so the answer
-        reflects any promotion that legitimately won the race rather than a
-        snapshot taken under the lock.
+        The write once had to be serialized against the dispatch sweep's promotion
+        step, so a pause that had already answered could not be followed by a turn
+        it thought it had prevented. There is no promotion step any more — nothing
+        starts a Layer 2 turn without being asked — so the write stands alone and
+        the barrier is gone with the sweep it guarded.
         """
         require_evaluation_enabled()
-        with eval_dispatcher.admission_barrier():
-            eval_control.pause()
+        eval_control.pause()
         return _queue_payload()
 
     @app.post("/api/evaluation/queue/resume")
     def resume_evaluation_queue() -> dict:
-        """Release the pause; the next sweep drains the queue that was held.
+        """Clear the persisted pause flag.
 
-        No recovery step is needed and none exists: deferral is durable, the sweep
-        is stateless, and the resident monitor tick re-derives everything from the
-        records — so resuming is exactly "stop holding", not "restart the queue".
-
-        Always writes, even against a queue that already reads as running: an
+        Always writes, even against a control that already reads as running: an
         unreadable control record reads as *paused* by design (the fail-closed
-        direction, so damage is visible rather than silently spending the window),
-        and this is the operation that repairs it. Returns the queue payload;
-        disabled → 404.
-
-        No admission barrier here, unlike the pause: the race the barrier closes is
-        a promotion slipping past a hold, and resuming has no hold to slip past.
-        The worst a concurrent sweep can do against this write is decline one tick
-        it was entitled to decline; the next one drains.
+        direction from when this held real spending), and this is the operation
+        that repairs it. Returns the queue payload; disabled → 404.
         """
         require_evaluation_enabled()
         eval_control.resume()

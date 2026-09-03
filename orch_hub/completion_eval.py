@@ -1,74 +1,57 @@
-"""Completion-triggered task evaluation: L1 now, L2 enqueued, never a gate.
+"""Completion-triggered task evaluation: Layer 1 automatically, Layer 2 never.
 
-Evaluation used to start only when an operator asked for it, so the evaluated
-corpus was a product of judgment — you evaluate the tasks that felt problematic
-— and a batch drawn from it cannot support recurrence or base-rate claims no
-matter how correctly it is imported. This module removes that selection: a run
-whose end classifies as ``completed`` evaluates its task mechanically, with
-nobody deciding which completions deserve a report.
+A run whose end classifies as ``completed`` gets its task measured mechanically,
+with nobody deciding which completions deserve a report — but only as far as the
+deterministic layer reaches. This module builds the evidence pack and the static
+metrics; the semantic layer is started by a person asking for it
+(:meth:`~orch_hub.semantic_jobs.SemanticJobManager.start_job`) and by nothing
+else.
 
-The two layers are dispatched differently because they cost differently:
+The split is not about cost. One Layer 2 turn is a bounded ``claude -p`` call,
+and the corpus argument for evaluating every completion is a real one: evaluate
+only the tasks that felt problematic and the resulting sample cannot support
+recurrence or base-rate claims. What broke the automatic half is what it takes to
+run a *model* turn on a schedule nobody is watching:
 
-- **Layer 1 (static metrics) runs immediately.** It is deterministic and makes
-  no model call, so there is nothing to schedule and nothing to contend for.
-- **Layer 2 (semantic) is enqueued** through the existing
-  :class:`~orch_hub.semantic_jobs.SemanticJobManager` — a persisted job record,
-  a single in-flight turn per task, a failure recorded rather than retried
-  forever. Cost is not the constraint here; contention is: one L2 turn can land
-  inside the same subscription rate window a dev session needs. So enqueuing is
-  *acceptance*, not admission: the record lands ``deferred`` and the dispatch
-  policy (:mod:`orch_hub.eval_dispatch`) decides when the window can afford the
-  turn. This module asks for the first sweep immediately, off the lock, so an
-  uncontended completion still becomes a turn within milliseconds; the resident
-  monitor's sweep is what retries a queue the policy is holding.
+- **It contends with the work it measures.** The turn draws on the same
+  subscription rate window the next dev session needs, and it fires whenever a
+  run happens to finish — which is exactly when the operator is most likely to be
+  starting the next one. Deferral moves the spend around inside the window
+  without removing it from the window.
+- **It needs a network the hub does not have.** Layer 1 is filesystem work and
+  completes on a train; a semantic turn on an unreliable link fails, records a
+  terminal ``failed``, and consumes the task's one automatic attempt. Automation
+  that turns a flaky connection into a permanently unmeasured task is worse than
+  no automation.
+- **Its consumer never needed the population.** Evolution reads evaluated
+  *samples* to find actionable improvements; it does not compute rates over the
+  full corpus, so mechanical completeness bought nothing that a person asking for
+  the reports that matter does not also buy. The machinery that existed to make
+  the denominator honest — the durable once-per-task acceptance record, the
+  capacity/spacing dispatch policy, the launch-time opt-out, the operator pause —
+  was all in service of a guarantee nobody consumes.
 
-Accepting a completion is durable **before the hook returns**. The run manager
-settles an end permanently — ``ended_ts`` is persisted and ``_refresh``
-early-returns for that run forever after — so a completion this module has only
-*promised* to evaluate (a closure handed to a daemon thread) is lost outright if
-the hub stops before that closure reaches the job store: nothing on disk records
-that the task ever reached the sidecar, and no reconciliation can find what was
-never written. The Layer 2 job record is therefore written inline, before the
-hook returns; only the slow part — Layer 1's evidence build — is detached. A hub
-that dies after that record exists leaves an observable orphan the startup sweep
-settles to ``failed``, which is a recorded outcome. A hub that dies before it
-would have left a silent gap in the one corpus whose entire point is that it has
-none.
+Layer 1 keeps its automatic trigger for the mirror-image reasons: it makes no
+model call and opens no socket, so there is nothing to schedule, nothing to
+contend for, and nothing a dead network can turn into a lost attempt. Its
+failure mode is a missing free artifact that the next completion regenerates.
 
-One further axis, orthogonal to both gates: the launch-time Layer 2 opt-out
-(``RunRecord.auto_semantic_eval``, chosen per run and hub-only — it never reaches
-the orchestrator). It exists for weeks when the subscription budget has to go to
-development rather than to measuring it; deferral cannot serve that need, since it
-moves spend *inside* the weekly bucket rather than out of it. But it re-opens, at
-production time, the same selection this module exists to close — and on the
-dimension that makes skips cluster on the expensive, remediation-heavy tail rather
-than thinning the corpus evenly. It is therefore admissible only as a *recorded*
-skip: the task gets a terminal ``skipped`` job record with a bounded machine
-reason, keyed by task like every other record, so an operator who wants less
-measurement gets it while nobody gets a corpus that lies about its own
-denominator. Layer 1 is never skipped: it makes no model call, so declining it
-would save nothing and forfeit the whole deterministic layer.
-
-Two gates and one guard:
-
-- ``Config.evaluation_enabled`` is the subsystem gate (shared with every manual
-  path) and ``Config.eval_auto`` is the trigger gate, so automatic evaluation
-  can be switched off while manual generation stays available. They gate both
-  halves of the automatic path, not just this one: the job records accepted here
-  are durable, so :class:`~orch_hub.eval_dispatch.DeferredDispatcher` re-checks
-  the same pair before promoting anything an earlier process left queued.
-- The task-level once-guard is
-  :meth:`~orch_hub.semantic_jobs.SemanticJobManager.enqueue_if_absent`. The
-  completion signal is per *run*, not per task: a task that reaches ``completed``
-  without being archived is still launchable, and the close-out-only re-run that
-  follows classifies ``completed`` again. The durable one-record-per-``(repo,
-  task)`` job store is what makes the corpus count a task once.
+Layer 1 is deliberately per completion signal rather than task-once. The signal
+is per *run* — a task that reaches ``completed`` without being archived is still
+launchable, and the close-out-only re-run that follows classifies ``completed``
+again — and a repeat simply mints a fresher evaluation dir. There is no durable
+guard here and none is needed: a free deterministic artifact regenerated twice
+costs a directory, whereas the guard's only purpose was to stop a *model turn*
+from running twice.
 
 Isolation is the invariant, exactly like notification delivery and the usage
 refresh hook: this runs after the ending run is already persisted, off the run
 manager's lock and off its thread, and every failure is logged and dropped. A
-missing repo, a broken evidence pack, a dead evaluator — none of them may touch
-run state, readiness, attention, or a launch/intake gate.
+missing repo, a broken evidence pack, an unreadable log — none of them may touch
+run state, readiness, attention, or a launch/intake gate. Nothing here is durably
+promised before the hook returns either: the whole work item is the artifact
+itself, so a hub that stops mid-build loses a report the next completion (or one
+click) rebuilds, not a record of something that was supposed to happen.
 """
 
 from __future__ import annotations
@@ -78,9 +61,7 @@ import threading
 from collections.abc import Callable
 
 from .config import Config
-from .eval_dispatch import DeferredDispatcher
 from .models import ManagedRepo, RunRecord
-from .semantic_jobs import SKIP_RUN_OPT_OUT, SemanticJobManager
 from .static_metrics import StaticEvaluator
 
 _log = logging.getLogger(__name__)
@@ -103,23 +84,22 @@ def _thread_executor(run: Callable[[], None]) -> None:
     """Default executor: evaluate a completed task on a short-lived daemon thread.
 
     Daemon so it never blocks interpreter shutdown; an abandoned read-only
-    evaluation is safe (its own all-or-nothing cleanup removes any partial
-    artifact dir, and an abandoned semantic job is reconciled to ``failed`` at the
-    next startup).
+    evaluation is safe — its own all-or-nothing cleanup removes any partial
+    artifact dir, and nothing else is pending on it.
     """
     threading.Thread(target=run, daemon=True, name="orch-hub-completion-eval").start()
 
 
 class CompletionEvaluationTrigger:
-    """Evaluates a task when one of its runs ends ``completed``.
+    """Generates Layer 1 for a task when one of its runs ends ``completed``.
 
     Wired into the app's single :class:`~orch_hub.runs.RunManager` as a plain
     ``Callable[[RunRecord], None]`` hook, so the run manager keeps no evaluation
     import and no evaluation policy — the same seam shape as the display-only
-    usage-refresh hook. Collaborators are injectable for tests: ``static_evaluator``
-    is Layer 1, ``job_manager`` owns Layer 2's persisted job lifecycle,
-    ``dispatcher`` owns when a queued Layer 2 turn may actually spend, and
-    ``executor`` decides where the work runs.
+    usage-refresh hook. Collaborators are injectable for tests:
+    ``static_evaluator`` is Layer 1 and ``executor`` decides where it runs. It
+    holds no reference to the semantic layer at all, which is the structural half
+    of "no completion can start a model turn": there is nothing here to call.
     """
 
     def __init__(
@@ -127,14 +107,10 @@ class CompletionEvaluationTrigger:
         config: Config,
         *,
         static_evaluator: StaticEvaluator,
-        job_manager: SemanticJobManager,
-        dispatcher: DeferredDispatcher,
         executor: CompletionExecutor = _thread_executor,
     ):
         self._config = config
         self._static = static_evaluator
-        self._jobs = job_manager
-        self._dispatcher = dispatcher
         self._executor = executor
 
     @property
@@ -143,12 +119,12 @@ class CompletionEvaluationTrigger:
 
         Subordinate by construction — a disabled subsystem has nothing to trigger,
         so ``ORCH_HUB_EVAL_AUTO`` only ever narrows ``ORCH_HUB_EVAL_ENABLED``.
+        Derived once in :attr:`orch_hub.config.Config.auto_evaluation_enabled`.
 
-        Derived once in :attr:`orch_hub.config.Config.auto_evaluation_enabled` and
-        read from there by both halves of the automatic path (acceptance here,
-        dispatch in :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep`): the
-        queue is durable, so a gate honored at acceptance but not at dispatch is
-        still a model turn in a hub that switched automatic evaluation off.
+        What it now gates is the deterministic layer alone. It is the switch for
+        "a completed run measures its own task without being asked", not for any
+        model spend: with automatic Layer 2 gone, no configuration value anywhere
+        can cause a semantic turn.
         """
         return self._config.auto_evaluation_enabled
 
@@ -169,39 +145,11 @@ class CompletionEvaluationTrigger:
         there is nothing to evaluate and an evaluation keyed by a wrong
         ``(repo, task)`` would be worse than none.
 
-        Then the run's own launch-time Layer 2 choice decides which durable record
-        this completion lands: an accepted job to be dispatched, or a terminal
-        ``skipped`` one. Both are written the same way, at the same point, through
-        the same once-per-task guard — which is what settles the multi-run question
-        the record could otherwise only be ambiguous about (see
-        :meth:`~orch_hub.semantic_jobs.SemanticJobManager.skip_if_absent`).
-
-        Then the ordering that matters: **Layer 2 is enqueued inline, Layer 1 is
-        dispatched.** The completion signal is one-shot and already settled when
-        this runs, so the automatic path has to accept it durably before returning
-        (module docstring). Enqueuing is that acceptance and it is O(1) — one small
-        record read plus one atomic write, under the job manager's briefly-held
-        lock — the same class of work ``_refresh`` already does under its own.
-        Layer 1 is not O(1): it walks the task file, every related run's
-        records/events/sessions, a bounded git window and the ``.ai/`` snapshot, so
-        it stays on the executor.
-
-        The two steps are independent and independently isolated: they are separate
-        artifacts over separately generated evidence, so an enqueue failure must
-        not also cost the task its deterministic layer, and a Layer 1 failure — a
-        git hiccup, an unreadable log — cannot reach an already-durable job. The
-        consequence of enqueuing first is that the semantic turn (dispatched by the
-        job manager onto its own thread) may now overlap this Layer 1 build rather
-        than following it. Both are read-only and unrelated; a redundant concurrent
-        evidence build costs less than a completion that is never recorded.
-
-        The enqueued job lands ``deferred``, so a third step follows on the
-        executor: ask the dispatcher to sweep. Whether this task's turn may spend
-        now is a policy question over subscription usage — a file read that can
-        trigger a background refresh — and it has no business on the run manager's
-        lock. Asking here rather than waiting for the resident sweep is what keeps
-        the uncontended case immediate; the sweep is global, so it may well start a
-        different, older job than this one, which is the queue behaving correctly.
+        Everything past that goes to the executor. Nothing is written inline
+        because nothing needs to be: the only output is the artifact the executor
+        produces, so a hub that stops before it runs leaves no half-kept promise
+        behind — just an unmeasured completion that the next run of the same task,
+        or one click, measures.
         """
         if not self.enabled:
             return
@@ -214,33 +162,7 @@ class CompletionEvaluationTrigger:
             )
             return
         task_id = record.task_id
-        if record.auto_semantic_eval:
-            self._enqueue_semantic(repo, task_id)
-        else:
-            self._skip_semantic(repo, task_id)
-        self._executor(lambda: self._dispatch_and_measure(repo, task_id))
-
-    def _dispatch_and_measure(self, repo: ManagedRepo, task_id: str) -> None:
-        """The off-lock half: admit a Layer 2 turn if allowed, then build Layer 1.
-
-        One executor submission rather than two, because the two steps share a
-        thread happily and neither blocks: the sweep only *starts* a turn (the job
-        manager detaches it onto its own executor), so putting it first costs
-        Layer 1 nothing and lets the turn begin while the evidence build runs.
-
-        Each half is isolated from the other. A dispatch policy that cannot read
-        usage, or a job store that cannot be walked, must not cost the task its
-        free deterministic layer; a failing Layer 1 must not stop the queue.
-        """
-        try:
-            self._dispatcher.sweep()
-        except Exception as exc:  # noqa: BLE001 - isolation from run state
-            _log.warning(
-                "automatic semantic dispatch sweep failed (%s): %s",
-                type(exc).__name__,
-                exc,
-            )
-        self._run_static(repo, task_id)
+        self._executor(lambda: self._run_static(repo, task_id))
 
     def _run_static(self, repo: ManagedRepo, task_id: str) -> None:
         """Generate the deterministic Layer 1 report off the lock; never raise.
@@ -251,9 +173,7 @@ class CompletionEvaluationTrigger:
         only writes are the two hub-owned artifacts, and a failure has already
         removed its own reserved dir.
 
-        Interrupting this loses only a free, reproducible artifact: the Layer 2 job
-        is already durable when this runs, and its own turn regenerates a complete
-        evidence + static pair.
+        Interrupting this loses only a free, reproducible artifact.
         """
         try:
             report = self._static.generate_metrics(repo, task_id)
@@ -271,99 +191,4 @@ class CompletionEvaluationTrigger:
             repo.name,
             task_id,
             report.evaluation_id,
-        )
-
-    def _skip_semantic(self, repo: ManagedRepo, task_id: str) -> None:
-        """Durably record that this completion gets no Layer 2 turn; never raise.
-
-        The opt-out half of the same acceptance step :meth:`_enqueue_semantic` is,
-        and it runs at the same point for the same reason: the completion signal is
-        one-shot and already settled, so a skip that was only *intended* would be
-        indistinguishable, forever after, from a task the trigger never saw. That
-        is the whole difference between an operator choosing to measure less and a
-        corpus that cannot state its own denominator.
-
-        ``skip_if_absent`` carries the identical once-per-task guard, so the two
-        paths cannot fight over a task across runs: whichever run completes the
-        task first writes the record and decides, and neither an accepted job nor a
-        skip can overwrite the other. A run that never completes the task never
-        reaches here, which is why the box on a mid-task session decides nothing.
-
-        Layer 1 is untouched by this branch — it runs for a skipped task exactly as
-        for an evaluated one.
-        """
-        try:
-            job = self._jobs.skip_if_absent(repo, task_id, SKIP_RUN_OPT_OUT)
-        except Exception as exc:  # noqa: BLE001 - isolation from run state
-            _log.warning(
-                "automatic semantic skip record failed for %s/%s (%s): %s",
-                repo.name,
-                task_id,
-                type(exc).__name__,
-                exc,
-            )
-            return
-        if job is None:
-            _log.info(
-                "automatic semantic skip not recorded for %s/%s:"
-                " the task already has a job record",
-                repo.name,
-                task_id,
-            )
-            return
-        _log.info(
-            "automatic semantic evaluation skipped for %s/%s (%s)",
-            repo.name,
-            task_id,
-            job.skip_reason,
-        )
-
-    def _enqueue_semantic(self, repo: ManagedRepo, task_id: str) -> None:
-        """Durably accept the completion as a Layer 2 job; never raise.
-
-        ``enqueue_if_absent`` is both the single-flight guard and the
-        once-per-task guard (see its docstring): a second completion signal for the
-        same task — the close-out-only re-run, a rescan, a hub restart — finds the
-        record and accepts nothing. The job then waits for the dispatch policy,
-        runs asynchronously, and settles to ``completed``/``failed`` on its own; a
-        failure there is a recorded job outcome, not an exception here.
-
-        That same record is the only durable trace that the automatic path accepted
-        this completion, which is why there is no startup replay to fall back on:
-        a scan for "completed runs with no job record" cannot distinguish a
-        completion this hub accepted from every task that completed before the
-        trigger existed, so it would enqueue a model turn for the entire archived
-        backlog on the first restart after deployment — the backfill this task
-        deliberately leaves to its own resumable, capacity-aware work. Writing the
-        record inline instead needs no second mechanism: it is already the guard.
-
-        Called on the run manager's thread, under its lock, so it must stay O(1);
-        the slow layer is dispatched, not this one. Isolated all the same — a
-        broken job store leaves the run untouched and costs this task its automatic
-        Layer 2, not the hub's run control.
-        """
-        try:
-            job = self._jobs.enqueue_if_absent(repo, task_id)
-        except Exception as exc:  # noqa: BLE001 - isolation from run state
-            _log.warning(
-                "automatic semantic job enqueue failed for %s/%s (%s): %s",
-                repo.name,
-                task_id,
-                type(exc).__name__,
-                exc,
-            )
-            return
-        if job is None:
-            _log.info(
-                "automatic semantic evaluation skipped for %s/%s:"
-                " the task already has a job record",
-                repo.name,
-                task_id,
-            )
-            return
-        _log.info(
-            "automatic semantic job %s accepted for %s/%s (awaiting dispatch)",
-            job.job_id,
-            repo.name,
-            task_id,
         )

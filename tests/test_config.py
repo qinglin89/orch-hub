@@ -22,22 +22,18 @@ from orch_hub.config import (
     DEFAULT_PORT,
     DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
-    DEFAULT_EVAL_DISPATCH_SPACING,
     DEFAULT_EVAL_QUEUE_MAX_AGE,
     DEFAULT_EVAL_RETENTION,
     DEFAULT_EVAL_TURN_TIMEOUT,
-    DEFAULT_EVAL_USAGE_CEILING,
     DEFAULT_INTAKE_EFFORT,
     DEFAULT_INTAKE_MODEL,
     EVAL_AUTO_ENV,
-    EVAL_DISPATCH_SPACING_ENV,
     EVAL_EFFORT_ENV,
     EVAL_ENABLED_ENV,
     EVAL_MODEL_ENV,
     EVAL_QUEUE_MAX_AGE_ENV,
     EVAL_RETENTION_ENV,
     EVAL_TURN_TIMEOUT_ENV,
-    EVAL_USAGE_CEILING_ENV,
     HOST_ENV,
     INTAKE_EFFORT_ENV,
     INTAKE_MODEL_ENV,
@@ -398,72 +394,68 @@ def test_eval_retention_malformed_or_negative_is_explicit_error():
         _configured_from_env({EVAL_RETENTION_ENV: "-1"})
 
 
-# -- automatic Layer 2 dispatch policy ----------------------------------------
-# The thresholds are configuration rather than literals so the policy can be
-# tuned without a code change; the defaults themselves are pinned because they
-# encode a judgement (see the constants' own docstrings) rather than a constant.
+# -- the held-job age bound ----------------------------------------------------
+# The one threshold left from the retired automatic dispatch policy: it is
+# visibility only, flagging a legacy held record that has been resting since the
+# automatic path was removed. Configuration rather than a literal so the flag can
+# be tuned without a code change; the default is pinned because it encodes a
+# judgement (see the constant's own docstring).
 
 
-def test_dispatch_policy_defaults_are_configuration_with_pinned_values():
-    cfg = _configured_from_env()
-    assert cfg.eval_usage_ceiling == DEFAULT_EVAL_USAGE_CEILING
-    assert cfg.eval_dispatch_spacing == DEFAULT_EVAL_DISPATCH_SPACING
-    assert cfg.eval_queue_max_age == DEFAULT_EVAL_QUEUE_MAX_AGE
-    # Also the dataclass defaults, so a directly-constructed Config agrees.
-    direct = Config(mandrel_path=Path("/root/mandrel"))
-    assert direct.eval_usage_ceiling == DEFAULT_EVAL_USAGE_CEILING
-    assert direct.eval_dispatch_spacing == DEFAULT_EVAL_DISPATCH_SPACING
-    assert direct.eval_queue_max_age == DEFAULT_EVAL_QUEUE_MAX_AGE
-    # 80% leaves ~20x one turn's cost in headroom, so measurement never competes
-    # with work; 15 minutes trickles a post-rollover backlog instead of bursting
-    # it; six hours is one full five-hour window plus slack.
-    assert (
-        DEFAULT_EVAL_USAGE_CEILING,
-        DEFAULT_EVAL_DISPATCH_SPACING,
-        DEFAULT_EVAL_QUEUE_MAX_AGE,
-    ) == (80.0, 900, 21600)
+def test_queue_age_bound_default_is_configuration_with_a_pinned_value():
+    assert _configured_from_env().eval_queue_max_age == DEFAULT_EVAL_QUEUE_MAX_AGE
+    # Also the dataclass default, so a directly-constructed Config agrees.
+    assert Config(mandrel_path=Path("/root/mandrel")).eval_queue_max_age == (
+        DEFAULT_EVAL_QUEUE_MAX_AGE
+    )
+    # Six hours: one full five-hour window plus slack.
+    assert DEFAULT_EVAL_QUEUE_MAX_AGE == 21600
 
 
-def test_dispatch_policy_overrides_are_honored():
-    assert _configured_from_env(
-        {EVAL_USAGE_CEILING_ENV: "55.5"}
-    ).eval_usage_ceiling == 55.5
-    assert _configured_from_env({EVAL_USAGE_CEILING_ENV: " 0 "}).eval_usage_ceiling == 0.0
-    assert _configured_from_env({EVAL_DISPATCH_SPACING_ENV: "60"}).eval_dispatch_spacing == 60
-    assert _configured_from_env({EVAL_DISPATCH_SPACING_ENV: "0"}).eval_dispatch_spacing == 0
+def test_queue_age_bound_overrides_are_honored():
     assert _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: "3600"}).eval_queue_max_age == 3600
     assert _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: "0"}).eval_queue_max_age == 0
 
 
-@pytest.mark.parametrize(
-    "env_name, attr, default",
-    [
-        (EVAL_USAGE_CEILING_ENV, "eval_usage_ceiling", DEFAULT_EVAL_USAGE_CEILING),
-        (EVAL_DISPATCH_SPACING_ENV, "eval_dispatch_spacing", DEFAULT_EVAL_DISPATCH_SPACING),
-        (EVAL_QUEUE_MAX_AGE_ENV, "eval_queue_max_age", DEFAULT_EVAL_QUEUE_MAX_AGE),
-    ],
-)
-def test_dispatch_policy_blank_counts_as_unset(env_name, attr, default):
+def test_queue_age_bound_blank_counts_as_unset():
     for blank in ("", "   "):
-        assert getattr(_configured_from_env({env_name: blank}), attr) == default
+        assert (
+            _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: blank}).eval_queue_max_age
+            == DEFAULT_EVAL_QUEUE_MAX_AGE
+        )
 
 
-@pytest.mark.parametrize(
-    "env_name, bad",
-    [
-        (EVAL_USAGE_CEILING_ENV, "high"),
-        (EVAL_USAGE_CEILING_ENV, "-1"),
-        (EVAL_USAGE_CEILING_ENV, "101"),
-        (EVAL_DISPATCH_SPACING_ENV, "quarter-hour"),
-        (EVAL_DISPATCH_SPACING_ENV, "-1"),
-        (EVAL_QUEUE_MAX_AGE_ENV, "forever"),
-        (EVAL_QUEUE_MAX_AGE_ENV, "-60"),
-    ],
-)
-def test_dispatch_policy_malformed_value_is_an_explicit_error(env_name, bad):
+@pytest.mark.parametrize("bad", ["forever", "-60"])
+def test_queue_age_bound_malformed_value_is_an_explicit_error(bad):
     """A mistyped threshold is a policy nobody chose; it must not start the hub."""
-    with pytest.raises(ValueError, match=env_name):
-        _configured_from_env({env_name: bad})
+    with pytest.raises(ValueError, match=EVAL_QUEUE_MAX_AGE_ENV):
+        _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: bad})
+
+
+def test_the_retired_dispatch_thresholds_are_gone():
+    """The automatic dispatcher's ceiling and spacing configured a deleted policy.
+
+    Keeping them would advertise a knob that changes nothing: an operator setting
+    ``ORCH_HUB_EVAL_USAGE_CEILING`` would be tuning a gate that no longer stands
+    between anything and a model turn, because nothing schedules one.
+    """
+    import orch_hub.config as config_module
+
+    for gone in (
+        "EVAL_USAGE_CEILING_ENV",
+        "DEFAULT_EVAL_USAGE_CEILING",
+        "EVAL_DISPATCH_SPACING_ENV",
+        "DEFAULT_EVAL_DISPATCH_SPACING",
+    ):
+        assert not hasattr(config_module, gone), gone
+    cfg = _configured_from_env(
+        {
+            "ORCH_HUB_EVAL_USAGE_CEILING": "10",
+            "ORCH_HUB_EVAL_DISPATCH_SPACING": "60",
+        }
+    )
+    assert not hasattr(cfg, "eval_usage_ceiling")
+    assert not hasattr(cfg, "eval_dispatch_spacing")
 
 
 # -- Layer 2 turn deadline -----------------------------------------------------

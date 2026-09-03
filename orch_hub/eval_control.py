@@ -1,30 +1,17 @@
-"""Hub-owned pause switch for automatic Layer 2 dispatch.
+"""Hub-owned pause switch, and the drain it used to hold.
 
-The automatic evaluation path already had one way to stop: ``ORCH_HUB_EVAL_AUTO``.
-It is the wrong instrument for the job an operator actually has. It is read from
-the environment, so changing it means editing a plist and restarting the service —
-which is not a thing anyone does at the moment they notice a turn is drawing on the
-window they need. And it is the *trigger* gate, so switching it off stops
-:class:`~orch_hub.completion_eval.CompletionEvaluationTrigger` from accepting
-completions at all: the queue does not pause, it stops existing, and every task
-that completes while it is off is silently absent from the corpus forever (the
-once-per-task guard means no later sweep goes back for them).
+It existed for one job: stop the automatic Layer 2 dispatch sweep, live, without
+the plist edit and restart ``ORCH_HUB_EVAL_AUTO`` required — and without that
+switch's cost, which was that turning it off stopped completions being *accepted*
+at all rather than merely holding them. A pause held only the drain, so the queue
+kept its shape and resuming spent it in completion order.
 
-This is the other lever, and the split is the whole point:
-
-============================  ==============================  =====================
-                              ``ORCH_HUB_EVAL_AUTO=false``    a pause
-============================  ==============================  =====================
-changed by                    editing config + restart        one request, live
-completions still accepted    no                              **yes**
-held records                  held                            held
-what the corpus loses         those tasks, permanently        nothing
-============================  ==============================  =====================
-
-A pause holds only the *drain*. Completions keep landing as ``deferred`` records,
-so the queue keeps its shape and resuming spends it in the same completion order
-it would have had — pausing costs the corpus nothing but time, which is exactly
-what makes it usable as a routine control rather than a decision.
+There is no drain now (:mod:`orch_hub.completion_eval` says why: a semantic turn
+starts only when a person asks for one, so nothing is scheduled to be held). What
+is left is a persisted operator-set flag: written by the HTTP control routes, read
+by the queue projection, and consulted by nothing that decides whether a turn may
+run — because nothing decides that. Its retirement, along with the routes and the
+dashboard controls that reach it, is the next slice of that work.
 
 State lives in one small JSON file, ``<data_dir>/eval-control.json``, beside the
 other hub-owned stores (``runs/``, ``intake/``, ``semantic-jobs/``,
@@ -32,27 +19,21 @@ other hub-owned stores (``runs/``, ``intake/``, ``semantic-jobs/``,
 outlives a process — an operator pausing for an afternoon's dev work must not have
 it silently undone by a launchd restart — and hub-owned rather than per-record
 because it is one global fact: stamping it onto every held job would churn the
-whole queue on a toggle and leave records claiming a reason that is no longer true
-(the same argument :meth:`orch_hub.eval_dispatch.DeferredDispatcher.sweep` already
-makes for the trigger gate).
+whole queue on a toggle and leave records claiming a reason that is no longer true.
 
-It is deliberately its own store rather than a field on the job manager or a
-member of the dispatcher. The job manager owns one record per ``(repo, task)`` and
-a lock serializing attempts against each other, neither of which a hub-wide switch
-shares; the dispatcher owns policy and persists nothing of its own, which is what
-makes its sweeps idempotent and its restarts free. One file, one shape, one owner,
-three readers (the sweep, the queue projection, the CLI) and one writer (the HTTP
-control routes).
+It is deliberately its own store rather than a field on the job manager. The job
+manager owns one record per ``(repo, task)`` and a lock serializing attempts
+against each other, neither of which a hub-wide switch shares. One file, one
+shape, one owner, two readers (the queue projection and the CLI) and one writer
+(the HTTP control routes).
 
-**An unreadable control reads as paused.** That is the same fail-toward-deferral
-direction the dispatch policy takes for an unreadable usage feed, and it is the
-recoverable one in both directions that matter: read the other way, a deliberate
-pause evaporates on a corrupt byte and turns are spent in the window the operator
-was protecting; read this way, the queue holds, the reason travels to every reader
-as :data:`PAUSE_UNREADABLE` rather than as somebody's choice, and ``resume``
-overwrites the damaged file — so the state is visible and self-healing rather than
-silent and stuck. A *missing* file is not this case: never having paused is the
-normal state and reads as running.
+**An unreadable control reads as paused.** The fail-closed direction, from when
+this held real spending: read the other way, a deliberate pause evaporated on a
+corrupt byte and turns were spent in the window the operator was protecting. Read
+this way the damage is visible — the reason travels to every reader as
+:data:`PAUSE_UNREADABLE` rather than as somebody's choice, and ``resume``
+overwrites the damaged file. A *missing* file is not this case: never having
+paused is the normal state and reads as running.
 """
 
 from __future__ import annotations

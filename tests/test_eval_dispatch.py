@@ -1,34 +1,21 @@
-"""Tests for the automatic Layer 2 dispatch policy (:mod:`orch_hub.eval_dispatch`).
+"""Tests for the semantic-job queue projection (:mod:`orch_hub.eval_dispatch`).
 
-Covers the capacity gate — a utilization ceiling read from the evaluator
-provider's highest currently-measured window, and fail-toward-deferral for every
-way that read can be unusable (unavailable, stale, figure-less, rolled over, a
-figure measured in an earlier window, a raising reader) — and the dispatcher that
-drains the deferred queue: oldest first, at most one per sweep, spaced from the
-last turn *admitted* to spend (manual turns included, and counted from admission
-rather than from the worker's later start stamp), each held job carrying the
-bounded machine reason it is still waiting, an unattributable record failed
-rather than left resident, and the queue-age bound warning once per job rather
-than once per sweep. Plus the two switches, checked against the durable queue a
-restart inherits: a closed subsystem or trigger gate holds every accepted record
-untouched, and reopening both drains it with no recovery step. Then the operator
-pause, which is deliberately none of those: read fresh on every sweep, holding the
-drain exactly as a closed gate does while leaving *acceptance* open, failing
-toward held when its own record is unreadable, and travelling to readers through
-the snapshot rather than being stamped on records. Then the operator view
-``queue_snapshot`` folds over: a complete census the row cap never shrinks, the
-two-group order, the deferred-only overdue flag, a read that moves nothing — and
-what the census is *not*, pinned from a real completed-then-failed retry.
-Every usage snapshot is synthetic; nothing here reads the operator's real
-subscription data or spends a model turn.
+This module used to own the automatic Layer 2 dispatch policy — a capacity gate,
+spacing between turns, a sweep that promoted held records — and this file used to
+test it. All of that is gone (:mod:`orch_hub.completion_eval` says why), and what
+is left is the read-only fold ``queue_snapshot`` takes over the persisted job
+store: a complete census the row cap never shrinks, the two-group order, the
+overdue flag over legacy held records, a read that moves nothing — and what the
+census is *not*, pinned from a real completed-then-failed retry.
+
+Nothing here can start a turn, which is now a property of the module rather than
+of the tests: there is no dispatcher left to drive.
 """
 
 from __future__ import annotations
 
 import datetime as dt
 import json
-import logging
-import threading
 from pathlib import Path
 
 import pytest
@@ -42,31 +29,16 @@ from orch_hub.semantic import (
     SemanticEvaluator,
 )
 from orch_hub.subprocess_utils import CommandResult
-from orch_hub.eval_dispatch import (
-    REASON_CAPACITY,
-    REASON_PACING,
-    REASON_USAGE_UNKNOWN,
-    CapacityGate,
-    DeferredDispatcher,
-    queue_snapshot,
-)
-from orch_hub.eval_control import (
-    PAUSE_OPERATOR,
-    PAUSE_UNREADABLE,
-    EvaluationControlStore,
-)
+from orch_hub.eval_dispatch import queue_snapshot
+from orch_hub.eval_control import PAUSE_OPERATOR, EvaluationControlStore
 from orch_hub.models import (
-    PROVIDER_CLAUDE,
     EvaluationControl,
     ManagedRepo,
     SemanticJob,
-    ProviderUsage,
     SemanticEvaluatorInfo,
     SemanticReport,
-    UsageWindow,
 )
 from orch_hub.semantic_jobs import (
-    SKIP_RUN_OPT_OUT,
     STATUS_CANCELLED,
     STATUS_COMPLETED,
     STATUS_DEFERRED,
@@ -81,12 +53,6 @@ from orch_hub.semantic_jobs import (
 TASK = "2026-08-09-completion-triggered-evaluation"
 REPO_PATH = Path("/repos/alpha")
 
-RACE_PATIENCE = 5
-"""Seconds a threaded test waits on the other thread before calling it stuck.
-
-Generous, because the assertion never depends on winning a timing race — the
-barrier decides the outcome, and this only keeps a regression from hanging the
-suite instead of failing it."""
 NOW = dt.datetime(2026, 8, 9, 12, 0, 0, tzinfo=dt.timezone.utc)
 
 
@@ -108,51 +74,12 @@ class Clock:
         self.now = self.now + dt.timedelta(seconds=seconds)
 
 
-def window(
-    key: str = "five_hour",
-    *,
-    used: float | None = 10.0,
-    resets_in: float | None = 3600.0,
-    figure_offset: float = 0.0,
-    now: dt.datetime = NOW,
-) -> UsageWindow:
-    """One provider window.
-
-    ``figure_offset`` shifts ``figure_instant`` *behind* ``resets_at`` — the shape
-    a percentage-less boundary refresh produces, where the displayed boundary has
-    moved on but the figure was measured in an earlier window.
-    """
-    resets = None if resets_in is None else now + dt.timedelta(seconds=resets_in)
-    figure = None if resets is None else resets - dt.timedelta(seconds=figure_offset)
-    return UsageWindow(
-        key=key,
-        used_percent=used,
-        resets_at=None if resets is None else resets.isoformat(),
-        figure_instant=None if figure is None else figure.isoformat(),
-    )
-
-
-def usage(*windows: UsageWindow, stale: bool = False, available: bool = True) -> ProviderUsage:
-    return ProviderUsage(
-        provider=PROVIDER_CLAUDE,
-        available=available,
-        windows=tuple(windows),
-        observed_ts=NOW.isoformat(),
-        stale=stale,
-    )
-
-
 def config(tmp_path: Path, **overrides) -> Config:
     return Config(
         mandrel_path=tmp_path / "mandrel",
         data_dir=tmp_path / "hub-data",
         **overrides,
     )
-
-
-def gate(cfg: Config, snapshot, *, clock: Clock | None = None) -> CapacityGate:
-    reader = snapshot if callable(snapshot) else (lambda: snapshot)
-    return CapacityGate(cfg, usage_reader=reader, clock=clock or Clock())
 
 
 def mk_report(evaluation_id: str) -> SemanticReport:
@@ -167,21 +94,6 @@ def mk_report(evaluation_id: str) -> SemanticReport:
         summary="ok",
         overall_confidence=0.7,
     )
-
-
-class FakeEvaluator:
-    def __init__(self):
-        self.calls: list[tuple[ManagedRepo, str]] = []
-
-    @property
-    def evaluator_info(self) -> SemanticEvaluatorInfo:
-        return SemanticEvaluatorInfo(backend="fake", model="fake-model", schema_version="1")
-
-    def evaluate(
-        self, r: ManagedRepo, task_id: str, *, turn_start_by=None, cancel=None
-    ) -> SemanticReport:
-        self.calls.append((r, task_id))
-        return mk_report(f"EVAL-{task_id}")
 
 
 class FlippingBackend:
@@ -234,863 +146,6 @@ def _git_unavailable(args, **kwargs) -> CommandResult:
 
 def sync_executor(run) -> None:
     run()
-
-
-class DeferredExecutor:
-    """Captures turns without running them, so a promoted job stays ``queued``."""
-
-    def __init__(self):
-        self.pending: list = []
-
-    def __call__(self, run) -> None:
-        self.pending.append(run)
-
-
-def stack(
-    tmp_path: Path,
-    *,
-    snapshot=None,
-    clock: Clock | None = None,
-    executor=sync_executor,
-    **cfg_overrides,
-):
-    """A real job manager plus the policy over it (no HTTP, no model, no usage IO)."""
-    cfg = config(tmp_path, **cfg_overrides)
-    clock = clock or Clock()
-    evaluator = FakeEvaluator()
-    jobs = SemanticJobManager(
-        cfg, evaluator=evaluator, clock=clock, executor=executor
-    )
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=jobs,
-        gate=gate(cfg, snapshot if snapshot is not None else usage(window()), clock=clock),
-        clock=clock,
-    )
-    return cfg, jobs, dispatcher, evaluator, clock
-
-
-# -- the capacity gate --------------------------------------------------------
-
-
-def test_a_quiet_window_admits_a_turn(tmp_path):
-    assert gate(config(tmp_path), usage(window(used=10.0))).check() is None
-
-
-def test_the_ceiling_holds_a_turn_and_is_configuration(tmp_path):
-    cfg = config(tmp_path)  # default ceiling
-    assert gate(cfg, usage(window(used=cfg.eval_usage_ceiling))).check() == REASON_CAPACITY
-    assert gate(cfg, usage(window(used=cfg.eval_usage_ceiling - 0.1))).check() is None
-
-    tuned = config(tmp_path, eval_usage_ceiling=25.0)
-    assert gate(tuned, usage(window(used=30.0))).check() == REASON_CAPACITY
-    assert gate(tuned, usage(window(used=20.0))).check() is None
-
-
-def test_the_ceiling_reads_the_most_exhausted_window(tmp_path):
-    """An exhausted weekly window is not hidden by a fresh five-hour one."""
-    snapshot = usage(
-        window("five_hour", used=5.0),
-        window("seven_day", used=95.0, resets_in=3 * 86400),
-    )
-    assert gate(config(tmp_path), snapshot).check() == REASON_CAPACITY
-
-
-@pytest.mark.parametrize(
-    "snapshot_kwargs, label",
-    [
-        (dict(available=False), "provider unavailable"),
-        (dict(stale=True), "observation stale"),
-    ],
-)
-def test_unusable_provider_state_defers(tmp_path, snapshot_kwargs, label):
-    snapshot = usage(window(used=1.0), **snapshot_kwargs)
-    assert gate(config(tmp_path), snapshot).check() == REASON_USAGE_UNKNOWN, label
-
-
-@pytest.mark.parametrize(
-    "windows, label",
-    [
-        ((), "no windows at all"),
-        ((window(used=None),), "window carries no figure"),
-        ((window(resets_in=None),), "window boundary unknown"),
-        ((window(resets_in=-60.0),), "boundary already passed: no window is open"),
-        ((window(figure_offset=6 * 3600),), "figure measured in an earlier window"),
-        ((window(used=1.0), window("seven_day", used=None)), "one window unreadable"),
-    ],
-)
-def test_an_unknown_window_is_not_an_empty_window(tmp_path, windows, label):
-    """Fail toward deferral: every degraded read holds the turn, never admits it."""
-    assert gate(config(tmp_path), usage(*windows)).check() == REASON_USAGE_UNKNOWN, label
-
-
-def test_a_raising_usage_reader_defers(tmp_path):
-    def boom():
-        raise OSError("usage store unreadable")
-
-    assert gate(config(tmp_path), boom).check() == REASON_USAGE_UNKNOWN
-
-
-# -- the dispatcher -----------------------------------------------------------
-
-
-def test_an_empty_queue_sweeps_to_nothing(tmp_path):
-    _, _, dispatcher, evaluator, _ = stack(tmp_path)
-
-    assert dispatcher.sweep() is None
-    assert evaluator.calls == []
-
-
-def test_a_held_job_dispatches_when_capacity_allows(tmp_path):
-    _, jobs, dispatcher, evaluator, _ = stack(tmp_path, snapshot=usage(window(used=5.0)))
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    started = dispatcher.sweep()
-
-    assert started is not None and started.task_id == TASK
-    assert jobs.get_job(repo(), TASK).status == STATUS_COMPLETED
-    assert evaluator.calls == [(repo(), TASK)]
-
-
-@pytest.mark.parametrize(
-    "snapshot, expected",
-    [
-        (usage(window(used=99.0)), REASON_CAPACITY),
-        (usage(available=False), REASON_USAGE_UNKNOWN),
-    ],
-)
-def test_a_refused_sweep_holds_the_job_with_its_reason(tmp_path, snapshot, expected):
-    _, jobs, dispatcher, evaluator, _ = stack(tmp_path, snapshot=snapshot)
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    assert dispatcher.sweep() is None
-
-    held = jobs.get_job(repo(), TASK)
-    assert held.status == STATUS_DEFERRED
-    assert held.defer_reason == expected
-    assert evaluator.calls == []  # deferred, never dropped and never spent
-
-
-def test_a_deferred_job_dispatches_on_its_own_when_capacity_returns(tmp_path):
-    """Defer rather than drop: nothing re-enqueues, the queue simply retries."""
-    snapshots = [usage(window(used=99.0)), usage(window(used=99.0)), usage(window(used=4.0))]
-    reads = iter(snapshots)
-    _, jobs, dispatcher, evaluator, _ = stack(tmp_path, snapshot=lambda: next(reads))
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    assert dispatcher.sweep() is None
-    assert dispatcher.sweep() is None
-    assert jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
-
-    assert dispatcher.sweep() is not None
-    assert jobs.get_job(repo(), TASK).status == STATUS_COMPLETED
-    assert evaluator.calls == [(repo(), TASK)]
-
-
-def test_a_held_queue_survives_a_hub_restart_and_drains_after_it(tmp_path):
-    """The restart-time re-dispatch is the resident sweep, not a startup step."""
-    cfg, jobs, dispatcher, _, clock = stack(tmp_path, snapshot=usage(window(used=99.0)))
-    jobs.enqueue_if_absent(repo(), TASK)
-    dispatcher.sweep()
-    assert jobs.get_job(repo(), TASK).defer_reason == REASON_CAPACITY
-
-    # A fresh process over the same data dir, capacity now free.
-    reborn_eval = FakeEvaluator()
-    reborn_jobs = SemanticJobManager(
-        cfg, evaluator=reborn_eval, clock=clock, executor=sync_executor
-    )
-    assert reborn_jobs.reconcile_orphans() == []
-    reborn = DeferredDispatcher(
-        cfg,
-        job_manager=reborn_jobs,
-        gate=gate(cfg, usage(window(used=3.0)), clock=clock),
-        clock=clock,
-    )
-
-    assert reborn.sweep() is not None
-    assert reborn_jobs.get_job(repo(), TASK).status == STATUS_COMPLETED
-    assert reborn_eval.calls == [(repo(), TASK)]
-
-
-# -- the rollover herd --------------------------------------------------------
-
-
-def test_a_backlog_drains_one_job_per_spacing_interval(tmp_path):
-    """A ceiling plus a queue makes the whole backlog dispatchable at the rollover.
-
-    Single-flight prevents double-spending one task, never a herd across tasks —
-    so the fresh window's opening capacity must not be handed the entire queue at
-    the moment the operator comes back to work.
-    """
-    clock = Clock()
-    _, jobs, dispatcher, evaluator, _ = stack(
-        tmp_path, snapshot=usage(window(used=2.0)), clock=clock, eval_dispatch_spacing=900
-    )
-    tasks = ["2026-08-01-a", "2026-08-02-b", "2026-08-03-c"]
-    for index, task in enumerate(tasks):
-        clock.advance(1)
-        jobs.enqueue_if_absent(repo(), task)
-        assert jobs.get_job(repo(), task).status == STATUS_DEFERRED
-        assert index >= 0
-
-    first = dispatcher.sweep()
-    assert first is not None and first.task_id == tasks[0]
-
-    # Inside the spacing: the rest stay held, with the pacing reason recorded.
-    clock.advance(60)
-    assert dispatcher.sweep() is None
-    assert [jobs.get_job(repo(), t).defer_reason for t in tasks[1:]] == [
-        REASON_PACING,
-        REASON_PACING,
-    ]
-
-    clock.advance(900)
-    second = dispatcher.sweep()
-    assert second is not None and second.task_id == tasks[1]
-    assert len(evaluator.calls) == 2
-
-
-def test_two_overlapping_sweeps_do_not_start_two_turns(tmp_path):
-    """Concurrent sweeps are the one way the spacing rule could be bypassed.
-
-    The resident tick and a just-landed completion can ask at the same instant.
-    Both would pass the spacing check against the same pre-dispatch state and then
-    promote a *different* held job — one turn per sweep, two turns at once. The
-    second sweep therefore declines outright rather than queueing.
-    """
-    reentered = []
-
-    class ReentrantEvaluator(FakeEvaluator):
-        """Sweeps again from inside the turn, i.e. while the first sweep is running."""
-
-        def __init__(self, dispatcher_box):
-            super().__init__()
-            self._box = dispatcher_box
-
-        def evaluate(self, r, task_id, *, turn_start_by=None, cancel=None):
-            reentered.append(self._box["dispatcher"].sweep())
-            return super().evaluate(r, task_id, turn_start_by=turn_start_by)
-
-    cfg = config(tmp_path, eval_dispatch_spacing=0)
-    clock = Clock()
-    box: dict = {}
-    evaluator = ReentrantEvaluator(box)
-    jobs = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
-    box["dispatcher"] = DeferredDispatcher(
-        cfg, job_manager=jobs, gate=gate(cfg, usage(window(used=1.0)), clock=clock), clock=clock
-    )
-    jobs.enqueue_if_absent(repo(), "2026-08-01-a")
-    jobs.enqueue_if_absent(repo(), "2026-08-02-b")
-
-    assert box["dispatcher"].sweep() is not None
-    assert reentered == [None]  # the overlapping sweep declined
-    assert len(evaluator.calls) == 1
-    assert jobs.get_job(repo(), "2026-08-02-b").status == STATUS_DEFERRED
-
-
-def test_the_oldest_held_job_goes_first(tmp_path):
-    clock = Clock()
-    _, jobs, dispatcher, _, _ = stack(tmp_path, clock=clock, eval_dispatch_spacing=0)
-    jobs.enqueue_if_absent(repo(), "2026-08-01-older")
-    clock.advance(120)
-    jobs.enqueue_if_absent(repo(), "2026-08-02-newer")
-
-    assert dispatcher.sweep().task_id == "2026-08-01-older"
-    assert dispatcher.sweep().task_id == "2026-08-02-newer"
-
-
-def test_pacing_counts_a_manual_turn_too(tmp_path):
-    """A manual evaluation draws on the same window, so it paces the queue."""
-    clock = Clock()
-    _, jobs, dispatcher, _, _ = stack(tmp_path, clock=clock, eval_dispatch_spacing=900)
-    jobs.start_job(repo(), "2026-08-01-manual")
-    clock.advance(60)
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    assert dispatcher.sweep() is None
-    assert jobs.get_job(repo(), TASK).defer_reason == REASON_PACING
-
-    clock.advance(900)
-    assert dispatcher.sweep() is not None
-
-
-def test_a_skipped_task_does_not_pace_the_queue(tmp_path):
-    """A skip spends nothing, so it must not hold back the jobs that would.
-
-    Otherwise a week of opted-out completions would pace the queue as if each one
-    had drawn on the window — starving exactly the tasks the operator did want
-    measured, on the strength of turns that never happened.
-    """
-    clock = Clock()
-    _, jobs, dispatcher, _, _ = stack(tmp_path, clock=clock, eval_dispatch_spacing=900)
-    jobs.skip_if_absent(repo(), "2026-08-01-declined", SKIP_RUN_OPT_OUT)
-    clock.advance(60)
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    assert dispatcher.sweep() is not None
-    assert jobs.get_job(repo(), TASK).status != STATUS_DEFERRED
-
-
-def test_zero_spacing_drains_as_fast_as_capacity_allows(tmp_path):
-    _, jobs, dispatcher, evaluator, _ = stack(tmp_path, eval_dispatch_spacing=0)
-    jobs.enqueue_if_absent(repo(), "2026-08-01-a")
-    jobs.enqueue_if_absent(repo(), "2026-08-02-b")
-
-    assert dispatcher.sweep() is not None
-    assert dispatcher.sweep() is not None
-    assert len(evaluator.calls) == 2
-
-
-def test_spacing_is_checked_before_capacity_is_read(tmp_path):
-    """A usage read can trigger background work; do not ask when it cannot be used."""
-    reads = []
-
-    def reader():
-        reads.append(True)
-        return usage(window(used=1.0))
-
-    cfg = config(tmp_path, eval_dispatch_spacing=900)
-    clock = Clock()
-    jobs = SemanticJobManager(
-        cfg, evaluator=FakeEvaluator(), clock=clock, executor=sync_executor
-    )
-    dispatcher = DeferredDispatcher(
-        cfg, job_manager=jobs, gate=gate(cfg, reader, clock=clock), clock=clock
-    )
-    jobs.start_job(repo(), "2026-08-01-manual")
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    assert dispatcher.sweep() is None
-    assert reads == []
-
-
-# -- queue hygiene ------------------------------------------------------------
-
-
-def test_only_the_held_job_is_touched_while_others_run(tmp_path):
-    """A promoted job is transient, so a later sweep neither re-runs nor holds it."""
-    executor = DeferredExecutor()
-    _, jobs, dispatcher, _, _ = stack(
-        tmp_path, executor=executor, eval_dispatch_spacing=0
-    )
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    promoted = dispatcher.sweep()
-    assert promoted is not None and promoted.status == STATUS_QUEUED
-    assert dispatcher.sweep() is None  # nothing deferred remains
-    assert jobs.get_job(repo(), TASK).status == STATUS_QUEUED
-    assert len(executor.pending) == 1
-
-
-def test_an_unattributable_held_job_is_failed_and_the_next_one_runs(tmp_path):
-    """A record that can never dispatch must not become a permanent resident."""
-    cfg, jobs, dispatcher, evaluator, clock = stack(tmp_path, eval_dispatch_spacing=0)
-    jobs.enqueue_if_absent(repo(), "2026-08-01-orphan")
-    jobs.enqueue_if_absent(repo(), "2026-08-02-fine")
-    # Strip the repo attribution the way a damaged record would have lost it.
-    path = cfg.data_dir / "semantic-jobs" / "alpha" / "2026-08-01-orphan" / "job.json"
-    data = json.loads(path.read_text())
-    data["repo_path"] = None
-    path.write_text(json.dumps(data))
-
-    started = dispatcher.sweep()
-
-    assert jobs.get_job(repo(), "2026-08-01-orphan").status == STATUS_FAILED
-    assert started is not None and started.task_id == "2026-08-02-fine"
-    assert evaluator.calls == [(repo(), "2026-08-02-fine")]
-
-
-def test_holding_rewrites_nothing_when_the_reason_is_unchanged(tmp_path):
-    """A queue legitimately waiting for hours must not rewrite itself every sweep."""
-    clock = Clock()
-    # A weekly window, so an hour of waiting does not itself change the reason.
-    _, jobs, dispatcher, _, _ = stack(
-        tmp_path,
-        snapshot=usage(window("seven_day", used=99.0, resets_in=7 * 86400)),
-        clock=clock,
-    )
-    jobs.enqueue_if_absent(repo(), TASK)
-    dispatcher.sweep()
-    first = jobs.get_job(repo(), TASK).updated_ts
-    assert jobs.get_job(repo(), TASK).defer_reason == REASON_CAPACITY
-
-    clock.advance(3600)
-    dispatcher.sweep()
-
-    assert jobs.get_job(repo(), TASK).updated_ts == first
-
-
-def test_a_stalled_queue_is_surfaced_once_per_job(tmp_path, caplog):
-    """The age bound bounds how long a stalled queue can stay invisible.
-
-    It changes no dispatch decision — a stalled job is still waiting for capacity,
-    not failed — and it warns once per job, not once per 30-second sweep.
-    """
-    clock = Clock()
-    _, jobs, dispatcher, _, _ = stack(
-        tmp_path,
-        snapshot=usage(available=False),
-        clock=clock,
-        eval_queue_max_age=21600,
-    )
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    with caplog.at_level(logging.WARNING, logger="orch_hub.eval_dispatch"):
-        dispatcher.sweep()
-        assert caplog.records == []  # fresh: normal backpressure
-
-        clock.advance(21600)
-        dispatcher.sweep()
-        dispatcher.sweep()
-        dispatcher.sweep()
-
-    stalled = [r for r in caplog.records if "not draining" in r.getMessage()]
-    assert len(stalled) == 1
-    assert TASK in stalled[0].getMessage()
-    assert jobs.get_job(repo(), TASK).status == STATUS_DEFERRED  # still just waiting
-
-
-def test_a_zero_age_bound_surfaces_nothing(tmp_path, caplog):
-    clock = Clock()
-    _, jobs, dispatcher, _, _ = stack(
-        tmp_path,
-        snapshot=usage(available=False),
-        clock=clock,
-        eval_queue_max_age=0,
-    )
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    with caplog.at_level(logging.WARNING, logger="orch_hub.eval_dispatch"):
-        clock.advance(30 * 86400)
-        dispatcher.sweep()
-
-    assert [r for r in caplog.records if "not draining" in r.getMessage()] == []
-
-
-# -- the two switches, against a durable queue --------------------------------
-
-
-def enqueued_queue(tmp_path: Path, tasks: tuple[str, ...]):
-    """A data dir holding already-accepted ``deferred`` records.
-
-    Models what every restart actually finds: the queue outlives the process that
-    accepted it, so the switches a *later* process runs under have to be honored
-    against records nobody is going to re-decide.
-    """
-    cfg, jobs, _, _, clock = stack(tmp_path)
-    for task in tasks:
-        jobs.enqueue_if_absent(repo(), task)
-    return cfg, jobs, clock
-
-
-@pytest.mark.parametrize(
-    "gates, label",
-    [
-        ({"eval_auto": False}, "trigger gate closed: manual-only operation"),
-        ({"evaluation_enabled": False}, "subsystem gate closed: evaluation is inert"),
-    ],
-)
-def test_a_pre_existing_queue_is_never_promoted_while_a_gate_is_closed(
-    tmp_path, gates, label
-):
-    """A durable queue must not outlive the switch that stopped producing it.
-
-    Restart shape: an earlier enabled process accepted the record, this one runs
-    with a gate closed. Promoting it would be an automatic model turn in a
-    deployment that said manual-only — and with the *subsystem* gate closed it is
-    worse than a stray turn, because the evaluator refuses a disabled subsystem
-    and the promotion would settle the record ``failed``, consuming the task's one
-    automatic attempt.
-    """
-    _, jobs, clock = enqueued_queue(tmp_path, (TASK,))
-    cfg = config(tmp_path, **gates)
-    evaluator = FakeEvaluator()
-    reborn_jobs = SemanticJobManager(
-        cfg, evaluator=evaluator, clock=clock, executor=sync_executor
-    )
-    reborn = DeferredDispatcher(
-        cfg,
-        job_manager=reborn_jobs,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        clock=clock,
-    )
-    before = reborn_jobs.get_job(repo(), TASK)
-
-    assert reborn.enabled is False, label
-    assert reborn.sweep() is None
-    assert evaluator.calls == []
-    # Held exactly as it was: nothing walked, nothing written, nothing failed.
-    assert reborn_jobs.get_job(repo(), TASK) == before
-
-
-def test_a_queue_held_by_a_closed_gate_drains_when_both_switches_reopen(tmp_path):
-    """Deferral already means "not now", so reopening needs no recovery step."""
-    _, _, clock = enqueued_queue(tmp_path, (TASK,))
-    off = config(tmp_path, eval_auto=False)
-    evaluator = FakeEvaluator()
-    jobs = SemanticJobManager(
-        off, evaluator=evaluator, clock=clock, executor=sync_executor
-    )
-    DeferredDispatcher(
-        off,
-        job_manager=jobs,
-        gate=gate(off, usage(window(used=1.0)), clock=clock),
-        clock=clock,
-    ).sweep()
-    assert jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
-
-    on = config(tmp_path)
-    reopened = DeferredDispatcher(
-        on,
-        job_manager=SemanticJobManager(
-            on, evaluator=evaluator, clock=clock, executor=sync_executor
-        ),
-        gate=gate(on, usage(window(used=1.0)), clock=clock),
-        clock=clock,
-    )
-
-    assert reopened.sweep() is not None
-    assert evaluator.calls == [(repo(), TASK)]
-
-
-def test_a_closed_gate_never_fails_an_unattributable_record(tmp_path):
-    """The one write a sweep makes to a record it cannot dispatch is gated too."""
-    cfg_on, jobs, clock = enqueued_queue(tmp_path, (TASK,))
-    path = cfg_on.data_dir / "semantic-jobs" / "alpha" / TASK / "job.json"
-    data = json.loads(path.read_text())
-    data["repo_path"] = None
-    path.write_text(json.dumps(data))
-
-    off = config(tmp_path, eval_auto=False)
-    off_jobs = SemanticJobManager(
-        off, evaluator=FakeEvaluator(), clock=clock, executor=sync_executor
-    )
-    DeferredDispatcher(
-        off,
-        job_manager=off_jobs,
-        gate=gate(off, usage(window(used=1.0)), clock=clock),
-        clock=clock,
-    ).sweep()
-
-    assert off_jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
-
-
-# -- the operator pause -------------------------------------------------------
-#
-# The lever that is deliberately NOT the trigger gate. ``ORCH_HUB_EVAL_AUTO``
-# needs a restart and stops completions being *accepted*, so every task finishing
-# while it is off is permanently absent from the corpus. A pause holds only the
-# drain, live, and the queue keeps filling behind it — which is what makes it
-# usable as a routine control rather than a decision.
-
-
-def paused(reason: str = PAUSE_OPERATOR, ts: str = "2026-08-09T11:00:00+00:00"):
-    return lambda: EvaluationControl(paused=True, paused_ts=ts, reason=reason)
-
-
-def test_a_paused_queue_is_held_exactly_as_it_is(tmp_path):
-    """Nothing walked, nothing written, nothing failed — the same treatment a
-    closed gate gets, and for the same reason: a pause is one global fact, not a
-    per-job one, so stamping it on records would churn the whole queue on a toggle
-    and leave them claiming a reason that stopped being true on resume."""
-    cfg, jobs, clock = enqueued_queue(tmp_path, (TASK,))
-    before = jobs.get_job(repo(), TASK)
-    evaluator = FakeEvaluator()
-    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=live,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=paused(),
-        clock=clock,
-    )
-
-    assert dispatcher.sweep() is None
-    assert evaluator.calls == []
-    assert live.get_job(repo(), TASK) == before
-
-
-def test_resuming_drains_the_queue_that_was_held_with_no_recovery_step(tmp_path):
-    """The pause costs the corpus nothing but time: the same records, in the same
-    completion order, the moment it is released."""
-    cfg, jobs, clock = enqueued_queue(tmp_path, (TASK,))
-    evaluator = FakeEvaluator()
-    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
-    state = {"paused": True}
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=live,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=lambda: EvaluationControl(paused=state["paused"]),
-        clock=clock,
-    )
-    assert dispatcher.sweep() is None
-
-    state["paused"] = False  # no restart, no reconstruction
-
-    assert dispatcher.sweep() is not None
-    assert evaluator.calls == [(repo(), TASK)]
-
-
-def test_the_pause_is_read_fresh_on_every_sweep(tmp_path):
-    """A dispatcher that cached it would reintroduce the restart the pause exists
-    to remove."""
-    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
-    reads = {"n": 0}
-
-    def control() -> EvaluationControl:
-        reads["n"] += 1
-        return EvaluationControl(paused=True)
-
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=SemanticJobManager(
-            cfg, evaluator=FakeEvaluator(), clock=clock, executor=sync_executor
-        ),
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=control,
-        clock=clock,
-    )
-    dispatcher.sweep()
-    dispatcher.sweep()
-
-    assert reads["n"] == 2
-
-
-def test_a_pause_never_stops_a_completion_being_accepted(tmp_path):
-    """The whole difference from ``ORCH_HUB_EVAL_AUTO``.
-
-    The trigger reads ``enabled`` to decide whether to accept a completion at all;
-    folding the pause into that predicate would make a paused hub drop completions
-    permanently through the once-per-task guard — exactly the loss the pause exists
-    to avoid.
-    """
-    cfg, jobs, clock = enqueued_queue(tmp_path, ())
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=jobs,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=paused(),
-        clock=clock,
-    )
-
-    assert dispatcher.enabled is True  # acceptance stays open
-    assert dispatcher.paused is True  # only the drain is held
-    assert jobs.enqueue_if_absent(repo(), TASK) is not None
-    assert jobs.get_job(repo(), TASK).status == STATUS_DEFERRED
-
-
-def test_an_unreadable_control_holds_the_drain(tmp_path):
-    """The store fails toward paused; the dispatcher consumes that rather than
-    re-deciding it. An unaccountable switch must not spend the window."""
-    cfg, jobs, clock = enqueued_queue(tmp_path, (TASK,))
-    evaluator = FakeEvaluator()
-    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=live,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=paused(PAUSE_UNREADABLE, ts=None),
-        clock=clock,
-    )
-
-    assert dispatcher.sweep() is None
-    assert evaluator.calls == []
-
-
-def test_the_promotion_boundary_re_reads_the_pause_it_pre_checked(tmp_path):
-    """The gap between the sweep's pause check and its promotion is real time.
-
-    Between them sit a store walk, a spacing check, and a capacity read — all of
-    which an operator can press Pause during. A sweep that carried its first
-    reading down to the promotion would spend a turn out of a queue that is, by
-    then, held. So the check that decides is taken at the promotion boundary.
-    """
-    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
-    evaluator = FakeEvaluator()
-    reads: list[bool] = []
-
-    def control() -> EvaluationControl:
-        # Running when the sweep pre-checks; paused by the time it promotes.
-        reads.append(True)
-        return EvaluationControl() if len(reads) == 1 else EvaluationControl(paused=True)
-
-    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=live,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=control,
-        clock=clock,
-    )
-
-    assert dispatcher.sweep() is None
-    assert len(reads) == 2  # the pre-filter, then the one that decides
-    assert evaluator.calls == []
-    assert live.get_job(repo(), TASK).status == STATUS_DEFERRED
-
-
-def test_a_pause_write_cannot_be_overtaken_by_a_sweep_already_deciding(tmp_path):
-    """The live race, driven through the real control store and the real barrier.
-
-    The pause lives in one store and the queue in another, written by two
-    different threads, so "paused" is only a hold if the two cannot interleave. A
-    sweep that read the control just before ``POST .../queue/pause`` would
-    otherwise go on to promote a job after the pause is durable — and after the
-    route has answered that the queue is held.
-    """
-    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
-    evaluator = FakeEvaluator()
-    live = SemanticJobManager(cfg, evaluator=evaluator, clock=clock, executor=sync_executor)
-    store = EvaluationControlStore(cfg.data_dir)
-    read_an_unpaused_control = threading.Event()
-
-    def control() -> EvaluationControl:
-        state = store.state()
-        if not state.paused:
-            read_an_unpaused_control.set()
-        return state
-
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=live,
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        control=control,
-        clock=clock,
-    )
-    swept: list = []
-    sweeper = threading.Thread(target=lambda: swept.append(dispatcher.sweep()))
-
-    with dispatcher.admission_barrier():  # what the pause route holds
-        sweeper.start()
-        assert read_an_unpaused_control.wait(RACE_PATIENCE), "the sweep never ran"
-        store.pause()
-    sweeper.join(RACE_PATIENCE)
-
-    assert not sweeper.is_alive()
-    assert swept == [None]
-    assert evaluator.calls == []
-    assert live.get_job(repo(), TASK).status == STATUS_DEFERRED
-
-
-def test_a_dispatcher_built_without_a_control_store_is_not_paused(tmp_path):
-    """"No control supplied" is a different thing from "the control could not be
-    read" — only the store decides the second, and only it fails closed."""
-    cfg, _, clock = enqueued_queue(tmp_path, (TASK,))
-    evaluator = FakeEvaluator()
-    dispatcher = DeferredDispatcher(
-        cfg,
-        job_manager=SemanticJobManager(
-            cfg, evaluator=evaluator, clock=clock, executor=sync_executor
-        ),
-        gate=gate(cfg, usage(window(used=1.0)), clock=clock),
-        clock=clock,
-    )
-
-    assert dispatcher.paused is False
-    assert dispatcher.sweep() is not None
-
-
-def test_the_pause_reaches_a_reader_through_the_queue_snapshot(tmp_path):
-    """A pause must never become a second silent condition on a queue whose failure
-    modes are already silent. It travels the way ``auto_enabled`` does."""
-    control = EvaluationControl(
-        paused=True, paused_ts="2026-08-09T11:00:00+00:00", reason=PAUSE_OPERATOR
-    )
-
-    snap = queue_snapshot(
-        config(tmp_path), [job("a", STATUS_DEFERRED)], control=control, now=NOW
-    )
-
-    assert snap.control == control
-    assert snap.to_dict()["control"] == {
-        "paused": True,
-        "paused_ts": "2026-08-09T11:00:00+00:00",
-        "reason": PAUSE_OPERATOR,
-    }
-    # The held record is still reported: hiding the queue would answer "why is
-    # nothing draining?" with the same silence that made the question necessary.
-    assert len(snap.entries) == 1
-
-
-def test_both_holds_are_reported_independently(tmp_path):
-    """A queue can be off *and* paused; telling an operator only one of those sends
-    them to fix the wrong switch."""
-    snap = queue_snapshot(
-        config(tmp_path, eval_auto=False),
-        [job("a", STATUS_DEFERRED)],
-        control=EvaluationControl(paused=True, reason=PAUSE_OPERATOR),
-        now=NOW,
-    )
-
-    assert snap.auto_enabled is False
-    assert snap.control.paused is True
-
-
-def test_a_snapshot_with_no_control_supplied_reads_as_running(tmp_path):
-    snap = queue_snapshot(config(tmp_path), [], now=NOW)
-
-    assert snap.control == EvaluationControl()
-    assert snap.to_dict()["control"]["paused"] is False
-
-
-def test_a_cancelled_record_is_counted_but_never_listed_as_actionable(tmp_path):
-    """A resting, deliberate outcome — the same treatment ``skipped`` gets. The
-    count is what keeps a deliberate gap in the corpus answerable; a row would only
-    crowd out the jobs that are genuinely stuck."""
-    snap = queue_snapshot(
-        config(tmp_path),
-        [job("a", STATUS_CANCELLED), job("b", STATUS_DEFERRED)],
-        now=NOW,
-    )
-
-    assert snap.counts[STATUS_CANCELLED] == 1
-    assert [e.job.task_id for e in snap.entries] == ["b"]
-    # And it is not folded into the skip tally: a task nobody declined at launch.
-    assert snap.skipped_by_repo == {}
-
-
-# -- spacing spans admission, not just the worker's own start -----------------
-
-
-def test_two_back_to_back_sweeps_promote_only_one_turn(tmp_path):
-    """The spacing gap between an admitted turn and its worker's start stamp.
-
-    A promoted job is persisted ``queued`` and its turn submitted off the lock;
-    ``started_ts`` appears only when that worker flips it to ``running``. A second
-    *sequential* sweep — the resident tick right behind the completion hook's own —
-    lands in between, and spacing measured from ``started_ts`` alone would see no
-    turn at all and promote a second one at once. Not the concurrent herd the
-    single-flight lock refuses: a sequential one, and just as expensive.
-    """
-    held = DeferredExecutor()
-    _, jobs, dispatcher, _, _ = stack(tmp_path, executor=held)  # default 900s spacing
-    jobs.enqueue_if_absent(repo(), "2026-08-01-a")
-    jobs.enqueue_if_absent(repo(), "2026-08-02-b")
-
-    first = dispatcher.sweep()
-    second = dispatcher.sweep()
-
-    assert first is not None and first.task_id == "2026-08-01-a"
-    assert second is None
-    assert len(held.pending) == 1
-    assert jobs.get_job(repo(), "2026-08-02-b").defer_reason == REASON_PACING
-
-
-def test_an_admitted_manual_turn_paces_the_queue_before_it_starts(tmp_path):
-    """Same gap on the manual side, which the queue is also paced against."""
-    held = DeferredExecutor()
-    clock = Clock()
-    _, jobs, dispatcher, _, _ = stack(tmp_path, executor=held, clock=clock)
-    manual = jobs.start_job(repo(), "2026-08-01-manual")
-    assert manual.status == STATUS_QUEUED and manual.started_ts is None
-    jobs.enqueue_if_absent(repo(), TASK)
-
-    assert dispatcher.sweep() is None
-    assert jobs.get_job(repo(), TASK).defer_reason == REASON_PACING
-
-    clock.advance(900)
-    assert dispatcher.sweep() is not None
 
 
 # -- the operator view --------------------------------------------------------
@@ -1340,28 +395,76 @@ def test_only_held_jobs_can_be_overdue(tmp_path):
     assert {e.job.task_id for e in snap.entries if e.overdue} == {"d"}
 
 
-def test_the_stalled_population_matches_the_dispatchers_own_warning(tmp_path):
-    """One population, two surfaces: the dashboard and the log must not disagree."""
-    clock = Clock()
-    cfg, jobs, dispatcher, _, _ = stack(
-        tmp_path,
-        clock=clock,
-        snapshot=usage(window(used=99.0)),  # held on capacity
-        eval_queue_max_age=3600,
+def test_the_persisted_pause_reaches_a_reader_through_the_snapshot(tmp_path):
+    """The pause store outlived the drain it held; the projection still reports it.
+
+    Nothing consults it to decide whether a turn may start — nothing decides that
+    any more — but it is persisted operator-set state, and a reader that showed the
+    queue without it would be describing a store it only half looked at.
+    """
+    control = EvaluationControl(
+        paused=True, paused_ts="2026-08-09T11:00:00+00:00", reason=PAUSE_OPERATOR
     )
-    jobs.enqueue_if_absent(repo(), "2026-08-01-old")
-    clock.advance(3600)
-    jobs.enqueue_if_absent(repo(), "2026-08-02-new")
-    clock.advance(1)
-    dispatcher.sweep()
 
-    warned = {
-        task_id for (_repo, task_id, _job_id) in dispatcher._stall_logged
+    snap = queue_snapshot(
+        config(tmp_path), [job("a", STATUS_DEFERRED)], control=control, now=NOW
+    )
+
+    assert snap.control == control
+    assert snap.to_dict()["control"] == {
+        "paused": True,
+        "paused_ts": "2026-08-09T11:00:00+00:00",
+        "reason": PAUSE_OPERATOR,
     }
-    snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
+    # The held record is still reported: hiding it would answer "why is this
+    # sitting here?" with the same silence that made the question necessary.
+    assert len(snap.entries) == 1
 
-    assert warned == {"2026-08-01-old"}
-    assert {e.job.task_id for e in snap.entries if e.overdue} == warned
+
+def test_a_stored_pause_is_read_as_a_value_the_caller_supplies(tmp_path):
+    """The projection stays pure: the store is the caller's to open, not this fold's."""
+    store = EvaluationControlStore(config(tmp_path).data_dir)
+    store.pause()
+
+    snap = queue_snapshot(config(tmp_path), [], control=store.state(), now=NOW)
+
+    assert snap.control.paused is True and snap.control.reason == PAUSE_OPERATOR
+
+
+def test_both_holds_are_reported_independently(tmp_path):
+    """The automatic switch and the pause are separate facts and travel separately."""
+    snap = queue_snapshot(
+        config(tmp_path, eval_auto=False),
+        [job("a", STATUS_DEFERRED)],
+        control=EvaluationControl(paused=True, reason=PAUSE_OPERATOR),
+        now=NOW,
+    )
+
+    assert snap.auto_enabled is False
+    assert snap.control.paused is True
+
+
+def test_a_snapshot_with_no_control_supplied_reads_as_running(tmp_path):
+    snap = queue_snapshot(config(tmp_path), [], now=NOW)
+
+    assert snap.control == EvaluationControl()
+    assert snap.to_dict()["control"]["paused"] is False
+
+
+def test_a_cancelled_record_is_counted_but_never_listed_as_actionable(tmp_path):
+    """A resting, deliberate outcome — the same treatment ``skipped`` gets. The
+    count is what keeps a deliberate gap in the corpus answerable; a row would only
+    crowd out the jobs that are genuinely stuck."""
+    snap = queue_snapshot(
+        config(tmp_path),
+        [job("a", STATUS_CANCELLED), job("b", STATUS_DEFERRED)],
+        now=NOW,
+    )
+
+    assert snap.counts[STATUS_CANCELLED] == 1
+    assert [e.job.task_id for e in snap.entries] == ["b"]
+    # And it is not folded into the skip tally: a task nobody declined at launch.
+    assert snap.skipped_by_repo == {}
 
 
 def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
@@ -1418,19 +521,29 @@ def test_an_empty_store_is_a_calm_snapshot_not_an_error(tmp_path):
 
 
 def test_the_snapshot_reads_the_store_without_moving_it(tmp_path):
-    """Asking about the queue must never dispatch, hold, or rewrite a record."""
-    cfg, jobs, _dispatcher, evaluator, clock = stack(
-        tmp_path, snapshot=usage(window(used=99.0))
+    """Asking about the queue must never start, settle, or rewrite a record."""
+    cfg = config(tmp_path)
+    clock = Clock()
+    held: list = []
+    backend = FlippingBackend()
+    service = EvaluationService(cfg, git_runner=_git_unavailable, clock=clock)
+    jobs = SemanticJobManager(
+        cfg,
+        evaluator=SemanticEvaluator(
+            cfg, evaluation_service=service, backend=backend, clock=clock
+        ),
+        clock=clock,
+        executor=held.append,  # the turn is never run, so the record rests queued
     )
-    jobs.enqueue_if_absent(repo(), TASK)
+    jobs.start_job(repo(), TASK)
     path = jobs.jobs_dir / "alpha" / TASK / "job.json"
     before = path.read_bytes()
 
     snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
 
-    assert [e.job.status for e in snap.entries] == [STATUS_DEFERRED]
+    assert [e.job.status for e in snap.entries] == [STATUS_QUEUED]
     assert path.read_bytes() == before
-    assert evaluator.calls == []
+    assert len(held) == 1  # still pending; reading the queue did not run it
 
 
 def test_a_report_outlives_the_record_that_produced_it(tmp_path):

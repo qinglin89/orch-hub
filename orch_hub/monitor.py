@@ -20,12 +20,16 @@ the monitor reuses the manager's existing trigger policy and its per-
 
 It is also the hub's only resident tick, so a second kind of work that needs one
 rides it rather than growing a thread of its own: ``sweeps`` are plain callables
-invoked after each run scan. The automatic evaluation dispatcher uses this to
-retry its deferred queue (a held Layer 2 turn waiting on subscription capacity,
-which nothing else would ever pick back up). The relationship stays the same as
-with the run scan — the monitor decides *when* a sweep runs and nothing about
-what it decides — and each sweep is isolated, so neither can take down the other
-or the thread.
+invoked after each run scan. The semantic-job store uses this to settle a turn
+that has outlived its own persisted deadline, which nothing else would pick back
+up between restarts. The relationship stays the same as with the run scan — the
+monitor decides *when* a sweep runs and nothing about what it decides — and each
+sweep is isolated, so neither can take down the other or the thread.
+
+Every sweep the hub wires here only ever *settles* work. None of them starts a
+model turn, and none may be given one to start: this thread runs unattended, so a
+sweep that could open a ``claude`` turn would be the hub spending the operator's
+subscription window with nobody present to have asked for it.
 
 The monitor is started and stopped by the FastAPI application lifecycle
 (:mod:`orch_hub.api`), so it lives exactly as long as the resident service and

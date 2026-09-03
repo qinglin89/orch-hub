@@ -106,7 +106,7 @@
   // is a record rather than an absence so the corpus's missing entries stay
   // countable — which is the whole condition on which the opt-out is admissible —
   // so it must never render as "never evaluated" either. Bounded machine tokens,
-  // mirroring SKIP_REASONS in orch_hub/semantic_jobs.py; an unknown one falls
+  // mirroring SKIP_RUN_OPT_OUT in orch_hub/semantic_jobs.py; an unknown one falls
   // through verbatim for the same reason as above.
   const SKIP_REASON_TEXT = {
     "run-opt-out": "its run was launched with automatic Layer 2 turned off",

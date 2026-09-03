@@ -10,16 +10,12 @@ display-only with respect to everything an operator does — it feeds no readine
 / attention / run / intake decision, and a failing source degrades one card and
 nothing else.
 
-One consumer reads it as a *decision* rather than a display, and it is worth
-naming here because the rest of this module is written on the assumption that
-nothing does: the automatic Layer 2 evaluation dispatcher
-(:mod:`orch_hub.eval_dispatch`) holds a hub-scheduled ``claude -p`` turn while
-the Claude window it would draw on is near its ceiling. That is the hub declining
-to spend the operator's window on measuring the operator's work — it delays only
-a sidecar the hub scheduled for itself, never anything anyone asked for (a manual
-evaluation is not capacity-gated), and unreadable figures defer rather than
-dispatch, so a broken feed stops the hub's own spending and nothing else.
-:meth:`UsageService.provider_usage` is that consumer's read.
+Nothing reads it as a *decision*. There was one consumer that did — the automatic
+Layer 2 evaluation dispatcher held a hub-scheduled ``claude -p`` turn while the
+Claude window it would draw on was near a ceiling — and it is gone with the
+automatic path itself (:mod:`orch_hub.completion_eval`). The hub no longer
+schedules any model spend of its own, so there is nothing left for a capacity
+reading to gate: this module is display-only without exception again.
 
 Two providers, two different signal sources — because the hub relates to each CLI
 differently:
@@ -2058,18 +2054,19 @@ class UsageService:
 
         The aggregate :meth:`get_usage` is the display read: it always touches both
         providers, and Codex's half scans up to :data:`MAX_ROLLOUT_SCAN` session
-        rollouts. A consumer that only cares about the provider it is about to
-        spend against (the automatic Layer 2 dispatcher, which runs the Claude CLI)
-        should not pay for the other one, so this reads exactly the asked-for
-        provider through the same fail-soft wrapper.
+        rollouts. A consumer that only cares about one provider should not pay for
+        the other one, so this reads exactly the asked-for provider through the
+        same fail-soft wrapper. It was built for the automatic Layer 2 dispatcher's
+        capacity read, which no longer exists; it remains as the single-provider
+        read of a service whose aggregate is the expensive one.
 
         Uncached on purpose: :meth:`get_usage` caches a whole snapshot for the
-        Overview's polling clients, while this answers a decision that must see the
+        Overview's polling clients, while this answers a caller that wants the
         freshest figures the store holds. Both go through the same per-provider
         readers, so a Claude read still ingests both carriers and still requests a
         background refresh when the observation has aged past the collector's
-        horizon — the decision path keeps the figures fresh as a side effect of
-        consulting them. An unknown provider key is unavailable, never an error."""
+        horizon — reading keeps the figures fresh as a side effect of consulting
+        them. An unknown provider key is unavailable, never an error."""
         now = self._clock()
         if provider == PROVIDER_CLAUDE:
             return _safe(PROVIDER_CLAUDE, lambda: self._read_claude(now))
