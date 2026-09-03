@@ -1722,7 +1722,7 @@ def create_app(
         require_evaluation_enabled()
         return {
             "enabled": True,
-            **queue_snapshot(resolved, semantic_jobs.list_jobs()).to_dict(),
+            **queue_snapshot(semantic_jobs.list_jobs()).to_dict(),
         }
 
     # -- global report feed ----------------------------------------------------

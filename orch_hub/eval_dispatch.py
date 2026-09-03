@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-from .config import Config
 from .models import (
     EvaluationQueueEntry,
     EvaluationQueueSnapshot,
@@ -119,7 +118,6 @@ def _settled_key(job: SemanticJob) -> tuple:
 
 
 def queue_snapshot(
-    config: Config,
     jobs: list[SemanticJob],
     *,
     now: dt.datetime | None = None,
@@ -129,14 +127,15 @@ def queue_snapshot(
 
     Pure: takes the records (one :meth:`SemanticJobManager.list_jobs` walk) and a
     clock, and returns a projection. It holds no state, reads no file, and writes
-    nothing. ``config`` is kept in the signature although nothing is read from it
-    today — every caller already has one, and a projection over hub-owned storage
-    that has to be re-plumbed to state one fact about it is a worse shape than an
-    unused parameter.
+    nothing.
 
-    It is deliberately **not** gated on ``auto_evaluation_enabled``: that switch
-    governs automatic *Layer 1* and has nothing to do with these records, which
-    are all somebody's explicit request or a legacy leftover.
+    It takes no ``Config``, which is the shape of the change rather than an
+    omission. The fold used to read three values — the trigger gate to echo, the
+    stall bound to measure held records against — and every one of them described a
+    dispatcher. There is no configuration that changes what this store holds or
+    how it should be read, so a config parameter here would only suggest one
+    exists. ``auto_evaluation_enabled`` in particular governs automatic *Layer 1*
+    and must not filter or annotate these records.
 
     ``counts`` is one entry per persisted *record* — and the store keeps one
     record per ``(repo, task)``, holding that task's **latest** attempt. So the

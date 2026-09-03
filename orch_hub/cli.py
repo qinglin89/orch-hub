@@ -200,12 +200,12 @@ def _build_parser() -> argparse.ArgumentParser:
     # service and a bearer token, and the moment an operator most wants to see the
     # queue is the moment the hub is misbehaving. This reads the same durable store
     # the service does, so it answers whether or not the service is up — and, like
-    # the catalog verbs, it is a read that changes nothing. Pause/resume stay on
-    # the HTTP/dashboard side: those are writes to live service state, and the
-    # dashboard is where the operator watching a stalled queue already is.
+    # the catalog verbs, it is a read that changes nothing. Starting an evaluation
+    # and cancelling one stay on the HTTP/dashboard side: those are writes to live
+    # service state, and the dashboard is where the operator reading this is.
     eval_queue_p = eval_sub.add_parser(
         "queue",
-        help="report the automatic Layer 2 evaluation queue; changes nothing",
+        help="report the Layer 2 evaluation job store; changes nothing",
     )
     _add_json_arg(eval_queue_p)
     eval_queue_p.set_defaults(eval_handler=_cmd_eval_queue)
@@ -962,7 +962,7 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    snapshot = queue_snapshot(config, records)
+    snapshot = queue_snapshot(records)
     if args.json:
         # The HTTP payload minus its ``enabled`` envelope field, which this command
         # cannot emit a value for other than true (a disabled subsystem exited

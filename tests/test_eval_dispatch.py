@@ -185,7 +185,6 @@ def test_the_census_counts_every_status_including_the_zeroes(tmp_path):
     that forgot to look.
     """
     snap = queue_snapshot(
-        config(tmp_path),
         [job("a", STATUS_COMPLETED), job("b", STATUS_COMPLETED), job("c", STATUS_DEFERRED)],
         now=NOW,
     )
@@ -214,9 +213,7 @@ def test_legacy_skipped_records_are_counted_but_never_listed(tmp_path):
     it accepted.
     """
     snap = queue_snapshot(
-        config(tmp_path),
-        [job(f"s{i}", STATUS_SKIPPED) for i in range(30)]
-        + [job("held", STATUS_DEFERRED)],
+        [job(f"s{i}", STATUS_SKIPPED) for i in range(30)] + [job("held", STATUS_DEFERRED)],
         now=NOW,
     )
 
@@ -235,7 +232,6 @@ def test_the_retired_per_repo_skip_tally_is_gone(tmp_path):
     visible without implying one.
     """
     snap = queue_snapshot(
-        config(tmp_path),
         [job("a", STATUS_SKIPPED, repo_name="alpha"), job("b", STATUS_SKIPPED, repo_name="")],
         now=NOW,
     )
@@ -247,7 +243,7 @@ def test_the_retired_per_repo_skip_tally_is_gone(tmp_path):
 
 def test_an_unknown_status_is_counted_rather_than_dropped(tmp_path):
     """A hand-edited record must not shrink the census silently."""
-    snap = queue_snapshot(config(tmp_path), [job("a", "improvised")], now=NOW)
+    snap = queue_snapshot([job("a", "improvised")], now=NOW)
 
     assert snap.counts["improvised"] == 1
     assert len(snap.entries) == 1
@@ -255,9 +251,7 @@ def test_an_unknown_status_is_counted_rather_than_dropped(tmp_path):
 
 def test_completed_jobs_are_counted_but_not_listed(tmp_path):
     """The healthy outcome is a figure, not a row; rows are what may need action."""
-    snap = queue_snapshot(
-        config(tmp_path), [job("a", STATUS_COMPLETED), job("b", STATUS_FAILED)], now=NOW
-    )
+    snap = queue_snapshot([job("a", STATUS_COMPLETED), job("b", STATUS_FAILED)], now=NOW)
 
     assert snap.counts[STATUS_COMPLETED] == 1
     assert [e.job.task_id for e in snap.entries] == ["b"]
@@ -273,7 +267,6 @@ def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
     older = NOW - dt.timedelta(hours=3)
     newer = NOW - dt.timedelta(hours=1)
     snap = queue_snapshot(
-        config(tmp_path),
         [
             job("fail-old", STATUS_FAILED, created=older, updated=older),
             job("held-new", STATUS_DEFERRED, created=newer),
@@ -296,9 +289,7 @@ def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
 def test_the_age_is_measured_from_acceptance_not_from_a_turn(tmp_path):
     """How long this attempt has been open, not how long its turn has run."""
     snap = queue_snapshot(
-        config(tmp_path),
-        [job("a", STATUS_DEFERRED, created=NOW - dt.timedelta(hours=2))],
-        now=NOW,
+        [job("a", STATUS_DEFERRED, created=NOW - dt.timedelta(hours=2))], now=NOW
     )
 
     assert snap.entries[0].age_seconds == 7200
@@ -313,7 +304,7 @@ def test_an_unparseable_stamp_reads_as_unknown_age_not_zero(tmp_path):
         status=STATUS_DEFERRED,
         created_ts="not-a-timestamp",
     )
-    snap = queue_snapshot(config(tmp_path), [record], now=NOW)
+    snap = queue_snapshot([record], now=NOW)
 
     assert snap.entries[0].age_seconds is None
 
@@ -329,7 +320,6 @@ def test_a_long_standing_record_is_reported_without_being_called_late(tmp_path):
     """
     old = NOW - dt.timedelta(days=30)
     snap = queue_snapshot(
-        config(tmp_path),
         [job("d", STATUS_DEFERRED, created=old), job("q", STATUS_QUEUED, created=old)],
         now=NOW,
     )
@@ -352,7 +342,7 @@ def test_the_projection_reports_no_switch_state_at_all(tmp_path):
     nothing to do with this store. Echoing it here would send a reader to the wrong
     switch.
     """
-    snap = queue_snapshot(config(tmp_path, eval_auto=False), [job("a", STATUS_DEFERRED)], now=NOW)
+    snap = queue_snapshot([job("a", STATUS_DEFERRED)], now=NOW)
 
     assert set(snap.to_dict()) == {"counts", "entries", "truncated"}
     assert not hasattr(snap, "auto_enabled")
@@ -366,11 +356,7 @@ def test_a_cancelled_record_is_counted_but_never_listed_as_actionable(tmp_path):
     """A resting, deliberate outcome — the same treatment ``skipped`` gets. The
     count is what keeps a deliberate gap in the corpus answerable; a row would only
     crowd out the jobs that are genuinely stuck."""
-    snap = queue_snapshot(
-        config(tmp_path),
-        [job("a", STATUS_CANCELLED), job("b", STATUS_DEFERRED)],
-        now=NOW,
-    )
+    snap = queue_snapshot([job("a", STATUS_CANCELLED), job("b", STATUS_DEFERRED)], now=NOW)
 
     assert snap.counts[STATUS_CANCELLED] == 1
     assert [e.job.task_id for e in snap.entries] == ["b"]
@@ -384,7 +370,7 @@ def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
         for i in range(5)
     ]
 
-    snap = queue_snapshot(config(tmp_path), records, now=NOW, limit=2)
+    snap = queue_snapshot(records, now=NOW, limit=2)
 
     assert len(snap.entries) == 2
     assert snap.truncated is True
@@ -393,32 +379,33 @@ def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
 
 
 def test_an_uncapped_page_is_not_marked_truncated(tmp_path):
-    snap = queue_snapshot(config(tmp_path), [job("a", STATUS_DEFERRED)], now=NOW)
+    snap = queue_snapshot([job("a", STATUS_DEFERRED)], now=NOW)
 
     assert snap.truncated is False
     assert len(snap.entries) == 1
 
 
-def test_the_fold_shows_the_same_records_whatever_the_gates_say(tmp_path):
+def test_the_fold_cannot_be_gated_because_it_reads_no_configuration(tmp_path):
     """A reader asking about a record must never be answered with an omission.
 
     The evaluation switches say nothing about this store — one gates automatic
     Layer 1, the other the whole subsystem's routes — so neither may filter what
-    the projection returns. The route above it still refuses while the subsystem is
-    disabled; that is the caller's gate, not the fold's.
+    the projection returns. That is now structural rather than a behaviour to
+    check: the fold takes no ``Config``, so there is nothing for a gate to be read
+    from. The route above it still refuses while the subsystem is disabled; that is
+    the caller's gate, not the fold's.
     """
-    records = [job("a", STATUS_DEFERRED)]
-    for cfg in (
-        config(tmp_path),
-        config(tmp_path, eval_auto=False),
-        config(tmp_path, evaluation_enabled=False),
-    ):
-        snap = queue_snapshot(cfg, records, now=NOW)
-        assert [e.job.task_id for e in snap.entries] == ["a"]
+    import inspect
+
+    params = inspect.signature(queue_snapshot).parameters
+    assert list(params) == ["jobs", "now", "limit"]
+    assert [e.job.task_id for e in queue_snapshot([job("a", STATUS_DEFERRED)], now=NOW).entries] == [
+        "a"
+    ]
 
 
 def test_an_empty_store_is_a_calm_snapshot_not_an_error(tmp_path):
-    snap = queue_snapshot(config(tmp_path), [], now=NOW)
+    snap = queue_snapshot([], now=NOW)
 
     assert snap.entries == ()
     assert snap.truncated is False
@@ -444,7 +431,7 @@ def test_the_snapshot_reads_the_store_without_moving_it(tmp_path):
     path = jobs.jobs_dir / "alpha" / TASK / "job.json"
     before = path.read_bytes()
 
-    snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
+    snap = queue_snapshot(jobs.list_jobs(), now=clock.now)
 
     assert [e.job.status for e in snap.entries] == [STATUS_QUEUED]
     assert path.read_bytes() == before
@@ -516,7 +503,7 @@ def test_a_report_outlives_the_record_that_produced_it(tmp_path):
 
     assert retried.status == STATUS_FAILED
     # One record per task, so the completed attempt is gone from the store...
-    snap = queue_snapshot(cfg, jobs.list_jobs(), now=clock.now)
+    snap = queue_snapshot(jobs.list_jobs(), now=clock.now)
     assert snap.counts[STATUS_COMPLETED] == 0
     assert snap.counts[STATUS_FAILED] == 1
     assert [e.job.status for e in snap.entries] == [STATUS_FAILED]
