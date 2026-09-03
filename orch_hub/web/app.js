@@ -1845,13 +1845,14 @@
     // `dev_mode`/`review_mode`; the server turns it into argv via
     // build_launch_args, so the per-role/backend rules live in one tested place.
     // The plan-gate toggle is orthogonal to the role selections and stays
-    // available in every mode. The evaluate-on-completion toggle sits beside it
-    // but is a different kind of field: plan-gate becomes orchestrator argv, while
-    // this one is hub-only (`auto_semantic_eval` on the start request, persisted on
-    // the run record) and must never reach the orchestrator, which parses argv
-    // strictly and would abort the launch on an unknown flag. The blocked-task
-    // acknowledgement moves inside the dialog, so it is confirmed together with
-    // the launch. Only one options dialog is on the page at a time, so fixed field
+    // available in every mode. It is the only toggle here, and it is orchestrator
+    // argv. An evaluate-on-completion toggle used to sit beside it, declining the
+    // automatic Layer 2 report for a task this run finished; a completion now
+    // measures its task with Layer 1 alone and starts no model turn, so there is
+    // nothing to decline at launch and the choice is not offered. Asking for a
+    // semantic report is a later, explicit act on the task's evaluation view. The
+    // blocked-task acknowledgement moves inside the dialog, so it is confirmed
+    // together with the launch. Only one options dialog is on the page at a time, so fixed field
     // ids are safe; the modal is named by its own heading through aria-labelledby.
     return (
       head +
@@ -1884,11 +1885,6 @@
             <span>Plan-gate: every dev session first proposes its goal and plan
             and blocks for confirmation before implementing (orchestrator
             default: off).</span></label>
-          <label class="opt-toggle"><input type="checkbox" class="opt-auto-eval" checked />
-            <span>Evaluate on completion: if this run finishes the task, queue its
-            automatic Layer 2 semantic report (default: on). Unchecking declines
-            only the model turn — the free Layer 1 metrics still run, and the skip
-            is recorded and counted rather than leaving a silent gap.</span></label>
           ${ack}
           <div class="control-actions">
             <button type="submit">Launch run</button>
@@ -1994,12 +1990,10 @@
       });
       const backendSel = form.querySelector(".opt-backend");
       if (backendSel) backendSel.value = "";
-      // Both toggles reset with the dialog: a reopened dialog offers the defaults
-      // (plan-gate off, evaluation on), never the previous launch's choices.
+      // The toggle resets with the dialog: a reopened dialog offers the default
+      // (plan-gate off), never the previous launch's choice.
       const planGate = form.querySelector(".opt-plan-gate");
       if (planGate) planGate.checked = false;
-      const autoEval = form.querySelector(".opt-auto-eval");
-      if (autoEval) autoEval.checked = true;
       launchCfg = {
         repo: form.dataset.repo,
         dev: "default",
@@ -2723,10 +2717,6 @@
     const ackBox = form.querySelector(".ack-blocked");
     const acknowledgeBlocked =
       form.dataset.blocked === "1" ? !!(ackBox && ackBox.checked) : false;
-    // Default ON when the control is missing for any reason: the server default is
-    // on too, and a UI accident must not silently thin the evaluated corpus.
-    const autoEvalBox = form.querySelector(".opt-auto-eval");
-    const autoSemanticEval = autoEvalBox ? !!autoEvalBox.checked : true;
     statusEl.textContent = "";
     statusEl.classList.remove("error-text");
     const launch = buildLaunchPayload(form, statusEl);
@@ -2743,7 +2733,6 @@
           task_id: form.dataset.task,
           launch: launch,
           acknowledge_blocked: acknowledgeBlocked,
-          auto_semantic_eval: autoSemanticEval,
         },
       });
       if (dialog && dialog.open) closeRunOptions(dialog);

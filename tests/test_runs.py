@@ -344,8 +344,6 @@ def test_run_record_is_persisted_to_run_json(tmp_path):
         "started_ts": clock.now.isoformat(),
         "ended_ts": None,
         "exit_code": None,
-        # The launch-time Layer 2 opt-out: on unless the launch declined it.
-        "auto_semantic_eval": True,
         # The end-tail marker: false for a run that has not ended.
         "end_settling": False,
     }
@@ -362,60 +360,31 @@ def test_run_record_carries_launch_time_task_status(tmp_path):
     assert read_record(manager, record.run_id)["task_status"] == "final_review"
 
 
-def test_a_launch_can_decline_the_automatic_layer_2(tmp_path):
-    """The hub-only opt-out is persisted for the completion trigger to read back."""
-    repo = make_repo(tmp_path)
-    manager, _, _ = make_manager(tmp_path)
+def test_a_run_json_from_the_layer_2_opt_out_era_still_loads(tmp_path):
+    """The retired launch field is ignored on read, not migrated and not resurrected.
 
-    record = manager.start_run(repo, TASK_ID, auto_semantic_eval=False)
-
-    assert record.auto_semantic_eval is False
-    assert read_record(manager, record.run_id)["auto_semantic_eval"] is False
-
-
-def test_the_layer_2_opt_out_never_reaches_the_orchestrator(tmp_path):
-    """It is hub-owned: the orchestrator parses argv strictly and would abort.
-
-    Asserted as argv equality between the two choices rather than as the absence
-    of one guessed flag spelling, so no future spelling can slip through.
-    """
-    repo = make_repo(tmp_path)
-    manager, spawner, _ = make_manager(tmp_path)
-
-    on = manager.start_run(repo, TASK_ID, auto_semantic_eval=True)
-    end_run(spawner, 0)
-    manager.list_runs()  # observe the end so the repo is free for a second launch
-    off = manager.start_run(repo, TASK_ID, auto_semantic_eval=False)
-
-    def orchestrator_args(argv):
-        # Drop the per-run control dir, the only argv difference between two runs.
-        return [a for a in argv if "/control" not in a]
-
-    assert orchestrator_args(spawner.calls[0]["argv"]) == orchestrator_args(
-        spawner.calls[1]["argv"]
-    )
-    assert on.auto_semantic_eval is True and off.auto_semantic_eval is False
-
-
-def test_a_record_written_before_the_opt_out_existed_still_evaluates(tmp_path):
-    """Absent means ON: that cohort was launched when declining was impossible.
-
-    Reading it as off would exclude every pre-field run from the corpus without
-    anyone choosing that — exactly the silent selection the trigger exists to
-    remove.
+    Every ``run.json`` a hub wrote while a launch could decline automatic Layer 2
+    carries ``auto_semantic_eval``. Nothing consumes that choice now — a completion
+    starts no model turn either way — so the reader must simply not know the key.
+    Pinned because the failure mode is loud and total: a record loader that choked
+    on an unknown key would make every historical run unreadable, taking run
+    history, evidence packs, and the log routes with it.
     """
     repo = make_repo(tmp_path)
     manager, _, _ = make_manager(tmp_path)
     record = manager.start_run(repo, TASK_ID)
     path = manager.runs_dir / record.run_id / "run.json"
     data = json.loads(path.read_text(encoding="utf-8"))
-    del data["auto_semantic_eval"]
+    assert "auto_semantic_eval" not in data  # nothing writes it any more
+    data["auto_semantic_eval"] = False
     path.write_text(json.dumps(data), encoding="utf-8")
 
     config = Config(mandrel_path=tmp_path / "mandrel", data_dir=tmp_path / "hub-data")
     reloaded = dict(load_records(config))[manager.runs_dir / record.run_id]
 
-    assert reloaded.auto_semantic_eval is True
+    assert reloaded.run_id == record.run_id
+    assert reloaded.task_id == TASK_ID
+    assert not hasattr(reloaded, "auto_semantic_eval")
 
 
 def test_run_record_spawn_out_path_is_set_and_reattaches(tmp_path):

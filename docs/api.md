@@ -70,10 +70,11 @@ Run starts fail closed on readiness, repo admission, task legality, and an
 uninterpretable launch selection. One repo may have at most one live run. A
 non-terminal remote intake also holds that repo's admission slot.
 
-Two start-request fields are hub-only and never become orchestrator argv:
-`acknowledge_blocked` (launch a `blocked` task anyway) and `auto_semantic_eval`
-(default true; false declines the automatic Layer 2 evaluation of a task this run
-completes — see `docs/evaluation.md`).
+One start-request field is hub-only and never becomes orchestrator argv:
+`acknowledge_blocked` (launch a `blocked` task anyway). A completed run generates
+its task's deterministic Layer 1 report and starts no model turn, so there is no
+launch-time Layer 2 choice to make; a semantic report is asked for explicitly on
+the task's evaluation view (see `docs/evaluation.md`).
 
 The stop route is graceful: it writes the scheduler's stop request and returns.
 The scheduler consumes it at the next session boundary or during an outstanding

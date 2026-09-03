@@ -81,7 +81,6 @@ def completed_record(
     repo_path: Path | None = REPO_PATH,
     task_id: str = TASK,
     repo_name: str = "alpha",
-    auto_semantic_eval: bool = True,
 ) -> RunRecord:
     """A run record as the manager hands it to the hook: ended, task attributed."""
     return RunRecord(
@@ -92,7 +91,6 @@ def completed_record(
         started_ts=FIXED_TS.isoformat(),
         ended_ts=FIXED_TS.isoformat(),
         exit_code=0,
-        auto_semantic_eval=auto_semantic_eval,
     )
 
 
@@ -286,29 +284,6 @@ def test_a_repeated_completion_regenerates_layer_1(tmp_path):
     trig.on_task_completed(completed_record())
 
     assert len(static.calls) == 2
-
-
-# -- the retired per-run Layer 2 opt-out --------------------------------------
-
-
-def test_the_launch_time_opt_out_no_longer_changes_anything(tmp_path):
-    """``auto_semantic_eval=False`` is inert: there is nothing left to opt out of.
-
-    The field selected between an accepted Layer 2 job and a recorded ``skipped``
-    one. Both halves are gone, so a run launched with the box unchecked and one
-    launched with it checked now take the identical path — Layer 1, nothing else.
-    Kept as a regression guard while the field itself is still persisted: it must
-    not grow a second meaning on the way out.
-    """
-    opted_out, static_out = trigger(tmp_path)
-    opted_out.on_task_completed(completed_record(auto_semantic_eval=False))
-
-    opted_in, static_in = trigger(tmp_path)
-    opted_in.on_task_completed(completed_record(auto_semantic_eval=True))
-
-    reached = [(r.name, t) for r, t in static_out.calls]
-    assert reached == [("alpha", TASK)]
-    assert [(r.name, t) for r, t in static_in.calls] == reached
 
 
 # -- integration: a real completed run through the real layers ----------------
@@ -536,24 +511,6 @@ def test_a_second_completed_run_of_the_same_task_regenerates_layer_1_only(tmp_pa
     stored = service.list_evaluations(target, TASK)
     assert len(stored) == 2
     assert all(SEMANTIC_REPORT_NAME not in s.artifacts for s in stored)
-    assert jobs.list_jobs() == []
-
-
-@pytest.mark.parametrize("opt_out", [True, False])
-def test_the_launch_flag_does_not_change_what_a_completion_produces(tmp_path, opt_out):
-    """End to end: the retired opt-out reaches nothing, in either position."""
-    cfg, service, jobs, manager, spawner = _wire(tmp_path)
-    target = _write_repo(tmp_path)
-
-    manager.start_run(target, TASK, auto_semantic_eval=not opt_out)
-    _write_orch_log(target)
-    spawner.procs[0].returncode = 0
-    assert manager.list_runs()[0].state == "completed"
-
-    stored = service.list_evaluations(target, TASK)
-    assert len(stored) == 1
-    assert set(stored[0].artifacts) == {EVIDENCE_NAME, STATIC_METRICS_NAME}
-    # Neither an accepted job nor a recorded skip: the whole vocabulary is unused.
     assert jobs.list_jobs() == []
 
 

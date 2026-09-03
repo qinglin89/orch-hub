@@ -343,14 +343,13 @@ class StartRunRequest(BaseModel):
     like ``GET /api/repos/{repo_id}/tasks``). ``acknowledge_blocked`` opts into
     launching a ``blocked`` task despite the §5.4 resume caveat.
 
-    ``auto_semantic_eval`` (default true) is the second hub-only field beside it,
-    and it is **inert**: it declined the automatic Layer 2 evaluation of a task
-    this run completed, and no completion starts a semantic turn any more. It is
-    still accepted and still persisted on the run record so existing callers do
-    not break and historical records stay readable; it is retired with the rest of
-    the automatic path's surface. Hub-only remains a hard constraint while it
-    exists — it must never become orchestrator argv, which is parsed strictly and
-    would abort the launch on an unknown flag.
+    A launch once carried a second hub-only field, ``auto_semantic_eval``, which
+    declined the automatic Layer 2 evaluation of a task this run completed. No
+    completion starts a semantic turn any more, so there is nothing left to
+    decline and the field is gone. A caller still sending it is not an error: an
+    unknown body key is ignored here as everywhere, so an old client keeps
+    launching runs rather than earning a 422 for asking about a choice that no
+    longer exists.
 
     Launch arguments come from exactly one of two mutually exclusive paths: the
     structured ``launch`` mode selector (server-built argv, the dashboard path) or
@@ -364,7 +363,6 @@ class StartRunRequest(BaseModel):
     launch: LaunchRequest | None = None
     extra_args: list[str] = Field(default_factory=list)
     acknowledge_blocked: bool = False
-    auto_semantic_eval: bool = True
 
 
 class AnswerRequest(BaseModel):
@@ -1205,7 +1203,6 @@ def create_app(
             req.task_id,
             extra_args=extra_args,
             acknowledge_blocked=req.acknowledge_blocked,
-            auto_semantic_eval=req.auto_semantic_eval,
         )
         return manager.get_run(record.run_id).to_dict()
 

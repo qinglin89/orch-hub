@@ -319,15 +319,6 @@ class RunRecord:
     unreadable ``run.json``, so a broken dir cannot hide a run. Stubs carry
     ``None`` placeholders for the unknown fields.
 
-    ``auto_semantic_eval`` is the launch-time opt-out for this run's automatic
-    Layer 2: ``False`` means a completion this run produces enqueues no semantic
-    turn and records a terminal ``skipped`` job instead (Layer 1 still runs — it
-    makes no model call, so skipping it would save nothing and forfeit the whole
-    deterministic layer). Hub-owned by construction: it never reaches the
-    orchestrator, which parses argv strictly and would abort a launch on an
-    unknown flag. Absent from a persisted record means **on**, so every run
-    written before the field existed still evaluates.
-
     ``end_settling`` is the second half of the end write: ``ended_ts`` settles a
     run permanently (the manager never revisits it), but the work that end
     *triggers* — the evidence settles, the notification, the completion handed
@@ -354,7 +345,6 @@ class RunRecord:
     started_ts: str | None = None
     ended_ts: str | None = None
     exit_code: int | None = None
-    auto_semantic_eval: bool = True
     end_settling: bool = False
     error: str | None = None
 
@@ -2352,8 +2342,8 @@ class SemanticJob:
     current hub writes carries ``auto=False``; the field remains because persisted
     records from the automatic era do not. ``skip_reason`` is likewise
     legacy-only: the bounded machine token on a ``skipped`` record, written when a
-    task completed under a run launched with the automatic Layer 2 opt-out
-    (``RunRecord.auto_semantic_eval``). Its vocabulary is the single token
+    task completed under a run launched with the retired per-run Layer 2 opt-out.
+    Its vocabulary is the single token
     :data:`orch_hub.semantic_jobs.SKIP_RUN_OPT_OUT`, never operator prose — free
     text would be unanalyzable and would leak repo content into a persisted
     surface. All three reason fields are mutually exclusive per record and answer

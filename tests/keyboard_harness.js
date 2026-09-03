@@ -1661,40 +1661,19 @@ async function scenarioRunOptions() {
   );
   eq("dialog: a successful launch closes it", dialogD.open, false);
 
-  // The Layer 2 opt-out: a hub-only body field, ON by default, and never part of
-  // the `launch` selection the server turns into orchestrator argv (an unknown
-  // flag would abort every launch).
+  // The retired Layer 2 opt-out. A completion measures its task with Layer 1 and
+  // starts no model turn, so the dialog offers no evaluation choice and the start
+  // request carries none — asserted on the body rather than only on the markup,
+  // because a stale field left in the payload would be invisible on screen.
   check(
-    "dialog: evaluate-on-completion defaults to on",
-    !!callD && callD.body.auto_semantic_eval === true,
+    "dialog: no evaluation toggle is offered",
+    !dialogD.querySelector(".opt-auto-eval"),
+    "an .opt-auto-eval control is still rendered"
+  );
+  check(
+    "dialog: the start request carries no evaluation choice",
+    !!callD && callD.body.auto_semantic_eval === undefined,
     callD ? JSON.stringify(callD.body) : "no call"
-  );
-  check(
-    "dialog: it never rides the launch selection",
-    !!callD && callD.body.launch.auto_semantic_eval === undefined,
-    callD ? JSON.stringify(callD.body.launch) : "no call"
-  );
-
-  // Unchecking it declines only the model turn — and the choice reaches the hub,
-  // where the skip is recorded and counted rather than left as a silent absence.
-  await navigate("#/tasks/" + REPO + "/" + TASK);
-  var openE = doc.querySelector(".open-run-options");
-  var dialogE = doc.querySelector(".run-options");
-  pressEnter(openE);
-  await flush();
-  var autoEval = dialogE.querySelector(".opt-auto-eval");
-  check("dialog: the evaluate-on-completion toggle is offered", !!autoEval, "no .opt-auto-eval");
-  eq("dialog: it opens checked", autoEval.checked, true);
-  autoEval.focus();
-  autoEval.checked = false;
-  dispatch(autoEval, new Event("change"));
-  pressEnter(dialogE.querySelector('button[type="submit"]'));
-  await flush();
-  var callE = lastCall("POST", "/api/runs");
-  check(
-    "dialog: unchecking it posts the opt-out",
-    !!callE && callE.body.auto_semantic_eval === false,
-    callE ? JSON.stringify(callE.body) : "no call"
   );
 
   // Reopening offers the defaults again: one dialog's choice must not become the
@@ -1707,21 +1686,14 @@ async function scenarioRunOptions() {
   var dialogF = doc.querySelector(".run-options");
   pressEnter(openF);
   await flush();
-  var autoEvalF = dialogF.querySelector(".opt-auto-eval");
   var planGateF = dialogF.querySelector(".opt-plan-gate");
-  autoEvalF.checked = false;
   planGateF.checked = true;
   pressEnter(dialogF.querySelector(".cancel-run-options"));
   eq("dialog: Cancel closed it before relaunching", dialogF.open, false);
   pressEnter(openF);
   await flush();
   eq(
-    "dialog: a reopened dialog restores the evaluation default",
-    dialogF.querySelector(".opt-auto-eval").checked,
-    true
-  );
-  eq(
-    "dialog: and the plan-gate default",
+    "dialog: a reopened dialog restores the plan-gate default",
     dialogF.querySelector(".opt-plan-gate").checked,
     false
   );

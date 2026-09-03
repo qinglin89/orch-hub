@@ -407,14 +407,14 @@ def test_launch_dialog_submit_sends_launch_and_keeps_ack():
     assert "launch: launch," in body
 
 
-def test_the_layer_2_opt_out_is_a_body_field_not_a_launch_argument():
-    # The boundary this test exists for: the toggle must reach the hub as a
-    # start-request field and must never join the `launch` selection, which the
-    # server turns into orchestrator argv — an unknown flag aborts every launch.
+def test_the_launch_dialog_offers_no_evaluation_choice():
+    # A completion measures its task with Layer 1 and starts no model turn, so
+    # there is nothing to decline at launch. Asserted as the absence of both the
+    # control and the body field: either one surviving alone would be a control
+    # that does nothing, or a payload field nobody can see.
     body = app_js()
-    assert "opt-auto-eval" in body
-    assert "auto_semantic_eval: autoSemanticEval," in body
-    assert "launch.auto_semantic_eval" not in body
+    assert "opt-auto-eval" not in body
+    assert "auto_semantic_eval" not in body
 
 
 # ---- startup-failure diagnostic (spawn.out) ---------------------------------

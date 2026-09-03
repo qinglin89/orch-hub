@@ -899,27 +899,25 @@ def test_start_run_blocked_task_requires_acknowledgement(tmp_path, monkeypatch):
     assert len(spawner.calls) == 1
 
 
-@pytest.mark.parametrize(
-    "body, expected",
-    [
-        ({}, True),  # omitted: the default, and the only safe default
-        ({"auto_semantic_eval": True}, True),
-        ({"auto_semantic_eval": False}, False),
-    ],
-)
-def test_start_run_records_the_layer_2_opt_out(tmp_path, monkeypatch, body, expected):
-    """Hub-only, beside ``acknowledge_blocked``: persisted, never orchestrator argv.
+@pytest.mark.parametrize("body", [{}, {"auto_semantic_eval": False}])
+def test_start_run_ignores_the_retired_layer_2_opt_out(tmp_path, monkeypatch, body):
+    """An old client still sending the field launches; the field means nothing.
 
-    The orchestrator parses argv strictly and would abort a launch on an unknown
-    flag, so this choice can only ride the run record — which is also where the
-    completion trigger reads it back from.
+    ``auto_semantic_eval`` declined the automatic Layer 2 evaluation of a task the
+    run completed. No completion starts a semantic turn now, so the field is gone
+    from the request model — but a body carrying it must not become a 422: a
+    dashboard cached in a phone browser, or a script written against the old
+    shape, would otherwise stop being able to start runs at all over a choice that
+    no longer exists. Unknown body keys are ignored, and the launch is identical
+    either way.
     """
     client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
 
     started = start_a_run(client, repo, **body)
 
+    assert started["state"] == "active"
     record = manager.get_run(started["run_id"]).record
-    assert record.auto_semantic_eval is expected
+    assert not hasattr(record, "auto_semantic_eval")
     assert "auto_semantic_eval" not in " ".join(spawner.calls[0]["argv"])
 
 
