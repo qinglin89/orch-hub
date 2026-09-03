@@ -106,9 +106,7 @@ no live run or other non-terminal intake may own the repo.
 |---|---|
 | `GET /api/evaluation` | Whether the optional evaluation subsystem is enabled |
 | `GET /api/evaluation/doctor` | Layer 2 backend availability without a model call |
-| `GET /api/evaluation/queue` | Cross-repo state of the automatic Layer 2 path (census, held jobs, gate and pause state) |
-| `POST /api/evaluation/queue/pause` | Hold automatic dispatch live; completions keep entering the queue |
-| `POST /api/evaluation/queue/resume` | Release the pause; the next sweep drains what was held |
+| `GET /api/evaluation/queue` | Cross-repo census of the Layer 2 job store: one record per task holding its latest attempt, plus the jobs still outstanding |
 | `GET /api/repos/{repo_id}/evaluations/{task_id}` | Persisted evaluations for an active or archived task |
 | `GET /api/repos/{repo_id}/evaluations/{task_id}/{evaluation_id}` | One evaluation's artifacts |
 | `POST /api/repos/{repo_id}/evaluations/{task_id}/evidence` | Generate a fresh bounded evidence pack |

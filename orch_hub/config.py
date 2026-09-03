@@ -219,29 +219,6 @@ DEFAULT_EVAL_RETENTION = 20
 prune older ones on the next generation. Generous enough for trend analysis over
 a task's evaluation history, bounded enough to avoid unbounded growth."""
 
-EVAL_QUEUE_MAX_AGE_ENV = "ORCH_HUB_EVAL_QUEUE_MAX_AGE"
-"""Seconds a job may sit in the deferred queue before it is surfaced as stalled.
-
-Deferral is meant to be temporary, and every reason it is not — an exhausted
-weekly window, a usage feed that stopped reporting, a ``claude`` binary that can
-no longer refresh it — looks identical from inside the queue: nothing happens,
-quietly, and the corpus stops growing. Past this age the dispatcher stops
-treating a held job as normal backpressure and says so. It changes no dispatch
-decision; it only bounds how long a stalled queue can stay invisible. Unset or
-blank means :data:`DEFAULT_EVAL_QUEUE_MAX_AGE`; ``0`` disables the bound; a
-negative or non-integer value fails loudly."""
-
-DEFAULT_EVAL_QUEUE_MAX_AGE = 21600
-"""Default deferred-queue age bound: six hours — one full five-hour window plus
-slack.
-
-A job that sat through an entire five-hour window without dispatching did not
-merely lose a busy afternoon: either the weekly window is exhausted or the usage
-signal itself is broken. The second is the likelier and worse failure, because
-unavailable usage defers *forever* by design, so the bound is set short enough to
-reveal it within a working day rather than after a week of silently missing
-reports."""
-
 _TRUE_TOKENS = frozenset({"1", "true", "yes", "on"})
 _FALSE_TOKENS = frozenset({"0", "false", "no", "off"})
 
@@ -461,14 +438,6 @@ class Config:
     is the cap. Only meaningful when evaluation is enabled.
     """
 
-    eval_queue_max_age: int = DEFAULT_EVAL_QUEUE_MAX_AGE
-    """Seconds after which a legacy held Layer 2 job is surfaced as stalled.
-
-    Selected by ``ORCH_HUB_EVAL_QUEUE_MAX_AGE``; ``0`` disables the bound. It
-    affects visibility only: no record it flags is waiting on anything the hub
-    will do by itself.
-    """
-
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "Config":
         """Build config from the environment, honoring the overrides.
@@ -537,11 +506,6 @@ class Config:
                 env.get(EVAL_TURN_TIMEOUT_ENV),
                 default=DEFAULT_EVAL_TURN_TIMEOUT,
                 env_name=EVAL_TURN_TIMEOUT_ENV,
-            ),
-            eval_queue_max_age=_parse_seconds(
-                env.get(EVAL_QUEUE_MAX_AGE_ENV),
-                default=DEFAULT_EVAL_QUEUE_MAX_AGE,
-                env_name=EVAL_QUEUE_MAX_AGE_ENV,
             ),
         )
 

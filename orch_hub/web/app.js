@@ -83,31 +83,33 @@
   // evaluation the view then selects; `error` (a corrupt job record) is handled as
   // terminal/idle-with-retry like `failed`.
   const SEMANTIC_JOB_TRANSIENT = new Set(["queued", "running"]);
-  // `deferred` is a fourth state, and neither transient nor terminal: the job is
-  // accepted and durably owed, held out of a model turn by the automatic dispatch
-  // policy. It must not be polled (a hold is an hours-scale wait) and must never
-  // render as "no job" (the corpus already owes this task a report).
+  // `deferred` is a fourth state, and neither transient nor terminal: an attempt
+  // an earlier hub accepted and held out of a model turn by the automatic dispatch
+  // policy. Nothing accepts or promotes one now, so every such record is a
+  // leftover — it must not be polled (nothing is coming) and must never render as
+  // "no job" either, since the row is what tells the reader a stale acceptance is
+  // sitting on this task until a fresh start supersedes it.
   //
-  // Its bounded machine reason, as prose. Mirrors the REASON_* constants in
-  // orch_hub/eval_dispatch.py; both the per-task evaluation view and the Overview
-  // queue section read this map so a hold is named identically wherever it shows.
-  // An unknown token falls through verbatim rather than vanishing, so a reason
-  // added on the hub is visible here before this map learns about it.
+  // Its bounded machine reason, as prose. The tokens were written by the retired
+  // dispatcher; both the per-task evaluation view and the Overview section read
+  // this map so a held record is named identically wherever it shows. An unknown
+  // token falls through verbatim rather than vanishing, so a record from a build
+  // this one does not know is still legible.
   const DEFER_REASON_TEXT = {
     capacity: "subscription capacity is at the configured ceiling",
     "usage-unknown": "subscription usage could not be read",
     pacing: "another evaluation turn ran recently",
   };
   const deferReasonText = (reason) =>
-    reason ? DEFER_REASON_TEXT[reason] || reason : "waiting for capacity";
+    reason ? DEFER_REASON_TEXT[reason] || reason : "held by a retired dispatch policy";
 
-  // `skipped` is the fifth state: a task that completed and deliberately got no
-  // model turn, because its run was launched with automatic Layer 2 declined. It
-  // is a record rather than an absence so the corpus's missing entries stay
-  // countable — which is the whole condition on which the opt-out is admissible —
-  // so it must never render as "never evaluated" either. Bounded machine tokens,
-  // mirroring SKIP_RUN_OPT_OUT in orch_hub/semantic_jobs.py; an unknown one falls
-  // through verbatim for the same reason as above.
+  // `skipped` is the fifth state, and likewise legacy: a task that completed and
+  // deliberately got no model turn, because its run was launched with automatic
+  // Layer 2 declined. Neither the opt-out nor the automatic path exists any more,
+  // so nothing produces one — but the records survive, and one must never render
+  // as "never evaluated". Bounded machine tokens, mirroring SKIP_RUN_OPT_OUT in
+  // orch_hub/semantic_jobs.py; an unknown one falls through verbatim for the same
+  // reason as above.
   const SKIP_REASON_TEXT = {
     "run-opt-out": "its run was launched with automatic Layer 2 turned off",
   };
@@ -6590,20 +6592,20 @@
     );
   }
 
-  // ---- evaluation queue (automatic Layer 2 visibility) ----
+  // ---- Layer 2 evaluations (cross-repo attempt visibility) ----
   //
-  // Automatic evaluation exists so the evaluated corpus is not a product of
-  // operator judgment. That makes its own failure modes silent by construction: a
-  // queue held by a dead usage feed, a job that failed, and a switch left off all
-  // look identical from outside — nothing happens, and the corpus quietly stops
-  // filling. A selection-free corpus nobody can tell has stalled is worth no more
-  // than the judgment-selected one it replaced, so this section exists to make the
-  // absence countable at a glance, on the screen the operator already lands on.
+  // Every other evaluation surface is scoped to one (repo, task), which cannot
+  // answer "is a semantic evaluation running right now?" or "did one fail while I
+  // was away?" without opening tasks one at a time. A Layer 2 turn takes minutes
+  // and is started from a phone, so the person who started it is rarely still on
+  // that task view when it settles — and a failure nobody can see is a failure
+  // nobody reads. This section is that missing view: one census of the job store,
+  // on the screen the operator already lands on.
   //
   // Display-only, exactly like Subscription usage: it never creates a Needs
   // attention row and never touches readiness, run state, or launch/intake gates
-  // (a stalled evaluation queue is not an operational problem — nothing is
-  // blocked, only unmeasured). Its own section, outside the operational grid.
+  // (a failed evaluation is not an operational problem — nothing is blocked, only
+  // unmeasured). Its own section, outside the operational grid.
 
   // Fetch the queue, distinguishing "the evaluation subsystem is off" (404, like
   // every other evaluation route) from "the read failed" (null). They render
@@ -6626,10 +6628,10 @@
   // on after the queue moved under it.
   const EVQ_CANCELLABLE = new Set(["deferred", "queued", "running"]);
 
-  // One queue row: which task, what state, how long, and — for a held job — why.
-  // The row links to that task's evaluation view, where the full diagnostic and
-  // the manual override live, so "which task is stuck" is one tap from the
-  // landing screen instead of a walk through run history.
+  // One row: which task, what state, how long, and — for a failed one — why. The
+  // row links to that task's evaluation view, where the full diagnostic and the
+  // Retry control live, so "which one failed" is one tap from the landing screen
+  // instead of a walk through run history.
   //
   // The Cancel control sits BESIDE that link rather than inside it: a button
   // nested in an anchor is invalid, and — worse for the operator this section is
@@ -6638,6 +6640,9 @@
   function evalQueueRow(entry) {
     const job = entry.job || {};
     const status = job.status || "unknown";
+    // `deferred` is legacy only: an attempt an earlier hub accepted and never got
+    // to. Nothing promotes one now, so it is shown with its recorded reason and
+    // left alone until somebody supersedes it from the task's own view.
     const held = status === "deferred";
     const age =
       entry.age_seconds === null || entry.age_seconds === undefined
@@ -6661,7 +6666,7 @@
           ` title="Cancel this evaluation">Cancel</button>`
         : "";
     return (
-      `<li class="evq-row${entry.overdue ? " evq-overdue" : ""}">` +
+      `<li class="evq-row">` +
       `<a href="${escapeHtml(evalHash(repoName, taskId))}">` +
       `<span class="evq-line">` +
       `<span class="evq-state ${escapeHtml(status)}">${escapeHtml(status)}</span>` +
@@ -6670,7 +6675,6 @@
       `<span class="evq-meta muted">${escapeHtml(
         [job.repo_name || "", bits.join(" · ")].filter(Boolean).join(" — ")
       )}</span>` +
-      (entry.overdue ? `<span class="evq-flag">stalled</span>` : "") +
       `</a>` +
       cancel +
       `</li>`
@@ -6682,15 +6686,15 @@
   // holding that task's LATEST attempt.
   //
   // That is deliberately not "how many tasks carry a report", and the two really
-  // do diverge: a manual re-run overwrites the task's terminal record
+  // do diverge: a re-run overwrites the task's terminal record
   // (SemanticJobManager.start_job) while the completed evaluation that record
   // pointed at stays in the task's retained evaluation history — so a successful
   // report followed by a failed retry belongs on this line as `failed`. It is the
   // queue that is being reported on, not the size of the corpus. Reading it as a
-  // corpus denominator would also be wrong in the other direction: a task
-  // completed before automatic evaluation existed has no record here at all. What
-  // a task actually carries is answered by its evaluation view and by the report
-  // feed, neither of which an attempt can overwrite.
+  // corpus denominator would also be wrong in the other direction: a task nobody
+  // asked to evaluate has no record here at all. What a task actually carries is
+  // answered by its evaluation view and by the report feed, neither of which an
+  // attempt can overwrite.
   //
   // Zero counts are dropped from the sentence but never from the payload — a queue
   // with nothing in it should read as calm, while "0 failed" as a permanent
@@ -6704,64 +6708,17 @@
     if (waiting) parts.push(waiting + " waiting");
     const failed = (c.failed || 0) + (c.error || 0);
     if (failed) parts.push(failed + " failed");
-    // The two records that are a decision rather than an outcome: a task that
-    // completed and was deliberately not evaluated (the launch-time opt-out), and
-    // one whose accepted attempt an operator stopped. Both belong on this line for
-    // the same reason — the count is exactly what makes declining admissible, and
-    // a figure only reachable by opening tasks one at a time is not a count.
+    // Records that are a decision rather than an outcome: an attempt somebody
+    // stopped, and — from the automatic era only — a completion whose run declined
+    // its evaluation at launch. Both stay on the line because a count is exactly
+    // what makes them legible; neither can be produced any more.
     if (c.cancelled) parts.push(c.cancelled + " cancelled");
     if (c.skipped) parts.push(c.skipped + " skipped");
     return "Latest attempt per task: " + parts.join(" · ");
   }
 
-  // The per-repo split of that skipped figure, because the shape of a thinning
-  // corpus is per repo — skips cluster on the expensive, remediation-heavy tail
-  // rather than spreading evenly. Server-ordered (most skipped first); only repos
-  // holding at least one skipped record appear, since the store knows nothing
-  // about the ones it has no record for. Named by cause, and never as a share of
-  // the repo's tasks: like every other figure here it counts current records.
-  function evalQueueSkips(byRepo) {
-    const names = Object.keys(byRepo || {});
-    if (!names.length) return "";
-    return (
-      `<p class="evq-note evq-skips muted">Layer 2 declined at launch: ` +
-      escapeHtml(names.map((n) => n + " " + byRepo[n]).join(" · ")) +
-      `.</p>`
-    );
-  }
-
-  // The pause note — a queue held by an operator, explained rather than merely
-  // still. It is deliberately NOT phrased like the ORCH_HUB_EVAL_AUTO note above
-  // it, because the two are not the same loss: that switch stops completions
-  // being accepted at all (their tasks are absent from the corpus for good),
-  // while a pause holds only the drain and the queue keeps filling behind it. An
-  // operator deciding which one to reach for needs that difference on screen.
-  //
-  // `unreadable-control` is the pause nobody chose: the hub could not read its own
-  // control file and held the queue rather than spend a window it could not
-  // account for. It says so, and names Resume as the repair, because reporting it
-  // as somebody's decision would send the operator looking for a choice they
-  // never made.
-  function evalQueuePauseNote(control) {
-    if (!control || !control.paused) return "";
-    if (control.reason === "unreadable-control")
-      return (
-        `<p class="evq-note evq-warn">Automatic dispatch is paused because the hub
-         could not read its pause control, so it held the queue rather than spend a
-         window it cannot account for. Resume rewrites the control and releases it.</p>`
-      );
-    const since = control.paused_ts ? formatCommitTime(control.paused_ts) : "";
-    return (
-      `<p class="evq-note evq-warn">${escapeHtml(
-        "Automatic dispatch is paused" +
-          (since ? " (since " + since + ")" : "") +
-          ". Completed tasks still enter the queue; resuming drains it in the same order."
-      )}</p>`
-    );
-  }
-
-  // The Evaluation queue section. Deliberately NO live region on the notes: the
-  // Overview repaints #overview-body on a 15-second tick, and a role="status"
+  // The Layer 2 evaluations section. Deliberately NO live region on the summary:
+  // the Overview repaints #overview-body on a 15-second tick, and a role="status"
   // element re-inserted each tick is re-announced each tick. These are standing
   // facts under a heading, not updates responding to an action — the same reason
   // the Subscription usage cards carry no role either. The section's ONE live
@@ -6773,85 +6730,55 @@
   // queue, and a permanent "disabled" notice on the landing screen is noise), or
   // null when the read failed (render the unavailable state — an unknown queue is
   // not an empty one).
+  //
+  // There are no explanatory notes above the rows any more. Two switches used to
+  // be rendered here — the completion trigger's gate and the operator pause over
+  // the dispatch drain — because a queue that moved by itself could be still for
+  // reasons no record explained. Nothing moves by itself now: every record here is
+  // something somebody asked for or a leftover, so each row explains itself and a
+  // standing notice would only be furniture.
   function evaluationQueuePanel(queue) {
     if (queue && queue.disabled) return "";
     const foot = `</section>`;
     if (queue === null)
       return (
-        `<section class="section overview-evalq"><h2>Evaluation queue</h2>` +
-        `<p class="muted">Evaluation queue is unavailable.</p>` +
+        `<section class="section overview-evalq"><h2>Layer 2 evaluations</h2>` +
+        `<p class="muted">Layer 2 evaluations are unavailable.</p>` +
         foot
       );
-    // The one control the section carries at queue level. Rendered from the
-    // payload's own `control` block rather than from client memory, so a pause
-    // another device set reads correctly here on the next tick, and the label
-    // always names the action rather than the state (a button reading "Paused"
-    // is ambiguous about what pressing it does).
-    const paused = !!(queue.control && queue.control.paused);
-    const toggle =
-      `<button type="button" class="btn-secondary evq-toggle"` +
-      ` data-action="${paused ? "resume" : "pause"}">` +
-      (paused ? "Resume" : "Pause") +
-      `</button>`;
     const head =
       `<section class="section overview-evalq">` +
-      `<div class="evq-head"><h2>Evaluation queue</h2>${toggle}</div>`;
-    const notes = [];
-    // A reason a queue sits still that leaves no trace on the records: the hub
-    // deliberately does not stamp a defer_reason for a closed gate (it is global
-    // config, not a per-job fact), so it can only be explained from the payload's
-    // own config echo. Both holds are rendered when both apply — telling an
-    // operator about only one sends them to fix the wrong switch.
-    if (!queue.auto_enabled)
-      notes.push(
-        `<p class="evq-note evq-warn">Automatic evaluation is off
-         (ORCH_HUB_EVAL_AUTO). Held jobs stay queued until it is switched back on.</p>`
-      );
-    notes.push(evalQueuePauseNote(queue.control));
-    if (queue.overdue)
-      notes.push(
-        `<p class="evq-note evq-warn">${escapeHtml(
-          queue.overdue +
-            (queue.overdue === 1 ? " job has" : " jobs have") +
-            " waited longer than " +
-            fmtDuration(queue.queue_max_age_seconds) +
-            "; the queue is not draining."
-        )}</p>`
-      );
+      `<div class="evq-head"><h2>Layer 2 evaluations</h2></div>`;
     const entries = queue.entries || [];
     const rows = entries.length
       ? `<ul class="list evq-rows">${entries.map(evalQueueRow).join("")}</ul>` +
         (queue.truncated
           ? `<p class="evq-note muted">Showing the first ${entries.length}; the counts above are complete.</p>`
           : "")
-      : `<p class="muted">Nothing waiting.</p>`;
+      : `<p class="muted">Nothing running.</p>`;
     return (
       head +
       `<p class="evq-summary">${escapeHtml(evalQueueSummary(queue.counts))}</p>` +
-      evalQueueSkips(queue.skipped_by_repo) +
-      notes.join("") +
       rows +
       // Empty on every paint, so the live region announces only what an action
-      // puts in it — the standing facts above are notes under a heading, not
-      // updates, and re-announcing them each 15-second tick is exactly what the
+      // puts in it — the summary above is a standing fact under a heading, not an
+      // update, and re-announcing it each 15-second tick is exactly what the
       // section avoids elsewhere.
       `<p class="control-status evq-status" role="status"></p>` +
       foot
     );
   }
 
-  // ---- evaluation queue controls (pause / resume / cancel) ----
+  // ---- Layer 2 evaluation controls (cancel) ----
   //
-  // The three levers the section needs to be more than a window onto a stuck
-  // queue. They live HERE, beside the rows they act on, because the operator this
-  // whole section exists for is the one already looking at the dashboard when the
-  // queue stops draining — a control reachable only by a hand-written HTTP call is
+  // The one lever the section needs to be more than a window onto a running turn.
+  // It lives HERE, beside the row it acts on, because the operator this section
+  // exists for is the one already looking at the dashboard when an evaluation is
+  // taking too long — a control reachable only by a hand-written HTTP call is
   // half-delivered.
   //
-  // All three answer with a payload the panel can repaint from directly (the pause
-  // routes return the whole queue read; cancel returns the settled job), so the
-  // result of pressing a button is the server's own state rather than an optimistic
-  // guess that the next 15-second tick might contradict.
+  // A pause/resume pair sat beside it while a dispatcher drained the queue on its
+  // own; there is no drain to hold, so what is left is per-attempt.
 
   const EVQ_SLOT_ID = "overview-evalq-slot";
 
@@ -6874,42 +6801,11 @@
   // each in-place repaint above). Re-binding wholesale is safe because the paint
   // replaced the nodes: the old listeners went with them.
   function wireEvaluationQueueControls() {
-    const toggle = document.querySelector(".evq-toggle");
-    if (toggle)
-      toggle.addEventListener("click", () =>
-        onEvalQueuePause(toggle.dataset.action, toggle)
-      );
     document.querySelectorAll(".evq-cancel").forEach((btn) => {
       btn.addEventListener("click", () =>
         onEvalQueueCancel(btn.dataset.repo, btn.dataset.task, btn)
       );
     });
-  }
-
-  // Pause/resume the automatic drain. The response IS the fresh queue read, so
-  // the repaint shows the hub's state — including anything that changed between
-  // the click and the write — rather than a locally toggled label.
-  async function onEvalQueuePause(action, button) {
-    const statusEl = document.querySelector(".evq-status");
-    const superseded = routeGuard(); // captured before the POST, not after it
-    setControlBusy(button, statusEl, true);
-    try {
-      const queue = await api(
-        "/api/evaluation/queue/" + (action === "resume" ? "resume" : "pause"),
-        { method: "POST" }
-      );
-      if (superseded()) return; // a newer route owns the view
-      repaintEvalQueue(queue);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) return; // login shown
-      if (superseded()) return; // the button and its status line are gone
-      setControlBusy(button, statusEl, false);
-      evalQueueControlError(
-        statusEl,
-        err,
-        action === "resume" ? "Failed to resume." : "Failed to pause."
-      );
-    }
   }
 
   // Cancel one job. A 409 is the ordinary outcome of acting on a row the queue
@@ -6931,8 +6827,8 @@
       );
       if (superseded()) return;
       // The cancel response carries only the settled job; the section's own
-      // figures (the census, the skip tally, the remaining rows) all move with
-      // it, so re-read the queue rather than splice one row out of a stale one.
+      // figures (the census, the remaining rows) all move with it, so re-read the
+      // queue rather than splice one row out of a stale one.
       const queue = await overviewEvalQueue();
       if (superseded()) return;
       repaintEvalQueue(queue);

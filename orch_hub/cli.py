@@ -51,7 +51,6 @@ from .install import (
 from .git_meta import latest_commit
 from .housekeeping import housekeeping_pending
 from .models import (
-    EvaluationControl,
     EvaluationQueueEntry,
     EvaluationQueueSnapshot,
     ManagedRepo,
@@ -894,38 +893,35 @@ def _cmd_eval_doctor(args: argparse.Namespace) -> int:
 
 
 def _cmd_eval_queue(args: argparse.Namespace) -> int:
-    """Report the cross-repo state of the automatic Layer 2 path. Reads only.
+    """Report the cross-repo state of the semantic-job store. Reads only.
 
-    The same projection the dashboard's *Evaluation queue* section renders
+    The same projection the dashboard's *Layer 2 evaluations* section renders
     (:func:`orch_hub.eval_dispatch.queue_snapshot`), reached without a running
-    service or a bearer token. That is the point: automatic evaluation's failure
-    modes are absences — a queue nobody drains, a turn that failed, a switch left
-    off — and the moment they matter is the moment the hub itself is the thing
-    misbehaving, when the HTTP route is exactly what may not answer. So this reads
-    the durable store directly rather than calling the service.
+    service or a bearer token. That is the point: a semantic job's outcomes are
+    absences — a turn that failed hours ago, a legacy record nobody will ever
+    promote — and the moment they matter most is the moment the hub itself is the
+    thing misbehaving, when the HTTP route is exactly what may not answer. So this
+    reads the durable store directly rather than calling the service.
 
     It reads the store, which is a different claim from reading *the running hub*:
     the records come from whichever ``ORCH_HUB_DATA_DIR`` this shell resolves, so
     the first line prints the tree that was walked. A shell whose data dir differs
     from the launchd service's answers honestly about a hub nobody is running.
 
-    Exit code says whether the queue could be **read**, not whether it is
-    draining — a paused queue is somebody's deliberate choice, a ``failed`` record
-    is a retained outcome, and both would make a health-style exit code lie. What
-    "not draining" looks like is in the payload the command prints: ``overdue``,
-    ``auto_enabled``, and ``control``. Only an operational failure (malformed
-    service env, evaluation disabled, a store that cannot be walked) exits
-    non-zero.
+    Exit code says whether the queue could be **read**, not what it holds — a
+    ``failed`` record is a retained outcome and a legacy held one is inert, and
+    either would make a health-style exit code lie. Only an operational failure
+    (malformed service env, evaluation disabled, a store that cannot be walked)
+    exits non-zero.
 
-    Deliberately read-only. Pause, resume, and cancel are writes to live service
-    state and stay on the HTTP/dashboard surface, where the operator watching a
-    stalled queue already is.
+    Deliberately read-only. Starting an evaluation and cancelling one are writes to
+    live service state and stay on the HTTP/dashboard surface, where the operator
+    reading this already is.
     """
     # Function-local for the reason `_open_catalog` imports its catalog locally:
     # `semantic_jobs` pulls in the whole evaluation/semantic chain, which `repos`
     # and the launchd verbs have no use for. The printers below import from the
     # same modules for the same reason — by then it is a `sys.modules` hit.
-    from .eval_control import EvaluationControlStore
     from .eval_dispatch import queue_snapshot
     from .semantic_jobs import jobs_root, list_persisted_jobs
 
@@ -966,11 +962,7 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    snapshot = queue_snapshot(
-        config,
-        records,
-        control=EvaluationControlStore(config.data_dir).state(),
-    )
+    snapshot = queue_snapshot(config, records)
     if args.json:
         # The HTTP payload minus its ``enabled`` envelope field, which this command
         # cannot emit a value for other than true (a disabled subsystem exited
@@ -982,24 +974,20 @@ def _cmd_eval_queue(args: argparse.Namespace) -> int:
 
 
 def _print_queue(snapshot: EvaluationQueueSnapshot, jobs_dir: Path) -> None:
-    """Human form: where it was read, why it might be still, the census, the rows.
+    """Human form: where it was read, the census, the rows.
 
-    The two holds on the drain are printed unconditionally, even when neither is
-    engaged, because their whole failure mode is being silent: a reader scanning
-    for why nothing moves must find both switches stated rather than inferred from
-    an absent line. The census below them is likewise complete — every status,
-    zeros included — since a terminal has room for it and a stable line is
-    greppable.
+    No switch lines above the census any more. Two used to be printed
+    unconditionally — the completion trigger's gate and the operator pause —
+    because a queue that moved by itself could be still for reasons no record
+    explained, and a reader scanning for why nothing moves had to find both stated
+    rather than inferred from an absent line. Nothing moves by itself now, so
+    silence needs no explaining: every record here says what it is. The census is
+    complete — every status, zeros included — since a terminal has room for it and
+    a stable line is greppable.
     """
     from .semantic_jobs import STATUSES
 
     print(f"queue: {jobs_dir}")
-    print(
-        "automatic dispatch: "
-        + ("on" if snapshot.auto_enabled else "off")
-        + " (ORCH_HUB_EVAL_AUTO)"
-    )
-    print(f"pause: {_pause_text(snapshot.control)}")
     counts = dict(snapshot.counts)
     # Known statuses in lifecycle order, then anything a hand-edited record put
     # there — counted rather than dropped, on the census's own rule.
@@ -1010,19 +998,6 @@ def _print_queue(snapshot: EvaluationQueueSnapshot, jobs_dir: Path) -> None:
         "  one record per repo/task holding that task's latest attempt; "
         "not a count of tasks carrying a report"
     )
-    if snapshot.overdue:
-        print(
-            f"overdue: {snapshot.overdue} waiting longer than "
-            f"{_fmt_age(snapshot.queue_max_age_seconds)} "
-            "(ORCH_HUB_EVAL_QUEUE_MAX_AGE); the queue is not draining"
-        )
-    if snapshot.skipped_by_repo:
-        # Tied by name to the `skipped` figure above it, and named by cause: on
-        # its own, a per-repo tally reads as a second unexplained number.
-        print(
-            "skipped by repo (Layer 2 declined at launch): "
-            + ", ".join(f"{repo} {n}" for repo, n in snapshot.skipped_by_repo.items())
-        )
     if not snapshot.entries:
         print("jobs: nothing waiting")
         return
@@ -1034,29 +1009,6 @@ def _print_queue(snapshot: EvaluationQueueSnapshot, jobs_dir: Path) -> None:
             f"  showing the first {len(snapshot.entries)}; "
             "the counts above are complete"
         )
-
-
-def _pause_text(control: EvaluationControl) -> str:
-    """One line for the operator pause, naming the damage case as damage.
-
-    ``unreadable-control`` is the pause nobody chose — the hub could not read its
-    own control file and held the queue rather than spend a window it cannot
-    account for — so it must not read as somebody's decision. The bounded reason
-    token is printed verbatim in both cases: it is what the JSON carries and what
-    the docs are written against.
-    """
-    from .eval_control import PAUSE_UNREADABLE
-
-    if not control.paused:
-        return "not paused"
-    if control.reason == PAUSE_UNREADABLE:
-        return (
-            f"paused ({PAUSE_UNREADABLE}) - the hub could not read its pause "
-            "control and held the queue; resume rewrites it"
-        )
-    since = f" since {control.paused_ts}" if control.paused_ts else ""
-    reason = f" ({control.reason})" if control.reason else ""
-    return f"paused{since}{reason} - completions still enter the queue"
 
 
 def _queue_row(entry: EvaluationQueueEntry) -> str:
@@ -1072,10 +1024,10 @@ def _queue_row(entry: EvaluationQueueEntry) -> str:
     target = "/".join(part for part in (job.repo_name, job.task_id) if part)
     parts = [f"{job.status:9}", target or job.job_id or "?"]
     if entry.age_seconds is not None:
-        # Always measured from ``created_ts`` — how long this task has gone
-        # unmeasured — so it is a wait only while the job is still owed a turn. A
-        # settled record's figure is the same interval and not a wait, and saying
-        # "waiting" over a failed row would claim it is still in the queue.
+        # Always measured from ``created_ts`` — how long this attempt has been
+        # open — so it is a wait only while the job is still owed a turn. A settled
+        # record's figure is the same interval and not a wait, and saying "waiting"
+        # over a failed row would claim it is still in the queue.
         waiting = job.status in (STATUS_DEFERRED, STATUS_QUEUED)
         parts.append(
             ("waiting " if waiting else "age ") + _fmt_age(entry.age_seconds)
@@ -1084,8 +1036,6 @@ def _queue_row(entry: EvaluationQueueEntry) -> str:
         parts.append(f"reason={job.defer_reason}")
     elif job.error:
         parts.append(_one_line(job.error))
-    if entry.overdue:
-        parts.append("[stalled]")
     return "  ".join(parts)
 
 

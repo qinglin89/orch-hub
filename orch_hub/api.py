@@ -43,7 +43,6 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .completion_eval import CompletionEvaluationTrigger
-from .eval_control import EvaluationControlStore
 from .eval_dispatch import queue_snapshot
 from .config import TOKEN_ENV, Config
 from .control_dir import (
@@ -708,12 +707,6 @@ def create_app(
     # and can never be handed a live evaluator — the same convention the
     # usage-refresh hook already follows.
     #
-    # The pause control is the operator's persisted hold. It held the automatic
-    # dispatch sweep, which no longer exists; the store and its routes remain while
-    # the surfaces that report it are retired, and it is read by the queue
-    # projection only. Nothing consults it to decide whether a turn may start,
-    # because nothing decides that any more.
-    eval_control = EvaluationControlStore(resolved.data_dir)
     completion_trigger = CompletionEvaluationTrigger(
         resolved,
         static_evaluator=static_metrics,
@@ -1688,21 +1681,6 @@ def create_app(
         require_evaluation_enabled()
         return {"enabled": True, "semantic": semantic.doctor().to_dict()}
 
-    def _queue_payload() -> dict:
-        """The queue read, shared by the GET and by both control writes.
-
-        The pause routes answer with the same shape rather than a bare
-        acknowledgement so a client renders the result of pressing the button and
-        every subsequent poll through one code path — the same reason
-        ``POST``/``GET .../semantic/job`` share the ``{"job": ...}`` envelope.
-        """
-        return {
-            "enabled": True,
-            **queue_snapshot(
-                resolved, semantic_jobs.list_jobs(), control=eval_control.state()
-            ).to_dict(),
-        }
-
     @app.get("/api/evaluation/queue")
     def evaluation_queue() -> dict:
         """Report the cross-repo state of the semantic-job store.
@@ -1715,17 +1693,15 @@ def create_app(
         at a time means never asking. So this is one walk of the semantic-job store
         folded into a census, which the Overview renders as a display-only section.
 
-        Read-only and cheap: it lists persisted records and reads config. It does
-        **not** start, settle, publish, or consult the usage service — asking about
-        the store must never move it.
+        Read-only and cheap: it walks the persisted records and folds them. It
+        does **not** start, settle, or publish anything — asking about the store
+        must never move it.
 
-        Deliberately **not** gated on ``ORCH_HUB_EVAL_AUTO``, which now switches
-        automatic *Layer 1* and no longer has anything to do with these records; it
-        travels in the payload as ``auto_enabled`` for the reader rather than
-        filtering anything. The subsystem gate is a different matter — with
-        evaluation off there is nothing to report — so this 404s while disabled like
-        every other evaluation route, leaving ``GET /api/evaluation`` the single
-        availability answer.
+        Deliberately **not** gated on ``ORCH_HUB_EVAL_AUTO``, which switches
+        automatic *Layer 1* and has nothing to do with these records. The subsystem
+        gate is a different matter — with evaluation off there is nothing to report
+        — so this 404s while disabled like every other evaluation route, leaving
+        ``GET /api/evaluation`` the single availability answer.
 
         Shape: ``{"enabled": true, **EvaluationQueueSnapshot}`` — ``counts`` is a
         complete census by status over every persisted record, while ``entries``
@@ -1736,48 +1712,18 @@ def create_app(
         task's evaluation history (see :class:`~orch_hub.models.EvaluationQueueSnapshot`).
         A consumer wanting report existence reads the evaluation tree or the
         report feed below.
+
+        There is no companion write. A pause and resume pair sat beside this route
+        while a dispatcher drained the queue on its own; holding that drain was the
+        only thing either of them did, and there is no drain to hold. The one write
+        this store still needs — stopping an attempt somebody started — belongs to
+        that attempt and lives on its own task-scoped cancel route.
         """
         require_evaluation_enabled()
-        return _queue_payload()
-
-    @app.post("/api/evaluation/queue/pause")
-    def pause_evaluation_queue() -> dict:
-        """Set the persisted pause flag. It currently holds nothing.
-
-        This was the live lever over automatic Layer 2 dispatch: it held the drain
-        while completions kept landing as ``deferred`` records, so resuming spent
-        the queue in completion order. There is no drain now — a semantic turn
-        starts only when somebody asks for one — so the write persists and is
-        reported back, and nothing about the hub's behaviour changes. The route is
-        retained with the rest of the automatic path's surface pending its removal.
-
-        Idempotent — pausing an already-paused queue keeps the original
-        ``paused_ts``. Returns the same payload as ``GET /api/evaluation/queue``,
-        whose ``control`` block reports the pause; disabled → 404 like every other
-        evaluation route.
-
-        The write once had to be serialized against the dispatch sweep's promotion
-        step, so a pause that had already answered could not be followed by a turn
-        it thought it had prevented. There is no promotion step any more — nothing
-        starts a Layer 2 turn without being asked — so the write stands alone and
-        the barrier is gone with the sweep it guarded.
-        """
-        require_evaluation_enabled()
-        eval_control.pause()
-        return _queue_payload()
-
-    @app.post("/api/evaluation/queue/resume")
-    def resume_evaluation_queue() -> dict:
-        """Clear the persisted pause flag.
-
-        Always writes, even against a control that already reads as running: an
-        unreadable control record reads as *paused* by design (the fail-closed
-        direction from when this held real spending), and this is the operation
-        that repairs it. Returns the queue payload; disabled → 404.
-        """
-        require_evaluation_enabled()
-        eval_control.resume()
-        return _queue_payload()
+        return {
+            "enabled": True,
+            **queue_snapshot(resolved, semantic_jobs.list_jobs()).to_dict(),
+        }
 
     # -- global report feed ----------------------------------------------------
     #

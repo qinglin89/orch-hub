@@ -3641,9 +3641,7 @@ def test_evaluation_queue_reports_a_calm_empty_store(tmp_path, monkeypatch):
     body = client.get("/api/evaluation/queue").json()
 
     assert body["enabled"] is True
-    assert body["auto_enabled"] is True
     assert body["entries"] == []
-    assert body["overdue"] == 0
     assert body["truncated"] is False
     assert set(body["counts"].values()) == {0}
 
@@ -3668,9 +3666,11 @@ def test_evaluation_queue_lists_held_jobs_with_their_reason(tmp_path, monkeypatc
     assert abs(entry["age_seconds"] - expected) < 5
 
 
-def test_evaluation_queue_counts_skips_per_repo(tmp_path, monkeypatch):
-    # The countable half of the launch-time opt-out: a skipped task is a record,
-    # not an absence, and the per-repo split is where a thinning corpus shows up.
+def test_evaluation_queue_counts_a_legacy_skip_without_listing_it(tmp_path, monkeypatch):
+    # `skipped` was written when a completing run had declined its Layer 2 at
+    # launch. Nothing produces one now, so every such record is a leftover: still
+    # counted, so the store's attempts add up, but never a row — a resting outcome
+    # has nothing to act on.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch)
     seed_queue_record(
         tmp_path, repo, status="skipped", auto=True, skip_reason=SKIP_RUN_OPT_OUT
@@ -3679,30 +3679,24 @@ def test_evaluation_queue_counts_skips_per_repo(tmp_path, monkeypatch):
     body = client.get("/api/evaluation/queue").json()
 
     assert body["counts"]["skipped"] == 1
-    assert body["skipped_by_repo"] == {repo.name: 1}
-    # A deliberate resting outcome is counted, never listed among what is stuck.
     assert body["entries"] == []
 
 
-def test_evaluation_queue_echoes_the_configured_age_bound(tmp_path, monkeypatch):
-    # The dashboard renders the real threshold rather than a literal of its own,
-    # so tuning the hub's bound moves the surface with it.
-    client, *_ = make_eval_client(tmp_path, monkeypatch, eval_queue_max_age=1800)
-
-    assert client.get("/api/evaluation/queue").json()["queue_max_age_seconds"] == 1800
-
-
-def test_evaluation_queue_reports_a_closed_trigger_gate(tmp_path, monkeypatch):
-    # Not gated on ORCH_HUB_EVAL_AUTO: a closed trigger gate is the one reason a
-    # queue sits still that leaves no trace on the records, so it travels in the
-    # payload instead of hiding the records that prove it.
+def test_evaluation_queue_payload_carries_no_switch_or_bound(tmp_path, monkeypatch):
+    # The shape echoed the automatic path's own state — its trigger gate, the
+    # operator pause, the age at which a held record was called stalled — because a
+    # queue that moved by itself could be still for reasons no record explained.
+    # Nothing moves by itself now. ORCH_HUB_EVAL_AUTO in particular switches
+    # automatic *Layer 1*, so echoing it beside these records would point a reader
+    # at the wrong switch. The records themselves are never filtered by it.
     client, *_, repo = make_eval_client(tmp_path, monkeypatch, eval_auto=False)
     seed_queue_record(tmp_path, repo, status="deferred", auto=True)
 
     body = client.get("/api/evaluation/queue").json()
 
-    assert body["auto_enabled"] is False
+    assert set(body) == {"enabled", "counts", "entries", "truncated"}
     assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
+    assert "overdue" not in body["entries"][0]
 
 
 def test_evaluation_queue_reading_it_moves_nothing(tmp_path, monkeypatch):
@@ -3733,80 +3727,34 @@ def test_evaluation_queue_requires_auth(tmp_path, monkeypatch):
     assert client.get("/api/evaluation/queue").status_code == 401
 
 
-# -- queue controls: the live pause the environment switch could not be ---------
+def test_the_queue_pause_controls_are_gone(tmp_path, monkeypatch):
+    """The pair held the automatic dispatch drain. There is no drain.
 
+    Retaining routes that persist a flag nothing reads would be worse than
+    removing them: an operator who pressed Pause would be told the queue was held
+    while a turn they started ran on regardless. 404 rather than 405 because these
+    paths are not registered at all — the same answer any unknown route gets.
 
-def test_pausing_holds_the_drain_and_reports_itself(tmp_path, monkeypatch):
-    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    seed_queue_record(tmp_path, repo, status="deferred", auto=True)
-
-    body = client.post("/api/evaluation/queue/pause").json()
-
-    # The control answers with the whole queue read, so a client renders the
-    # result of pressing the button and every later poll through one path.
-    assert body["enabled"] is True
-    assert body["control"]["paused"] is True
-    assert body["control"]["reason"] == "operator"
-    assert body["control"]["paused_ts"]
-    # Held, not emptied: the record the pause protects is still there.
-    assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
-    assert client.get("/api/evaluation/queue").json()["control"]["paused"] is True
-
-
-def test_a_pause_is_independent_of_the_trigger_gate(tmp_path, monkeypatch):
-    # Both holds are reported: a queue can be off AND paused, and naming only one
-    # sends the operator to fix the wrong switch.
-    client, *_ = make_eval_client(tmp_path, monkeypatch, eval_auto=False)
-
-    body = client.post("/api/evaluation/queue/pause").json()
-
-    assert body["auto_enabled"] is False
-    assert body["control"]["paused"] is True
-
-
-def test_pausing_is_idempotent_on_the_instant_the_drain_stopped(tmp_path, monkeypatch):
-    client, *_ = make_eval_client(tmp_path, monkeypatch)
-    first = client.post("/api/evaluation/queue/pause").json()["control"]
-
-    again = client.post("/api/evaluation/queue/pause").json()["control"]
-
-    assert again["paused_ts"] == first["paused_ts"]
-
-
-def test_resuming_releases_the_queue_without_a_restart(tmp_path, monkeypatch):
-    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    seed_queue_record(tmp_path, repo, status="deferred", auto=True)
-    client.post("/api/evaluation/queue/pause")
-
-    body = client.post("/api/evaluation/queue/resume").json()
-
-    assert body["control"]["paused"] is False
-    assert body["control"]["reason"] is None
-    # Same records, same order — the pause cost the corpus time, not entries.
-    assert [e["job"]["task_id"] for e in body["entries"]] == [RUN_TASK_ID]
-
-
-def test_the_pause_survives_a_restart_of_the_service(tmp_path, monkeypatch):
-    # The failure mode that rules an in-memory switch out: an operator pausing for
-    # an afternoon must not have it silently undone by a launchd restart.
-    client, *_, repo = make_eval_client(tmp_path, monkeypatch)
-    client.post("/api/evaluation/queue/pause")
-
-    reborn, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo)
-
-    assert reborn.get("/api/evaluation/queue").json()["control"]["paused"] is True
-
-
-def test_the_queue_controls_are_gated_and_protected(tmp_path, monkeypatch):
+    Asserted on the registered paths as well as on the responses, because a 404
+    alone cannot tell an unregistered route from a registered one refusing: the
+    per-attempt cancel route also answers 404 when there is no job to cancel, and
+    it is the write this store still has. Checking the route table alongside keeps
+    this from passing because the whole surface disappeared.
+    """
     repo = make_run_repo(tmp_path)
-    off, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo, enabled=False)
-    assert off.post("/api/evaluation/queue/pause").status_code == 404
-    assert off.post("/api/evaluation/queue/resume").status_code == 404
-
     client, *_ = make_eval_client(tmp_path, monkeypatch, repo=repo)
-    del client.headers["Authorization"]
-    assert client.post("/api/evaluation/queue/pause").status_code == 401
-    assert client.post("/api/evaluation/queue/resume").status_code == 401
+
+    assert client.post("/api/evaluation/queue/pause").status_code == 404
+    assert client.post("/api/evaluation/queue/resume").status_code == 404
+    assert client.get("/api/evaluation/queue").status_code == 200
+
+    paths = {getattr(route, "path", None) for route in client.app.routes}
+    assert "/api/evaluation/queue/pause" not in paths
+    assert "/api/evaluation/queue/resume" not in paths
+    assert "/api/evaluation/queue" in paths
+    assert (
+        "/api/repos/{repo_id}/evaluations/{task_id}/semantic/job/cancel" in paths
+    )
 
 
 # -- protocol identity coverage census -----------------------------------------

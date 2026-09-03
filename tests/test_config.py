@@ -22,7 +22,6 @@ from orch_hub.config import (
     DEFAULT_PORT,
     DEFAULT_EVAL_EFFORT,
     DEFAULT_EVAL_MODEL,
-    DEFAULT_EVAL_QUEUE_MAX_AGE,
     DEFAULT_EVAL_RETENTION,
     DEFAULT_EVAL_TURN_TIMEOUT,
     DEFAULT_INTAKE_EFFORT,
@@ -31,7 +30,6 @@ from orch_hub.config import (
     EVAL_EFFORT_ENV,
     EVAL_ENABLED_ENV,
     EVAL_MODEL_ENV,
-    EVAL_QUEUE_MAX_AGE_ENV,
     EVAL_RETENTION_ENV,
     EVAL_TURN_TIMEOUT_ENV,
     HOST_ENV,
@@ -394,50 +392,16 @@ def test_eval_retention_malformed_or_negative_is_explicit_error():
         _configured_from_env({EVAL_RETENTION_ENV: "-1"})
 
 
-# -- the held-job age bound ----------------------------------------------------
-# The one threshold left from the retired automatic dispatch policy: it is
-# visibility only, flagging a legacy held record that has been resting since the
-# automatic path was removed. Configuration rather than a literal so the flag can
-# be tuned without a code change; the default is pinned because it encodes a
-# judgement (see the constant's own docstring).
+def test_the_retired_dispatch_knobs_are_gone():
+    """Every value that configured the automatic Layer 2 path went with the path.
 
-
-def test_queue_age_bound_default_is_configuration_with_a_pinned_value():
-    assert _configured_from_env().eval_queue_max_age == DEFAULT_EVAL_QUEUE_MAX_AGE
-    # Also the dataclass default, so a directly-constructed Config agrees.
-    assert Config(mandrel_path=Path("/root/mandrel")).eval_queue_max_age == (
-        DEFAULT_EVAL_QUEUE_MAX_AGE
-    )
-    # Six hours: one full five-hour window plus slack.
-    assert DEFAULT_EVAL_QUEUE_MAX_AGE == 21600
-
-
-def test_queue_age_bound_overrides_are_honored():
-    assert _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: "3600"}).eval_queue_max_age == 3600
-    assert _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: "0"}).eval_queue_max_age == 0
-
-
-def test_queue_age_bound_blank_counts_as_unset():
-    for blank in ("", "   "):
-        assert (
-            _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: blank}).eval_queue_max_age
-            == DEFAULT_EVAL_QUEUE_MAX_AGE
-        )
-
-
-@pytest.mark.parametrize("bad", ["forever", "-60"])
-def test_queue_age_bound_malformed_value_is_an_explicit_error(bad):
-    """A mistyped threshold is a policy nobody chose; it must not start the hub."""
-    with pytest.raises(ValueError, match=EVAL_QUEUE_MAX_AGE_ENV):
-        _configured_from_env({EVAL_QUEUE_MAX_AGE_ENV: bad})
-
-
-def test_the_retired_dispatch_thresholds_are_gone():
-    """The automatic dispatcher's ceiling and spacing configured a deleted policy.
-
-    Keeping them would advertise a knob that changes nothing: an operator setting
-    ``ORCH_HUB_EVAL_USAGE_CEILING`` would be tuning a gate that no longer stands
-    between anything and a model turn, because nothing schedules one.
+    Keeping any of them would advertise a knob that changes nothing: an operator
+    setting ``ORCH_HUB_EVAL_USAGE_CEILING`` would be tuning a gate that no longer
+    stands between anything and a model turn, and ``ORCH_HUB_EVAL_QUEUE_MAX_AGE``
+    would be setting the age at which a record is called late for not being picked
+    up by a dispatcher that does not exist. Asserted as absence on the module and
+    on a Config built from an environment that still sets all three, so a
+    reintroduced attribute or a silently-honoured variable both fail here.
     """
     import orch_hub.config as config_module
 
@@ -446,16 +410,20 @@ def test_the_retired_dispatch_thresholds_are_gone():
         "DEFAULT_EVAL_USAGE_CEILING",
         "EVAL_DISPATCH_SPACING_ENV",
         "DEFAULT_EVAL_DISPATCH_SPACING",
+        "EVAL_QUEUE_MAX_AGE_ENV",
+        "DEFAULT_EVAL_QUEUE_MAX_AGE",
     ):
         assert not hasattr(config_module, gone), gone
     cfg = _configured_from_env(
         {
             "ORCH_HUB_EVAL_USAGE_CEILING": "10",
             "ORCH_HUB_EVAL_DISPATCH_SPACING": "60",
+            "ORCH_HUB_EVAL_QUEUE_MAX_AGE": "3600",
         }
     )
     assert not hasattr(cfg, "eval_usage_ceiling")
     assert not hasattr(cfg, "eval_dispatch_spacing")
+    assert not hasattr(cfg, "eval_queue_max_age")
 
 
 # -- Layer 2 turn deadline -----------------------------------------------------

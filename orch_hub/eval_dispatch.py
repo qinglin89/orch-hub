@@ -8,18 +8,25 @@ when a person asks for one, so there is no queue to drain and no policy to decid
 when a mechanical turn may spend.
 
 What remains is the projection. The store still holds one record per
-``(repo, task)`` — every manual attempt, and whatever legacy automatic records a
-hub accumulated while the automatic path existed — and :func:`queue_snapshot`
-folds them into one cross-repo census for the Overview and the CLI. It reports;
-nothing here can start, promote, or hold a turn.
+``(repo, task)`` — every attempt somebody started, and whatever legacy automatic
+records a hub accumulated while the automatic path existed — and
+:func:`queue_snapshot` folds them into one cross-repo census for the Overview and
+the CLI. It reports; nothing here can start, promote, or hold a turn.
 
-Legacy ``deferred`` records are the visible edge of that removal. They were
-accepted by an earlier process and there is now no code path that can promote
-one, so they rest in the census exactly as they are until an operator's manual
+The census is worth keeping for the manual path rather than a leftover of the
+automatic one. A Layer 2 turn runs for minutes and is asked for from a phone, so
+the person who started it is usually somewhere else by the time it settles, and
+every other evaluation surface is scoped to a single ``(repo, task)`` — which
+cannot answer "is anything running?" or "did one of these fail while I was
+away?" without opening tasks one at a time.
+
+Legacy ``deferred`` and ``skipped`` records rest in that census exactly as they
+are: they were written by an earlier process, no code path can promote or
+reproduce one, and they stay until a manual
 :meth:`~orch_hub.semantic_jobs.SemanticJobManager.start_job` supersedes the
-record with a fresh attempt. That is the intended shape: a held record is a task
+record with a fresh attempt. That is the intended shape — a held record is a task
 nobody has asked about, not a turn waiting to fire the moment a network comes
-back.
+back — and it is why nothing here flags one as late.
 """
 
 from __future__ import annotations
@@ -28,7 +35,6 @@ import datetime as dt
 
 from .config import Config
 from .models import (
-    EvaluationControl,
     EvaluationQueueEntry,
     EvaluationQueueSnapshot,
     SemanticJob,
@@ -65,7 +71,7 @@ def _parse_ts(value: str | None) -> dt.datetime | None:
     Local copy of the same tolerant parse the other modules keep (``usage``,
     ``logs``, ``static_metrics``), so this module stays independent. An
     unparseable stamp reads as absent, which every caller here treats as "cannot
-    prove this constraint applies"."""
+    say"."""
     if not isinstance(value, str) or not value.strip():
         return None
     try:
@@ -80,17 +86,17 @@ def _parse_ts(value: str | None) -> dt.datetime | None:
 # -- operator view -------------------------------------------------------------
 #
 # Nothing here decides; it reports. Which is the whole module now, and matters
-# because a semantic job's failure modes are silent by construction: a failed
-# turn, a legacy record nobody will ever promote, and an evaluation nobody asked
+# because a semantic job's outcomes are silent by construction: a turn that
+# failed, a legacy record nobody will ever promote, and an evaluation nobody asked
 # for all look identical from outside — nothing happens, quietly.
 
 
 _WAITING_ORDER = (STATUS_DEFERRED, STATUS_QUEUED, STATUS_RUNNING)
 """Statuses whose jobs are still owed a turn, in the order a reader wants them.
 
-They lead the queue view, and within it a held job precedes an admitted one:
-"what is stuck" is the question this surface exists to answer, and an admitted
-turn is already answering itself."""
+They lead the queue view, and within it a legacy held record precedes an admitted
+one: "what is not going to happen by itself" is the question this surface exists
+to answer, and an admitted turn is already answering itself."""
 
 
 def _waiting_key(job: SemanticJob) -> tuple:
@@ -116,68 +122,47 @@ def queue_snapshot(
     config: Config,
     jobs: list[SemanticJob],
     *,
-    control: EvaluationControl | None = None,
     now: dt.datetime | None = None,
     limit: int = QUEUE_ENTRY_LIMIT,
 ) -> EvaluationQueueSnapshot:
     """Fold every persisted job into the cross-repo view of the semantic queue.
 
-    Pure: takes the records (one :meth:`SemanticJobManager.list_jobs` walk), the
-    pause state, and a clock, reads two config values, and returns a projection.
-    It holds no state and writes nothing. It is deliberately **not** gated on
-    ``auto_evaluation_enabled``: a reader asking why a record is sitting still must
-    be able to see it, and hiding records behind a switch would answer the question
-    with the same silence that made it necessary. The switch state travels as
-    ``auto_enabled`` instead, so the reader explains rather than omits.
+    Pure: takes the records (one :meth:`SemanticJobManager.list_jobs` walk) and a
+    clock, and returns a projection. It holds no state, reads no file, and writes
+    nothing. ``config`` is kept in the signature although nothing is read from it
+    today — every caller already has one, and a projection over hub-owned storage
+    that has to be re-plumbed to state one fact about it is a worse shape than an
+    unused parameter.
 
-    ``control`` is passed in as a *value* rather than read here, which is what
-    keeps this function pure: a projection that opened a file would make every
-    caller's read depend on store IO it did not ask for. ``None`` means "no pause
-    state supplied" and reads as running — callers that own a store pass its state.
+    It is deliberately **not** gated on ``auto_evaluation_enabled``: that switch
+    governs automatic *Layer 1* and has nothing to do with these records, which
+    are all somebody's explicit request or a legacy leftover.
 
     ``counts`` is one entry per persisted *record* — and the store keeps one
     record per ``(repo, task)``, holding that task's **latest** attempt. So the
     census states the store's attempt lifecycle and deliberately not how many
     tasks carry a report: :meth:`SemanticJobManager.start_job` overwrites a
-    terminal record for a manual re-run while the completed evaluation it pointed
-    at survives in the task's retained history, so a report followed by a failed
+    terminal record for a re-run while the completed evaluation it pointed at
+    survives in the task's retained history, so a report followed by a failed
     retry counts here as ``failed`` (correctly — the queue is what this reports
-    on), and a task completed before automatic evaluation existed contributes no
-    record at all. Report existence has its own authorities (the evaluation tree,
-    the publication feed) that no attempt can overwrite. Consumers must label
-    these figures as the attempt lifecycle they are; presenting ``completed`` as
-    an evaluated-corpus denominator would be wrong in both directions.
+    on), and a task nobody asked to evaluate contributes no record at all. Report
+    existence has its own authorities (the evaluation tree, the publication feed)
+    that no attempt can overwrite. Consumers must label these figures as the
+    attempt lifecycle they are; presenting ``completed`` as an evaluated-corpus
+    denominator would be wrong in both directions.
 
-    ``overdue`` counts held jobs past ``eval_queue_max_age``. Only legacy
-    ``deferred`` records can reach that state now — nothing accepts new ones — so
-    the flag reads as "this record has been resting since the automatic path was
-    retired", not as a queue failing to drain. A bound of ``0`` disables the flag
-    entirely (no job is overdue), matching the config contract.
-
-    ``skipped_by_repo`` folds the tasks that completed and deliberately got no
-    turn (the retired launch-time Layer 2 opt-out) into a per-repo count. Per repo because
-    that is the shape a thinning corpus actually has — skips cluster on the
-    expensive, remediation-heavy tail rather than spreading evenly — and a count
-    rather than rows because individual rows are the least likely thing anyone
-    scrolls to. Only repos with at least one skip appear: the store knows nothing
-    about repos it holds no record for, so a zero row would be an invention.
-    Skipped records are kept out of ``entries`` alongside ``completed`` and
-    ``cancelled``: all three are resting outcomes with nothing to act on, and a row
-    per opted-out or deliberately stopped task would crowd out the jobs that are
-    genuinely stuck. All three stay in ``counts``, which is where a reader looks to
-    find out how much of the corpus was declined rather than measured.
+    ``entries`` holds what is left to look at, so the three resting outcomes stay
+    out of it: ``completed`` and ``cancelled`` are settled attempts, and
+    ``skipped`` is a legacy record for a completion the retired launch opt-out
+    declined. All three remain in ``counts``, which is where a reader looks for
+    what the store holds rather than for what to do next.
     """
     moment = now or _utc_now()
-    max_age = config.eval_queue_max_age
     counts: dict[str, int] = {status: 0 for status in STATUSES}
-    skipped_by_repo: dict[str, int] = {}
     pending: list[SemanticJob] = []
     for job in jobs:
         counts[job.status] = counts.get(job.status, 0) + 1
-        if job.status == STATUS_SKIPPED:
-            repo_name = job.repo_name or "(unattributed)"
-            skipped_by_repo[repo_name] = skipped_by_repo.get(repo_name, 0) + 1
-        elif job.status not in (STATUS_COMPLETED, STATUS_CANCELLED):
+        if job.status not in (STATUS_COMPLETED, STATUS_CANCELLED, STATUS_SKIPPED):
             pending.append(job)
     # Two groups with opposite senses, so they are sorted apart and concatenated
     # rather than forced into one comparator.
@@ -188,35 +173,18 @@ def queue_snapshot(
         key=_settled_key,
         reverse=True,
     )
-    entries = []
-    overdue = 0
-    for job in pending:
-        created = _parse_ts(job.created_ts)
-        age = int((moment - created).total_seconds()) if created is not None else None
-        stalled = (
-            job.status == STATUS_DEFERRED
-            and max_age > 0
-            and age is not None
-            and age >= max_age
-        )
-        if stalled:
-            overdue += 1
-        if len(entries) < max(limit, 0):
-            entries.append(
-                EvaluationQueueEntry(job=job, age_seconds=age, overdue=stalled)
-            )
+    entries = [
+        EvaluationQueueEntry(job=job, age_seconds=_age_seconds(job, moment))
+        for job in pending[: max(limit, 0)]
+    ]
     return EvaluationQueueSnapshot(
-        auto_enabled=config.auto_evaluation_enabled,
-        control=control if control is not None else EvaluationControl(),
-        queue_max_age_seconds=max_age,
         counts=counts,
-        # Most-skipped first, ties by repo name: the reader is looking for which
-        # repo is thinning, and a deterministic tiebreak keeps the payload stable
-        # across reads of an unchanged store.
-        skipped_by_repo=dict(
-            sorted(skipped_by_repo.items(), key=lambda kv: (-kv[1], kv[0]))
-        ),
-        overdue=overdue,
         entries=tuple(entries),
         truncated=len(pending) > len(entries),
     )
+
+
+def _age_seconds(job: SemanticJob, moment: dt.datetime) -> int | None:
+    """How long since this attempt was accepted, or ``None`` if it cannot be said."""
+    created = _parse_ts(job.created_ts)
+    return int((moment - created).total_seconds()) if created is not None else None

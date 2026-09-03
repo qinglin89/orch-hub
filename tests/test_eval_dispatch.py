@@ -4,9 +4,9 @@ This module used to own the automatic Layer 2 dispatch policy — a capacity gat
 spacing between turns, a sweep that promoted held records — and this file used to
 test it. All of that is gone (:mod:`orch_hub.completion_eval` says why), and what
 is left is the read-only fold ``queue_snapshot`` takes over the persisted job
-store: a complete census the row cap never shrinks, the two-group order, the
-overdue flag over legacy held records, a read that moves nothing — and what the
-census is *not*, pinned from a real completed-then-failed retry.
+store: a complete census the row cap never shrinks, the two-group order, legacy
+records reported as they rest, a read that moves nothing — and what the census is
+*not*, pinned from a real completed-then-failed retry.
 
 Nothing here can start a turn, which is now a property of the module rather than
 of the tests: there is no dispatcher left to drive.
@@ -30,9 +30,7 @@ from orch_hub.semantic import (
 )
 from orch_hub.subprocess_utils import CommandResult
 from orch_hub.eval_dispatch import queue_snapshot
-from orch_hub.eval_control import PAUSE_OPERATOR, EvaluationControlStore
 from orch_hub.models import (
-    EvaluationControl,
     ManagedRepo,
     SemanticJob,
     SemanticEvaluatorInfo,
@@ -204,35 +202,16 @@ def test_the_census_counts_every_status_including_the_zeroes(tmp_path):
     }
 
 
-def test_a_skipped_task_is_counted_and_broken_down_per_repo(tmp_path):
-    """The count is what makes the launch-time opt-out admissible at all.
+def test_legacy_skipped_records_are_counted_but_never_listed(tmp_path):
+    """A resting outcome nothing can produce any more: a figure, never a row.
 
-    An opt-out whose entries left no countable trace would hand back, at
-    production time, exactly the selection automatic evaluation exists to remove.
-    Per repo because that is the shape a thinning corpus has — skips cluster on the
-    expensive, remediation-heavy tail rather than spreading evenly.
-    """
-    snap = queue_snapshot(
-        config(tmp_path),
-        [
-            job("a", STATUS_SKIPPED, repo_name="alpha"),
-            job("b", STATUS_SKIPPED, repo_name="beta"),
-            job("c", STATUS_SKIPPED, repo_name="beta"),
-            job("d", STATUS_COMPLETED, repo_name="beta"),
-        ],
-        now=NOW,
-    )
-
-    assert snap.counts[STATUS_SKIPPED] == 3
-    # Most-skipped first, so the repo losing the most reports leads.
-    assert list(snap.skipped_by_repo.items()) == [("beta", 2), ("alpha", 1)]
-
-
-def test_skipped_records_stay_out_of_the_actionable_rows(tmp_path):
-    """A deliberate resting outcome has nothing to act on, and there can be many.
-
-    One row per opted-out task would crowd out the jobs that are genuinely stuck —
-    the question this list exists to answer.
+    ``skipped`` was written when a completion's run had declined its Layer 2 at
+    launch. Both the opt-out and the automatic path are gone, so every such record
+    is a leftover — still worth counting, since a reader comparing this census
+    against a repo's task list should see where the store's attempts went, but
+    nothing to act on. One row per legacy skip would crowd out the jobs that
+    actually need reading, and a hub that ran the automatic path holds one per task
+    it accepted.
     """
     snap = queue_snapshot(
         config(tmp_path),
@@ -246,25 +225,24 @@ def test_skipped_records_stay_out_of_the_actionable_rows(tmp_path):
     assert snap.counts[STATUS_SKIPPED] == 30
 
 
-def test_a_store_with_no_skips_states_nothing_per_repo(tmp_path):
-    """Only repos holding a skipped record appear: a zero row would be an invention.
+def test_the_retired_per_repo_skip_tally_is_gone(tmp_path):
+    """It measured a thinning corpus under an opt-out that no longer exists.
 
-    The job store knows nothing about repos it has no record for, so it cannot
-    honestly render "0 skipped" for them.
+    The tally answered "which repo is losing the most reports to the launch-time
+    decline?" Nothing declines anything at launch now, so the figure could only
+    ever describe history — and a standing per-repo breakdown of a frozen legacy
+    set reads as a live pattern. The flat ``skipped`` count keeps the records
+    visible without implying one.
     """
     snap = queue_snapshot(
-        config(tmp_path), [job("a", STATUS_COMPLETED), job("b", STATUS_DEFERRED)], now=NOW
+        config(tmp_path),
+        [job("a", STATUS_SKIPPED, repo_name="alpha"), job("b", STATUS_SKIPPED, repo_name="")],
+        now=NOW,
     )
 
-    assert snap.skipped_by_repo == {}
-    assert snap.counts[STATUS_SKIPPED] == 0  # the census still states the zero
-
-
-def test_a_skip_with_no_repo_attribution_is_still_counted(tmp_path):
-    """An unreadable record must not shrink the tally silently."""
-    snap = queue_snapshot(config(tmp_path), [job("a", STATUS_SKIPPED, repo_name="")], now=NOW)
-
-    assert snap.skipped_by_repo == {"(unattributed)": 1}
+    assert snap.counts[STATUS_SKIPPED] == 2
+    assert not hasattr(snap, "skipped_by_repo")
+    assert "skipped_by_repo" not in snap.to_dict()
 
 
 def test_an_unknown_status_is_counted_rather_than_dropped(tmp_path):
@@ -288,8 +266,8 @@ def test_completed_jobs_are_counted_but_not_listed(tmp_path):
 def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
     """Two groups with opposite senses: a queue, then a log.
 
-    The waiting group is shown in the dispatcher's own promotion order, so the
-    top row is what actually runs next; the settled group leads with the newest
+    The waiting group leads with the longest-open record, so the top row is the
+    one that has been unanswered longest; the settled group leads with the newest
     failure, which is the one still worth reading.
     """
     older = NOW - dt.timedelta(hours=3)
@@ -316,7 +294,7 @@ def test_waiting_jobs_lead_oldest_first_then_failures_newest_first(tmp_path):
 
 
 def test_the_age_is_measured_from_acceptance_not_from_a_turn(tmp_path):
-    """How long the task has gone unmeasured, which is the corpus's question."""
+    """How long this attempt has been open, not how long its turn has run."""
     snap = queue_snapshot(
         config(tmp_path),
         [job("a", STATUS_DEFERRED, created=NOW - dt.timedelta(hours=2))],
@@ -338,117 +316,50 @@ def test_an_unparseable_stamp_reads_as_unknown_age_not_zero(tmp_path):
     snap = queue_snapshot(config(tmp_path), [record], now=NOW)
 
     assert snap.entries[0].age_seconds is None
-    assert snap.entries[0].overdue is False
-    assert snap.overdue == 0
 
 
-def test_the_overdue_flag_comes_from_the_configured_bound(tmp_path):
-    """The threshold is configuration, and the flag is measured against it."""
-    cfg = config(tmp_path, eval_queue_max_age=3600)
-    records = [
-        job("young", STATUS_DEFERRED, created=NOW - dt.timedelta(seconds=3599)),
-        job("old", STATUS_DEFERRED, created=NOW - dt.timedelta(seconds=3600)),
-    ]
+def test_a_long_standing_record_is_reported_without_being_called_late(tmp_path):
+    """No staleness flag, and no bound to measure one against.
 
-    snap = queue_snapshot(cfg, records, now=NOW)
-
-    assert snap.queue_max_age_seconds == 3600
-    assert snap.overdue == 1
-    assert {e.job.task_id: e.overdue for e in snap.entries} == {
-        "young": False,
-        "old": True,
-    }
-
-
-def test_a_disabled_bound_flags_nothing(tmp_path):
-    """``0`` disables the bound, per the config contract — not "everything is overdue"."""
-    cfg = config(tmp_path, eval_queue_max_age=0)
-    snap = queue_snapshot(
-        cfg, [job("a", STATUS_DEFERRED, created=NOW - dt.timedelta(days=30))], now=NOW
-    )
-
-    assert snap.overdue == 0
-    assert snap.entries[0].overdue is False
-
-
-def test_only_held_jobs_can_be_overdue(tmp_path):
-    """The bound has exactly one meaning, shared with the dispatcher's own warning.
-
-    A hung ``queued``/``running`` turn is a different failure with its own
-    recovery (restart reconciliation settles it), so it renders its age without
-    borrowing the stalled-queue flag.
+    While a dispatcher drained the queue, a held record past
+    ``ORCH_HUB_EVAL_QUEUE_MAX_AGE`` meant the drain had stopped. Nothing drains
+    anything now, so a month-old legacy record is not evidence of a malfunction —
+    it is a task nobody asked about. A warning that fires on every such record is
+    a warning that means nothing, so the age is reported and left to the reader.
     """
-    cfg = config(tmp_path, eval_queue_max_age=60)
-    stale = NOW - dt.timedelta(days=1)
+    old = NOW - dt.timedelta(days=30)
     snap = queue_snapshot(
-        cfg,
-        [
-            job("q", STATUS_QUEUED, created=stale),
-            job("r", STATUS_RUNNING, created=stale),
-            job("f", STATUS_FAILED, created=stale),
-            job("d", STATUS_DEFERRED, created=stale),
-        ],
+        config(tmp_path),
+        [job("d", STATUS_DEFERRED, created=old), job("q", STATUS_QUEUED, created=old)],
         now=NOW,
     )
 
-    assert snap.overdue == 1
-    assert {e.job.task_id for e in snap.entries if e.overdue} == {"d"}
+    assert [e.age_seconds for e in snap.entries] == [2592000, 2592000]
+    assert not hasattr(snap, "overdue")
+    assert not hasattr(snap.entries[0], "overdue")
+    assert "overdue" not in snap.to_dict()
+    assert "overdue" not in snap.to_dict()["entries"][0]
+    assert "queue_max_age_seconds" not in snap.to_dict()
 
 
-def test_the_persisted_pause_reaches_a_reader_through_the_snapshot(tmp_path):
-    """The pause store outlived the drain it held; the projection still reports it.
+def test_the_projection_reports_no_switch_state_at_all(tmp_path):
+    """Nothing holds these records, so there is no hold to explain.
 
-    Nothing consults it to decide whether a turn may start — nothing decides that
-    any more — but it is persisted operator-set state, and a reader that showed the
-    queue without it would be describing a store it only half looked at.
+    The shape carried the completion trigger's gate and the operator pause because
+    a queue that moved by itself could be still for reasons no record explained. A
+    turn starts only when somebody asks now, so every record is explained by the
+    record — and ``ORCH_HUB_EVAL_AUTO`` switches automatic *Layer 1*, which has
+    nothing to do with this store. Echoing it here would send a reader to the wrong
+    switch.
     """
-    control = EvaluationControl(
-        paused=True, paused_ts="2026-08-09T11:00:00+00:00", reason=PAUSE_OPERATOR
-    )
+    snap = queue_snapshot(config(tmp_path, eval_auto=False), [job("a", STATUS_DEFERRED)], now=NOW)
 
-    snap = queue_snapshot(
-        config(tmp_path), [job("a", STATUS_DEFERRED)], control=control, now=NOW
-    )
-
-    assert snap.control == control
-    assert snap.to_dict()["control"] == {
-        "paused": True,
-        "paused_ts": "2026-08-09T11:00:00+00:00",
-        "reason": PAUSE_OPERATOR,
-    }
-    # The held record is still reported: hiding it would answer "why is this
-    # sitting here?" with the same silence that made the question necessary.
-    assert len(snap.entries) == 1
-
-
-def test_a_stored_pause_is_read_as_a_value_the_caller_supplies(tmp_path):
-    """The projection stays pure: the store is the caller's to open, not this fold's."""
-    store = EvaluationControlStore(config(tmp_path).data_dir)
-    store.pause()
-
-    snap = queue_snapshot(config(tmp_path), [], control=store.state(), now=NOW)
-
-    assert snap.control.paused is True and snap.control.reason == PAUSE_OPERATOR
-
-
-def test_both_holds_are_reported_independently(tmp_path):
-    """The automatic switch and the pause are separate facts and travel separately."""
-    snap = queue_snapshot(
-        config(tmp_path, eval_auto=False),
-        [job("a", STATUS_DEFERRED)],
-        control=EvaluationControl(paused=True, reason=PAUSE_OPERATOR),
-        now=NOW,
-    )
-
-    assert snap.auto_enabled is False
-    assert snap.control.paused is True
-
-
-def test_a_snapshot_with_no_control_supplied_reads_as_running(tmp_path):
-    snap = queue_snapshot(config(tmp_path), [], now=NOW)
-
-    assert snap.control == EvaluationControl()
-    assert snap.to_dict()["control"]["paused"] is False
+    assert set(snap.to_dict()) == {"counts", "entries", "truncated"}
+    assert not hasattr(snap, "auto_enabled")
+    assert not hasattr(snap, "control")
+    # The record is still reported: hiding it would answer "why is this sitting
+    # here?" with the same silence that made the question necessary.
+    assert [e.job.task_id for e in snap.entries] == ["a"]
 
 
 def test_a_cancelled_record_is_counted_but_never_listed_as_actionable(tmp_path):
@@ -463,8 +374,6 @@ def test_a_cancelled_record_is_counted_but_never_listed_as_actionable(tmp_path):
 
     assert snap.counts[STATUS_CANCELLED] == 1
     assert [e.job.task_id for e in snap.entries] == ["b"]
-    # And it is not folded into the skip tally: a task nobody declined at launch.
-    assert snap.skipped_by_repo == {}
 
 
 def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
@@ -479,8 +388,7 @@ def test_the_entry_cap_never_shrinks_the_counts(tmp_path):
 
     assert len(snap.entries) == 2
     assert snap.truncated is True
-    assert snap.counts[STATUS_DEFERRED] == 5
-    assert snap.overdue == 5  # counted over every held job, not just the shown ones
+    assert snap.counts[STATUS_DEFERRED] == 5  # the census sees all five
     assert [e.job.task_id for e in snap.entries] == ["t04", "t03"]  # oldest first
 
 
@@ -491,31 +399,28 @@ def test_an_uncapped_page_is_not_marked_truncated(tmp_path):
     assert len(snap.entries) == 1
 
 
-def test_the_view_reports_a_closed_gate_rather_than_hiding_the_queue(tmp_path):
-    """A reader asking why nothing drains must see the held records AND the switch.
+def test_the_fold_shows_the_same_records_whatever_the_gates_say(tmp_path):
+    """A reader asking about a record must never be answered with an omission.
 
-    A closed gate leaves no trace on the records by design (it is global config,
-    not a per-job fact), so it can only be explained from the config echo — and
-    hiding the queue while the gate is closed would answer the question with the
-    same silence that prompted it.
+    The evaluation switches say nothing about this store — one gates automatic
+    Layer 1, the other the whole subsystem's routes — so neither may filter what
+    the projection returns. The route above it still refuses while the subsystem is
+    disabled; that is the caller's gate, not the fold's.
     """
     records = [job("a", STATUS_DEFERRED)]
     for cfg in (
+        config(tmp_path),
         config(tmp_path, eval_auto=False),
         config(tmp_path, evaluation_enabled=False),
     ):
         snap = queue_snapshot(cfg, records, now=NOW)
-        assert snap.auto_enabled is False
         assert [e.job.task_id for e in snap.entries] == ["a"]
-
-    assert queue_snapshot(config(tmp_path), records, now=NOW).auto_enabled is True
 
 
 def test_an_empty_store_is_a_calm_snapshot_not_an_error(tmp_path):
     snap = queue_snapshot(config(tmp_path), [], now=NOW)
 
     assert snap.entries == ()
-    assert snap.overdue == 0
     assert snap.truncated is False
     assert set(snap.counts.values()) == {0}
 

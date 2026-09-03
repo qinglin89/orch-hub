@@ -2545,15 +2545,16 @@ def test_report_feed_styles_are_present():
         assert selector in css, selector
 
 
-# ---- evaluation queue on overview ---------------------------------------------
+# ---- Layer 2 evaluations on overview ------------------------------------------
 #      (2026-08-09-completion-triggered-evaluation, session-2-cont)
 #
-# The Overview gains a second independent, display-only section over
-# GET /api/evaluation/queue: the cross-repo state of automatic Layer 2 evaluation.
-# Its whole reason to exist is that the automatic path fails silently — a held
-# queue, a failed turn, and a switch left off all look like nothing happening — so
-# these pin the served-asset wiring and the boundaries that keep it display-only.
-# Rendering/state behaviour is verified by the jsc harness
+# The Overview carries a second independent, display-only section over
+# GET /api/evaluation/queue: the cross-repo state of the semantic-job store. Every
+# other evaluation surface is scoped to one (repo, task), which cannot answer "is
+# anything running?" or "did one fail while I was away?" — and a turn takes minutes
+# and is started from a phone, so the person who started it is rarely still there
+# when it settles. These pin the served-asset wiring and the boundaries that keep
+# it display-only. Rendering/state behaviour is verified by the jsc harness
 # (tests/keyboard_harness.js, scenarioEvaluationQueue).
 
 
@@ -2566,60 +2567,70 @@ def test_overview_evaluation_queue_is_a_seventh_best_effort_source():
     # and an unknown queue must never render as an empty one).
     assert "overviewEvalQueue" in body
     assert "err.status === 404" in body
-    assert "Evaluation queue is unavailable." in body
+    assert "Layer 2 evaluations are unavailable." in body
 
 
 def test_overview_evaluation_queue_is_display_only():
     body = app_js()
-    # Its own section heading, painted OUTSIDE the overview-panels grid: an
-    # unmeasured corpus is not a blocked run, so it never lays out as an
-    # operational panel and never becomes a Needs attention row.
-    assert "Evaluation queue" in body
+    # Its own section heading, painted OUTSIDE the overview-panels grid: a failed
+    # evaluation is not a blocked run, so it never lays out as an operational
+    # panel and never becomes a Needs attention row.
+    assert "Layer 2 evaluations" in body
     assert "overview-evalq" in body
     assert "evaluationQueuePanel(data.evalQueue)" in body
 
 
-def test_overview_evaluation_queue_explains_every_way_it_can_stall():
+def test_overview_evaluation_queue_reports_no_switch_and_no_stall_bound():
+    """Two notes used to sit above the rows; both described a drain that is gone.
+
+    While a dispatcher promoted held records on its own, a still queue could mean
+    the trigger gate was off or an operator had paused it — reasons no record
+    carried, so they had to be rendered from the payload's config echo. Nothing
+    promotes anything now: every record is somebody's request or a legacy
+    leftover, so each row explains itself. ORCH_HUB_EVAL_AUTO in particular
+    switches automatic *Layer 1* and naming it here would send a reader to the
+    wrong switch.
+    """
     body = app_js()
-    # The three record-borne reasons, mapped from the hub's bounded machine tokens
-    # (orch_hub/eval_dispatch.py) with an unknown token falling through verbatim.
+    assert "queue.auto_enabled" not in body
+    assert "ORCH_HUB_EVAL_AUTO" not in body
+    assert "queue.control" not in body
+    assert "Automatic dispatch is paused" not in body
+    assert "unreadable-control" not in body
+    # Nor a staleness flag: nothing is late for an appointment nothing keeps.
+    assert "queue.queue_max_age_seconds" not in body
+    assert "evq-overdue" not in body
+    assert "not draining" not in body
+
+
+def test_overview_evaluation_queue_explains_the_records_it_shows():
+    body = app_js()
+    # A legacy held record still renders its recorded machine reason, mapped from
+    # the hub's bounded tokens with an unknown one falling through verbatim.
     assert "DEFER_REASON_TEXT" in body
     for token in ("capacity", "usage-unknown", "pacing"):
         assert token in body, token
-    # The fourth reason leaves no trace on the records by design, so it can only
-    # render from the payload's config echo.
-    assert "queue.auto_enabled" in body
-    assert "ORCH_HUB_EVAL_AUTO" in body
-    # The overdue bound is the hub's configured threshold, never a client literal.
-    assert "queue.queue_max_age_seconds" in body
     # A capped page must not read as "this is everything".
     assert "queue.truncated" in body
     assert "counts above are complete" in body
 
 
-def test_overview_evaluation_queue_carries_its_controls_not_only_its_state():
-    # 2026-08-27-evaluation-liveness-and-control, session-2. The section used to
-    # be display-only, which left the operator watching a stalled queue with no
-    # lever on the page they were already looking at. Pause/resume and per-job
-    # cancel therefore live HERE, beside the rows they act on — a control
-    # reachable only by a hand-written HTTP call is half-delivered.
+def test_overview_evaluation_queue_carries_the_control_it_still_has():
+    # 2026-08-27-evaluation-liveness-and-control, session-2. The section used to be
+    # display-only, which left the operator watching a running turn with no lever
+    # on the page they were already looking at. Per-job cancel therefore lives
+    # HERE, beside the row it acts on — a control reachable only by a hand-written
+    # HTTP call is half-delivered. The pause/resume pair that sat next to it held
+    # the automatic drain and went with it.
     body = app_js()
-    assert '"/api/evaluation/queue/" + (action === "resume" ? "resume" : "pause")' in body
     assert "/semantic/job/cancel" in body
-    assert "evq-toggle" in body
     assert "evq-cancel" in body
     assert "wireEvaluationQueueControls" in body
-    # The pause is read from the payload's own control block, never from client
-    # memory, so a pause set from another device reads correctly on the next tick.
-    assert "queue.control" in body
-    # And it is explained, not merely obeyed: a pause must never become a second
-    # silent reason the queue sits still.
-    assert "Automatic dispatch is paused" in body
-    # The pause nobody chose (the hub could not read its own control) says so
-    # instead of being reported as somebody's decision.
-    assert "unreadable-control" in body
-    # A cancelled record is countable like a skip — it is a deliberate gap in the
-    # corpus, and a gap that leaves no trace is what this subsystem exists to end.
+    assert "evq-toggle" not in body
+    assert "/api/evaluation/queue/pause" not in body
+    assert "/api/evaluation/queue/resume" not in body
+    # A cancelled record stays countable — it is a deliberate gap in the corpus,
+    # and a gap that leaves no trace is what this section exists to end.
     assert 'c.cancelled + " cancelled"' in body
 
 
@@ -2644,21 +2655,21 @@ def test_overview_evaluation_queue_styles():
         ".evq-row",
         ".evq-state",
         ".evq-meta",
-        ".evq-flag",
     ):
         assert selector in css, selector
-    # An overdue held job uses the same left-accent idiom the task cards use for a
-    # run signal, warn-coloured — nothing here is an error state.
-    assert ".evq-row.evq-overdue > a" in css
-    assert ".evq-warn" in css
-    # The controls: a heading row that keeps Pause/Resume on the trailing edge,
-    # and a row that is itself the flex container so Cancel can sit BESIDE the
-    # link rather than inside it (a button nested in an anchor is invalid, and
-    # every tap aimed at it would also navigate).
+    # The row is itself the flex container so Cancel can sit BESIDE the link
+    # rather than inside it (a button nested in an anchor is invalid, and every
+    # tap aimed at it would also navigate).
     assert ".evq-head" in css
-    assert ".evq-toggle" in css
     assert ".evq-cancel" in css
     assert ".evq-row {" in css
+    # The retired stalled/paused vocabulary took its rules with it: a stylesheet
+    # that still dressed a state nothing can enter is dead weight that reads as a
+    # state the page can still show.
+    assert ".evq-overdue" not in css
+    assert ".evq-flag" not in css
+    assert ".evq-warn" not in css
+    assert ".evq-toggle" not in css
 
 
 def test_shell_assets_resolve_through_the_runtime_resource_root():

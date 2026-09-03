@@ -2432,169 +2432,98 @@ class SemanticJob:
 
 
 @dataclass(frozen=True)
-class EvaluationControl:
-    """Whether automatic Layer 2 dispatch is currently held by an operator pause.
-
-    The persisted shape of :class:`orch_hub.eval_control.EvaluationControlStore`,
-    and one of the two config-like facts a queue reader cannot infer from the job
-    records (the other being ``auto_enabled``). It is deliberately the same kind of
-    answer: a pause must never be a *second silent condition* on a queue whose
-    failure modes are already silent by construction — so it travels in the queue
-    payload and explains itself rather than leaving the reader with a still queue
-    and no reason.
-
-    ``paused_ts`` is when the drain actually stopped, not when the button was last
-    pressed: pausing an already-paused queue keeps the original stamp, so "held
-    since 09:14" stays true across repeated presses and a second browser session.
-    It is ``None`` on a pause that no operator made (see below) and on a running
-    queue.
-
-    ``reason`` is a bounded machine token from a closed vocabulary
-    (:data:`orch_hub.eval_control.PAUSE_OPERATOR`,
-    :data:`~orch_hub.eval_control.PAUSE_UNREADABLE`), never operator prose — the
-    same rule the job record's ``defer_reason``/``skip_reason`` follow, for the
-    same reasons: prose is unanalyzable, leaks repo content into a persisted
-    surface, and invites recording a rationalization. It is ``None`` exactly when
-    ``paused`` is false. The two tokens are kept apart because they call for
-    opposite responses: an operator pause ends when the operator ends it, while an
-    unreadable control record is damage that will not fix itself and must not be
-    reported as somebody's decision.
-    """
-
-    paused: bool = False
-    paused_ts: str | None = None
-    reason: str | None = None
-
-    def to_dict(self) -> dict:
-        return {
-            "paused": self.paused,
-            "paused_ts": self.paused_ts,
-            "reason": self.reason,
-        }
-
-
-@dataclass(frozen=True)
 class EvaluationQueueEntry:
     """One semantic job as the operator's queue view shows it.
 
-    A :class:`SemanticJob` plus the two facts a queue reader needs and the record
-    itself cannot state: how long it has been waiting, and whether that wait has
-    passed the configured bound (``ORCH_HUB_EVAL_QUEUE_MAX_AGE``). Both are
-    derived at read time against a clock, never persisted — the record is the
-    truth and this is a projection of it, so a config change re-renders rather
-    than migrating anything.
+    A :class:`SemanticJob` plus the one fact a queue reader needs and the record
+    itself cannot state: how long it has been in this state. Derived at read time
+    against a clock, never persisted — the record is the truth and this is a
+    projection of it.
 
-    ``age_seconds`` is measured from ``created_ts`` (when the completion was
-    accepted, not when a turn started) because that is the interval the corpus
-    cares about: how long a completed task has gone unmeasured. It is ``None``
-    for a record whose stamp will not parse, which reads as "cannot say" rather
-    than as zero.
+    ``age_seconds`` is measured from ``created_ts`` (when the attempt was
+    accepted, not when a turn started), so for a job still owed a turn it is the
+    wait and for a settled one it is the age of the outcome. It is ``None`` for a
+    record whose stamp will not parse, which reads as "cannot say" rather than as
+    zero.
 
-    ``overdue`` is deliberately narrow: it flags a **deferred** job past the
-    bound and nothing else. Only legacy records reach that status now — nothing
-    accepts new ones — so the flag reads as "this has been resting since the
-    automatic path was retired". A ``queued``/``running`` job that has hung is a
-    different failure
-    with its own recovery — its ``deadline_ts`` settles it, at startup or on the
-    resident sweep — and giving one threshold two meanings is how a threshold
-    stops meaning anything.
+    There is deliberately no staleness flag. One existed while a dispatcher drained
+    a queue on its own: past a configured bound, a held job stopped being ordinary
+    backpressure and became a queue that was not draining. Nothing drains anything
+    now — a turn starts when somebody asks — so no wait here is evidence of a
+    malfunction, and a threshold that fires on every legacy record would be a
+    warning that means nothing. A ``queued``/``running`` job that has genuinely
+    hung is a different failure with its own recovery: its ``deadline_ts`` settles
+    it, at startup or on the resident sweep.
     """
 
     job: SemanticJob
     age_seconds: int | None = None
-    overdue: bool = False
 
     def to_dict(self) -> dict:
         return {
             "job": self.job.to_dict(),
             "age_seconds": self.age_seconds,
-            "overdue": self.overdue,
         }
 
 
 @dataclass(frozen=True)
 class EvaluationQueueSnapshot:
-    """The cross-repo state of automatic Layer 2 evaluation, for one read.
+    """The cross-repo state of the semantic-job store, for one read.
 
-    Automatic evaluation exists to remove production-side selection from the
-    evaluated corpus, which makes its own failure modes quiet by construction: a
-    queue that stops draining, a job that fails, or a switch left off all look
-    identical from outside — nothing happens, and the corpus simply stops
-    growing. Nobody notices an absence. This is the shape that makes the absence
-    countable.
+    Every other evaluation surface is scoped to one ``(repo, task)``, which is
+    right for "how did this task go?" and useless for "what did I start, and how
+    did it end?" A Layer 2 turn is minutes long and asked for from a phone, so the
+    operator who started one is rarely still on the task view when it settles, and
+    a failure that is only reachable by opening tasks one at a time is a failure
+    nobody reads. This is that missing view: one walk of the store, folded.
 
     ``counts`` is a **complete census** by job status over every persisted
     record, never capped, so a truncated ``entries`` page can never make the
     queue look shorter than it is. Every known status is present (zero-valued
     when unseen) so a reader can render a stable set of figures, and an
     unrecognized status from a hand-edited record is counted under its own key
-    rather than silently dropped.
+    rather than silently dropped. The legacy statuses stay in that vocabulary:
+    nothing writes ``deferred`` or ``skipped`` any more, and a hub that ran the
+    automatic path still holds records at both.
 
     What it counts is **records** — one per ``(repo, task)``, each holding that
     task's *latest* attempt — and deliberately not "how many tasks carry a
     report". The two diverge by design:
     :meth:`~orch_hub.semantic_jobs.SemanticJobManager.start_job` overwrites a
-    task's terminal record for a manual re-run, while the completed evaluation
-    that record pointed at stays in the task's retained evaluation history. So a
+    task's terminal record for a re-run, while the completed evaluation that
+    record pointed at stays in the task's retained evaluation history. So a
     successful report followed by a failed retry counts here as ``failed``, and
     correctly — this is the state of the queue, not the size of the corpus. It
-    would understate a corpus in the other direction too: a task completed before
-    automatic evaluation existed has no record here at all. Report existence is
-    answered by the evaluation tree and the publication feed
-    (:mod:`orch_hub.report_catalog`), neither of which an attempt overwrites; a
-    reader of this shape must label its figures as the attempt lifecycle they
-    are.
+    would understate a corpus in the other direction too: a task nobody ever asked
+    to evaluate has no record here at all. Report existence is answered by the
+    evaluation tree and the publication feed (:mod:`orch_hub.report_catalog`),
+    neither of which an attempt overwrites; a reader of this shape must label its
+    figures as the attempt lifecycle they are.
 
     ``entries`` carries the jobs an operator might act on — everything except
-    ``completed`` and ``skipped``, the two resting outcomes the counts already
-    report (one healthy, one deliberate) — ordered the way the queue itself is: waiting jobs oldest-first (the
-    dispatcher's own promotion order), then settled failures newest-first. It is
-    capped at :data:`orch_hub.eval_dispatch.QUEUE_ENTRY_LIMIT`, with ``truncated``
-    saying so, because a surface that silently shows the first N reads as "this
-    is everything".
+    ``completed``, ``cancelled``, and ``skipped``, the resting outcomes the counts
+    already report — ordered the way a reader wants them: jobs still owed a turn
+    oldest-first, then settled failures newest-first. It is capped at
+    :data:`orch_hub.eval_dispatch.QUEUE_ENTRY_LIMIT`, with ``truncated`` saying
+    so, because a surface that silently shows the first N reads as "this is
+    everything".
 
-    ``skipped_by_repo`` is the one figure the flat census cannot carry: a
-    per-repo tally of records resting at ``skipped``, i.e. completed tasks whose
-    run was launched with the Layer 2 opt-out. It is per repo because that is
-    where a shrinking corpus shows up as a pattern rather than as scattered rows —
-    skips cluster on the expensive, remediation-heavy tail — and it is a *count*
-    because individual rows are the least likely thing anyone scrolls to. Skipped
-    records are deliberately absent from ``entries``: they are a resting,
-    intentional outcome with nothing to act on, and one row per opted-out task
-    would crowd out the jobs that are genuinely stuck. Like every other figure
-    here it is over *records*, one per ``(repo, task)`` holding that task's latest
-    attempt — so it is the count of tasks currently resting at skipped, never a
-    share of that repo's tasks and never a lifetime total (a manual evaluation
-    overwrites a skipped record like any other terminal one).
-
-    ``auto_enabled``, ``control``, and ``queue_max_age_seconds`` are the pieces of
-    state a queue reader cannot infer from records. The first says whether
-    completed runs are generating Layer 1 unasked; the second is the persisted
-    operator pause (:class:`EvaluationControl`), which held the retired automatic
-    drain and is reported rather than stamped on records; and the last is the bound
-    ``overdue`` was measured against, so the reader renders the real threshold
-    instead of a literal that drifts from it. Both are reported independently:
-    telling an operator only one of
-    those sends them to fix the wrong switch.
+    There is no config echo beside these figures. The shape once carried the
+    automatic path's own state — the completion-trigger switch, the operator pause
+    over the drain, the bound a held job was called stalled against — because a
+    queue that moved by itself could be still for reasons no record explained. A
+    turn now starts only when somebody asks for one, so every record here is
+    explained by the record: nothing is waiting on a condition the reader would
+    have to be told about.
     """
 
-    auto_enabled: bool = False
-    control: EvaluationControl = field(default_factory=EvaluationControl)
-    queue_max_age_seconds: int = 0
     counts: Mapping[str, int] = field(default_factory=dict)
-    skipped_by_repo: Mapping[str, int] = field(default_factory=dict)
-    overdue: int = 0
     entries: tuple[EvaluationQueueEntry, ...] = ()
     truncated: bool = False
 
     def to_dict(self) -> dict:
         return {
-            "auto_enabled": self.auto_enabled,
-            "control": self.control.to_dict(),
-            "queue_max_age_seconds": self.queue_max_age_seconds,
             "counts": dict(self.counts),
-            "skipped_by_repo": dict(self.skipped_by_repo),
-            "overdue": self.overdue,
             "entries": [entry.to_dict() for entry in self.entries],
             "truncated": self.truncated,
         }
