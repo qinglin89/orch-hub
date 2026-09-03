@@ -2333,7 +2333,7 @@ class SemanticJob:
     ``status`` is a semantic-job lifecycle label, deliberately distinct from task
     frontmatter status, run overlay states, and intake status: ``deferred``
     (accepted, held out of the model turn by the retired automatic dispatch
-    policy) is a legacy *waiting* state that no restart sweep may fail and nothing
+    policy) is a legacy held record that no restart sweep may fail and nothing
     now writes or promotes; ``queued`` (admitted, turn about to start) and
     ``running`` (the model turn is in flight) are transient; ``completed``,
     ``failed``, and ``skipped`` are terminal. ``defer_reason``
