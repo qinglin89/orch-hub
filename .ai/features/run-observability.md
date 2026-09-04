@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-09-04
+verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
 ---
 
 # Features: Run Observability
@@ -88,9 +88,10 @@ Implemented behavior:
   `page == total_pages + 1` and keeps a Previous cursor.
 - Returned runs retain normal serialized status plus embedded persisted events,
   per-run session snapshots (`sessions`, `context_budget`), typed `session_est`
-  (`null` when unknown), persisted `effective_config` (`null` when absent), the
-  run-owned protocol snapshot with its derived coverage verdict, and batched
-  optional task-evaluation state. Evaluation state is returned once per distinct
+  (`null` when unknown), the catalog-free persisted `effective_config` (`null`
+  when absent), the run-owned protocol snapshot with its derived coverage
+  verdict, and batched optional task-evaluation state. Evaluation state is
+  returned once per distinct
   `(repo_path, task_id)` group in the returned window/summary as `none` / `l1` /
   `l1_l2`, skips all reads when evaluation is disabled, and fails soft per task.
 - Protocol coverage keeps verified, pending, changed, drifted, end-inconclusive,
@@ -113,7 +114,9 @@ Implemented behavior:
   partial data when logs are absent or malformed.
 - `GET /api/runs/{run_id}/effective-config` returns `{run_id,
   effective_config}`. Live runs parse the current log, ended runs prefer the
-  persisted snapshot and fall back to log parsing for pre-field runs; unknown
-  runs are 404 and absent/unparsed snapshots return `null`.
+  persisted snapshot and fall back to log parsing for pre-field runs. Both paths
+  omit the selection-independent `options` catalog, including when reading a
+  pre-drop file that still stores it; unknown runs are 404 and absent/unparsed
+  snapshots return `null`.
 - History readback treats missing `events.jsonl` as empty history and surfaces
   unreadable or malformed event lines as `history_error` events.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-04
+verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
 ---
 
 # Features: Run Control
@@ -106,9 +106,11 @@ Implemented behavior:
   persisted at the observed live-to-ended transition. Parsing failures are
   isolated from run state.
 - The real run's startup `effective-config:` JSON is parsed from the located
-  orchestrator log or `spawn.out`, persisted as `effective_config.json` at the
-  live-to-ended transition, served by `GET /api/runs/{run_id}/effective-config`,
-  and embedded snapshot-only in run history.
+  orchestrator log or `spawn.out`; its snapshot view omits only the
+  selection-independent `options` catalog. That view is persisted as
+  `effective_config.json` at the live-to-ended transition, served by
+  `GET /api/runs/{run_id}/effective-config`, and embedded snapshot-only in run
+  history; read-time trimming keeps pre-drop files compatible.
 
 ## Control-dir File Channel
 

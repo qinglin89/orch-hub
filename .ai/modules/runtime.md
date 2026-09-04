@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-04
+verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
 ---
 
 # Modules: Runtime
@@ -85,10 +85,11 @@ beside `run.json`, isolated so parse/IO failures cannot affect run state.
 `read_sessions(run_id)` serves live runs from the current log, ended runs from
 the persisted snapshot, and falls back to live parsing only for pre-field runs
 with no snapshot. The same transition snapshots the real startup
-`effective-config:` JSON into `effective_config.json`; `read_effective_config`
-serves live runs from the current log, ended runs from the snapshot with log
-fallback, and Run-history reads embed the persisted effective config, protocol
-snapshot, per-session snapshot, and current active-or-archived `session-est`.
+`effective-config:` JSON minus its selection-independent `options` catalog into
+`effective_config.json`; `read_effective_config` serves that catalog-free view
+from a live log or ended snapshot, trimming pre-drop files on read. Run-history
+reads embed the persisted effective config, protocol snapshot, per-session
+snapshot, and current active-or-archived `session-est`.
 Task estimates are deduped per `(repo, task)` and degrade to unknown on
 task-file read failures.
 
@@ -149,10 +150,11 @@ emit only their role-profile flag; any non-Default role requires an explicit
 shared backend; Custom emits only that role's explicit fields. Each Custom
 cc-codex role requires its complete agent/model/effort tuple; Cursor rejects
 either role-agent flag. The legacy run-wide shape rejects `review_agent` rather
-than ignoring it. Snapshot
-helpers parse `effective-config:` log lines, persist/load
-`effective_config.json`, and remain tolerant/raw because snapshots are
-display/history data, not launch-preview validation.
+than ignoring it. `parse_effective_config_line` remains a faithful tolerant
+parser, while both snapshot readers drop exactly `options`; the sole writer
+persists the already-trimmed log read, and read-time trimming keeps pre-drop
+files compatible. The Start dialog's live `query_effective_config` path retains
+the catalog.
 
 ## Run Monitor
 

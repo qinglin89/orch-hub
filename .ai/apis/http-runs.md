@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-04
+verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -65,8 +65,9 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 - Every run entry embeds the normal `RunStatus` fields, including
   `stop_requested`, plus `events`, persisted session snapshot fields
   (`sessions`, `context_budget`), `session_est`
-  (`{"current","total"}` or `null`), and `effective_config` (`null` when no
-  startup snapshot exists). Both top-level contracts also include
+  (`{"current","total"}` or `null`), and the catalog-free run snapshot
+  `effective_config` (`null` when no startup snapshot exists). Both top-level
+  contracts also include
   `evaluation_enabled` plus `evaluation_states`, one entry per distinct
   returned task group: `{repo_name, repo_path, task_id, latest_evaluation_id,
   level}` where `level` is `none`, `l1`, or `l1_l2`.
@@ -119,10 +120,12 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 - Source: resolves `run_id` through `RunManager.read_effective_config`. Live
   runs parse the located orchestrator log; ended runs prefer the persisted
   `<run>/effective_config.json` written at live-to-ended transition and fall
-  back to log parsing for pre-field runs.
-- Shape: `{"run_id", "effective_config"}` where `effective_config` is the raw
-  orchestrator JSON object or `null` when absent/unparsed. Unknown runs return
-  404.
+  back to log parsing for pre-field runs. Both read paths omit `options`, so a
+  pre-drop file that still stores the catalog remains readable with the same
+  served shape as a new snapshot.
+- Shape: `{"run_id", "effective_config"}` where `effective_config` is the
+  orchestrator startup object minus its selection-independent `options` catalog,
+  or `null` when absent/unparsed. Unknown runs return 404.
 
 ## `POST /api/runs/{run_id}/stop`
 
