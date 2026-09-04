@@ -1350,14 +1350,14 @@ def create_app(
     def get_run_effective_config(run_id: str) -> dict:
         """Return one run's authoritative ``effective-config:`` launch snapshot.
 
-        Resolves the run by ``run_id`` (unknown → 404) and returns the exact launch
-        configuration the orchestrator logged at startup — the same
-        :class:`EffectiveConfig` shape as the preview query, but with the real
-        task/profile/models/efforts/sources/revisions, so it is authoritative if
-        the preview and launch-time values differ. A live run is parsed from its
-        current log; an ended run is served from the persisted snapshot. A run with
-        no parseable snapshot yet returns ``effective_config: null`` (graceful, not
-        an error).
+        Resolves the run by ``run_id`` (unknown → 404) and returns the launch
+        configuration the orchestrator logged at startup minus the
+        selection-independent ``options`` catalog. The retained
+        task/profile/models/efforts/sources/revisions are authoritative if the
+        preview and launch-time values differ. A live run is parsed from its current
+        log; an ended run is served from the persisted snapshot. A run with no
+        parseable snapshot yet returns ``effective_config: null`` (graceful, not an
+        error).
         """
         config = manager.read_effective_config(run_id)  # UnknownRunError → 404
         return {"run_id": run_id, "effective_config": config}

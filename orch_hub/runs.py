@@ -915,8 +915,9 @@ class RunManager:
         the log exists); an ended run is served from the ``effective_config.json``
         snapshot persisted at its end (which survives repo-side log cleanup),
         falling back to a live parse only for a pre-field run with no snapshot.
-        Returns the raw JSON dict the orchestrator logged, or ``None`` when no
-        snapshot is available. Unknown ids raise :class:`UnknownRunError`.
+        Returns the snapshot view of the logged JSON dict (everything except the
+        selection-independent ``options`` catalog), or ``None`` when no snapshot
+        is available. Unknown ids raise :class:`UnknownRunError`.
         """
         with self._lock:
             run_dir = self._run_dir_for(run_id)
