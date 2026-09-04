@@ -76,6 +76,13 @@ its task's deterministic Layer 1 report and starts no model turn, so there is no
 launch-time Layer 2 choice to make; a semantic report is asked for explicitly on
 the task's evaluation view (see `docs/evaluation.md`).
 
+The launch snapshot a run stores and serves — on the effective-config route and
+embedded per run in run history — is the orchestrator's startup line minus its
+`options` catalog. That catalog states what any launch may select rather than
+what this run resolved to, so it belongs to
+`GET /api/repos/{repo_id}/orchestrator-config`, the live query a client builds a
+launch selection from, and not to a per-run record.
+
 The stop route is graceful: it writes the scheduler's stop request and returns.
 The scheduler consumes it at the next session boundary or during an outstanding
 human-input wait; it does not kill the current coding-agent process immediately.

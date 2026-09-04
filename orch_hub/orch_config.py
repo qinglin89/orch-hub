@@ -20,7 +20,10 @@ target repo:
   logic duplicated in the API and the browser.
 - The ``effective-config:`` snapshot helpers read/persist the authoritative launch
   configuration every real run logs at startup, so run history retains what
-  actually launched (it is authoritative if it differs from the preview).
+  actually launched (it is authoritative if it differs from the preview). They
+  drop exactly one field on the way through — the ``options`` catalog, which says
+  what any launch MAY select and so records nothing about the run it would be
+  stored under (:func:`strip_option_catalog`).
 
 This module deliberately does **not** import :mod:`orch_hub.runs` (which imports
 it): the two deployed-orchestrator path constants are mirrored locally, matching
@@ -91,7 +94,9 @@ NAMED_PROFILE_MODES = (MODE_STANDARD, MODE_EXCELLENT)
 
 EFFECTIVE_CONFIG_NAME = "effective_config.json"
 """Hub-owned run-dir file holding the parsed ``effective-config:`` snapshot,
-written once at the live->ended transition beside ``run.json``/``sessions.json``."""
+written once at the live->ended transition beside ``run.json``/``sessions.json``.
+Holds the snapshot view of the line, not the line: see
+:func:`strip_option_catalog`."""
 
 _HEAD_SCAN_LINES = 200
 """The ``effective-config:`` line is the first thing a run logs, so a bounded head
@@ -660,13 +665,43 @@ def _require(value: str | None, label: str) -> str:
 # -- effective-config run snapshot --------------------------------------------
 
 
+OPTION_CATALOG_KEY = "options"
+"""The one ``effective-config:`` field a *run snapshot* drops — see
+:func:`strip_option_catalog`. Only the snapshot family drops it; the Start
+dialog's live query keeps it (:func:`parse_option_catalog`)."""
+
+
+def strip_option_catalog(data: dict) -> dict:
+    """Return the run-snapshot view of an ``effective-config:`` payload: everything
+    the orchestrator logged except its ``options`` catalog.
+
+    Every other field records what THIS run resolved to. The catalog is
+    selection-independent by construction — it states what any launch MAY select,
+    never what this one did — so a per-run snapshot is the single place it carries
+    no information, while being the bulk of the bytes: measured against the
+    deployed schema-3 orchestrator it is ~2.5 KB of a ~3.4 KB line, stored per run
+    and re-sent in every entry of a fixed 50-run history window that renders none
+    of it.
+
+    Applied on read at both snapshot sources (:func:`read_effective_config_log`,
+    :func:`read_effective_config_snapshot`), which is what makes an
+    ``effective_config.json`` written before this drop stay readable: it keeps its
+    catalog on disk and simply loses the field on the way out. Newly written
+    snapshots hold no catalog at all, because the only writer persists what the log
+    read already returned.
+    """
+    return {key: value for key, value in data.items() if key != OPTION_CATALOG_KEY}
+
+
 def parse_effective_config_line(lines: Iterable[str]) -> dict | None:
     """Return the parsed ``effective-config:`` JSON from a run's log lines, or None.
 
     Scans for the first ``[HH:MM:SS] effective-config: {json}`` line (the
-    timestamp prefix is optional) and returns its object. Tolerant: a malformed or
-    non-object payload is skipped, an absent line yields ``None`` — a missing
-    snapshot is a graceful degradation, never an error.
+    timestamp prefix is optional) and returns its object verbatim. Tolerant: a
+    malformed or non-object payload is skipped, an absent line yields ``None`` — a
+    missing snapshot is a graceful degradation, never an error. The snapshot
+    trim (:func:`strip_option_catalog`) belongs to the readers above this, so the
+    parser stays a faithful reading of the line.
     """
     for line in lines:
         match = _EFFECTIVE_CONFIG_LINE.match(line.rstrip("\n"))
@@ -688,16 +723,15 @@ def read_effective_config_log(record: RunRecord) -> dict | None:
     near the top of the located log and of the hub's ``spawn.out`` capture. Prefers
     the canonical run log (located from the record alone, never a client path) and
     falls back to ``spawn.out`` for a run that failed before opening its log.
-    Bounded head scan; any IO failure degrades to ``None``.
+    Bounded head scan; any IO failure degrades to ``None``. What comes back is the
+    snapshot view of the line (:func:`strip_option_catalog`), which is both what a
+    live run serves and what the run's persisted snapshot is written from.
     """
     log_path = logs.locate_log(record)
-    if log_path is not None:
-        found = _scan_head(log_path)
-        if found is not None:
-            return found
-    if record.spawn_out is not None:
-        return _scan_head(record.spawn_out)
-    return None
+    found = _scan_head(log_path) if log_path is not None else None
+    if found is None and record.spawn_out is not None:
+        found = _scan_head(record.spawn_out)
+    return None if found is None else strip_option_catalog(found)
 
 
 def _scan_head(path: Path) -> dict | None:
@@ -713,7 +747,14 @@ def effective_config_snapshot_path(run_dir: Path) -> Path:
 
 
 def write_effective_config_snapshot(run_dir: Path, data: dict) -> None:
-    """Persist the parsed ``effective-config:`` snapshot atomically (tmp + rename)."""
+    """Persist the parsed ``effective-config:`` snapshot atomically (tmp + rename).
+
+    Writes what it is given. The one caller hands it a
+    :func:`read_effective_config_log` result, so a snapshot written from here is
+    already catalog-free; the guarantee that no served payload carries a catalog
+    is the readers' (:func:`strip_option_catalog`), which is where it has to live
+    anyway for the files written before the drop.
+    """
     path = effective_config_snapshot_path(run_dir)
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(json.dumps(data, indent=1, sort_keys=True), encoding="utf-8")
@@ -722,10 +763,15 @@ def write_effective_config_snapshot(run_dir: Path, data: dict) -> None:
 
 def read_effective_config_snapshot(run_dir: Path) -> dict | None:
     """Load the persisted ``effective_config.json`` snapshot; ``None`` if absent,
-    unreadable, or not a JSON object (tolerant, like the sessions snapshot)."""
+    unreadable, or not a JSON object (tolerant, like the sessions snapshot).
+
+    Trimmed on the way out (:func:`strip_option_catalog`) rather than on the way
+    in, so a snapshot written before the drop — which still has its catalog on
+    disk — reads back like a new one instead of becoming a second served shape.
+    """
     path = effective_config_snapshot_path(run_dir)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if isinstance(data, dict) else None
+    return strip_option_catalog(data) if isinstance(data, dict) else None

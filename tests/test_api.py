@@ -1281,6 +1281,12 @@ SAMPLE_CONFIG = {
 # What the route serves: the catalog projected to the part a caller renders.
 SAMPLE_CONFIG_OPTIONS = {"agents": SAMPLE_CONFIG["options"]["agents"]}
 
+# What a *run snapshot* of the same line keeps. The catalog is selection-
+# independent — what any launch MAY select — so it stays on the live config route
+# the Start dialog reads and is dropped from the per-run snapshot, which is where
+# it would be stored and re-sent once per history entry while rendering nothing.
+SAMPLE_CONFIG_SNAPSHOT = {k: v for k, v in SAMPLE_CONFIG.items() if k != "options"}
+
 
 def capture_config_query(monkeypatch, config: dict = SAMPLE_CONFIG) -> dict:
     """Replace the orchestrator query with a recorder; returns the captured kwargs."""
@@ -1449,7 +1455,7 @@ def test_run_effective_config_live_parses_log(tmp_path, monkeypatch):
     assert resp.status_code == 200
     body = resp.json()
     assert body["run_id"] == started["run_id"]
-    assert body["effective_config"] == SAMPLE_CONFIG
+    assert body["effective_config"] == SAMPLE_CONFIG_SNAPSHOT
 
 
 def test_run_effective_config_null_when_absent(tmp_path, monkeypatch):
@@ -1475,7 +1481,42 @@ def test_history_runs_embeds_effective_config(tmp_path, monkeypatch):
 
     resp = client.get("/api/history/runs?limit=1")
     assert resp.status_code == 200
-    assert resp.json()["runs"][0]["effective_config"] == SAMPLE_CONFIG
+    assert resp.json()["runs"][0]["effective_config"] == SAMPLE_CONFIG_SNAPSHOT
+
+
+def test_history_runs_effective_config_omits_the_option_catalog(tmp_path, monkeypatch):
+    # The catalog is ~three quarters of a real schema-3 line and the disclosure
+    # renders none of it (backend, both roles, the two revisions, sources), so a
+    # fixed 50-run window was carrying it 50 times for nothing.
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    write_run_log(manager, started["run_id"], [effective_config_line()])
+    spawner.procs[0].returncode = 0
+    client.get("/api/runs")  # observe end -> snapshot persisted
+
+    entry = client.get("/api/history/runs?limit=1").json()["runs"][0]
+    served = entry["effective_config"]
+
+    assert "options" not in served
+    # Every field the run-history disclosure renders survives.
+    rendered = (
+        "backend",
+        "dev",
+        "review",
+        "config_revision",
+        "effective_revision",
+        "profile",
+        "profiles",
+        "sources",
+    )
+    for key in rendered:
+        assert served[key] == SAMPLE_CONFIG[key]
+    assert len(json.dumps(served)) < len(json.dumps(SAMPLE_CONFIG))
+    # And the Start dialog still gets the catalog from its own live query, which
+    # this drop does not touch.
+    capture_config_query(monkeypatch)
+    config = client.get(f"/api/repos/{repo.name}/orchestrator-config").json()
+    assert config["options"] == SAMPLE_CONFIG_OPTIONS
 
 
 def test_history_runs_embeds_the_protocol_verdict_and_its_reason(

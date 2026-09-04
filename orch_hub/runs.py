@@ -1434,9 +1434,11 @@ class RunManager:
         Isolated the same way: parse the authoritative startup line from the log
         (falling back to ``spawn.out``) and, when present, write it beside
         ``run.json`` so history keeps what actually launched after the repo-side
-        log is cleaned. A run that never logged the line (an early startup failure)
-        simply gets no snapshot; any parse/IO failure degrades to no snapshot and
-        never propagates into run state.
+        log is cleaned. What the read hands back is already the snapshot view of
+        that line — the ``options`` catalog is dropped there, so it is neither
+        stored per run nor re-sent in every history entry. A run that never logged
+        the line (an early startup failure) simply gets no snapshot; any parse/IO
+        failure degrades to no snapshot and never propagates into run state.
         """
         try:
             data = read_effective_config_log(record)

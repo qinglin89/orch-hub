@@ -2800,11 +2800,41 @@ EFFECTIVE_CONFIG = {
     "sources": {"backend": "config"},
 }
 
+# What the orchestrator actually logs: the same object plus its selection-
+# independent `options` catalog (trimmed here to one agent). The hub drops that
+# field at the snapshot boundary, so EFFECTIVE_CONFIG above is what every
+# assertion below expects to be stored and served — the catalog says what any
+# launch MAY select, which is nothing about the run it would be filed under.
+EFFECTIVE_CONFIG_LOGGED = {
+    **EFFECTIVE_CONFIG,
+    "options": {
+        "backends": ["cc-codex", "cursor"],
+        "agents": {
+            "cc-codex": {
+                role: {
+                    "claude": {
+                        "effort_axis": "effort",
+                        "efforts": ["low", "max"],
+                        "models": [
+                            {
+                                "id": "claude-opus-4-8",
+                                "effort_axis": "effort",
+                                "efforts": ["low", "max"],
+                            }
+                        ],
+                    }
+                }
+                for role in ("dev", "review")
+            }
+        },
+    },
+}
+
 
 def effective_config_line() -> str:
     """The startup line the orchestrator logs (timestamp prefix + compact JSON)."""
     return "[03:00:00] effective-config: " + json.dumps(
-        EFFECTIVE_CONFIG, sort_keys=True, separators=(",", ":")
+        EFFECTIVE_CONFIG_LOGGED, sort_keys=True, separators=(",", ":")
     )
 
 
@@ -2823,6 +2853,12 @@ def test_run_end_persists_effective_config_snapshot(tmp_path):
 
     snap = read_effective_config_snapshot(manager.runs_dir / record.run_id)
     assert snap == EFFECTIVE_CONFIG
+    # The catalog is dropped before the file is written, not just before it is
+    # served: nothing stores per run what no run selected.
+    on_disk = json.loads(
+        effective_config_json(manager, record.run_id).read_text(encoding="utf-8")
+    )
+    assert "options" not in on_disk
 
 
 def test_read_effective_config_live_parses_current_log(tmp_path):
@@ -2877,6 +2913,23 @@ def test_read_effective_config_none_when_line_absent(tmp_path):
     manager.list_runs()
     assert not effective_config_json(manager, record.run_id).exists()  # nothing to persist
     assert manager.read_effective_config(record.run_id) is None
+
+
+def test_read_effective_config_reads_a_pre_drop_snapshot(tmp_path):
+    # A snapshot persisted before the option catalog was dropped still has it on
+    # disk. Run history must not start failing on those files, nor serve them as a
+    # second, fatter shape — they read back like a snapshot written today.
+    repo = make_repo(tmp_path)
+    manager, spawner, _ = make_manager(tmp_path)
+    record = manager.start_run(repo, TASK_ID)  # no log: nothing to snapshot at end
+    end_run(spawner, 0)
+    manager.list_runs()
+    effective_config_json(manager, record.run_id).write_text(
+        json.dumps(EFFECTIVE_CONFIG_LOGGED), encoding="utf-8"
+    )
+
+    assert manager.read_effective_config(record.run_id) == EFFECTIVE_CONFIG
+    assert manager.recent_runs(limit=1)[0].effective_config == EFFECTIVE_CONFIG
 
 
 def test_read_effective_config_unknown_run_raises(tmp_path):

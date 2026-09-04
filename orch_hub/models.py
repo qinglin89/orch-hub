@@ -494,9 +494,12 @@ class RunHistoryEntry:
     per ``(repo, task)`` and stamps the same value on each of that task's runs.
 
     ``effective_config`` is the run's authoritative ``effective-config:`` launch
-    snapshot (the raw JSON dict the orchestrator logged at startup — same shape as
-    :class:`EffectiveConfig`), embedded so the history view shows what actually
-    launched (profile/models/efforts/sources/revisions) without a per-run follow-up
+    snapshot — the JSON dict the orchestrator logged at startup, minus its
+    selection-independent ``options`` catalog
+    (:func:`orch_hub.orch_config.strip_option_catalog`), which states what any
+    launch MAY select and so says nothing about this run while being most of its
+    bytes. Embedded so the history view shows what actually launched
+    (profile/models/efforts/sources/revisions) without a per-run follow-up
     request. ``None`` — serialized as ``effective_config: null`` — is "unknown": a
     run with no persisted snapshot yet (live/pre-field) or whose startup line could
     not be parsed. Read snapshot-only here (cheap), like ``sessions``.

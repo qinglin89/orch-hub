@@ -9,6 +9,7 @@ and tested directly.
 from __future__ import annotations
 
 import copy
+import json
 import subprocess
 from pathlib import Path
 
@@ -1149,9 +1150,9 @@ def test_parse_effective_config_line_absent_is_none():
 
 
 def test_snapshot_round_trips_both_role_profile_shapes(tmp_path):
-    """Snapshots stay raw on purpose: a split run keeps `profiles` verbatim and an
-    old snapshot keeps its single `profile`, so the display layer — not the store —
-    decides how a legacy run's roles are derived."""
+    """Snapshots stay raw apart from the option catalog: a split run keeps
+    `profiles` verbatim and an old snapshot keeps its single `profile`, so the
+    display layer — not the store — decides how a legacy run's roles are derived."""
     split = {"profile": "default", "profiles": {"dev": "standard", "review": "excellent"}}
     legacy = {"profile": "excellent"}
 
@@ -1160,3 +1161,29 @@ def test_snapshot_round_trips_both_role_profile_shapes(tmp_path):
         run_dir.mkdir()
         write_effective_config_snapshot(run_dir, data)
         assert read_effective_config_snapshot(run_dir) == data
+
+
+def test_snapshot_read_drops_the_option_catalog(tmp_path):
+    """The catalog states what any launch MAY select, never what a run did, so the
+    per-run snapshot is the one place it carries no information — and it is most of
+    the bytes, stored per run and re-sent in every run-history entry.
+
+    Written here with the catalog, which is exactly the shape of every
+    `effective_config.json` persisted before the drop: those files stay readable
+    and lose the field on the way out rather than becoming a second served shape.
+    """
+    run_dir = tmp_path / "legacy-run"
+    run_dir.mkdir()
+    write_effective_config_snapshot(run_dir, SAMPLE)
+
+    served = read_effective_config_snapshot(run_dir)
+
+    assert served == {k: v for k, v in SAMPLE.items() if k != "options"}
+    assert "options" not in served
+    # Readable, not rejected — and untouched: the trim is on the read, so the file
+    # on disk still holds what was written to it.
+    on_disk = json.loads((run_dir / "effective_config.json").read_text(encoding="utf-8"))
+    assert on_disk["options"] == CATALOG
+    # Measurably smaller: against the deployed schema-3 catalog the served payload
+    # is under half of what the orchestrator logged.
+    assert len(json.dumps(served)) * 2 < len(json.dumps(SAMPLE))
