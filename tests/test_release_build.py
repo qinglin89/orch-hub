@@ -10,8 +10,10 @@ called, and what it treats as forbidden in the payload it produced.
 from __future__ import annotations
 
 import errno
+import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -21,6 +23,8 @@ from orch_hub import release_build
 from orch_hub.macho import PayloadFacts
 from orch_hub.release_audit import MAINTAINER_PATH, SECRET_MATERIAL
 from orch_hub.release_build import (
+    DIRTY_SUFFIX,
+    GIT_BIN,
     TARGET,
     BuildError,
     BuildOptions,
@@ -28,10 +32,13 @@ from orch_hub.release_build import (
     check_host,
     check_min_macos,
     default_literals,
+    is_source_revision,
     read_project,
+    read_source_revision,
     read_version,
 )
 from orch_hub.release_python import PinnedInterpreter, pinned_interpreter
+from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -482,6 +489,124 @@ def test_an_environment_that_cannot_name_its_interpreter_is_rebuilt(
     assert not (venv_dir / "marker").exists()
 
 
+COMMIT = "a" * 40
+
+
+class FakeGit:
+    """Answers the three probes a source-revision read makes.
+
+    Injected rather than driving a real repository: what is being pinned is the
+    driver's reading of git's answers, and a real ``git init`` would test git.
+    ``toplevel=None`` is the way a directory says it is not a work tree, which
+    git spells as a non-zero exit rather than as empty output.
+    """
+
+    def __init__(
+        self,
+        *,
+        toplevel: str | Path | None = None,
+        head: str | None = COMMIT,
+        status: str = "",
+        missing: bool = False,
+    ):
+        self.toplevel = toplevel
+        self.head = head
+        self.status = status
+        self.missing = missing
+        self.calls: list[tuple[str, ...]] = []
+
+    def __call__(self, args, **kwargs) -> CommandResult:
+        argv = tuple(str(item) for item in args)
+        self.calls.append(argv)
+        if self.missing:
+            raise CommandNotFoundError(argv[0])
+        if argv[1:] == ("rev-parse", "--show-toplevel"):
+            if self.toplevel is None:
+                return CommandResult(argv, 128, "", "not a git repository")
+            return CommandResult(argv, 0, f"{self.toplevel}\n", "")
+        if argv[1:] == ("rev-parse", "--verify", "HEAD^{commit}"):
+            if self.head is None:
+                return CommandResult(argv, 128, "", "ambiguous argument 'HEAD'")
+            return CommandResult(argv, 0, f"{self.head}\n", "")
+        if argv[1:] == ("status", "--porcelain"):
+            return CommandResult(argv, 0, self.status, "")
+        raise AssertionError(f"unexpected command {argv}")
+
+
+def test_a_clean_checkout_records_the_commit_it_is_at(tmp_path: Path):
+    git = FakeGit(toplevel=tmp_path)
+
+    assert read_source_revision(tmp_path, runner=git) == COMMIT
+    assert git.calls[0] == (GIT_BIN, "rev-parse", "--show-toplevel")
+
+
+def test_a_modified_tree_records_a_revision_the_commit_cannot_match(tmp_path: Path):
+    # The freezer reads the working tree, so a commit with edits on top did not
+    # produce these bytes. Marking it is what makes one comparison in
+    # publication enough: a reader that only knew the commit would accept it.
+    git = FakeGit(toplevel=tmp_path, status=" M orch_hub/api.py\n")
+
+    revision = read_source_revision(tmp_path, runner=git)
+
+    assert revision == f"{COMMIT}{DIRTY_SUFFIX}"
+    assert revision != COMMIT
+
+
+def test_an_untracked_file_counts_as_a_modified_tree(tmp_path: Path):
+    # An untracked orch_hub/*.py is frozen in as readily as a committed one.
+    git = FakeGit(toplevel=tmp_path, status="?? orch_hub/scratch.py\n")
+
+    assert read_source_revision(tmp_path, runner=git) == f"{COMMIT}{DIRTY_SUFFIX}"
+
+
+def test_a_source_export_records_no_revision(tmp_path: Path):
+    # A tree with no history is buildable; it is only unpublishable.
+    assert read_source_revision(tmp_path, runner=FakeGit(toplevel=None)) is None
+
+
+def test_a_repository_with_no_commit_yet_records_no_revision(tmp_path: Path):
+    git = FakeGit(toplevel=tmp_path, head=None)
+    assert read_source_revision(tmp_path, runner=git) is None
+
+
+def test_a_machine_without_git_records_no_revision(tmp_path: Path):
+    # The build must not need git to be present; it needs to be honest about it.
+    assert read_source_revision(tmp_path, runner=FakeGit(missing=True)) is None
+
+
+def test_a_git_probe_that_runs_past_its_bound_records_no_revision(tmp_path: Path):
+    # The probe is bounded, and the bound expiring is one more way of learning
+    # nothing — not a way of failing a build over an optional answer.
+    def timed_out(args, **kwargs):
+        raise subprocess.TimeoutExpired(list(args), kwargs["timeout"])
+
+    assert read_source_revision(tmp_path, runner=timed_out) is None
+
+
+def test_an_export_unpacked_inside_another_repository_records_no_revision(
+    tmp_path: Path,
+):
+    # Git answers for the enclosing repository, whose HEAD is a real, verifiable
+    # commit of entirely different source. Stamping the payload with it would be
+    # provenance that is wrong rather than absent.
+    export = tmp_path / "enclosing" / "orch-hub-0.1.0"
+    export.mkdir(parents=True)
+    git = FakeGit(toplevel=tmp_path / "enclosing")
+
+    assert read_source_revision(export, runner=git) is None
+    # Refused on the first probe: nothing else about that repository is read.
+    assert len(git.calls) == 1
+
+
+def test_a_recorded_revision_is_a_commit_or_a_commit_marked_modified():
+    assert is_source_revision(COMMIT)
+    assert is_source_revision(f"{COMMIT}{DIRTY_SUFFIX}")
+    assert not is_source_revision("")
+    assert not is_source_revision(COMMIT[:12])
+    assert not is_source_revision(COMMIT.upper())
+    assert not is_source_revision(f"{COMMIT}-modified")
+
+
 def payload_files(extra: dict[str, bytes] | None = None) -> dict[str, bytes]:
     """A payload holding every member a usable runtime must have.
 
@@ -504,12 +629,13 @@ def prepare_build(
     staged_files: dict[str, bytes],
     literals=(),
     min_macos: str | None = "11.0",
+    source_revision: str | None = COMMIT,
 ) -> BuildOptions:
     """Run a build for real from the freeze onwards, without freezing anything.
 
     Everything the driver decides after the freezer returns — describing the
     payload, auditing it, publishing it — runs unmodified; only the freezer,
-    the build environment and the Mach-O scan are stood in for.
+    the build environment, the Mach-O scan and the git reads are stood in for.
     """
     checkout = tmp_path / "checkout"
     (checkout / "orch_hub").mkdir(parents=True)
@@ -540,6 +666,11 @@ def prepare_build(
     )
     monkeypatch.setattr(release_build, "_interpreter_version", lambda python: "3.14.4")
     monkeypatch.setattr(release_build, "_builder_identity", lambda python: "pyinstaller 6.22.2")
+    monkeypatch.setattr(
+        release_build,
+        "read_source_revision",
+        lambda checkout, *, runner: source_revision,
+    )
     return options(tmp_path, checkout=checkout, literals=tuple(literals))
 
 
@@ -599,6 +730,54 @@ def test_a_payload_that_passes_replaces_the_previous_one(tmp_path: Path, monkeyp
     # Replaced rather than merged: nothing of the old payload is left behind.
     assert not (payload_dir / "marker").exists()
     assert list(payload_dir.parent.iterdir()) == [payload_dir]
+
+
+def test_the_manifest_records_the_revision_the_payload_was_frozen_from(
+    tmp_path: Path, monkeypatch
+):
+    # The one fact a compiled payload could not otherwise carry: it records the
+    # interpreter and the freezer that made it, and nothing about the source.
+    build_options = prepare_build(tmp_path, monkeypatch, staged_files=payload_files())
+
+    result = release_build.build_runtime(build_options)
+
+    assert result.manifest["source_revision"] == COMMIT
+    written = json.loads(
+        (result.payload_dir / release_build.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert written["source_revision"] == COMMIT
+
+
+def test_the_build_reads_the_revision_through_its_own_runner(tmp_path: Path, monkeypatch):
+    build_options = prepare_build(tmp_path, monkeypatch, staged_files=payload_files())
+    # Put the real reader back: what is being pinned here is that the driver
+    # asks git about *its* checkout, through the runner it was handed.
+    monkeypatch.setattr(release_build, "read_source_revision", read_source_revision)
+    git = FakeGit(toplevel=build_options.checkout)
+
+    result = release_build.build_runtime(build_options, runner=git)
+
+    assert result.manifest["source_revision"] == COMMIT
+    assert git.calls[0] == (GIT_BIN, "rev-parse", "--show-toplevel")
+
+
+def test_a_payload_with_no_readable_revision_is_still_built_and_says_so(
+    tmp_path: Path, monkeypatch
+):
+    # A build has to work from a source export. What it must not do is leave the
+    # question unanswered: a present null says the build looked and could not
+    # name a revision, which publication refuses for a stated reason.
+    build_options = prepare_build(
+        tmp_path, monkeypatch, staged_files=payload_files(), source_revision=None
+    )
+
+    result = release_build.build_runtime(build_options)
+
+    written = json.loads(
+        (result.payload_dir / release_build.MANIFEST_NAME).read_text(encoding="utf-8")
+    )
+    assert "source_revision" in written
+    assert written["source_revision"] is None
 
 
 def test_a_payload_above_the_floor_is_not_published(tmp_path: Path, monkeypatch):

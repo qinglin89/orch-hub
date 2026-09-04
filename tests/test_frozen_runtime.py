@@ -36,9 +36,9 @@ from pathlib import Path
 
 import pytest
 
-from orch_hub import release_package
+from orch_hub import release_build, release_package
 from orch_hub.release_audit import ForbiddenLiteral, audit_payload
-from orch_hub.release_build import default_literals
+from orch_hub.release_build import default_literals, is_source_revision
 from orch_hub.release_package import PackageOptions, package_release
 from orch_hub.release_publish import (
     PUBLICATION_NAME,
@@ -227,6 +227,24 @@ def test_manifest_describes_the_shipped_target(manifest: dict):
     assert manifest["target"] == "darwin-arm64"
     assert manifest["architectures"] == ["arm64"]
     assert manifest["min_macos"]
+
+
+def test_manifest_records_the_source_the_payload_was_frozen_from(manifest: dict):
+    """A real build's own reading of the checkout the freezer read.
+
+    Marked modified is fine — a smoke build usually is — and so is a null, which
+    is how a build from a source export says it could not name a revision. What
+    is checked is that the payload answered the question at all, because that
+    answer is publication's only way to bind these bytes to a tag.
+
+    A payload from before builds recorded one is skipped rather than failed, the
+    same way this module skips when there is no payload: it cannot answer, and
+    the driver's own tests are what catch a build that stopped answering.
+    """
+    if "source_revision" not in manifest:
+        pytest.skip("payload predates source-revision recording; rebuild to cover it")
+    revision = manifest["source_revision"]
+    assert revision is None or is_source_revision(revision)
 
 
 def test_manifest_carries_no_build_machine_paths(manifest: dict):
@@ -780,9 +798,56 @@ def tagged_checkout(root: Path, tag: str) -> Path:
     return checkout
 
 
-def test_the_real_release_publishes_under_its_tag(
-    release: Path, tmp_path: Path, manifest: dict
-):
+@pytest.fixture(scope="module")
+def publishable(tmp_path_factory) -> tuple[Path, Path, str]:
+    """A real artifact set whose payload records the commit its tag names.
+
+    Publication binds the bytes to their source, so the accepting path is out of
+    reach of any smoke test taken literally: the tag it resolves is one it just
+    created, and the payload on disk was frozen from a working checkout that is
+    not sitting on a release tag. The recorded revision is therefore the one
+    value stood in for — restamped on a *copy* of the payload, never on the
+    built one — and everything downstream of it stays real: the freezer's
+    payload, the packager, the 17 MB self-extractor, and the placement.
+    """
+    payload = payload_dir()
+    executable()  # skip here, not mid-test, when nothing is built
+    root = tmp_path_factory.mktemp("publishable")
+    version = json.loads(
+        (payload / release_build.MANIFEST_NAME).read_text(encoding="utf-8")
+    )["version"]
+    tag = f"v{version}"
+    checkout = tagged_checkout(root, tag)
+    commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(checkout),
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+
+    copy = root / payload.name
+    shutil.copytree(payload, copy, symlinks=True)
+    manifest_path = copy / release_build.MANIFEST_NAME
+    stamped = json.loads(manifest_path.read_text(encoding="utf-8"))
+    stamped["source_revision"] = commit
+    manifest_path.write_text(
+        json.dumps(stamped, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+    result = package_release(
+        PackageOptions(
+            payload_dirs=(copy,),
+            out_dir=root / "artifacts",
+            work_dir=root / "work",
+            template_path=REPO_ROOT / release_package.TEMPLATE_RELATIVE_PATH,
+            literals=default_literals(REPO_ROOT, dict(os.environ)),
+        )
+    )
+    return result.out_dir, checkout, tag
+
+
+def test_the_real_release_publishes_under_its_tag(publishable, tmp_path: Path):
     """Publish the artifact set an engineer would actually be handed.
 
     tests/test_release_publish.py pins every refusal against synthetic releases.
@@ -790,11 +855,11 @@ def test_the_real_release_publishes_under_its_tag(
     header has to be found and whose digest has to be recomputed from the same
     bytes the packager wrote.
     """
-    tag = f"v{manifest['version']}"
+    release, checkout, tag = publishable
     destination = tmp_path / "storage"
     result = publish(
         PublishOptions(
-            checkout=tagged_checkout(tmp_path, tag),
+            checkout=checkout,
             release_dir=release,
             work_dir=tmp_path / "work",
             tag=tag,
@@ -816,6 +881,11 @@ def test_the_real_release_publishes_under_its_tag(
     assert verified.returncode == 0, verified.stdout + verified.stderr
     record = json.loads((published / PUBLICATION_NAME).read_text(encoding="utf-8"))
     assert record["tag"] == tag
-    assert record["version"] == manifest["version"]
+    assert record["version"] == tag.lstrip("v")
+    # The commit it records is the one every published payload declares, because
+    # publication refused every other possibility before it wrote this.
+    document = json.loads((published / "release.json").read_text(encoding="utf-8"))
+    for entry in document["targets"].values():
+        assert entry["runtime"]["source_revision"] == record["commit"]
     # The one digest the release cannot carry for itself.
     assert "SHA256SUMS" in {item["name"] for item in record["files"]}

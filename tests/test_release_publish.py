@@ -42,6 +42,7 @@ from orch_hub.release_publish import (
     PublishError,
     PublishOptions,
     Revision,
+    check_payload_revision,
     check_tag,
     default_release_dir,
     main,
@@ -71,12 +72,18 @@ def make_payload(
     version: str = "9.9.9",
     target: str = "darwin-arm64",
     label: str = "",
+    source_revision: str | None = COMMIT,
 ) -> Path:
     """A payload directory shaped like a real one, minus the interpreter.
 
     ``label`` changes the runtime's bytes without changing anything the release
     format describes, which is how a test gets two equally valid releases of one
     version that a digest can tell apart.
+
+    ``source_revision`` defaults to the commit :class:`FakeRunner` resolves the
+    tag to, so the ordinary payload is one the tag can actually be bound to;
+    every other value is a test about that binding. ``None`` omits the field —
+    a payload from a build that could not name its source.
     """
     declared_os, _, declared_arch = target.partition("-")
     payload = root / f"orch-hub-{target}"
@@ -86,25 +93,24 @@ def make_payload(
         FAKE_RUNTIME + (f"# {label}\n" if label else ""), encoding="utf-8"
     )
     binary.chmod(0o755)
+    manifest = {
+        "schema": MANIFEST_SCHEMA,
+        "name": "orch-hub",
+        "version": version,
+        "target": target,
+        "os": declared_os,
+        "arch": declared_arch,
+        "executable": "orch-hub",
+        "min_macos": "11.0",
+        "architectures": [declared_arch],
+        "binaries": 1,
+        "python_version": "3.14.7",
+        "builder": "pyinstaller 6.22.2",
+    }
+    if source_revision is not None:
+        manifest["source_revision"] = source_revision
     (payload / MANIFEST_NAME).write_text(
-        json.dumps(
-            {
-                "schema": MANIFEST_SCHEMA,
-                "name": "orch-hub",
-                "version": version,
-                "target": target,
-                "os": declared_os,
-                "arch": declared_arch,
-                "executable": "orch-hub",
-                "min_macos": "11.0",
-                "architectures": [declared_arch],
-                "binaries": 1,
-                "python_version": "3.14.7",
-                "builder": "pyinstaller 6.22.2",
-            },
-            indent=2,
-        ),
-        encoding="utf-8",
+        json.dumps(manifest, indent=2), encoding="utf-8"
     )
     return payload
 
@@ -115,6 +121,7 @@ def make_release(
     version: str = "9.9.9",
     targets=("darwin-arm64",),
     label: str = "",
+    source_revision: str | None = COMMIT,
 ) -> Path:
     """Package synthetic payloads into a real release directory.
 
@@ -125,7 +132,13 @@ def make_release(
     suffix = f"-{label}" if label else ""
     source = tmp_path / f"payloads{suffix}"
     payloads = tuple(
-        make_payload(source, version=version, target=target, label=label)
+        make_payload(
+            source,
+            version=version,
+            target=target,
+            label=label,
+            source_revision=source_revision,
+        )
         for target in targets
     )
     result = package_release(
@@ -817,6 +830,94 @@ def test_resolves_a_tag_against_a_real_repository(tmp_path: Path):
 
 
 # --------------------------------------------------------------------------
+# The payload-to-source gate
+# --------------------------------------------------------------------------
+
+
+def test_binds_every_payload_to_the_commit_the_tag_names(tmp_path: Path):
+    release_dir = make_release(tmp_path, targets=("darwin-arm64", "darwin-x86_64"))
+    release = verify_release(release_dir)
+
+    assert check_payload_revision(release, Revision(tag="v9.9.9", commit=COMMIT)) is None
+
+
+def test_refuses_artifacts_frozen_from_another_commit(tmp_path: Path):
+    # Everything else about this release is correct: the version matches, the
+    # inventory recomputes, the checkout is at the tag. The bytes are simply
+    # from a build that happened before the source changed.
+    release_dir = make_release(tmp_path, source_revision=OTHER_COMMIT)
+
+    with pytest.raises(PublishError) as raised:
+        publish_to(tmp_path, release_dir, str(tmp_path / "storage"))
+
+    message = str(raised.value)
+    assert OTHER_COMMIT[:12] in message and COMMIT[:12] in message
+    assert not (tmp_path / "storage").exists()
+
+
+def test_refuses_artifacts_frozen_from_a_modified_tree(tmp_path: Path):
+    # The recorded revision is the tag's commit; what it is not is the source
+    # that produced these bytes, and one comparison catches both.
+    release_dir = make_release(tmp_path, source_revision=f"{COMMIT}-dirty")
+
+    with pytest.raises(PublishError, match="uncommitted changes"):
+        publish_to(tmp_path, release_dir, str(tmp_path / "storage"))
+
+
+def test_refuses_a_payload_that_recorded_no_revision(tmp_path: Path):
+    release_dir = make_release(tmp_path, source_revision=None)
+
+    with pytest.raises(PublishError, match="records no source revision"):
+        publish_to(tmp_path, release_dir, str(tmp_path / "storage"))
+
+
+def test_refuses_a_payload_whose_recorded_revision_is_not_a_commit(tmp_path: Path):
+    # Packaging refuses this shape, so reaching publication means the document
+    # was edited afterwards — the moment to be least trusting, not most.
+    release_dir = make_release(tmp_path)
+    document = read_release(release_dir)
+    document["targets"]["darwin-arm64"]["runtime"]["source_revision"] = "HEAD"
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+
+    with pytest.raises(PublishError, match="not a commit"):
+        publish_to(tmp_path, release_dir, str(tmp_path / "storage"))
+
+
+def test_refuses_a_target_carrying_no_runtime_manifest(tmp_path: Path):
+    release_dir = make_release(tmp_path)
+    document = read_release(release_dir)
+    del document["targets"]["darwin-arm64"]["runtime"]
+    write_release(release_dir, document)
+    resync_checksums(release_dir)
+
+    with pytest.raises(PublishError, match="carries no runtime manifest"):
+        publish_to(tmp_path, release_dir, str(tmp_path / "storage"))
+
+
+def test_one_stale_target_stops_a_multi_target_release(tmp_path: Path):
+    # One version published as one set: a stale payload for the second target is
+    # exactly the artifact nobody would look at twice.
+    source = tmp_path / "payloads"
+    payloads = (
+        make_payload(source, target="darwin-arm64"),
+        make_payload(source, target="darwin-x86_64", source_revision=OTHER_COMMIT),
+    )
+    result = package_release(
+        PackageOptions(
+            payload_dirs=payloads,
+            out_dir=tmp_path / "dist" / "release",
+            work_dir=tmp_path / "build",
+            template_path=TEMPLATE,
+            allow_findings=True,
+        )
+    )
+
+    with pytest.raises(PublishError, match="darwin-x86_64 payload"):
+        publish_to(tmp_path, result.out_dir, str(tmp_path / "storage"))
+
+
+# --------------------------------------------------------------------------
 # Destinations
 # --------------------------------------------------------------------------
 
@@ -1442,14 +1543,32 @@ def real_checkout(root: Path, tag: str) -> Path:
     return checkout
 
 
+def head_of(checkout: Path) -> str:
+    """The commit a real test repository is at.
+
+    The payloads published from it have to record this, so the release built for
+    such a test is built *after* the repository — the same order a maintainer
+    works in, and the reason these two tests cannot share the module's fixed
+    :data:`COMMIT`.
+    """
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=checkout,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
 def test_cli_publishes_and_names_everything_it_wrote(tmp_path: Path, capsys):
-    release_dir = make_release(tmp_path)
+    checkout = real_checkout(tmp_path, "v9.9.9")
+    release_dir = make_release(tmp_path, source_revision=head_of(checkout))
     destination = tmp_path / "storage"
 
     code = main(
         [
             "--checkout",
-            str(real_checkout(tmp_path, "v9.9.9")),
+            str(checkout),
             "--release",
             str(release_dir),
             "--work",
@@ -1471,12 +1590,13 @@ def test_cli_publishes_and_names_everything_it_wrote(tmp_path: Path, capsys):
 
 
 def test_cli_emits_the_result_as_json(tmp_path: Path, capsys):
-    release_dir = make_release(tmp_path)
+    checkout = real_checkout(tmp_path, "v9.9.9")
+    release_dir = make_release(tmp_path, source_revision=head_of(checkout))
 
     code = main(
         [
             "--checkout",
-            str(real_checkout(tmp_path, "v9.9.9")),
+            str(checkout),
             "--release",
             str(release_dir),
             "--work",

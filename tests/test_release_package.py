@@ -240,6 +240,39 @@ def test_a_payload_that_is_not_orch_hub_is_refused(tmp_path: Path, field: str):
         read_payload_manifest(payload)
 
 
+@pytest.mark.parametrize(
+    "recorded", ["", "0123456", "not-a-commit", "b" * 40 + "-modified", "B" * 40]
+)
+def test_a_manifest_recording_something_other_than_a_commit_is_refused(
+    tmp_path: Path, recorded: str
+):
+    # It reaches release.json verbatim, so an unreadable revision would be
+    # published as provenance; packaging is the last step that can still fix it
+    # by rebuilding rather than by retracting.
+    payload = make_payload(tmp_path, manifest_overrides={"source_revision": recorded})
+    with pytest.raises(PackageError, match="not a commit"):
+        read_payload_manifest(payload)
+
+
+def test_a_payload_that_recorded_no_revision_is_still_packageable(tmp_path: Path):
+    # A local smoke build from a source export is the ordinary case; publication
+    # is where the absence is refused, because that is the step that hands the
+    # bytes to somebody.
+    payload = make_payload(tmp_path)
+    assert "source_revision" not in read_payload_manifest(payload)
+    assert package(tmp_path, payload).is_dir()
+
+
+@pytest.mark.parametrize("recorded", ["c" * 40, "c" * 40 + "-dirty"])
+def test_a_recorded_revision_reaches_the_release_document(tmp_path: Path, recorded: str):
+    # Including the modified-tree spelling: packaging carries what the build
+    # measured, and publication is what decides the payload cannot be handed out.
+    payload = make_payload(tmp_path, manifest_overrides={"source_revision": recorded})
+    out = package(tmp_path, payload)
+    release = json.loads((out / RELEASE_NAME).read_text(encoding="utf-8"))
+    assert release["targets"]["darwin-arm64"]["runtime"]["source_revision"] == recorded
+
+
 def test_a_payload_without_its_declared_executable_is_refused(tmp_path: Path):
     payload = make_payload(tmp_path)
     (payload / "orch-hub").unlink()

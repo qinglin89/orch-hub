@@ -12,9 +12,11 @@ checks. Three properties are the whole point:
 
 - **The tag is a gate, not a label.** ``--tag v0.1.0`` is refused unless the
   release really is version ``0.1.0``, that tag exists in this checkout, the
-  checkout is *at* it, and the working tree is clean. Without those, "the
+  checkout is *at* it, the working tree is clean, and every payload records
+  that same commit as the source it was frozen from. Without those, "the
   artifacts for v0.1.0" means "whatever happened to be in ``dist/`` when
-  somebody typed a tag name".
+  somebody typed a tag name" — and without the last one, a checkout at the tag
+  still says nothing about when ``dist/`` was filled.
 - **The bytes are re-verified against their own inventory.** Every digest,
   size, and file name in ``release.json`` is recomputed from the files on disk,
   ``SHA256SUMS`` must agree with it and cover exactly the same set, and the
@@ -58,7 +60,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .atomic_dir import discard_path
-from .release_build import BuildError, read_version
+from .release_build import (
+    COMMIT_RE,
+    DIRTY_SUFFIX,
+    GIT_BIN,
+    BuildError,
+    is_source_revision,
+    read_version,
+)
 from .release_package import (
     CHECKSUM_KIND,
     CHECKSUM_NAME,
@@ -95,7 +104,6 @@ the only reading of that release that is not a lie about its bytes."""
 TAG_PREFIX = "v"
 """How a tag names a version. ``v0.1.0`` publishes ``0.1.0`` and nothing else."""
 
-GIT_BIN = "git"
 GH_BIN = "gh"
 
 GITHUB_SCHEME = "github:"
@@ -112,8 +120,6 @@ Lowercase hex only: a release that spelled its digests any other way would
 compare unequal to every recomputation here and to ``shasum -c`` on the far
 side, so accepting one would only move the failure to a machine that cannot
 report it."""
-
-COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 _HEADER_BYTES = 8192
 """How much of a ``.run`` is read to find its embedded identity.
@@ -307,11 +313,11 @@ def check_checkout_version(checkout: Path, version: str) -> None:
     the release being tagged is a version bump, and the most likely way to
     publish bytes nobody meant to publish.
 
-    This is the strongest binding available on this side. The tag proves the
-    checkout is the tag; nothing in a compiled payload records the revision it
-    was frozen from, so a rebuild that never happened *at the same version*
-    still passes here. Closing that needs the build to record its source
-    revision, which is a build-side change and a separate piece of work.
+    A cheap check that runs before any git probe, and the one that produces the
+    readable error for the ordinary mistake. What actually binds the *bytes* to
+    the source is :func:`check_payload_revision`, which needs the tag resolved
+    first; a version bump that was never rebuilt fails here with a message about
+    the version rather than there with a message about two commit hashes.
     """
     try:
         declared = read_version(checkout)
@@ -325,6 +331,67 @@ def check_checkout_version(checkout: Path, version: str) -> None:
         )
 
 
+def check_payload_revision(release: VerifiedRelease, revision: Revision) -> None:
+    """Refuse artifacts that were not frozen from the commit being tagged.
+
+    The binding the rest of publication cannot make. Everything else proves the
+    artifact set agrees with itself and that the checkout is the tag; both hold
+    perfectly for a ``dist/`` filled by a build from a week ago, at the same
+    version, from source that has since changed. What closes it is the payload
+    naming the revision it came from, and this comparing that name to the commit
+    the tag resolves to.
+
+    Every target is checked, not the first: a multi-target release is one
+    version published as one set, and a stale payload for one target is exactly
+    the artifact nobody would look at twice.
+
+    Three refusals rather than one message, because the fixes differ. A payload
+    that names another commit needs a rebuild; a payload built from a modified
+    tree needs the changes committed *and* a rebuild; a payload that names no
+    revision was built somewhere its source had no history, and no amount of
+    re-tagging turns it into a release. All three name what was recorded, so the
+    error is diagnosable from the terminal that produced it.
+    """
+    targets = release.release.get("targets")
+    if not isinstance(targets, dict) or not targets:
+        raise PublishError(f"{RELEASE_NAME} declares no targets")
+    for target in sorted(targets):
+        entry = targets[target]
+        runtime = entry.get("runtime") if isinstance(entry, dict) else None
+        if not isinstance(runtime, dict):
+            raise PublishError(
+                f"target {target!r} carries no runtime manifest, so nothing "
+                "says which source its payload was frozen from"
+            )
+        recorded = runtime.get("source_revision")
+        if recorded is None:
+            raise PublishError(
+                f"the {target} payload records no source revision, so these "
+                f"bytes cannot be shown to come from {revision.tag}; rebuild "
+                "from a git checkout of the tagged commit"
+            )
+        value = str(recorded).strip()
+        if not is_source_revision(value):
+            raise PublishError(
+                f"the {target} payload records source revision {value!r}, "
+                "which is not a commit"
+            )
+        if value.endswith(DIRTY_SUFFIX):
+            commit = value[: -len(DIRTY_SUFFIX)]
+            raise PublishError(
+                f"the {target} payload was built from {commit[:12]} with "
+                f"uncommitted changes, so its source has no name to publish "
+                f"under; commit them, rebuild, and repackage before {revision.tag}"
+            )
+        if value != revision.commit:
+            raise PublishError(
+                f"the {target} payload was built from {value[:12]}, but tag "
+                f"{revision.tag!r} names {revision.commit[:12]}; these artifacts "
+                "were not frozen from the source being tagged — rebuild and "
+                "repackage before publishing"
+            )
+
+
 def resolve_tag(
     checkout: Path, tag: str, *, runner: Runner = run_command
 ) -> Revision:
@@ -335,11 +402,11 @@ def resolve_tag(
     commit with edits on top is a checkout whose state has no name, and
     publishing from it files unnamed bytes under a name.
 
-    This proves the *checkout* is the tag. It cannot prove the payload was
-    frozen from that checkout — nothing in a compiled payload records the
-    revision it came from — which is why the artifact set is re-verified
-    against its own inventory as well: the two checks bound different failures
-    and neither replaces the other.
+    This proves the *checkout* is the tag, which is a claim about the machine
+    publication runs on and not about the bytes it is publishing. The commit it
+    returns is what :func:`check_payload_revision` holds each payload's recorded
+    source revision to; on its own it would say nothing about when ``dist/`` was
+    filled or from what.
     """
     commit = _git(
         runner,
@@ -728,11 +795,11 @@ def _digest(path: Path) -> str:
 def publication_document(release: VerifiedRelease, revision: Revision) -> dict:
     """What is recorded beside the artifacts, and why each field is in it.
 
-    ``commit`` is the provenance the artifacts themselves cannot carry: a
-    compiled payload records the interpreter and the freezer that made it, not
-    the revision it was made from. ``files`` repeats the inventory with the
-    checksum file's own digest included, which closes the one link
-    ``SHA256SUMS`` cannot close for itself.
+    ``commit`` is the revision every published payload was frozen from — the
+    tag's commit, which :func:`check_payload_revision` has already held each
+    target's manifest to, so it is one fact rather than a second copy of one.
+    ``files`` repeats the inventory with the checksum file's own digest
+    included, which closes the one link ``SHA256SUMS`` cannot close for itself.
 
     No timestamp, deliberately, and for the same reason the release archive
     writes a fixed mtime: a publication that is a pure function of its tag and
@@ -790,6 +857,7 @@ def publish(options: PublishOptions, *, runner: Runner = run_command) -> Publish
     check_tag(options.tag, release.version)
     check_checkout_version(options.checkout, release.version)
     revision = resolve_tag(options.checkout, options.tag, runner=runner)
+    check_payload_revision(release, revision)
 
     stage = _stage(layout, release, revision)
     try:

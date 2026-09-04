@@ -21,9 +21,10 @@ Three properties are worth more than the mechanics:
   first-party code from the checkout, so what ships is the working tree and
   never a stale copy in ``site-packages``.
 - **The payload declares itself.** ``runtime.json`` records version, target,
-  architecture, and the minimum macOS the produced binaries actually require —
-  read back out of the Mach-O headers rather than assumed from the build host.
-  Nothing in it is a path, so the manifest carries no trace of the builder.
+  architecture, the source revision it was frozen from, and the minimum macOS
+  the produced binaries actually require — read back out of the Mach-O headers
+  rather than assumed from the build host. Nothing in it is a path, so the
+  manifest carries no trace of the builder.
 - **The payload is audited before it is a release.** A build with findings
   fails; shipping a maintainer's absolute path or bearer token inside a binary
   is not recoverable after publication. The same applies to the minimum macOS
@@ -43,6 +44,7 @@ import argparse
 import json
 import os
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -56,6 +58,8 @@ from pathlib import Path
 # renamed plist then changes the bundle too, rather than silently dropping it.
 # ``atomic_dir`` owns the one way a produced directory reaches a path something
 # else consumes — the installer publishes a version through the same function.
+# ``subprocess_utils`` owns how the hub runs a command at all, and the git reads
+# below are commands like any other.
 # Every import chain here is standard-library only, which the build driver
 # relies on: it runs before the build environment with the runtime dependencies
 # exists.
@@ -81,6 +85,7 @@ from .release_python import (
     pinned_interpreter,
 )
 from .resources import WEB_RELATIVE_PATH
+from .subprocess_utils import Runner, run_command
 
 TARGET_OS = "darwin"
 TARGET_ARCH = "arm64"
@@ -144,6 +149,32 @@ REQUIRED_MEMBERS = (
 Absence of the forbidden is only half of a distributable payload; a build that
 quietly dropped the dashboard assets or the plist template produces a binary
 that starts and then fails at the first request."""
+
+GIT_BIN = "git"
+"""Git as the producer chain invokes it: bare, on ``PATH``.
+
+Defined here rather than in each producer module because the build reads the
+revision a payload is frozen from and publication reads the revision a tag
+names, and those two answers are only comparable if they came from the same
+program."""
+
+_GIT_TIMEOUT = 30.0
+"""Bound on every producer-side git read. All of them are local ref/index
+reads; a git that has not answered in half a minute is not going to."""
+
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+"""A commit as ``git rev-parse`` writes it, and as a manifest records it."""
+
+DIRTY_SUFFIX = "-dirty"
+"""Marks a revision the build did not actually freeze.
+
+A recorded revision answers one question — which source produced these bytes —
+so a tree with edits on top of a commit has to answer it differently from the
+commit itself. Spelling that as a suffix rather than a second boolean is what
+makes the answer a *single comparable value*: publication compares one string
+against the commit its tag names, and a modified tree fails that comparison
+without anyone having to remember to also read a flag. Git's own
+``describe --dirty`` marks it the same way, for the same reason."""
 
 SECRET_ENV_LABELS = {
     "ORCH_HUB_TOKEN": "bearer token",
@@ -329,6 +360,88 @@ def check_min_macos(
     print(f"warning: {message}", file=sys.stderr)
 
 
+def is_source_revision(value: str) -> bool:
+    """Whether ``value`` is a revision a payload could have recorded.
+
+    One spelling, checked in one place: the build writes it, packaging refuses a
+    manifest carrying anything else, and publication reads it. A reader that
+    accepted a looser shape would be a reader that could not tell a modified
+    tree from a commit whose hash happens to end in the same letters.
+    """
+    if value.endswith(DIRTY_SUFFIX):
+        value = value[: -len(DIRTY_SUFFIX)]
+    return COMMIT_RE.fullmatch(value) is not None
+
+
+def read_source_revision(
+    checkout: Path, *, runner: Runner = run_command
+) -> str | None:
+    """The revision this payload is being frozen from, or ``None`` if unknowable.
+
+    The one fact the artifacts could not otherwise carry. A compiled payload
+    records the interpreter and the freezer that made it; without this, the only
+    thing binding a release to its source is that the *checkout* was at the tag
+    when somebody ran publication, which says nothing about when the bytes in
+    ``dist/`` were produced or from what.
+
+    Three answers, and the third is a real one rather than a failure:
+
+    - the commit, when the work tree is exactly it;
+    - the commit plus :data:`DIRTY_SUFFIX`, when it is not — tracked edits and
+      untracked files alike, because the freezer reads the working tree and an
+      untracked ``orch_hub/*.py`` ships as readily as a committed one;
+    - ``None``, when there is no revision to read: no git on the machine, an
+      exported source tree with no history, a repository with no commit yet.
+
+    ``None`` is recorded rather than raised. A build has to work from a source
+    export, and a payload that honestly declares it cannot name its source is
+    publishable-by-nobody rather than unbuildable — which is the split this
+    module keeps everywhere else too: the build reports what it produced, and
+    publication decides what may be handed out.
+
+    The checkout must be the *root* of the work tree git answers for. An export
+    unpacked inside some unrelated repository would otherwise be stamped with
+    that repository's HEAD — a revision that is real, verifiable, and about
+    entirely different source.
+    """
+    top = _git(runner, checkout, ["rev-parse", "--show-toplevel"])
+    if top is None:
+        return None
+    try:
+        if Path(top).resolve() != checkout.expanduser().resolve():
+            return None
+    except OSError:
+        return None
+    commit = _git(runner, checkout, ["rev-parse", "--verify", "HEAD^{commit}"])
+    if commit is None or not COMMIT_RE.fullmatch(commit):
+        return None
+    status = _git(runner, checkout, ["status", "--porcelain"], strip=False)
+    if status is None:
+        return None
+    return commit if not status.strip() else f"{commit}{DIRTY_SUFFIX}"
+
+
+def _git(
+    runner: Runner, checkout: Path, args: Sequence[str], *, strip: bool = True
+) -> str | None:
+    """One git read, where every way of not getting an answer is one answer.
+
+    Unlike the rest of this module a git failure is not a :class:`BuildError`:
+    the caller is asking a question the build can live without, so a missing
+    git, a directory that is not a work tree, a non-zero exit, and a probe that
+    ran past its bound all mean the same thing to it — nothing was learned. A
+    build that could not read its source records that it could not; it does not
+    stop.
+    """
+    try:
+        result = runner([GIT_BIN, *args], cwd=checkout, timeout=_GIT_TIMEOUT)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if not result.ok:
+        return None
+    return result.stdout.strip() if strip else result.stdout
+
+
 def default_literals(
     checkout: Path, environ: dict[str, str], *, home: Path | None = None
 ) -> tuple[ForbiddenLiteral, ...]:
@@ -344,7 +457,7 @@ def default_literals(
     return tuple(literals)
 
 
-def build_runtime(options: BuildOptions) -> BuildResult:
+def build_runtime(options: BuildOptions, *, runner: Runner = run_command) -> BuildResult:
     """Freeze, describe, and audit one runtime payload, then publish it.
 
     Everything happens on the staged directory the freezer wrote, and the
@@ -371,6 +484,7 @@ def build_runtime(options: BuildOptions) -> BuildResult:
         facts=facts,
         python_version=_interpreter_version(venv_python),
         builder=_builder_identity(venv_python),
+        source_revision=read_source_revision(options.checkout, runner=runner),
     )
     report = audit_payload(
         staged_dir, required=REQUIRED_MEMBERS, literals=options.literals
@@ -605,12 +719,20 @@ def _write_manifest(
     facts: PayloadFacts,
     python_version: str,
     builder: str,
+    source_revision: str | None,
 ) -> dict:
     """Write the payload's self-description.
 
     Deliberately path-free: every value is a property of the artifact, not of
     the machine that produced it, so the manifest is safe to publish and stable
-    across builders.
+    across builders. A commit is such a property; the checkout it was read from
+    is not, and does not appear.
+
+    ``source_revision`` is written even when it is ``None``. A field that is
+    present and null says the build looked and could not name a revision, which
+    is a different fact from a payload produced before builds recorded one at
+    all — and publication has to refuse both, for different reasons it can only
+    state if it can tell them apart.
     """
     manifest = {
         "schema": MANIFEST_SCHEMA,
@@ -622,6 +744,7 @@ def _write_manifest(
         "executable": EXECUTABLE_NAME,
         "python_version": python_version,
         "builder": builder,
+        "source_revision": source_revision,
         **facts.to_dict(),
     }
     path = payload_dir / MANIFEST_NAME
@@ -785,6 +908,7 @@ def _print_human(result: BuildResult) -> None:
     )
     floor = pinned_interpreter(manifest["target"]).min_macos
     print(f"min macOS:  {manifest['min_macos'] or 'undeclared'} (supported: {floor})")
+    print(f"source:     {_describe_source(manifest['source_revision'])}")
     scanned = f"{result.audit.files_scanned} files, {result.audit.archives_scanned} archives"
     if result.audit.clean:
         print(f"audit:      clean ({scanned})")
@@ -792,6 +916,21 @@ def _print_human(result: BuildResult) -> None:
     print(f"audit:      {len(result.audit.findings)} finding(s) ({scanned})")
     for finding in result.audit.findings:
         print(f"  {finding.kind}: {finding.path} ({finding.detail})")
+
+
+def _describe_source(revision: str | None) -> str:
+    """The recorded revision, saying plainly when the payload cannot be published.
+
+    Printed on the successful path rather than as a warning, because neither
+    state is a build failure — but both are a publication failure, and the
+    build's own output is the last place a maintainer looks before packaging.
+    """
+    if revision is None:
+        return "unknown — no git revision, so this payload cannot be published"
+    if revision.endswith(DIRTY_SUFFIX):
+        commit = revision[: -len(DIRTY_SUFFIX)]
+        return f"{commit[:12]} + uncommitted changes, so this payload cannot be published"
+    return revision[:12]
 
 
 if __name__ == "__main__":

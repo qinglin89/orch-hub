@@ -60,6 +60,7 @@ from .release_build import (
     REQUIRED_MEMBERS,
     TARGET,
     default_literals,
+    is_source_revision,
 )
 from .release_python import PINNED
 
@@ -251,8 +252,33 @@ def read_payload_manifest(payload_dir: Path) -> dict:
     )
     _check_target_identity(manifest, path)
     _check_declared_macos(manifest, path)
+    _check_source_revision(manifest, path)
     _check_payload_executable(payload_dir / EXECUTABLE_NAME)
     return manifest
+
+
+def _check_source_revision(manifest: dict, path: Path) -> None:
+    """Prove a recorded source revision is one, before it becomes a release.
+
+    Presence is *not* required. A payload that could not name its source is
+    packageable — a local smoke build from an export is the ordinary case — and
+    publication is where the absence is refused, because publication is the
+    step that hands the bytes to somebody.
+
+    What is refused here is a value that is not a revision at all. It reaches
+    ``release.json`` verbatim, so an unreadable one would be published as
+    provenance and read back by whoever trusted the document, and packaging is
+    the last step that can still fix it by rebuilding rather than by retracting.
+    """
+    raw = manifest.get("source_revision")
+    if raw is None:
+        return
+    value = value_of(manifest, "source_revision")
+    if not is_source_revision(value):
+        raise PackageError(
+            f"{path} records source revision {value!r}, which is not a commit "
+            "this release format can publish as provenance"
+        )
 
 
 def _check_declared_macos(manifest: dict, path: Path) -> None:

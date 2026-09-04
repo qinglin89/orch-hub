@@ -30,8 +30,9 @@ Packaging produces exactly three files:
 
 A published release carries a fourth file, `publication.json`, written by the
 publish step rather than by packaging: it binds the artifact set to a version
-tag and the commit that tag names, and records the digest of `SHA256SUMS`
-itself — the one link a checksum file cannot close for itself.
+tag and the commit that tag names — which publication has proven is also the
+commit every payload was frozen from — and records the digest of `SHA256SUMS`
+itself, the one link a checksum file cannot close for itself.
 
 The shipped and supported target is `darwin-arm64` (Apple Silicon). The schema
 is target-keyed so a second target is a build concern rather than a format
@@ -369,10 +370,26 @@ python3 -m orch_hub.release_build
 
 Produces one payload directory — the executable plus the libraries,
 interpreter, and resources it needs — carrying a `runtime.json` that records
-version, target, architecture, the freezer, the interpreter version, and the
-minimum macOS the produced binaries actually require, read back out of the
-Mach-O load commands rather than assumed from the build host. Nothing in that
-manifest is a path, so it carries no trace of the builder.
+version, target, architecture, the freezer, the interpreter version, the source
+revision it was frozen from, and the minimum macOS the produced binaries
+actually require, read back out of the Mach-O load commands rather than assumed
+from the build host. Nothing in that manifest is a path, so it carries no trace
+of the builder.
+
+`source_revision` is what lets publication prove the bytes came from the source
+being tagged, so it says exactly one of three things:
+
+| Recorded | Means |
+|---|---|
+| `<commit>` | The work tree was that commit. This is the only form publication accepts. |
+| `<commit>-dirty` | That commit with uncommitted changes on top — tracked edits or untracked files, because the freezer reads the working tree and an untracked `orch_hub/*.py` ships as readily as a committed one. |
+| `null` | No revision could be read: no git on the machine, a source export with no history, a repository with no commit yet. |
+
+The last two are recorded rather than refused. A build has to work from a source
+export, and a local smoke build from a modified tree is the ordinary case; a
+payload that honestly declares it cannot name its source is one nobody can
+publish, not one nobody can build. The build prints what it recorded, saying so
+when the payload is unpublishable. Git being absent never fails a build.
 
 Two things make the payload a property of the source rather than of the
 machine:
@@ -471,6 +488,8 @@ binding this step exists to make.
 | A checkout that declares a different version | `dist/` survives every build, so what is sitting there is whatever was built last — which is the *previous* version's artifact set exactly when the release being tagged is a version bump. |
 | A tag that does not exist, or a checkout not at it | "The artifacts for v0.1.0" otherwise means "whatever was in `dist/` when somebody typed a tag name". |
 | A dirty working tree | A tagged commit with edits on top is a checkout whose state has no name. |
+| A payload whose `source_revision` is not the tag's commit | Every other check holds for a `dist/` filled by a build from last week at the same version. The payload names the commit it was frozen from, and it has to be this one — every target, not the first. |
+| A payload built from a modified tree, or recording no revision | A `<commit>-dirty` payload's source has no name to publish under; a `null` one was built where its source had no history. Neither is fixed by re-tagging. |
 | Digests, sizes, names, or `SHA256SUMS` that disagree with the bytes | Every entry in `release.json` is recomputed from the files on disk; `SHA256SUMS` must agree with it and cover exactly the same set; the `.run` header must name the version and target it is filed under. |
 | A destination that already holds this tag | The one guarantee a consumer cannot verify locally is that the bytes behind a version did not change after they were handed out. |
 | A release directory, scratch directory, or destination nested inside another | The scratch tree is created and cleared by the run; a release or destination under it would be destroyed by the run meant to read or fill it, and a scratch tree under either puts working files inside the set being verified or beside the tags being handed out. Refused in both directions. |
@@ -489,12 +508,12 @@ tag, commit, and the file inventory **including the digest of `SHA256SUMS`
 itself**. There is no timestamp in it, deliberately — a publication that is a
 pure function of its tag and its bytes can be produced twice and compared.
 
-**One limit worth stating.** Publication proves that the checkout is the tag and
-that the artifact set is internally consistent with its own inventory. It does
-not prove the payload was frozen from that checkout: nothing in a compiled
-payload currently records the source revision it was built from, so a rebuild
-that never happened *at the same version* still passes. Rebuild and repackage
-before publishing rather than relying on what `dist/` happens to hold.
+**What the three bindings cover.** The tag proves the *checkout* is the tag; the
+inventory re-derivation proves the artifact set agrees with its own bytes; and
+`source_revision` proves the *payload* was frozen from the commit being tagged.
+They bound different failures and none replaces another — the first two both
+hold perfectly for a `dist/` that was filled before the source changed, which is
+exactly what the third refuses.
 
 ## Verifying a release you received
 
@@ -514,4 +533,7 @@ sh orch-hub-0.1.0-darwin-arm64.run --extract /tmp/inspect
 
 For a published set, `publication.json` additionally names the tag, the commit,
 and the digest of `SHA256SUMS` — which is what lets you check the checksum file
-itself rather than trusting it.
+itself rather than trusting it. That commit is the revision the payloads were
+frozen from: publication refuses a release whose `release.json` records any
+other one under `targets.<target>.runtime.source_revision`, so the two documents
+can be compared and must agree.
