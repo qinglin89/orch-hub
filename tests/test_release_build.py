@@ -10,10 +10,12 @@ called, and what it treats as forbidden in the payload it produced.
 from __future__ import annotations
 
 import errno
+import io
 import json
 import os
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +27,7 @@ from orch_hub.release_audit import MAINTAINER_PATH, SECRET_MATERIAL
 from orch_hub.release_build import (
     DIRTY_SUFFIX,
     GIT_BIN,
+    STATUS_ARGV,
     TARGET,
     BuildError,
     BuildOptions,
@@ -32,6 +35,7 @@ from orch_hub.release_build import (
     check_host,
     check_min_macos,
     default_literals,
+    freeze_source,
     is_source_revision,
     read_project,
     read_source_revision,
@@ -490,15 +494,21 @@ def test_an_environment_that_cannot_name_its_interpreter_is_rebuilt(
 
 
 COMMIT = "a" * 40
+LATER_COMMIT = "b" * 40
+"""What a checkout is at after somebody committed while the build was running."""
 
 
 class FakeGit:
-    """Answers the three probes a source-revision read makes.
+    """Answers the probes a build makes about its source.
 
     Injected rather than driving a real repository: what is being pinned is the
     driver's reading of git's answers, and a real ``git init`` would test git.
     ``toplevel=None`` is the way a directory says it is not a work tree, which
     git spells as a non-zero exit rather than as empty output.
+
+    ``tracked`` is what ``git archive`` writes out: the commit's tree, which is
+    deliberately not the checkout directory, so a test can tell the two apart by
+    what the exported tree does *not* contain.
     """
 
     def __init__(
@@ -508,11 +518,15 @@ class FakeGit:
         head: str | None = COMMIT,
         status: str = "",
         missing: bool = False,
+        tracked: dict[str, str] | None = None,
+        archive_ok: bool = True,
     ):
         self.toplevel = toplevel
         self.head = head
         self.status = status
         self.missing = missing
+        self.tracked = dict(tracked or {})
+        self.archive_ok = archive_ok
         self.calls: list[tuple[str, ...]] = []
 
     def __call__(self, args, **kwargs) -> CommandResult:
@@ -528,9 +542,27 @@ class FakeGit:
             if self.head is None:
                 return CommandResult(argv, 128, "", "ambiguous argument 'HEAD'")
             return CommandResult(argv, 0, f"{self.head}\n", "")
-        if argv[1:] == ("status", "--porcelain"):
+        if argv[1:] == STATUS_ARGV:
             return CommandResult(argv, 0, self.status, "")
+        if argv[1] == "archive":
+            return self._archive(argv)
         raise AssertionError(f"unexpected command {argv}")
+
+    def _archive(self, argv: tuple[str, ...]) -> CommandResult:
+        if not self.archive_ok:
+            return CommandResult(argv, 128, "", "fatal: not a valid object name")
+        (output,) = [
+            value.partition("=")[2]
+            for value in argv
+            if value.startswith("--output=")
+        ]
+        with tarfile.open(output, "w") as tar:
+            for name, text in self.tracked.items():
+                data = text.encode("utf-8")
+                member = tarfile.TarInfo(name)
+                member.size = len(data)
+                tar.addfile(member, io.BytesIO(data))
+        return CommandResult(argv, 0, "", "")
 
 
 def test_a_clean_checkout_records_the_commit_it_is_at(tmp_path: Path):
@@ -598,6 +630,114 @@ def test_an_export_unpacked_inside_another_repository_records_no_revision(
     assert len(git.calls) == 1
 
 
+def real_checkout(tmp_path: Path, **config: str) -> tuple[Path, str]:
+    """A real repository with one commit, and the commit it is at.
+
+    One pass over real git per behaviour that depends on git's own defaults —
+    which is what a configuration option is — so the argv is known to be real
+    argv answering a real configuration rather than a fake agreeing with itself.
+    """
+    checkout = tmp_path / "real-checkout"
+    (checkout / "orch_hub").mkdir(parents=True)
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.com",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.com",
+    }
+
+    def run(*args: str) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=checkout, env=env, check=True, capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    run("init", "--quiet")
+    for key, value in config.items():
+        run("config", key.replace("_", "."), value)
+    (checkout / "orch_hub" / "__init__.py").write_text(
+        '__version__ = "1.2.3"\n', encoding="utf-8"
+    )
+    (checkout / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
+    run("add", "--all")
+    run("commit", "--quiet", "-m", "one")
+    return checkout, run("rev-parse", "HEAD")
+
+
+def test_an_untracked_file_counts_as_modified_whatever_git_is_told_to_show(
+    tmp_path: Path,
+):
+    # status.showUntrackedFiles=no is an ordinary way to quiet a noisy
+    # repository, and it makes plain `git status --porcelain` answer "clean" for
+    # a tree holding an untracked orch_hub/*.py the freezer would read like any
+    # other module. The build asks the question it actually has.
+    checkout, commit = real_checkout(tmp_path, status_showUntrackedFiles="no")
+    (checkout / "orch_hub" / "scratch.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert read_source_revision(checkout) == f"{commit}{DIRTY_SUFFIX}"
+
+
+def test_a_clean_tree_is_frozen_from_the_exported_commit_not_the_directory(
+    tmp_path: Path,
+):
+    # The export is the whole point: the freezer reads a copy git wrote out of
+    # the object database, so nothing that happens to the checkout afterwards is
+    # in the payload.
+    checkout, commit = real_checkout(tmp_path)
+    build_options = options(tmp_path, checkout=checkout)
+
+    source = freeze_source(build_options, commit)
+
+    (checkout / "orch_hub" / "__init__.py").write_text(
+        '__version__ = "9.9.9"\n', encoding="utf-8"
+    )
+    (checkout / "orch_hub" / "untracked.py").write_text("x = 1\n", encoding="utf-8")
+    assert source != checkout
+    assert read_version(source) == "1.2.3"
+    assert not (source / "untracked.py").exists()
+    assert not (source / ".git").exists()
+
+
+def test_a_tree_with_no_commit_to_name_is_frozen_where_it_lies(tmp_path: Path):
+    # A modified tree and a source export have nothing immutable to copy, and
+    # what they record already tells publication these bytes are not a commit's.
+    build_options = options(tmp_path)
+
+    def unexpected(args, **kwargs):
+        raise AssertionError(f"asked git for {args}")
+
+    assert freeze_source(build_options, None, runner=unexpected) == build_options.checkout
+    assert (
+        freeze_source(build_options, f"{COMMIT}{DIRTY_SUFFIX}", runner=unexpected)
+        == build_options.checkout
+    )
+
+
+def test_a_commit_that_cannot_be_exported_stops_the_build(tmp_path: Path):
+    # The one git failure this module refuses to absorb: falling back to the
+    # working tree would freeze bytes nobody checked while recording a commit as
+    # their source.
+    build_options = options(tmp_path)
+    git = FakeGit(toplevel=build_options.checkout, archive_ok=False)
+
+    with pytest.raises(BuildError, match="cannot export"):
+        freeze_source(build_options, COMMIT, runner=git)
+
+
+def test_a_stale_export_from_an_earlier_build_is_not_reused(tmp_path: Path):
+    build_options = options(tmp_path)
+    git = FakeGit(toplevel=build_options.checkout, tracked={"orch_hub/api.py": "new\n"})
+    stale = build_options.work_dir / release_build.SOURCE_DIR
+    stale.mkdir(parents=True)
+    (stale / "left-behind.py").write_text("old\n", encoding="utf-8")
+
+    source = freeze_source(build_options, COMMIT, runner=git)
+
+    assert (source / "orch_hub" / "api.py").read_text(encoding="utf-8") == "new\n"
+    assert not (source / "left-behind.py").exists()
+
+
 def test_a_recorded_revision_is_a_commit_or_a_commit_marked_modified():
     assert is_source_revision(COMMIT)
     assert is_source_revision(f"{COMMIT}{DIRTY_SUFFIX}")
@@ -630,12 +770,19 @@ def prepare_build(
     literals=(),
     min_macos: str | None = "11.0",
     source_revision: str | None = COMMIT,
+    during_freeze=None,
 ) -> BuildOptions:
     """Run a build for real from the freeze onwards, without freezing anything.
 
     Everything the driver decides after the freezer returns — describing the
     payload, auditing it, publishing it — runs unmodified; only the freezer,
     the build environment, the Mach-O scan and the git reads are stood in for.
+
+    The source boundary is stood in for too, as the checkout itself: these tests
+    are about what the driver does with a payload, and the boundary has its own
+    tests below. ``during_freeze(build_options, source)`` runs inside the stand-in
+    freezer, which is where a test puts anything that has to happen while the
+    freezer is reading.
     """
     checkout = tmp_path / "checkout"
     (checkout / "orch_hub").mkdir(parents=True)
@@ -645,7 +792,9 @@ def prepare_build(
     (checkout / "pyproject.toml").write_text("[project]\n", encoding="utf-8")
     staged_dir = tmp_path / "work" / "dist" / "orch-hub"
 
-    def fake_freeze(build_options, venv_python):
+    def fake_freeze(build_options, venv_python, source):
+        if during_freeze is not None:
+            during_freeze(build_options, source)
         for relative, content in staged_files.items():
             path = staged_dir / relative
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -653,6 +802,11 @@ def prepare_build(
         return staged_dir
 
     monkeypatch.setattr(release_build, "check_host", lambda: None)
+    monkeypatch.setattr(
+        release_build,
+        "freeze_source",
+        lambda build_options, revision, *, runner: build_options.checkout,
+    )
     monkeypatch.setattr(
         release_build, "ensure_build_venv", lambda build_options, project: tmp_path / "python"
     )
@@ -759,6 +913,50 @@ def test_the_build_reads_the_revision_through_its_own_runner(tmp_path: Path, mon
 
     assert result.manifest["source_revision"] == COMMIT
     assert git.calls[0] == (GIT_BIN, "rev-parse", "--show-toplevel")
+
+
+def test_a_checkout_that_moves_during_the_freeze_does_not_reach_the_payload(
+    tmp_path: Path, monkeypatch
+):
+    # A build takes minutes. A maintainer who edits and commits while it runs
+    # leaves a checkout that is clean at a *new* commit, and a driver that read
+    # the revision after the freeze would record that commit for a payload
+    # holding some of the old source and some of the new — which publication
+    # would then accept under that commit's tag.
+    seen: list[Path] = []
+
+    def commit_while_the_freezer_reads(build_options, source):
+        seen.append(source)
+        (build_options.checkout / "orch_hub" / "injected.py").write_text(
+            "x = 1\n", encoding="utf-8"
+        )
+        git.head = LATER_COMMIT
+
+    build_options = prepare_build(
+        tmp_path,
+        monkeypatch,
+        staged_files=payload_files(),
+        during_freeze=commit_while_the_freezer_reads,
+    )
+    # Both halves of the boundary put back: the driver decides the revision and
+    # the tree it freezes for itself, which is what the ordering is about.
+    monkeypatch.setattr(release_build, "read_source_revision", read_source_revision)
+    monkeypatch.setattr(release_build, "freeze_source", freeze_source)
+    git = FakeGit(
+        toplevel=build_options.checkout,
+        tracked={
+            "orch_hub/__init__.py": '__version__ = "1.2.3"\n',
+            "pyproject.toml": "[project]\n",
+        },
+    )
+
+    result = release_build.build_runtime(build_options, runner=git)
+
+    (source,) = seen
+    assert source != build_options.checkout
+    assert not (source / "orch_hub" / "injected.py").exists()
+    assert result.manifest["source_revision"] == COMMIT
+    assert result.manifest["version"] == "1.2.3"
 
 
 def test_a_payload_with_no_readable_revision_is_still_built_and_says_so(

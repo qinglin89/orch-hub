@@ -381,7 +381,7 @@ being tagged, so it says exactly one of three things:
 
 | Recorded | Means |
 |---|---|
-| `<commit>` | The work tree was that commit. This is the only form publication accepts. |
+| `<commit>` | The work tree was that commit, and the freezer read the commit rather than the directory (below). This is the only form publication accepts. |
 | `<commit>-dirty` | That commit with uncommitted changes on top — tracked edits or untracked files, because the freezer reads the working tree and an untracked `orch_hub/*.py` ships as readily as a committed one. |
 | `null` | No revision could be read: no git on the machine, a source export with no history, a repository with no commit yet. |
 
@@ -391,7 +391,18 @@ payload that honestly declares it cannot name its source is one nobody can
 publish, not one nobody can build. The build prints what it recorded, saying so
 when the payload is unpublishable. Git being absent never fails a build.
 
-Two things make the payload a property of the source rather than of the
+**A build off a clean checkout freezes the commit, not the directory.** The
+revision is read first, and then `git archive` writes that commit's tree out of
+the object database into `build/release/source/`; the freezer reads that copy.
+A build takes minutes, and reading the working tree throughout them would let a
+maintainer who edits and commits mid-build leave a checkout that is clean at a
+*new* commit — a payload of mixed old and new source, recorded under a commit
+publication would accept. Probing the checkout again at the end does not fix
+that; it only compares two observations of something that was free to move
+between them. A tree with nothing to export — modified, or with no history —
+is frozen where it lies, and records `-dirty` or `null` accordingly.
+
+Three things make the payload a property of the source rather than of the
 machine:
 
 - **The build is declared, not discovered.** The freezer is pinned exactly in
@@ -401,13 +412,17 @@ machine:
   interpreter is pinned for the same reason the freezer is: it decides what the
   artifact *is*, down to which macOS versions it runs on.
 - **The project is deliberately not installed into the build environment.** The
-  freezer reads first-party code from the checkout, so a build can never ship a
-  stale copy from `site-packages`.
+  freezer reads first-party code from the settled source tree, so a build can
+  never ship a stale copy from `site-packages`.
+- **The source is settled before anything slow starts.** The revision, the
+  version, and the dependencies the build environment is made of are all read
+  from the exported tree, so they describe one moment rather than three.
 
 | The build refuses | Because |
 |---|---|
 | Audit findings in the staged payload | Shipping a maintainer's absolute path or bearer token inside a binary is silent and unrecoverable after publication. `--allow-findings` reports without failing. |
 | A payload requiring a newer macOS than the release supports | Above the declared floor the artifact is only wrong on somebody else's Mac. `--allow-unsupported-macos` overrides — never for a published artifact. |
+| A commit git named but could not export | The only fallback would be to freeze the working tree while recording that commit as its source — the one thing the export exists to prevent. Failing to *read* a revision still never fails a build. |
 
 Both run on the *staged* build, so a rejected candidate is never published and
 the last payload that passed stays where the installer and the smoke test look

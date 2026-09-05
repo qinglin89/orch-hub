@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 from orch_hub import release_publish as publish_module
-from orch_hub.release_build import MANIFEST_NAME, MANIFEST_SCHEMA
+from orch_hub.release_build import MANIFEST_NAME, MANIFEST_SCHEMA, STATUS_ARGV
 from orch_hub.release_package import (
     CHECKSUM_NAME,
     RELEASE_NAME,
@@ -221,7 +221,7 @@ class FakeRunner:
             return CommandResult(argv, 0, f"{self.tag_commit}\n", "")
         if argv[1:3] == ("rev-parse", "--verify"):
             return CommandResult(argv, 0, f"{self.head}\n", "")
-        if argv[1:] == ("status", "--porcelain"):
+        if argv[1:] == STATUS_ARGV:
             return CommandResult(argv, 0, self.status, "")
         raise AssertionError(f"unexpected command {argv}")
 
@@ -763,7 +763,7 @@ def test_resolves_a_tag_the_checkout_is_at(tmp_path: Path):
     assert runner.git_calls() == [
         (GIT_BIN, "rev-parse", "--verify", "--quiet", "refs/tags/v9.9.9^{commit}"),
         (GIT_BIN, "rev-parse", "--verify", "HEAD^{commit}"),
-        (GIT_BIN, "status", "--porcelain"),
+        (GIT_BIN, *STATUS_ARGV),
     ]
     assert all(call["cwd"] == tmp_path for call in runner.kwargs)
 
@@ -825,6 +825,14 @@ def test_resolves_a_tag_against_a_real_repository(tmp_path: Path):
     assert revision == Revision(tag="v9.9.9", commit=head)
 
     (checkout / "file.txt").write_text("two\n", encoding="utf-8")
+    with pytest.raises(PublishError, match="uncommitted changes"):
+        resolve_tag(checkout, "v9.9.9")
+
+    # An untracked file is a state the tag does not name either, and whether git
+    # volunteers it is a configuration setting. The argv states the question.
+    run("checkout", "--", "file.txt")
+    run("config", "status.showUntrackedFiles", "no")
+    (checkout / "extra.txt").write_text("three\n", encoding="utf-8")
     with pytest.raises(PublishError, match="uncommitted changes"):
         resolve_tag(checkout, "v9.9.9")
 

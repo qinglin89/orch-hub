@@ -64,6 +64,7 @@ from .release_build import (
     COMMIT_RE,
     DIRTY_SUFFIX,
     GIT_BIN,
+    STATUS_ARGV,
     BuildError,
     is_source_revision,
     read_version,
@@ -424,7 +425,7 @@ def resolve_tag(
             f"{checkout} is at {head[:12]}, not at tag {tag!r} ({commit[:12]}); "
             "check out the tag before publishing it"
         )
-    status = _git(runner, checkout, ["status", "--porcelain"], strip=False)
+    status = _git(runner, checkout, STATUS_ARGV, strip=False)
     if status.strip():
         raise PublishError(
             f"{checkout} has uncommitted changes, so its state is not tag "

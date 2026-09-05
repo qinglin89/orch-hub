@@ -18,8 +18,10 @@ Three properties are worth more than the mechanics:
   silently inherit whatever the maintainer happened to have installed — down to
   the Python that decides which macOS versions the artifact runs on. The
   project itself is deliberately *not* installed there: the freezer reads
-  first-party code from the checkout, so what ships is the working tree and
-  never a stale copy in ``site-packages``.
+  first-party code from a source tree this module settles on before the build
+  starts, so what ships is never a stale copy in ``site-packages`` — and, for a
+  build off a clean checkout, is the exported commit rather than a directory
+  somebody can still edit while the freezer walks it.
 - **The payload declares itself.** ``runtime.json`` records version, target,
   architecture, the source revision it was frozen from, and the minimum macOS
   the produced binaries actually require — read back out of the Mach-O headers
@@ -48,6 +50,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tarfile
 import tomllib
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
@@ -108,6 +111,13 @@ because a release build must not need write access to anything else on the
 machine — the same reason the pin is a redistributable archive rather than a
 system install."""
 
+SOURCE_DIR = "source"
+"""Where a build materialises the commit it freezes, under the scratch
+directory.
+
+Beside the interpreter cache rather than anywhere else for the same reason: a
+build must not need write access to anything outside its own build directory."""
+
 RELEASE_EXTRA = "release"
 """``pyproject.toml`` optional-dependency group holding the build toolchain."""
 
@@ -159,8 +169,23 @@ names, and those two answers are only comparable if they came from the same
 program."""
 
 _GIT_TIMEOUT = 30.0
-"""Bound on every producer-side git read. All of them are local ref/index
-reads; a git that has not answered in half a minute is not going to."""
+"""Bound on every producer-side git call. All of them are local reads — refs,
+the index, and one export out of the object database; a git that has not
+answered in half a minute is not going to."""
+
+STATUS_ARGV = ("status", "--porcelain", "--untracked-files=normal")
+"""How the producer chain asks git whether a work tree is modified.
+
+The flag is not decoration. Plain ``git status --porcelain`` honours
+``status.showUntrackedFiles``, and a maintainer who set it to ``no`` — an
+ordinary way to quiet a noisy repository — gets an empty answer for a tree
+holding an untracked ``orch_hub/*.py`` that the freezer would read like any
+other module. Stating the question in the argv is what keeps the answer a
+property of the tree rather than of the machine's git configuration.
+
+Shared with publication for the reason :data:`GIT_BIN` is: the build's reading
+of "modified" and publication's are the same claim, and two spellings of it are
+two claims that can drift apart."""
 
 COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 """A commit as ``git rev-parse`` writes it, and as a manifest records it."""
@@ -415,10 +440,91 @@ def read_source_revision(
     commit = _git(runner, checkout, ["rev-parse", "--verify", "HEAD^{commit}"])
     if commit is None or not COMMIT_RE.fullmatch(commit):
         return None
-    status = _git(runner, checkout, ["status", "--porcelain"], strip=False)
+    status = _git(runner, checkout, STATUS_ARGV, strip=False)
     if status is None:
         return None
     return commit if not status.strip() else f"{commit}{DIRTY_SUFFIX}"
+
+
+def freeze_source(
+    options: BuildOptions, revision: str | None, *, runner: Runner = run_command
+) -> Path:
+    """The tree the freezer reads — the recorded revision's, when there is one.
+
+    A build takes minutes and the freezer reads first-party code throughout all
+    of them, so reading the working tree while a revision names it states two
+    different moments as one. A maintainer who commits mid-build leaves a
+    checkout that is clean at a *new* commit; a payload holding some of the old
+    source and some of the new would then record that new commit and pass
+    publication under its tag. Probing the checkout again afterwards does not
+    close that: it compares two observations of a thing that was free to move
+    between them.
+
+    So a revision that names a commit is materialised — ``git archive`` writes
+    that commit's tree out of the object database and the freezer reads the
+    copy. The recorded commit stops being an observation of the checkout and
+    becomes the thing the source was taken from, which is the claim publication
+    makes on the maintainer's behalf.
+
+    A tree with no commit to name is frozen where it lies. There is nothing
+    immutable to take a copy of, and what such a build records — ``-dirty`` or
+    ``None`` — already tells publication these bytes are not any commit's.
+    """
+    if revision is None or not COMMIT_RE.fullmatch(revision):
+        return options.checkout
+    return _export_commit(
+        options.checkout, revision, options.work_dir / SOURCE_DIR, runner=runner
+    )
+
+
+def _export_commit(
+    checkout: Path, commit: str, destination: Path, *, runner: Runner
+) -> Path:
+    """Write ``commit``'s tree to ``destination`` and return it.
+
+    ``git archive`` rather than a second work tree: it reads the object database
+    and writes a file, leaving the maintainer's repository untouched, where
+    ``git worktree add`` registers state under ``.git`` that an interrupted
+    build would leave behind. The commit is named by hash, not as ``HEAD``, so
+    what is exported is the revision that will be recorded even if the ref moves
+    while git is reading.
+
+    A failure here is a :class:`BuildError`, unlike every other git call in this
+    module. Reading a revision is optional — a build that cannot name its source
+    records that it could not. Materialising a commit git has already named is
+    not: the only fallback would be to freeze the working tree while recording
+    that commit as its source, which is the one outcome this function exists to
+    prevent.
+    """
+    archive = destination.with_name(f"{destination.name}.tar")
+    if destination.exists():
+        shutil.rmtree(destination)
+    archive.unlink(missing_ok=True)
+    destination.mkdir(parents=True)
+    try:
+        result = runner(
+            [GIT_BIN, "archive", "--format=tar", f"--output={archive}", commit],
+            cwd=checkout,
+            timeout=_GIT_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BuildError(
+            f"cannot export {commit[:12]} from {checkout}: {exc}"
+        ) from exc
+    if not result.ok:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise BuildError(
+            f"cannot export {commit[:12]} from {checkout}"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        with tarfile.open(archive) as tar:
+            tar.extractall(destination, filter="data")
+    except (OSError, tarfile.TarError) as exc:
+        raise BuildError(f"cannot unpack the exported {commit[:12]}: {exc}") from exc
+    finally:
+        archive.unlink(missing_ok=True)
+    return destination
 
 
 def _git(
@@ -469,13 +575,23 @@ def build_runtime(options: BuildOptions, *, runner: Runner = run_command) -> Bui
     for the same reason: the installer gates on that number, so a payload above
     the promised floor is one whose only remaining failure is on a stranger's
     Mac.
+
+    The source the build reads is settled first, before anything slow enough for
+    the checkout to change underneath it: the revision is read, and
+    :func:`freeze_source` turns it into a tree that cannot move. Everything the
+    payload declares about its source — the revision, the version, the
+    dependencies the build environment is made of — is then read from that one
+    boundary rather than re-observed from a checkout somebody is still working
+    in.
     """
     check_host()
     pin = pinned_interpreter(TARGET)
-    version = read_version(options.checkout)
-    project = read_project(options.checkout)
+    revision = read_source_revision(options.checkout, runner=runner)
+    source = freeze_source(options, revision, runner=runner)
+    version = read_version(source)
+    project = read_project(source)
     venv_python = ensure_build_venv(options, project)
-    staged_dir = _freeze(options, venv_python)
+    staged_dir = _freeze(options, venv_python, source)
     facts = scan_payload(staged_dir)
     check_min_macos(facts.min_macos, pin, allow=options.allow_unsupported_macos)
     manifest = _write_manifest(
@@ -484,7 +600,7 @@ def build_runtime(options: BuildOptions, *, runner: Runner = run_command) -> Bui
         facts=facts,
         python_version=_interpreter_version(venv_python),
         builder=_builder_identity(venv_python),
-        source_revision=read_source_revision(options.checkout, runner=runner),
+        source_revision=revision,
     )
     report = audit_payload(
         staged_dir, required=REQUIRED_MEMBERS, literals=options.literals
@@ -639,8 +755,13 @@ def _interpreter_identity(executable: str, version: str) -> str:
     return f"{executable} (python {'.'.join(version.split('.')[:3])})"
 
 
-def _freeze(options: BuildOptions, venv_python: Path) -> Path:
-    """Run the freezer and return the directory it produced."""
+def _freeze(options: BuildOptions, venv_python: Path, source: Path) -> Path:
+    """Run the freezer over ``source`` and return the directory it produced.
+
+    ``source`` rather than the checkout: it is the tree :func:`freeze_source`
+    settled on, which for a publishable build is the exported commit and cannot
+    change while the freezer walks it.
+    """
     dist_dir = options.work_dir / "dist"
     if dist_dir.exists():
         shutil.rmtree(dist_dir)
@@ -660,30 +781,31 @@ def _freeze(options: BuildOptions, venv_python: Path) -> Path:
         str(options.work_dir / "pyinstaller"),
         "--specpath",
         str(options.work_dir),
-        # First-party code is read from the checkout, never from an install, so
-        # a build always reflects the working tree.
+        # First-party code is read from the settled source tree, never from an
+        # install, so a build reflects the revision it records and never a stale
+        # copy in site-packages.
         "--paths",
-        str(options.checkout),
+        str(source),
     ]
     # Name every first-party module explicitly rather than letting the freezer's
     # reachability analysis decide: which imports are static today is an
     # implementation detail, and a module reached only lazily would otherwise be
     # missing from the payload with no build-time signal.
-    for module in first_party_modules(options.checkout):
+    for module in first_party_modules(source):
         argv += ["--hidden-import", module]
     if options.clean:
         argv.append("--clean")
     for module in (*BUILD_ONLY_MODULES, *EXCLUDED_MODULES):
         argv += ["--exclude-module", module]
-    for source, destination in (
+    for relative, destination in (
         (WEB_RELATIVE_PATH, WEB_RELATIVE_PATH),
         (LAUNCHD_TEMPLATE_RELATIVE_PATH, LAUNCHD_TEMPLATE_RELATIVE_PATH.parent),
     ):
         argv += [
             "--add-data",
-            f"{options.checkout / source}:{destination.as_posix()}",
+            f"{source / relative}:{destination.as_posix()}",
         ]
-    argv.append(str(options.checkout / ENTRY_RELATIVE_PATH))
+    argv.append(str(source / ENTRY_RELATIVE_PATH))
     _run(argv, "freeze runtime", cwd=options.work_dir)
     produced = dist_dir / EXECUTABLE_NAME
     if not (produced / EXECUTABLE_NAME).is_file():
