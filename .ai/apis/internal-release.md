@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-09-05
+verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
 ---
 
 # APIs: Internal — Release Delivery
@@ -32,8 +32,13 @@ Installed layout:
 `release_build.build_runtime(BuildOptions)` produces one staged/audited payload
 and then publishes it. `runtime.json` carries schema/name/version/target/os/
 arch/executable, measured architectures and `min_macos`, Python/freezer
-identity, and binary count. The default interpreter is `PINNED[target]`,
-provisioned by URL+SHA-256; explicit `--python` is an identity-enforced override.
+identity, binary count, and `source_revision`: a clean 40-hex commit, that
+commit plus `-dirty`, or JSON null when Git cannot identify the tree.
+`read_source_revision` requires the checkout to be the work-tree root and uses
+the shared `STATUS_ARGV` that forces untracked-file reporting. `freeze_source`
+exports a clean recorded commit before slow work; dirty or unidentified source
+stays in place. The default interpreter is `PINNED[target]`, provisioned by
+URL+SHA-256; explicit `--python` is an identity-enforced override.
 
 `release_audit.audit_payload` returns labeled findings without echoing forbidden
 secret values. Required members and default machine/secret literals come from
@@ -61,12 +66,11 @@ agreement, v1 artifact kind/cardinality, and installer header identity.
 `resolve_tag` requires an existing `v<version>` local tag at clean HEAD;
 checkout-declared and release versions must agree.
 
-`publish(PublishOptions)` creates a per-invocation checked stage and emits
-schema `orch-hub-publication/1` with tag, commit, and every file including
-`SHA256SUMS`'s digest. Filesystem destinations stage alongside then claim the
-tag using no-clobber `mkdir`; a tag may be briefly visible while same-filesystem
+`publish(PublishOptions)` requires every target runtime to record the exact tag
+commit, creates a per-invocation checked stage, and emits schema
+`orch-hub-publication/1` with tag, commit, and every file including
+`SHA256SUMS`'s digest. Missing, dirty, and mismatched payload revisions are
+distinct refusals. Filesystem destinations stage alongside then claim the tag
+using no-clobber `mkdir`; a tag may be briefly visible while same-filesystem
 renames fill it, and failed placement removes the partial claim. GitHub uses
 `gh release create --verify-tag`. Neither path replaces an existing tag.
-
-Publication does not prove which source revision the frozen payload contains;
-the compiled manifest currently has no such field.

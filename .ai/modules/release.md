@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-09-05
+verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
 ---
 
 # Modules: Release Delivery
@@ -34,11 +34,14 @@ no-clobber.
 interpreter under build scratch. Cache identity includes archive digest; failed
 download/verification/extraction leaves no reusable partial state.
 
-`release_build.py` freezes the checkout with pinned PyInstaller onedir, without
-installing first-party code into the build venv. It enumerates every package
-module as a hidden import, writes `runtime.json`, measures target/minimum macOS
-with `macho.py`, audits the staged payload, and publishes only after all gates
-pass. Build-only modules are excluded from the runtime.
+`release_build.py` reads source identity before slow work. A clean checkout is
+materialized from its recorded commit with `git archive`; dirty or unidentified
+trees are frozen in place and marked unpublishable. Version, dependency
+declarations, first-party modules, entry point, and resources all come from the
+settled source tree. Pinned PyInstaller onedir freezes it without installing
+first-party code into the build venv, `runtime.json` records `source_revision`,
+and the staged payload is measured and audited before publication. Build-only
+modules are excluded from the runtime.
 
 `release_audit.py` scans filesystem/archive members plus the executable's
 PyInstaller CArchive and nested PYZ decompressed bytes. It rejects first-party
@@ -59,12 +62,15 @@ The script checks host and payload digest before unpacking and delegates every
 installed path decision to the extracted runtime.
 
 `release_publish.py` re-derives inventory/checksums/header identity from bytes,
-binds `v<version>` to clean HEAD, stages per invocation, and rechecks the stage
-before transfer. Filesystem publication stages on the destination filesystem
-and atomically claims `<destination>/<tag>` with `mkdir`; GitHub publication
-uses absolute assets and `gh release create --verify-tag`. A published tag is
-never replaced. `publication.json` records tag/commit and closes the artifact
-inventory at `SHA256SUMS` by recording that file's own digest.
+binds `v<version>` to clean HEAD, and requires every target runtime's recorded
+clean source revision to equal the tag commit. Build and publication force Git
+to report untracked files rather than inherit `status.showUntrackedFiles`.
+Publication stages per invocation and rechecks the stage before transfer.
+Filesystem publication stages on the destination filesystem and atomically
+claims `<destination>/<tag>` with `mkdir`; GitHub publication uses absolute
+assets and `gh release create --verify-tag`. A published tag is never replaced.
+`publication.json` records tag/commit and closes the artifact inventory at
+`SHA256SUMS` by recording that file's own digest.
 
 ## Boundaries
 
@@ -75,5 +81,5 @@ inventory at `SHA256SUMS` by recording that file's own digest.
 - `tests/test_frozen_runtime.py` consumes an existing payload and skips when
   absent; it does not build. Rebuild before treating it as evidence after a
   frozen-behavior change.
-- Publication proves checkout/tag identity and artifact consistency, not the
-  source revision embedded in the payload; that provenance is separate work.
+- Publication proves checkout/tag identity, artifact consistency, and equality
+  between the tag commit and every payload's recorded source revision.

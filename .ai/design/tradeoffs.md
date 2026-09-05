@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-22
-verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
+last-updated: 2026-09-05
+verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
 ---
 
 # Design: Tradeoffs
@@ -215,8 +215,10 @@ verified-against: 908707b16015269eefab9696bba52fa91feb9ea9
   filesystem or GitHub publication.
 - Reason: it delivers the private release workflow without first creating a CI
   signing and artifact pipeline.
-- Consequence: checksums prove published-byte integrity, but the payload does
-  not yet record the source revision it was frozen from.
+- Consequence: a clean build exports the commit before freezing and records it
+  in the payload; publication rejects dirty, unknown, or non-tag revisions.
+  Local builds from modified trees or source exports remain possible but are
+  deliberately unpublishable.
 
 ## Tradeoff: replace staging vs immutable tag publication
 

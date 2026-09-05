@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-05
+verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
 ---
 
 # Architecture
@@ -133,9 +133,13 @@ archives.
 - Release build and package outputs keep the last known-good canonical bytes
   until a staged replacement passes. Publication is immutable per tag and
   uses create-only placement, not the replace-oriented atomic-directory helper.
+- A publishable clean build settles its source before slow work by exporting
+  the exact commit it records in `runtime.json`; version, dependency
+  declarations, and freezer inputs come from that immutable tree. Dirty or
+  unidentifiable trees remain buildable but record an unpublishable source.
 - A release tag gates publication of locally built bytes. Publication records
-  checksums and closure metadata, but payload source revision is not yet part of
-  the artifact identity.
+  checksums and closure metadata and requires every target payload's recorded
+  source revision to equal the tag commit.
 
 ## Related Memory
 

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-05
+verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
 ---
 
 # Features: Operations Surfaces
@@ -164,6 +164,10 @@ Implemented behavior:
   measures the produced Mach-O floor; a missing or above-promise floor fails.
   Packaging validates an ASCII dotted floor because downstream readers cannot
   safely enforce an unreadable declaration.
+- Clean builds record and freeze an exported commit before slow work; dirty or
+  unidentifiable sources still build but are marked unpublishable. The
+  `source_revision` flows verbatim from `runtime.json` into each target's
+  `release.json` runtime entry.
 - Installed layout is `<prefix>/versions/<version>`, atomic `current`, recorded
   `previous`, and a stable command link. Upgrade/rollback select a version and
   restart the fixed service without rewriting data or configuration; uninstall
@@ -175,12 +179,12 @@ Implemented behavior:
   host gate.
 - Packaging deterministically emits a target-keyed `release.json`, installer,
   and `SHA256SUMS`. Publication re-verifies bytes, tag/version/HEAD/clean-tree
-  identity, and installer headers; filesystem storage uses atomic `mkdir`
+  identity, installer headers, and that every payload's recorded clean source
+  revision equals the tag commit; filesystem storage uses atomic `mkdir`
   no-clobber while GitHub publication uses `gh release create --verify-tag`.
   `publication.json` pins the checksum file's digest and source tag/commit.
-- Publication proves checkout/tag identity and artifact self-consistency, not
-  the compiled payload's source revision; installed-version retention,
-  statusLine reachability, and payload source provenance remain separate tasks.
+- Installed-version retention and statusLine reachability remain separate
+  tasks.
 - Human workflow and refusal tables live in `docs/release.md`; the artifact is
   unsigned, with signing/notarization reserved as an optional future wrapper.
 
