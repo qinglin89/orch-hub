@@ -22,10 +22,13 @@ from orch_hub import install, launchd
 from orch_hub.atomic_dir import INCOMING_SUFFIX
 from orch_hub.config import DATA_DIR_ENV, HOST_ENV, MANDREL_PATH_ENV, PORT_ENV, TOKEN_ENV
 from orch_hub.install import (
+    KEEP_VERSIONS,
+    REMOVING_SUFFIX,
     InstallError,
     SetupOptions,
     check_target,
     install_version,
+    prune_versions,
     read_current,
     read_installation,
     read_payload_manifest,
@@ -490,6 +493,210 @@ def test_read_installation_of_an_empty_prefix(tmp_path):
     assert installation.versions == ()
     assert installation.current is None
     assert installation.to_dict()["prefix"] == str(tmp_path / "nothing")
+
+
+# --------------------------------------------------------------------------
+# retention
+# --------------------------------------------------------------------------
+
+
+def install_series(tmp_path, prefix, *versions, keep=KEEP_VERSIONS):
+    """Install each version onto one prefix in order, as repeated upgrades do."""
+    result = None
+    for version in versions:
+        result = install_version(
+            make_payload(tmp_path, version), prefix=prefix, link=False, keep=keep
+        )
+    return result
+
+
+def test_a_prefix_below_the_limit_keeps_every_version(tmp_path):
+    prefix = tmp_path / "prefix"
+
+    result = install_series(tmp_path, prefix, "0.1.0", "0.2.0", keep=3)
+
+    assert result.prune.removed == ()
+    assert result.prune.kept == ("0.1.0", "0.2.0")
+    assert read_installation(prefix).versions == ("0.1.0", "0.2.0")
+
+
+def test_an_install_at_the_limit_removes_the_oldest(tmp_path):
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=3)
+
+    result = install_version(
+        make_payload(tmp_path, "0.4.0"), prefix=prefix, link=False, keep=3
+    )
+
+    assert result.prune.removed == ("0.1.0",)
+    assert result.prune.kept == ("0.2.0", "0.3.0", "0.4.0")
+    assert not (prefix / "versions" / "0.1.0").exists()
+    # 0.2.0 is neither current nor previous and is kept anyway: the window is
+    # what gives `rollback --to` a target beyond the last upgrade.
+    installation = read_installation(prefix)
+    assert (installation.current, installation.previous) == ("0.4.0", "0.3.0")
+    for version in installation.versions:
+        assert (prefix / "versions" / version / "orch-hub").is_file()
+
+
+def test_repeated_upgrades_stop_growing_the_prefix(tmp_path):
+    """The whole point: an upgrade onto a full prefix leaves a bounded set."""
+    prefix = tmp_path / "prefix"
+    versions = [f"0.{minor}.0" for minor in range(1, 8)]
+
+    install_series(tmp_path, prefix, *versions)
+
+    installation = read_installation(prefix)
+    assert installation.versions == tuple(versions[-KEEP_VERSIONS:])
+    assert installation.current == versions[-1]
+    assert installation.previous == versions[-2]
+    # Both are still runnable, not just still listed.
+    assert (prefix / "current" / "orch-hub").is_file()
+    assert (prefix / "versions" / installation.previous / "orch-hub").is_file()
+
+
+def test_retention_keeps_current_and_previous_outside_the_window(tmp_path):
+    """An operator sitting on an old version must not be pruned out from under."""
+    prefix = tmp_path / "prefix"
+    install_series(
+        tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0", keep=9
+    )
+    # Rolled back to the oldest: it is now the running program, and the newest
+    # is what a bare `rollback` returns to. Neither is in the newest two.
+    select_version(prefix, "0.1.0")
+
+    result = prune_versions(prefix, keep=2)
+
+    assert result.removed == ("0.2.0", "0.3.0")
+    assert result.kept == ("0.1.0", "0.4.0", "0.5.0")
+    assert read_current(prefix) == "0.1.0"
+    assert read_previous(prefix) == "0.5.0"
+
+
+def test_retention_keeps_the_version_it_is_running_from(tmp_path, monkeypatch):
+    """Deleting the payload under a live process fails later and elsewhere."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", keep=9)
+    monkeypatch.setattr(install, "is_frozen", lambda: True)
+    monkeypatch.setattr(
+        install.sys, "executable", str(prefix / "versions" / "0.1.0" / "orch-hub")
+    )
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ("0.2.0",)
+    assert result.kept == ("0.1.0", "0.3.0", "0.4.0")
+
+
+def test_retention_leaves_entries_that_are_not_installed_versions(tmp_path):
+    """`versions/` is ours, but only what we filed there is a version."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    foreign = prefix / "versions" / "notes"
+    foreign.mkdir()
+    (foreign / "keep-me.txt").write_text("mine\n", encoding="utf-8")
+
+    result = prune_versions(prefix, keep=2)
+
+    # Not removed, and it did not consume a retention slot either: 0.1.0 falls
+    # out on its own age, and nothing else changes because of the intruder.
+    assert result.removed == ("0.1.0",)
+    assert (foreign / "keep-me.txt").is_file()
+
+
+def test_a_prune_that_cannot_move_a_version_removes_nothing(tmp_path):
+    """Refuse rather than half-remove: a failed prune leaves everything usable."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", keep=9)
+    versions_dir = prefix / "versions"
+    versions_dir.chmod(0o500)
+    try:
+        result = prune_versions(prefix, keep=1)
+    finally:
+        versions_dir.chmod(0o700)
+
+    assert result.removed == ()
+    assert "cannot remove 0.1.0" in result.problem
+    assert read_installation(prefix).versions == ("0.1.0", "0.2.0", "0.3.0", "0.4.0")
+    # Still selectable, which is the property a half-removal would destroy.
+    select_version(prefix, "0.1.0")
+    assert read_current(prefix) == "0.1.0"
+
+
+def test_a_prune_that_fails_partway_puts_back_what_it_moved(tmp_path, monkeypatch):
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", keep=9)
+    real_rename = Path.rename
+
+    def rename(self, target):
+        if self.name == "0.2.0":
+            raise OSError("resource busy")
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", rename)
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ()
+    assert read_installation(prefix).versions == ("0.1.0", "0.2.0", "0.3.0", "0.4.0")
+    # 0.1.0 was already moved aside when 0.2.0 refused; it came back whole.
+    assert (prefix / "versions" / "0.1.0" / "orch-hub").is_file()
+
+
+def test_a_prune_that_cannot_delete_reports_the_files_it_left(tmp_path, monkeypatch):
+    """The version leaves the set atomically; only the bytes can be stranded."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+
+    def refuse(path, *args, **kwargs):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(install.shutil, "rmtree", refuse)
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ("0.1.0",)
+    assert "still on disk" in result.problem
+    assert read_installation(prefix).versions == ("0.2.0", "0.3.0")
+    assert (prefix / "versions" / f"0.1.0{REMOVING_SUFFIX}").is_dir()
+    # Never offered as a rollback target while it is half a payload.
+    with pytest.raises(InstallError, match="version 0.1.0 is not installed"):
+        select_version(prefix, "0.1.0")
+
+
+def test_prune_scratch_is_not_an_installed_version(tmp_path):
+    """Debris from a killed prune must not be listed, kept, or rolled back to."""
+    prefix = tmp_path / "prefix"
+    install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
+    debris = prefix / "versions" / f"0.0.9{REMOVING_SUFFIX}"
+    debris.mkdir()
+    (debris / "half-deleted").write_text("x", encoding="utf-8")
+
+    assert read_installation(prefix).versions == ("0.1.0",)
+    # And it is still recognised as ours, so uninstall does not refuse over it.
+    result = uninstall(
+        prefix=prefix,
+        bin_dir=tmp_path / "bin",
+        plist_path=tmp_path / PLIST_NAME,
+        runner=FakeLaunchctl(),
+    )
+    assert result.prefix_removed is True
+
+
+def test_a_prune_with_nothing_to_do_touches_nothing(tmp_path):
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", keep=3)
+
+    result = prune_versions(prefix, keep=3)
+
+    assert (result.removed, result.kept, result.problem) == ((), ("0.1.0",), None)
+    assert (prefix / "versions" / "0.1.0" / "orch-hub").is_file()
+
+
+def test_prune_of_an_empty_prefix_is_not_an_error(tmp_path):
+    result = prune_versions(tmp_path / "nothing")
+
+    assert (result.removed, result.kept) == ((), ())
 
 
 # --------------------------------------------------------------------------

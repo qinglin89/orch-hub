@@ -41,6 +41,7 @@ from .launchd import (
     stop_service,
 )
 from .install import (
+    KEEP_VERSIONS,
     InstallError,
     SetupOptions,
     install_version,
@@ -599,6 +600,15 @@ def _cmd_statusline(args: argparse.Namespace, wrapped: Sequence[str]) -> int:
     )
 
 
+def _print_prune(prune) -> None:
+    """Report what retention removed, and what it left, after a version lands."""
+    if prune.removed:
+        print(f"removed: {', '.join(prune.removed)}")
+        print(f"kept: {', '.join(prune.kept)}")
+    if prune.problem:
+        print(f"note: {prune.problem}")
+
+
 def _cmd_install(args: argparse.Namespace) -> int:
     try:
         result = install_version(
@@ -617,6 +627,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
     print(f"{verb} orch-hub {result.version}")
     print(f"prefix: {result.installation.prefix}")
     print(f"current: {result.installation.current}")
+    _print_prune(result.prune)
     if result.link_path:
         print(f"command: {result.link_path}")
         if not result.link_on_path:
@@ -663,6 +674,7 @@ def _cmd_upgrade(args: argparse.Namespace) -> int:
         return 1
     previous = result.previous_version or "none"
     print(f"upgraded orch-hub {previous} -> {result.install.version}")
+    _print_prune(result.install.prune)
     _print_service_summary(result.setup.deployment, result.setup.generated_token)
     print(f"health: {result.setup.health}")
     return _health_exit(result.setup.health)
@@ -688,7 +700,7 @@ def _cmd_versions(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if args.json:
-        print(json.dumps(installation.to_dict(), indent=2))
+        print(json.dumps({**installation.to_dict(), "keep": KEEP_VERSIONS}, indent=2))
         return 0
     print(f"prefix: {installation.prefix}")
     if not installation.versions:
@@ -702,6 +714,12 @@ def _cmd_versions(args: argparse.Namespace) -> int:
             marks.append("previous")
         suffix = f" ({', '.join(marks)})" if marks else ""
         print(f"{version}{suffix}")
+    # The listed set is bounded, so say by what: an operator reading it needs to
+    # know which of these a later install will still be able to roll back to.
+    print(
+        f"retention: the newest {KEEP_VERSIONS}, plus current and previous; "
+        "installing prunes the rest"
+    )
     return 0
 
 

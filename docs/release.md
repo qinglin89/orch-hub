@@ -129,7 +129,8 @@ runtime's own answers, never paths the shell script re-derives.
 ## What gets installed where
 
 ```text
-~/.local/orch-hub/versions/<version>/    one payload per version, never mutated
+~/.local/orch-hub/versions/<version>/    one payload per version, never mutated;
+                                         bounded by retention (see below)
 ~/.local/orch-hub/current -> versions/X  which one is live; swapped atomically
 ~/.local/orch-hub/previous               which one it was; written the first
                                          time the selection moves
@@ -274,10 +275,57 @@ already selected, and a bare `rollback` when no previous version was recorded
 The health probe target is read *before* the selection moves, so an unreadable
 service configuration fails while the running version is still the selected one.
 
-Installed versions accumulate; nothing prunes them automatically. `orch-hub
-versions` marks `current` and `previous`, and a version directory that is
-neither can be removed by hand (`rm -r ~/.local/orch-hub/versions/<version>`)
-if disk space matters.
+## Retention
+
+Every version is a full ~30MB payload, so a prefix that never removed one grew
+by that much on every upgrade. **Install and upgrade keep the newest three
+versions and remove the rest.** Three things are never removed, however old
+they are:
+
+- the selected `current` version — the program launchd runs;
+- the version `previous` names — where a bare `rollback` goes;
+- the payload the running command is executing from.
+
+So the bound is "three, plus whatever is in use": if you are sitting on an old
+version after a rollback, it is kept and the set is four. Space is never
+reclaimed by taking away something that is in use.
+
+What you can rely on for rollback: **everything `orch-hub versions` lists is a
+valid `rollback --to` target, and that listing is the whole set.** It ends with
+a line stating the rule, so the retained set is legible before and after an
+upgrade:
+
+```text
+prefix: /Users/you/.local/orch-hub
+0.3.0
+0.4.0 (previous)
+0.5.0 (current)
+retention: the newest 3, plus current and previous; installing prunes the rest
+```
+
+An install or upgrade reports what it removed and what it kept:
+
+```text
+upgraded orch-hub 0.4.0 -> 0.5.0
+removed: 0.2.0
+kept: 0.3.0, 0.4.0, 0.5.0
+```
+
+A pruned version is not lost: reinstall it from its release artifact with
+`sh orch-hub-<version>-darwin-arm64.run` or `orch-hub install --from <payload>`.
+Nothing goes with it — service configuration and hub data live outside the
+prefix and are untouched by any of this.
+
+Pruning never fails an install or an upgrade; the version you asked for is
+installed and running either way. A doomed version is renamed out of
+`versions/` before its files are deleted, so a removal that cannot finish
+leaves one of two states, both reported as a `note:` line and neither of them a
+directory that still looks installed and no longer runs:
+
+| What happened | What you see | What is true |
+|---|---|---|
+| A version could not be moved aside | `note: kept every version: cannot remove <version>: <reason>` | Nothing was removed; every version is still selectable |
+| A moved-aside version could not be deleted | `note: removed from the version set, but their files are still on disk: <path>: <reason>` | The version is gone from `versions` and cannot be selected; its bytes are still in a `<version>.removing` directory you can remove by hand |
 
 ## Uninstall
 

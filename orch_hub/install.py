@@ -90,6 +90,33 @@ A symlink cannot be edited in place, so selection creates the new one beside the
 old and renames it over: ``rename`` replaces the entry atomically, which means a
 reader never sees ``current`` missing."""
 
+REMOVING_SUFFIX = ".removing"
+"""Suffix a version is renamed to before its files are deleted.
+
+Deleting a tree in place can fail halfway and leave a directory that still looks
+like an installed version but no longer runs. Moving it out of the version
+namespace first is one rename inside ``versions/`` — it happens completely or
+not at all — so what is left listed is always whole."""
+
+KEEP_VERSIONS = 3
+"""How many installed versions a prefix keeps, on top of the fail-safes below.
+
+Every version is a full ~30MB payload and nothing used to remove one, so a
+prefix grew by that much on every upgrade forever. The alternatives were
+keeping only ``current`` + ``previous`` (smallest, but it silently destroys the
+older targets ``rollback --to`` can still name) and pruning only on an explicit
+verb (safest, but it leaves the default unbounded, which is the thing being
+fixed). Three is the middle: an upgrade keeps the version it just installed,
+the one it replaced, and one more before that, so the two rollbacks an operator
+actually reaches for survive and the prefix stops growing.
+
+The bound is *approximate on purpose*: :func:`prune_versions` also keeps
+``current``, the recorded ``previous``, and the payload the running process
+executes from even when they fall outside the newest three, because removing
+any of those breaks something that is in use rather than reclaiming space. A
+version pruned here is not lost — it is reinstallable from its release
+artifact, which the older ones are exactly as much as the newer ones."""
+
 OWNED_PREFIX_ENTRIES = frozenset(
     {VERSIONS_DIR, CURRENT_LINK, PREVIOUS_MARKER, INCOMING_LINK}
 )
@@ -128,6 +155,31 @@ class Installation:
 
 
 @dataclass(frozen=True)
+class PruneResult:
+    """What retention removed from a prefix, and what it left installed."""
+
+    prefix: Path
+    removed: tuple[str, ...]
+    kept: tuple[str, ...]
+    problem: str | None = None
+    """Why the prune did less than it set out to, or ``None``.
+
+    Set with an empty ``removed`` when the prune refused and every version is
+    still installed; set alongside a non-empty ``removed`` when versions did
+    leave the version set but their files could not all be deleted. Reclaiming
+    disk is never worth failing an install over, so this is reported rather
+    than raised — but it is reported, because "removed" that did not free the
+    space is a claim the operator would otherwise act on."""
+
+    def to_dict(self) -> dict:
+        return {
+            "removed": list(self.removed),
+            "kept": list(self.kept),
+            "problem": self.problem,
+        }
+
+
+@dataclass(frozen=True)
 class InstallResult:
     installation: Installation
     version: str
@@ -136,6 +188,7 @@ class InstallResult:
 
     link_path: Path | None
     link_on_path: bool
+    prune: PruneResult
 
     def to_dict(self) -> dict:
         return {
@@ -143,6 +196,7 @@ class InstallResult:
             "replaced": self.replaced,
             "link": str(self.link_path) if self.link_path else None,
             "link_on_path": self.link_on_path,
+            "prune": self.prune.to_dict(),
             **self.installation.to_dict(),
         }
 
@@ -334,13 +388,23 @@ def check_target(
 
 
 def read_installation(prefix: Path | None = None) -> Installation:
-    """Describe what is installed under ``prefix`` without changing anything."""
+    """Describe what is installed under ``prefix`` without changing anything.
+
+    Placement and pruning both stage under scratch names beside the version
+    they are working on, and a kill mid-operation leaves one behind. Those are
+    skipped: listing one as an installed version would offer a partial tree as
+    a rollback target and let it occupy a retention slot.
+    """
     root = _resolve_prefix(prefix)
     versions_dir = root / VERSIONS_DIR
     versions: list[str] = []
     if versions_dir.is_dir():
         versions = sorted(
-            (entry.name for entry in versions_dir.iterdir() if entry.is_dir()),
+            (
+                entry.name
+                for entry in versions_dir.iterdir()
+                if entry.is_dir() and not _is_installer_scratch(entry.name)
+            ),
             key=_version_sort_key,
         )
     return Installation(
@@ -419,12 +483,139 @@ def select_version(prefix: Path, version: str) -> str | None:
     return before
 
 
+def prune_versions(
+    prefix: Path | None = None, *, keep: int = KEEP_VERSIONS
+) -> PruneResult:
+    """Remove installed versions the retention policy no longer keeps.
+
+    The policy is the newest ``keep`` versions, and on top of that three things
+    are never candidates however old they are:
+
+    - the selected ``current`` version, which is the program launchd runs;
+    - the version the ``previous`` marker names, which is what a bare
+      ``rollback`` goes back to;
+    - the payload this process is executing from, when it is a frozen runtime —
+      deleting it would pull files out from under the running command, and the
+      failure would surface later and somewhere else.
+
+    Nothing under the prefix that is not an installed version is touched.
+    Candidacy is decided by the same test uninstall uses to prove ownership, so
+    a foreign directory, a half-copied tree, or scratch from an interrupted
+    install is left alone rather than deleted on the strength of sitting in
+    ``versions/``. Such an entry does not occupy a retention slot either.
+
+    Removal is two-phase, because a ``rmtree`` that fails partway would leave a
+    directory that still looks installed and no longer runs. Every doomed
+    version is first renamed aside — one rename inside ``versions/``, so it
+    either leaves the version set completely or not at all — and only then are
+    the files deleted. A rename that fails puts back the ones already moved and
+    removes nothing, so a refused prune leaves every version selectable.
+    """
+    root = _resolve_prefix(prefix)
+    installation = read_installation(root)
+    versions_dir = root / VERSIONS_DIR
+    doomed = _prunable_versions(installation, keep=keep)
+    if not doomed:
+        return PruneResult(prefix=root, removed=(), kept=installation.versions)
+
+    staged: list[tuple[str, Path]] = []
+    for name in doomed:
+        scratch = versions_dir / f"{name}{REMOVING_SUFFIX}"
+        try:
+            # Cleared first, so finding this path after a failure below proves
+            # this prune put it there.
+            discard_path(scratch)
+            (versions_dir / name).rename(scratch)
+        except (OSError, PlacementError) as exc:
+            stranded = _restore_staged(staged)
+            note = (
+                "; could not put back " + ", ".join(str(path) for path in stranded)
+                if stranded
+                else ""
+            )
+            return PruneResult(
+                prefix=root,
+                removed=(),
+                kept=read_installation(root).versions,
+                problem=f"kept every version: cannot remove {name}: {exc}{note}",
+            )
+        staged.append((name, scratch))
+
+    unreclaimed: list[str] = []
+    for _, scratch in staged:
+        try:
+            shutil.rmtree(scratch)
+        except OSError as exc:
+            unreclaimed.append(f"{scratch}: {exc}")
+    problem = None
+    if unreclaimed:
+        problem = (
+            "removed from the version set, but their files are still on disk: "
+            + "; ".join(unreclaimed)
+        )
+    return PruneResult(
+        prefix=root,
+        removed=tuple(name for name, _ in staged),
+        kept=read_installation(root).versions,
+        problem=problem,
+    )
+
+
+def _prunable_versions(installation: Installation, *, keep: int) -> tuple[str, ...]:
+    """Installed versions retention would remove, oldest first."""
+    versions_dir = installation.prefix / VERSIONS_DIR
+    candidates = [
+        name
+        for name in installation.versions
+        if _installed_version_problem(versions_dir / name) is None
+    ]
+    protected = {installation.current, installation.previous}
+    protected.add(_running_version(installation.prefix, tuple(candidates)))
+    if keep > 0:
+        protected.update(candidates[-keep:])
+    return tuple(name for name in candidates if name not in protected)
+
+
+def _running_version(prefix: Path, versions: tuple[str, ...]) -> str | None:
+    """Installed version this process executes from, when it is a frozen one.
+
+    The same test :func:`_refuse_self_replacement` applies, asked the other way
+    round: not "is this the one I am running from" but "which one is it", so
+    retention can leave it alone.
+    """
+    if not is_frozen():
+        return None
+    running = Path(sys.executable).resolve()
+    for name in versions:
+        target = (prefix / VERSIONS_DIR / name).resolve()
+        if target == running or target in running.parents:
+            return name
+    return None
+
+
+def _restore_staged(staged: list[tuple[str, Path]]) -> list[Path]:
+    """Put moved-aside versions back, returning the ones that would not go.
+
+    Only reached before any deletion has started, so each staged tree is still
+    whole and putting it back restores a runnable version rather than a
+    half-emptied one.
+    """
+    stranded: list[Path] = []
+    for name, scratch in staged:
+        try:
+            scratch.rename(scratch.with_name(name))
+        except OSError:
+            stranded.append(scratch)
+    return stranded
+
+
 def install_version(
     payload_dir: Path,
     *,
     prefix: Path | None = None,
     bin_dir: Path | None = None,
     link: bool = True,
+    keep: int = KEEP_VERSIONS,
     environ: dict[str, str] | None = None,
 ) -> InstallResult:
     """Place a payload under the prefix as a version and select it.
@@ -432,6 +623,13 @@ def install_version(
     The payload is copied, not moved: it may be a build output in a checkout, or
     an extraction the installer script still owns, and consuming it would make
     installing to a second prefix impossible.
+
+    Retention runs here rather than in ``upgrade`` so that every path that adds
+    a version to a prefix bounds it — the ``.run`` installer reaches this
+    through ``install``, not through ``upgrade``. It runs last, after the new
+    version is placed, selected, and linked, so a placement that fails removes
+    nothing, and it never raises: the version the operator asked for is
+    installed and working either way.
     """
     payload = payload_dir.expanduser().resolve()
     if not payload.is_dir():
@@ -460,12 +658,14 @@ def install_version(
         raise InstallError(str(exc)) from exc
     select_version(root, version)
     link_path = _link_command(root, bin_dir) if link else None
+    prune = prune_versions(root, keep=keep)
     return InstallResult(
         installation=read_installation(root),
         version=version,
         replaced=replaced,
         link_path=link_path,
         link_on_path=_on_path(link_path, environ),
+        prune=prune,
     )
 
 
@@ -743,7 +943,7 @@ def _verify_removable_prefix(root: Path) -> bool:
         # Debris from an interrupted publication is ours, but it is not a
         # version: it is skipped rather than counted, so it can never be the
         # only thing "proving" ownership.
-        if _is_publication_scratch(entry.name):
+        if _is_installer_scratch(entry.name):
             continue
         raise InstallError(
             f"{entry} is not an installed orch-hub version ({problem}); "
@@ -779,16 +979,17 @@ def _installed_version_problem(entry: Path) -> str | None:
     return None
 
 
-def _is_publication_scratch(name: str) -> bool:
-    """Whether ``name`` is a scratch path this module's own publication makes.
+def _is_installer_scratch(name: str) -> bool:
+    """Whether ``name`` is a scratch path this module's own writes make.
 
     ``place_directory`` stages beside its target and holds the tree it replaces
-    beside it too; both are cleared on the error paths, so one survives only a
-    kill or a power loss mid-install. Refusing to uninstall because of debris the
-    installer itself left would be a fault of this check, not evidence of a
-    foreign prefix.
+    beside it too, and :func:`prune_versions` moves a doomed version aside before
+    deleting it. Each is cleared before it is used again, so one survives only a
+    kill mid-operation or a deletion that could not finish. Refusing to uninstall
+    because of debris the installer itself left would be a fault of this check,
+    not evidence of a foreign prefix.
     """
-    return name.endswith(INCOMING_SUFFIX) or name.endswith(PREVIOUS_SUFFIX)
+    return name.endswith((INCOMING_SUFFIX, PREVIOUS_SUFFIX, REMOVING_SUFFIX))
 
 
 def _list_dir(path: Path) -> list[Path]:

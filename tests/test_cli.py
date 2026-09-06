@@ -1294,6 +1294,10 @@ def _fake_installation(**overrides) -> SimpleNamespace:
     )
 
 
+def _fake_prune(removed=(), kept=("0.1.0", "0.2.0"), problem=None) -> SimpleNamespace:
+    return SimpleNamespace(removed=tuple(removed), kept=tuple(kept), problem=problem)
+
+
 def _fake_setup_result(health: str = "ok") -> SimpleNamespace:
     return SimpleNamespace(
         installation=_fake_installation(),
@@ -1313,6 +1317,7 @@ def test_install_cli_reports_the_command_and_path_hint(monkeypatch, capsys):
             replaced=False,
             link_path=Path("/home/u/.local/bin/orch-hub"),
             link_on_path=False,
+            prune=_fake_prune(),
             to_dict=lambda: {"version": "0.2.0"},
         ),
     )
@@ -1413,7 +1418,12 @@ def test_upgrade_cli(monkeypatch, capsys):
         cli,
         "upgrade",
         lambda payload, prefix=None, bin_dir=None, plist_path=None: SimpleNamespace(
-            install=SimpleNamespace(version="0.2.0"),
+            install=SimpleNamespace(
+                version="0.2.0",
+                prune=_fake_prune(
+                    removed=("0.0.9",), kept=("0.1.0", "0.2.0")
+                ),
+            ),
             setup=_fake_setup_result(),
             previous_version="0.1.0",
         ),
@@ -1422,7 +1432,33 @@ def test_upgrade_cli(monkeypatch, capsys):
     rc = cli.main(["upgrade", "--from", "/tmp/payload"])
 
     assert rc == 0
-    assert "upgraded orch-hub 0.1.0 -> 0.2.0" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "upgraded orch-hub 0.1.0 -> 0.2.0" in out
+    # An upgrade that silently deleted an installed rollback target would be
+    # the one thing an operator could not find out afterwards.
+    assert "removed: 0.0.9" in out
+    assert "kept: 0.1.0, 0.2.0" in out
+
+
+def test_upgrade_cli_reports_a_prune_that_could_not_finish(monkeypatch, capsys):
+    """Reclaiming disk must not fail an upgrade, but it must not be silent."""
+    monkeypatch.setattr(
+        cli,
+        "upgrade",
+        lambda payload, prefix=None, bin_dir=None, plist_path=None: SimpleNamespace(
+            install=SimpleNamespace(
+                version="0.2.0",
+                prune=_fake_prune(problem="kept every version: cannot remove 0.0.9"),
+            ),
+            setup=_fake_setup_result(),
+            previous_version="0.1.0",
+        ),
+    )
+
+    rc = cli.main(["upgrade", "--from", "/tmp/payload"])
+
+    assert rc == 0
+    assert "note: kept every version: cannot remove 0.0.9" in capsys.readouterr().out
 
 
 def test_upgrade_cli_error_names_the_rollback(monkeypatch, capsys):
@@ -1477,6 +1513,7 @@ def test_versions_cli(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "0.1.0 (previous)" in out
     assert "0.2.0 (current)" in out
+    assert f"retention: the newest {cli.KEEP_VERSIONS}" in out
 
 
 def test_versions_cli_json(monkeypatch, capsys):
@@ -1485,7 +1522,9 @@ def test_versions_cli_json(monkeypatch, capsys):
     rc = cli.main(["versions", "--json"])
 
     assert rc == 0
-    assert json.loads(capsys.readouterr().out)["current"] == "0.2.0"
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["current"] == "0.2.0"
+    assert payload["keep"] == cli.KEEP_VERSIONS
 
 
 def test_versions_cli_with_nothing_installed(monkeypatch, capsys):
