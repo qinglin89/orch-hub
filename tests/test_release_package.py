@@ -321,6 +321,25 @@ def test_a_version_the_runtime_could_not_install_is_refused(tmp_path: Path, vers
     assert not (tmp_path / "release").exists()
 
 
+@pytest.mark.parametrize("suffix", install.RESERVED_VERSION_SUFFIXES)
+def test_a_version_the_runtime_reserves_for_scratch_is_refused(
+    tmp_path: Path, suffix: str
+):
+    """Same reason as above, for the names the installer works beside a version under.
+
+    A release published under one of these could be downloaded and never
+    installed, and a release cannot be corrected — only withdrawn.
+    """
+    payload = make_payload(tmp_path, version=f"9.9.9{suffix}")
+    with pytest.raises(install.InstallError, match="may not end with"):
+        install.read_payload_manifest(payload)
+    with pytest.raises(PackageError, match="reserves"):
+        read_payload_manifest(payload)
+    with pytest.raises(PackageError):
+        package(tmp_path, payload)
+    assert not (tmp_path / "release").exists()
+
+
 def test_a_target_that_contradicts_the_payload_it_carries_is_refused(tmp_path: Path):
     # `target` is the release key and the artifact's file name; `os`/`arch` are
     # what the installer's host gate compares. Letting them disagree publishes

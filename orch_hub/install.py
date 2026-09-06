@@ -29,13 +29,17 @@ not re-creatable from a release.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import platform
 import shutil
 import sys
+import threading
 import time
-from collections.abc import Callable
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -91,12 +95,37 @@ old and renames it over: ``rename`` replaces the entry atomically, which means a
 reader never sees ``current`` missing."""
 
 REMOVING_SUFFIX = ".removing"
-"""Suffix a version is renamed to before its files are deleted.
+"""Suffix a version is renamed under before its files are deleted.
 
 Deleting a tree in place can fail halfway and leave a directory that still looks
 like an installed version but no longer runs. Moving it out of the version
 namespace first is one rename inside ``versions/`` — it happens completely or
 not at all — so what is left listed is always whole."""
+
+RESERVED_VERSION_SUFFIXES = (INCOMING_SUFFIX, PREVIOUS_SUFFIX, REMOVING_SUFFIX)
+"""Suffixes an installed version's name may not end with.
+
+Placement and pruning both work beside the version they are handling, under a
+sibling name built from one of these. That only stays unambiguous if the
+reverse is refused: a payload declaring version ``0.1.0.removing`` would install
+as a directory this module's own inventory hides as debris, uninstall waves
+through as debris, and a prune of some other version could pick as its scratch
+name. Reserving them costs a version a suffix nothing numbers with, and makes
+"anything under ``versions/`` wearing one of these is not an installed version"
+true by construction rather than by luck.
+
+:mod:`orch_hub.release_package` applies the same reservation, so a release
+cannot be published under a version this installer would then refuse."""
+
+LOCK_NAME = ".lock"
+"""File held exclusively for the length of any mutation of one prefix.
+
+Placing, selecting, and pruning are each several filesystem steps, and retention
+in particular decides what to remove from an inventory it read a moment earlier.
+Without exclusion a concurrent ``rollback`` landing between that reading and the
+removal would leave ``current`` pointing at a version the prune then deleted.
+Everything these operations touch lives under the prefix, so one lock file there
+is the whole boundary."""
 
 KEEP_VERSIONS = 3
 """How many installed versions a prefix keeps, on top of the fail-safes below.
@@ -118,7 +147,7 @@ version pruned here is not lost — it is reinstallable from its release
 artifact, which the older ones are exactly as much as the newer ones."""
 
 OWNED_PREFIX_ENTRIES = frozenset(
-    {VERSIONS_DIR, CURRENT_LINK, PREVIOUS_MARKER, INCOMING_LINK}
+    {VERSIONS_DIR, CURRENT_LINK, PREVIOUS_MARKER, INCOMING_LINK, LOCK_NAME}
 )
 """Everything this module ever creates directly under a prefix.
 
@@ -164,12 +193,12 @@ class PruneResult:
     problem: str | None = None
     """Why the prune did less than it set out to, or ``None``.
 
-    Set with an empty ``removed`` when the prune refused and every version is
-    still installed; set alongside a non-empty ``removed`` when versions did
-    leave the version set but their files could not all be deleted. Reclaiming
-    disk is never worth failing an install over, so this is reported rather
-    than raised — but it is reported, because "removed" that did not free the
-    space is a claim the operator would otherwise act on."""
+    ``removed`` names only versions whose files are actually gone, so a prune
+    that stopped early is visible in the two lists as well as here: what it did
+    not get to is still in ``kept``. Reclaiming disk is never worth failing an
+    install over, so this is reported rather than raised — but it is reported,
+    because a version left half-deleted, or one that could not be put back, is
+    a state the operator has to know about to act on."""
 
     def to_dict(self) -> dict:
         return {
@@ -332,6 +361,10 @@ def _payload_version(manifest: dict, path: Path) -> str:
     or ``..``-bearing component silently discards the prefix. A version that
     survives this is also one ``read_current`` can read back out of the
     selection link, which a version carrying a separator would not be.
+
+    It is a name this module's own scratch paths will not collide with, too:
+    those are formed by suffixing a version, so a version wearing one of the
+    reserved suffixes would install as a directory that reads as debris.
     """
     version = str(manifest.get("version") or "").strip()
     if not version:
@@ -340,6 +373,12 @@ def _payload_version(manifest: dict, path: Path) -> str:
         raise InstallError(
             f"{path} declares version {version!r}; a version must be a single "
             "path component naming a directory under versions/"
+        )
+    if version.endswith(RESERVED_VERSION_SUFFIXES):
+        raise InstallError(
+            f"{path} declares version {version!r}; a version may not end with "
+            f"{' or '.join(RESERVED_VERSION_SUFFIXES)}, which name this "
+            "installer's own scratch paths beside a version"
         )
     return version
 
@@ -457,30 +496,35 @@ def select_version(prefix: Path, version: str) -> str | None:
     old selection or the new one and never a missing ``current``. Selecting the
     version that is already current is a no-op for the previous marker: it would
     otherwise erase the only thing rollback has to go back to.
+
+    Held against every other mutation of the prefix, so that "this version is
+    installed" stays true from the check below until the link names it —
+    retention would otherwise be free to remove it in between.
     """
     root = prefix.expanduser()
-    target = root / VERSIONS_DIR / version
-    if not target.is_dir():
-        raise InstallError(f"version {version} is not installed under {root}")
-    link = root / CURRENT_LINK
-    if link.exists() and not link.is_symlink():
-        raise InstallError(
-            f"{link} exists and is not a symlink; remove it and reinstall"
-        )
-    before = read_current(root)
-    incoming = root / INCOMING_LINK
-    discard_path(incoming)
-    try:
-        # Relative, so the whole prefix can be moved or copied without the
-        # selection pointing back at where it was created.
-        incoming.symlink_to(Path(VERSIONS_DIR) / version)
-        os.replace(incoming, link)
-    except OSError as exc:
-        discard_path(incoming, best_effort=True)
-        raise InstallError(f"cannot select version {version}: {exc}") from exc
-    if before is not None and before != version:
-        _write_previous(root, before)
-    return before
+    with _prefix_lock(root):
+        target = root / VERSIONS_DIR / version
+        if not target.is_dir():
+            raise InstallError(f"version {version} is not installed under {root}")
+        link = root / CURRENT_LINK
+        if link.exists() and not link.is_symlink():
+            raise InstallError(
+                f"{link} exists and is not a symlink; remove it and reinstall"
+            )
+        before = read_current(root)
+        incoming = root / INCOMING_LINK
+        discard_path(incoming)
+        try:
+            # Relative, so the whole prefix can be moved or copied without the
+            # selection pointing back at where it was created.
+            incoming.symlink_to(Path(VERSIONS_DIR) / version)
+            os.replace(incoming, link)
+        except OSError as exc:
+            discard_path(incoming, best_effort=True)
+            raise InstallError(f"cannot select version {version}: {exc}") from exc
+        if before is not None and before != version:
+            _write_previous(root, before)
+        return before
 
 
 def prune_versions(
@@ -510,8 +554,35 @@ def prune_versions(
     either leaves the version set completely or not at all — and only then are
     the files deleted. A rename that fails puts back the ones already moved and
     removes nothing, so a refused prune leaves every version selectable.
+
+    A delete that fails stops the prune there rather than working through the
+    rest: what has not been touched goes back into the version set, and so does
+    the one that refused if nothing of it was deleted. Only a tree the deletion
+    had already started on stays out — it is no longer a version anybody could
+    run, and its path is reported so the bytes can be dealt with by hand.
+
+    The whole transaction runs under the prefix lock. Which versions are in use
+    is read once at the top, and a selection arriving in the middle would
+    otherwise make that reading wrong precisely where it matters.
     """
     root = _resolve_prefix(prefix)
+    try:
+        with _prefix_lock(root):
+            return _prune_locked(root, keep=keep)
+    except InstallError as exc:
+        # Reclaiming disk is never worth failing the operation that triggered
+        # it, and an unlockable prefix is somebody else's mutation in flight or
+        # a prefix this process cannot write: both are "not now", not an error.
+        return PruneResult(
+            prefix=root,
+            removed=(),
+            kept=read_installation(root).versions,
+            problem=f"kept every version: {exc}",
+        )
+
+
+def _prune_locked(root: Path, *, keep: int) -> PruneResult:
+    """Body of :func:`prune_versions`, with the prefix already held."""
     installation = read_installation(root)
     versions_dir = root / VERSIONS_DIR
     doomed = _prunable_versions(installation, keep=keep)
@@ -520,13 +591,17 @@ def prune_versions(
 
     staged: list[tuple[str, Path]] = []
     for name in doomed:
-        scratch = versions_dir / f"{name}{REMOVING_SUFFIX}"
+        scratch = versions_dir / f"{name}.{uuid.uuid4().hex[:8]}{REMOVING_SUFFIX}"
         try:
-            # Cleared first, so finding this path after a failure below proves
-            # this prune put it there.
-            discard_path(scratch)
+            # Nothing is ever cleared to make room: an existing path here is
+            # not this prune's, so it is not this prune's to delete. The name
+            # carries a fresh token so that debris from an earlier failure —
+            # or anything else sitting under `versions/` — neither blocks a
+            # prune nor gets recursively removed by one.
+            if os.path.lexists(scratch):
+                raise OSError(f"{scratch} already exists")
             (versions_dir / name).rename(scratch)
-        except (OSError, PlacementError) as exc:
+        except OSError as exc:
             stranded = _restore_staged(staged)
             note = (
                 "; could not put back " + ", ".join(str(path) for path in stranded)
@@ -541,24 +616,70 @@ def prune_versions(
             )
         staged.append((name, scratch))
 
-    unreclaimed: list[str] = []
-    for _, scratch in staged:
+    removed: list[str] = []
+    problem: str | None = None
+    for index, (name, scratch) in enumerate(staged):
         try:
-            shutil.rmtree(scratch)
+            _delete_staged(scratch)
         except OSError as exc:
-            unreclaimed.append(f"{scratch}: {exc}")
-    problem = None
-    if unreclaimed:
-        problem = (
-            "removed from the version set, but their files are still on disk: "
-            + "; ".join(unreclaimed)
-        )
+            problem, restored = _abandon_removal(
+                name, scratch, exc, staged[index + 1 :]
+            )
+            if not restored:
+                removed.append(name)
+            break
+        removed.append(name)
     return PruneResult(
         prefix=root,
-        removed=tuple(name for name, _ in staged),
+        removed=tuple(removed),
         kept=read_installation(root).versions,
         problem=problem,
     )
+
+
+def _delete_staged(scratch: Path) -> None:
+    """Delete one moved-aside version, its manifest first.
+
+    ``rmtree`` can fail partway, and what it leaves then has to be answerable:
+    put this tree back into the version set, or not? The manifest is what makes
+    a directory an installed version, so removing it before anything else makes
+    that question exact. A tree that survives a failed deletion either still
+    carries its manifest, in which case nothing was deleted at all and it can go
+    back, or does not, in which case it is already not a version and must not.
+    No cheaper signal separates those: an executable can outlive the libraries
+    it needs and still look like a payload.
+    """
+    (scratch / MANIFEST_NAME).unlink()
+    shutil.rmtree(scratch)
+
+
+def _abandon_removal(
+    name: str, scratch: Path, exc: OSError, pending: list[tuple[str, Path]]
+) -> tuple[str, bool]:
+    """Give up a prune at ``name``, returning the note and whether it survived.
+
+    A failed deletion must not cost the operator versions it never got to.
+    Everything after this one is untouched and goes straight back. The one that
+    refused goes back too when it is still a payload this installer would
+    accept — a ``rmtree`` can fail on its first entry — and only a tree that is
+    already part-deleted stays out, because putting *that* back would list
+    something as installed that cannot run.
+    """
+    whole = _installed_version_problem(scratch, version=name) is None
+    putback = [(name, scratch), *pending] if whole else list(pending)
+    stranded = _restore_staged(putback)
+    restored = whole and scratch not in stranded
+    note = f"stopped at {name}: cannot delete it: {exc}"
+    if restored:
+        note += "; it is still installed"
+    elif whole:
+        note += f"; it is whole at {scratch} but could not be put back"
+    else:
+        note += f"; it is part-deleted, not selectable, and left at {scratch}"
+    others = [path for path in stranded if path != scratch]
+    if others:
+        note += "; could not put back " + ", ".join(str(path) for path in others)
+    return note, restored
 
 
 def _prunable_versions(installation: Installation, *, keep: int) -> tuple[str, ...]:
@@ -596,9 +717,9 @@ def _running_version(prefix: Path, versions: tuple[str, ...]) -> str | None:
 def _restore_staged(staged: list[tuple[str, Path]]) -> list[Path]:
     """Put moved-aside versions back, returning the ones that would not go.
 
-    Only reached before any deletion has started, so each staged tree is still
-    whole and putting it back restores a runnable version rather than a
-    half-emptied one.
+    Only ever called with trees that are still whole — nothing deleted yet, or
+    proven intact after a deletion refused — so putting one back restores a
+    runnable version rather than a half-emptied one.
     """
     stranded: list[Path] = []
     for name, scratch in staged:
@@ -640,33 +761,37 @@ def install_version(
     root = _resolve_prefix(prefix)
     target = root / VERSIONS_DIR / version
     _refuse_self_replacement(payload, target, version)
-    replaced = target.is_dir()
-    try:
-        place_directory(
-            payload,
-            target,
-            # ``symlinks=True`` is load-bearing, not tidiness: the payload's
-            # bundled framework is a tree of relative links, and resolving them
-            # into copies produces a runtime that is both larger and differently
-            # shaped from the one that was built and audited.
-            transfer=lambda source, destination: shutil.copytree(
-                source, destination, symlinks=True
-            ),
-            what=f"version {version}",
+    # One lock for the whole thing: the selection and the prune below take it
+    # again and find it already held, so no other mutation of this prefix can
+    # land between placing the version and retention deciding what is in use.
+    with _prefix_lock(root, create=True):
+        replaced = target.is_dir()
+        try:
+            place_directory(
+                payload,
+                target,
+                # ``symlinks=True`` is load-bearing, not tidiness: the payload's
+                # bundled framework is a tree of relative links, and resolving
+                # them into copies produces a runtime that is both larger and
+                # differently shaped from the one that was built and audited.
+                transfer=lambda source, destination: shutil.copytree(
+                    source, destination, symlinks=True
+                ),
+                what=f"version {version}",
+            )
+        except PlacementError as exc:
+            raise InstallError(str(exc)) from exc
+        select_version(root, version)
+        link_path = _link_command(root, bin_dir) if link else None
+        prune = prune_versions(root, keep=keep)
+        return InstallResult(
+            installation=read_installation(root),
+            version=version,
+            replaced=replaced,
+            link_path=link_path,
+            link_on_path=_on_path(link_path, environ),
+            prune=prune,
         )
-    except PlacementError as exc:
-        raise InstallError(str(exc)) from exc
-    select_version(root, version)
-    link_path = _link_command(root, bin_dir) if link else None
-    prune = prune_versions(root, keep=keep)
-    return InstallResult(
-        installation=read_installation(root),
-        version=version,
-        replaced=replaced,
-        link_path=link_path,
-        link_on_path=_on_path(link_path, environ),
-        prune=prune,
-    )
 
 
 def setup_service(
@@ -853,26 +978,30 @@ def uninstall(
     """
     root = _resolve_prefix(prefix)
     resolved_plist = (plist_path or default_plist_path()).expanduser()
+    # Ownership is proven before the prefix is locked, because locking writes a
+    # file into it: a mistyped `--prefix` must be refused without this module
+    # having left anything behind in somebody else's directory.
     prefix_present = _verify_removable_prefix(root)
     resolved_data = _uninstall_data_dir(data_dir, resolved_plist) if purge_data else None
 
-    try:
-        stop_service(runner=runner)
-    except LaunchdError as exc:
-        raise InstallError(
-            f"cannot stop the {LABEL} service, so nothing was removed: {exc}; "
-            "stop it and retry, or unload it by hand with "
-            f"`launchctl bootout {service_target()}`"
-        ) from exc
+    with _prefix_lock(root):
+        try:
+            stop_service(runner=runner)
+        except LaunchdError as exc:
+            raise InstallError(
+                f"cannot stop the {LABEL} service, so nothing was removed: {exc}; "
+                "stop it and retry, or unload it by hand with "
+                f"`launchctl bootout {service_target()}`"
+            ) from exc
 
-    plist_removed = _remove_file(resolved_plist)
-    link_path, link_removed = _unlink_command(root, bin_dir)
-    data_removed = False
-    if resolved_data is not None:
-        data_removed = _remove_tree(resolved_data)
-    # Last, because on a frozen runtime this is the directory the running
-    # executable lives in: everything above still needs the payload's files.
-    prefix_removed = _remove_tree(root) if prefix_present else False
+        plist_removed = _remove_file(resolved_plist)
+        link_path, link_removed = _unlink_command(root, bin_dir)
+        data_removed = False
+        if resolved_data is not None:
+            data_removed = _remove_tree(resolved_data)
+        # Last, because on a frozen runtime this is the directory the running
+        # executable lives in: everything above still needs the payload's files.
+        prefix_removed = _remove_tree(root) if prefix_present else False
     return UninstallResult(
         prefix=root,
         prefix_removed=prefix_removed,
@@ -887,6 +1016,84 @@ def uninstall(
 
 def _resolve_prefix(prefix: Path | None) -> Path:
     return (prefix or default_prefix()).expanduser()
+
+
+_HELD_LOCKS = threading.local()
+"""Prefixes this thread already holds, by depth.
+
+Per-thread on purpose: it exists so a call chain that already holds a prefix
+does not lock it a second time, and a *different* thread must not read that as
+permission to skip the lock. ``flock`` treats two descriptors for one file
+independently even inside one process, so the second thread blocks on the file
+exactly like a second process would."""
+
+
+@contextmanager
+def _prefix_lock(root: Path, *, create: bool = False) -> Iterator[None]:
+    """Hold ``root`` exclusively for the length of one mutation.
+
+    Every operation that changes what is installed under a prefix — placing a
+    version, selecting one, pruning, removing the installation — runs inside
+    this. Retention is why: it reads the inventory, works out what nothing is
+    using, and only then removes it, so a selection landing in that gap would
+    make ``current`` name a version the prune is already deleting. Excluding one
+    mutation at a time is cheaper to reason about than making each step
+    individually race-free, and these are operator-paced commands.
+
+    Nesting is expected — placement locks, then selects and prunes under the
+    lock it already holds — and is a no-op after the first acquisition.
+
+    The lock file lives inside the prefix, so it is taken only where an
+    installation can exist: ``create`` is for placement, which is entitled to
+    make the prefix, and everything else runs unlocked against a prefix that is
+    not there, having nothing to exclude anyone from.
+    """
+    key = Path(os.path.realpath(root))
+    depths = getattr(_HELD_LOCKS, "depths", None)
+    if depths is None:
+        depths = _HELD_LOCKS.depths = {}
+    depth = depths.get(key, 0)
+    depths[key] = depth + 1
+    try:
+        if depth:
+            yield
+            return
+        if create:
+            try:
+                root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise InstallError(f"cannot create the prefix {root}: {exc}") from exc
+        if not root.is_dir():
+            yield
+            return
+        handle = _open_prefix_lock(root)
+        try:
+            yield
+        finally:
+            # Closing the descriptor releases the lock, including when the
+            # prefix it lives in has just been removed by uninstall.
+            os.close(handle)
+    finally:
+        remaining = depths[key] - 1
+        if remaining:
+            depths[key] = remaining
+        else:
+            del depths[key]
+
+
+def _open_prefix_lock(root: Path) -> int:
+    """Open and lock ``<prefix>/.lock``, or fail as an operational error."""
+    path = root / LOCK_NAME
+    try:
+        handle = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError as exc:
+        raise InstallError(f"cannot lock {root}: {exc}") from exc
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+    except OSError as exc:
+        os.close(handle)
+        raise InstallError(f"cannot lock {root}: {exc}") from exc
+    return handle
 
 
 def _verify_removable_prefix(root: Path) -> bool:
@@ -957,7 +1164,7 @@ def _verify_removable_prefix(root: Path) -> bool:
     return True
 
 
-def _installed_version_problem(entry: Path) -> str | None:
+def _installed_version_problem(entry: Path, *, version: str | None = None) -> str | None:
     """Why ``entry`` is not an installed orch-hub version, or ``None``.
 
     The test is the one :func:`read_payload_manifest` already applies to a
@@ -966,6 +1173,12 @@ def _installed_version_problem(entry: Path) -> str | None:
     that function rather than re-listing its rules is deliberate — a second copy
     would decide "is this ours" by different rules than the ones that put it
     there.
+
+    ``version`` names what the directory is filed as, defaulting to its own
+    name. Retention passes the original when it asks about a tree it has already
+    moved aside for deletion: that tree is still exactly the payload it was, and
+    matching the manifest against the scratch name would answer "not a version"
+    for every one of them.
     """
     if entry.is_symlink() or not entry.is_dir():
         return "not a directory"
@@ -973,9 +1186,10 @@ def _installed_version_problem(entry: Path) -> str | None:
         manifest = read_payload_manifest(entry)
     except InstallError as exc:
         return str(exc)
+    filed_as = entry.name if version is None else version
     declared = _payload_version(manifest, entry / MANIFEST_NAME)
-    if declared != entry.name:
-        return f"declares version {declared!r} but is filed as {entry.name!r}"
+    if declared != filed_as:
+        return f"declares version {declared!r} but is filed as {filed_as!r}"
     return None
 
 
@@ -984,12 +1198,15 @@ def _is_installer_scratch(name: str) -> bool:
 
     ``place_directory`` stages beside its target and holds the tree it replaces
     beside it too, and :func:`prune_versions` moves a doomed version aside before
-    deleting it. Each is cleared before it is used again, so one survives only a
-    kill mid-operation or a deletion that could not finish. Refusing to uninstall
-    because of debris the installer itself left would be a fault of this check,
-    not evidence of a foreign prefix.
+    deleting it. One survives only a kill mid-operation or a deletion that could
+    not finish. Refusing to uninstall because of debris the installer itself left
+    would be a fault of this check, not evidence of a foreign prefix.
+
+    Deciding this by name is safe only because the same names are refused as
+    versions (:data:`RESERVED_VERSION_SUFFIXES`): no installed version can be
+    mistaken for debris, and no debris can be offered as a version.
     """
-    return name.endswith((INCOMING_SUFFIX, PREVIOUS_SUFFIX, REMOVING_SUFFIX))
+    return name.endswith(RESERVED_VERSION_SUFFIXES)
 
 
 def _list_dir(path: Path) -> list[Path]:

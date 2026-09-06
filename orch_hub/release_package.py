@@ -51,6 +51,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .atomic_dir import PlacementError, place_directory
+# The one rule the packager reads from the runtime rather than restating: which
+# version names the installer will not place. Restating it is how the two drift.
+from .install import RESERVED_VERSION_SUFFIXES
 from .macho import version_key
 from .release_audit import AuditReport, ForbiddenLiteral, audit_payload
 from .release_build import (
@@ -241,7 +244,7 @@ def read_payload_manifest(payload_dir: Path) -> dict:
                 f"{path} declares {field} {declared!r}, "
                 f"but a release payload is named {EXECUTABLE_NAME!r}"
             )
-    _check_path_component(
+    version = _check_path_component(
         manifest,
         "version",
         path,
@@ -250,6 +253,15 @@ def read_payload_manifest(payload_dir: Path) -> dict:
             "must be a single path component"
         ),
     )
+    # The installer works beside a version under these suffixes and therefore
+    # refuses them as versions; a release published under one could be built
+    # and downloaded but never installed.
+    if version.endswith(RESERVED_VERSION_SUFFIXES):
+        raise PackageError(
+            f"{path} declares version {version!r}; the installer reserves "
+            f"{' or '.join(RESERVED_VERSION_SUFFIXES)} for its own scratch "
+            "paths beside a version"
+        )
     _check_target_identity(manifest, path)
     _check_declared_macos(manifest, path)
     _check_source_revision(manifest, path)

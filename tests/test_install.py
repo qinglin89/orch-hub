@@ -14,6 +14,7 @@ import os
 import platform
 import plistlib
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,7 @@ from orch_hub.config import DATA_DIR_ENV, HOST_ENV, MANDREL_PATH_ENV, PORT_ENV, 
 from orch_hub.install import (
     KEEP_VERSIONS,
     REMOVING_SUFFIX,
+    RESERVED_VERSION_SUFFIXES,
     InstallError,
     SetupOptions,
     check_target,
@@ -643,8 +645,41 @@ def test_a_prune_that_fails_partway_puts_back_what_it_moved(tmp_path, monkeypatc
     assert (prefix / "versions" / "0.1.0" / "orch-hub").is_file()
 
 
-def test_a_prune_that_cannot_delete_reports_the_files_it_left(tmp_path, monkeypatch):
-    """The version leaves the set atomically; only the bytes can be stranded."""
+def test_a_prune_that_cannot_delete_a_version_keeps_it_selectable(tmp_path):
+    """A deletion that never started must cost the operator nothing.
+
+    The acceptance is "refuse rather than half-remove": a version whose files
+    would not delete goes back into the version set, and the prune stops there
+    instead of working through the ones behind it.
+    """
+    prefix = tmp_path / "prefix"
+    install_series(
+        tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0", keep=9
+    )
+    # Read-only version directory: the tree can still be moved aside, but
+    # nothing inside it can be unlinked.
+    (prefix / "versions" / "0.2.0").chmod(0o500)
+    try:
+        result = prune_versions(prefix, keep=1)
+    finally:
+        for entry in (prefix / "versions").iterdir():
+            entry.chmod(0o700)
+
+    assert result.removed == ("0.1.0",)
+    assert "stopped at 0.2.0" in result.problem
+    assert "still installed" in result.problem
+    assert result.kept == ("0.2.0", "0.3.0", "0.4.0", "0.5.0")
+    # 0.2.0 is back under its own name and whole; 0.3.0 was doomed too and the
+    # prune never reached it.
+    assert read_installation(prefix).versions == ("0.2.0", "0.3.0", "0.4.0", "0.5.0")
+    for version in ("0.2.0", "0.3.0"):
+        assert (prefix / "versions" / version / "orch-hub").is_file()
+        select_version(prefix, version)
+        assert read_current(prefix) == version
+
+
+def test_a_prune_does_not_put_back_a_version_it_started_deleting(tmp_path, monkeypatch):
+    """The one thing that cannot be undone is reported, never re-listed."""
     prefix = tmp_path / "prefix"
     install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
 
@@ -655,13 +690,120 @@ def test_a_prune_that_cannot_delete_reports_the_files_it_left(tmp_path, monkeypa
 
     result = prune_versions(prefix, keep=1)
 
+    # The manifest is deleted first, so this tree is no longer a payload: it
+    # cannot go back without listing something that would not run.
     assert result.removed == ("0.1.0",)
-    assert "still on disk" in result.problem
+    assert "part-deleted" in result.problem
     assert read_installation(prefix).versions == ("0.2.0", "0.3.0")
-    assert (prefix / "versions" / f"0.1.0{REMOVING_SUFFIX}").is_dir()
+    stranded = [
+        entry
+        for entry in (prefix / "versions").iterdir()
+        if entry.name.endswith(REMOVING_SUFFIX)
+    ]
+    assert len(stranded) == 1
+    assert str(stranded[0]) in result.problem
     # Never offered as a rollback target while it is half a payload.
     with pytest.raises(InstallError, match="version 0.1.0 is not installed"):
         select_version(prefix, "0.1.0")
+
+
+@pytest.mark.parametrize("suffix", RESERVED_VERSION_SUFFIXES)
+def test_a_version_named_like_installer_scratch_is_refused(tmp_path, suffix):
+    """The scratch namespace is reserved, so nothing real can wear it.
+
+    Every listing this module makes decides "debris or version" by these
+    suffixes. A payload allowed to declare `0.1.0.removing` would install as a
+    directory that reads as debris: hidden from `versions`, unreachable by
+    rollback, and waved through by uninstall's ownership proof.
+    """
+    payload = make_payload(tmp_path, f"0.1.0{suffix}")
+    prefix = tmp_path / "prefix"
+
+    with pytest.raises(InstallError, match="may not end with"):
+        read_payload_manifest(payload)
+    with pytest.raises(InstallError, match="may not end with"):
+        install_version(payload, prefix=prefix, link=False)
+
+    assert not prefix.exists()
+
+
+def test_a_version_that_merely_contains_a_reserved_word_still_installs(tmp_path):
+    """The reservation is a suffix rule; it must not swallow ordinary versions."""
+    prefix = tmp_path / "prefix"
+
+    result = install_version(
+        make_payload(tmp_path, "1.0.0-incoming.2"), prefix=prefix, link=False
+    )
+
+    assert result.version == "1.0.0-incoming.2"
+    assert read_installation(prefix).versions == ("1.0.0-incoming.2",)
+    assert read_current(prefix) == "1.0.0-incoming.2"
+
+
+def test_a_prune_leaves_an_entry_that_collides_with_its_scratch_name(tmp_path):
+    """Staging is never allowed to clear a path it did not create."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    # Exactly the name a fixed scratch suffix would have picked for the version
+    # about to be pruned — debris from an earlier failure, or somebody else's
+    # directory. Either way it is not this prune's, so it is not this prune's to
+    # clear out of the way.
+    squatter = prefix / "versions" / f"0.1.0{REMOVING_SUFFIX}"
+    squatter.mkdir()
+    (squatter / "keep-me.txt").write_text("mine\n", encoding="utf-8")
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ("0.1.0",)
+    assert result.problem is None
+    assert (squatter / "keep-me.txt").read_text(encoding="utf-8") == "mine\n"
+    assert read_installation(prefix).versions == ("0.2.0", "0.3.0")
+
+
+def test_a_rollback_cannot_land_inside_a_prune(tmp_path, monkeypatch):
+    """Retention decides from a reading of the prefix; nothing may move under it.
+
+    Without exclusion, a `rollback --to` arriving between "which versions is
+    anything using" and the removal itself selects a version the prune is
+    already committed to deleting — and leaves `current` pointing at files that
+    are no longer there.
+    """
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", keep=9)
+    trying = threading.Event()
+    finished = threading.Event()
+    outcome: dict[str, str] = {}
+
+    def roll_back():
+        trying.set()
+        try:
+            select_version(prefix, "0.1.0")
+        except InstallError as exc:
+            outcome["error"] = str(exc)
+        finally:
+            finished.set()
+
+    roller = threading.Thread(target=roll_back)
+    real_prunable = install._prunable_versions
+
+    def snapshot(installation, *, keep):
+        doomed = real_prunable(installation, keep=keep)
+        roller.start()
+        trying.wait(5)
+        assert not finished.wait(0.2), "a selection ran inside the prune"
+        return doomed
+
+    monkeypatch.setattr(install, "_prunable_versions", snapshot)
+
+    result = prune_versions(prefix, keep=1)
+    roller.join(5)
+
+    assert result.removed == ("0.1.0", "0.2.0")
+    # The rollback still ran — after the transaction it would have raced. It
+    # fails loudly on a version that is gone rather than selecting one.
+    assert "0.1.0 is not installed" in outcome["error"]
+    assert read_current(prefix) == "0.4.0"
+    assert (prefix / "current" / "orch-hub").is_file()
 
 
 def test_prune_scratch_is_not_an_installed_version(tmp_path):
@@ -1129,7 +1271,9 @@ def test_uninstall_refuses_a_prefix_it_does_not_own(tmp_path):
         )
 
     assert (home / "Documents" / "notes.txt").read_text(encoding="utf-8") == "keep me"
-    # Refused before every side effect, launchctl included.
+    # Refused before every side effect, launchctl included — and before the
+    # prefix lock, which would otherwise leave a file in a stranger's directory.
+    assert [entry.name for entry in home.iterdir()] == ["Documents"]
     assert plist_path.read_text(encoding="utf-8") == "installed"
     assert runner.calls == []
 
