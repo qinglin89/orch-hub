@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-06
+verified-against: 36007bd48472fb0d1b91b8042c5dfc5810636054
 ---
 
 # APIs: CLI
@@ -222,14 +222,19 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   failures print one `error:` line on stderr and no partial JSON result.
 - Non-goal: does not alter evaluation artifacts or run at service startup.
 
-## `orch-hub-statusline`
+## `orch-hub-statusline` / `orch-hub statusline`
 
 - Purpose: legacy optional Claude Code `statusLine.command` wrapper that can
   still contribute the CLI's local subscription `rate_limits` payload.
+- Runtime forms: a source install retains the packaging-provided
+  `orch-hub-statusline` console script; a compiled release, which has one
+  executable and no console scripts, reaches the same wrapper through
+  `orch-hub statusline`.
 - Options: `--sink <path>` overrides the sink file; `--data-dir <dir>` writes
   under `<dir>/usage/claude-statusline.json`; `--print-sink` prints the resolved
   sink and reads no stdin. Everything after `--` is the operator's own statusline
-  command argv.
+  command argv; the compiled verb separates that suffix before top-level argparse
+  handling so wrapped flags cannot be interpreted as hub flags.
 - Behavior: reads stdin bytes once, best-effort writes only `rate_limits` plus
   `subscription_type` to the bounded hub sink, then passes the same stdin to the
   wrapped command with inherited stdout/stderr and the wrapped exit code. No

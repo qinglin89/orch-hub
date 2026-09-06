@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-06
+verified-against: 36007bd48472fb0d1b91b8042c5dfc5810636054
 ---
 
 # Features: Agent Subscription Usage
@@ -24,7 +24,8 @@ APIs: protected `GET /api/usage`; internal `UsageService`,
 `WindowBoundary`, `parse_claude_stream_usage`,
 `parse_claude_stream_boundaries`, `merge_window_boundaries`,
 `parse_claude_statusline`, `read_claude_statusline`, `read_codex_usage`;
-legacy console script `orch-hub-statusline`; `ORCH_HUB_CODEX_HOME`.
+statusLine wrapper entry points `orch-hub-statusline` and
+`orch-hub statusline`; `ORCH_HUB_CODEX_HOME`.
 
 Implemented behavior:
 
@@ -57,9 +58,12 @@ Implemented behavior:
   `rate_limit_event`. The latter advances only `resets_at` on an already-stored
   known window; it never creates a window or changes figures, plan, or
   `observed_ts`. Unsupported/absent output records nothing.
-- The legacy statusLine writer is opt-in and pass-through: the hub never writes
-  `~/.claude/**`, the sink stores only `rate_limits` plus `subscription_type`,
-  and wrapped operator statusline argv/stdin/stdout/stderr/exit code are relayed.
+- The statusLine writer is opt-in and pass-through: source installs retain the
+  legacy `orch-hub-statusline` console script, while the one-executable compiled
+  runtime exposes the same writer as `orch-hub statusline`. The hub never writes
+  `~/.claude/**`; the sink stores only `rate_limits` plus `subscription_type`;
+  everything after `--` is the wrapped command and its argv/stdin/stdout/stderr/
+  exit code are relayed unchanged.
 - `launchd deploy|update` no longer inspect Claude settings or print wrapper
   guidance; no statusLine setup is required, and existing settings are never
   edited or removed automatically.
