@@ -11,7 +11,8 @@ anything installed into your CLI config:
 
 **There is nothing to set up.** If you followed an earlier version of this guide
 and installed the `orch-hub-statusline` wrapper, it still works and still
-contributes figures — see [Legacy: the statusLine wrapper](#legacy-the-statusline-wrapper)
+contributes figures — as does its compiled-release spelling, `orch-hub
+statusline` — see [Legacy: the statusLine wrapper](#legacy-the-statusline-wrapper)
 for why it is no longer needed and how to remove it if you want to.
 
 ## How the Claude figures are obtained
@@ -151,9 +152,22 @@ The wrapper itself is unchanged: it is operator-installed (orch-hub never edits
 `subscription_type` plan name, and it relays your wrapped statusLine command's
 stdin, stdout, stderr, and exit code untouched.
 
-`orch-hub-statusline` is a source-install console script. A compiled release
-ships one executable and does not carry it — which costs nothing, because the
-Claude card is fed by the utilization cache either way. See
+Both installations can reach it, under two spellings of the same wrapper:
+
+| Installation | `statusLine.command` |
+|---|---|
+| Source checkout | `<checkout>/.venv/bin/orch-hub-statusline -- <your command>` |
+| Compiled release | `<prefix>/current/orch-hub statusline -- <your command>` |
+
+The console script comes from packaging metadata, which a compiled release has
+no equivalent of — it ships one executable — so there the wrapper is a verb on
+it. Existing `statusLine.command` settings keep working: the console script is
+not going away. Everything after `--` is your own command either way, and
+`--print-sink` tells you which file the wrapper writes.
+
+You still do not need any of this: the Claude card is fed by the utilization
+cache on both installations. The sink is worth having only if you want the plan
+name, or a second carrier for when the cache is not being refreshed. See
 [installing from a release](release.md).
 
 ## It gates nothing you do

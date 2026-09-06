@@ -20,11 +20,18 @@ installation should keep working and keep contributing: both carriers merge into
 one store per window, so the sink is an opportunistic extra reading rather than a
 competing source. New installations do not need it (``docs/claude-usage.md``).
 
+Both runtime shapes can reach it. A source install gets the
+``orch-hub-statusline`` console script from packaging metadata; a compiled
+release ships one executable and no console scripts, so there it is the
+``orch-hub statusline`` subcommand (:func:`run` is the shared body). The two
+spellings are the same wrapper, and the sink is the only carrier that also names
+the plan tier — so a compiled install is not cut off from it.
+
 Two properties make installing it safe:
 
 - **Operator-installed, never hub-installed.** The hub does not write
   ``~/.claude/**``; the operator points their own ``statusLine.command`` at this
-  script, and removing it again is their edit to make — nothing in the hub adds,
+  writer, and removing it again is their edit to make — nothing in the hub adds,
   edits, or nags about that setting.
 - **Invisible.** Anything after ``--`` is the operator's existing statusLine
   command: it receives the same stdin bytes and its stdout/stderr/exit code are
@@ -177,8 +184,15 @@ def capture(raw: bytes, sink: Path, *, now: dt.datetime | None = None) -> bool:
         return False
 
 
-def _split_argv(argv: Sequence[str]) -> tuple[list[str], list[str]]:
-    """Split our own flags from the wrapped statusLine command after ``--``."""
+def split_argv(argv: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Split our own flags from the wrapped statusLine command after ``--``.
+
+    Done before any parser sees the argv, by both entry points (the legacy
+    console script and ``orch-hub statusline``), because the wrapped command's
+    own flags are not ours to interpret: an operator status line invoked as
+    ``-- /usr/local/bin/mystatus --color`` must keep its ``--color``. Splitting
+    on the *first* ``--`` leaves any later one inside the wrapped argv, where a
+    nested command (``-- /bin/sh -c '...'``) may need it."""
     args = list(argv)
     if "--" in args:
         index = args.index("--")
@@ -205,17 +219,27 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def main(argv: Sequence[str] | None = None) -> int:
+def run(
+    *,
+    sink: str | None = None,
+    data_dir: str | None = None,
+    print_sink: bool = False,
+    wrapped: Sequence[str] = (),
+) -> int:
     """Capture usage from stdin, then pass through to the wrapped command.
+
+    The whole behavior of the writer, shared by its two spellings — the legacy
+    ``orch-hub-statusline`` console script and the ``orch-hub statusline``
+    subcommand a compiled release reaches (:mod:`orch_hub.cli`) — so an operator
+    pointing ``statusLine.command`` at either gets the identical wrapper rather
+    than two drifting copies of it.
 
     Exit code is the wrapped command's, or ``0`` when none is configured — the
     capture result never changes it, because a status line's success has nothing
     to do with the hub's display bookkeeping."""
-    own, wrapped = _split_argv(sys.argv[1:] if argv is None else argv)
-    args = _build_parser().parse_args(own)
-    sink = resolve_sink(sink=args.sink, data_dir=args.data_dir)
-    if args.print_sink:
-        print(sink)
+    path = resolve_sink(sink=sink, data_dir=data_dir)
+    if print_sink:
+        print(path)
         return 0
 
     # Read stdin whole (the CLI is the producer and closes the pipe) so the wrapped
@@ -224,8 +248,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         raw = sys.stdin.buffer.read()
     except Exception:  # noqa: BLE001 — no stdin is not a reason to skip pass-through
         raw = b""
-    capture(raw, sink)
+    capture(raw, path)
     return passthrough(wrapped, raw)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """Legacy ``orch-hub-statusline`` console-script entry point."""
+    own, wrapped = split_argv(sys.argv[1:] if argv is None else argv)
+    args = _build_parser().parse_args(own)
+    return run(
+        sink=args.sink,
+        data_dir=args.data_dir,
+        print_sink=args.print_sink,
+        wrapped=wrapped,
+    )
 
 
 def passthrough(command: Sequence[str], stdin_bytes: bytes) -> int:

@@ -257,7 +257,7 @@ def test_cli_help_works_without_python_on_path(tmp_path: Path):
     result = run_runtime(tmp_path, "--help")
     assert result.returncode == 0, result.stderr
     for command in (
-        "repos", "serve", "launchd", "notify", "eval", "version",
+        "repos", "serve", "launchd", "notify", "eval", "version", "statusline",
         # The checkout-independent lifecycle: the only surface a release has.
         "install", "setup", "upgrade", "rollback", "versions", "uninstall",
     ):
@@ -273,6 +273,46 @@ def test_lazily_imported_commands_survived_the_freeze(tmp_path: Path):
     result = run_runtime(tmp_path, "eval", "doctor", ORCH_HUB_MANDREL_PATH="/tmp/absent")
     assert "ModuleNotFoundError" not in (result.stderr + result.stdout)
     assert "Traceback" not in (result.stderr + result.stdout)
+
+
+def test_statusline_wrapper_is_reachable_and_invisible(tmp_path: Path):
+    # The statusLine sink is Claude usage's fallback carrier and the only one
+    # that names the plan tier, and a release ships no console scripts — so this
+    # verb is the only thing an installed runtime can put in `statusLine.command`.
+    # Reachability alone is not the contract: the wrapper is only safe to install
+    # if it is invisible, so this drives the real payload and compares bytes.
+    payload = json.dumps(
+        {
+            "rate_limits": {"five_hour": {"used_percentage": 12.5, "resets_at": 1785290400}},
+            "subscription_type": "max",
+        }
+    ).encode()
+    sink = tmp_path / "sink.json"
+    wrapped = tmp_path / "mystatus.sh"
+    # Relays its own flag (colour codes and all), then the stdin it was handed:
+    # one comparison then covers both directions of the pass-through.
+    wrapped.write_text("#!/bin/sh\nprintf '\\033[32m%s\\033[0m|' \"$1\"\n/bin/cat\nexit 3\n")
+    wrapped.chmod(0o755)
+
+    result = subprocess.run(
+        [
+            str(executable()), "statusline", "--sink", str(sink),
+            "--", str(wrapped), "--my-own-flag",
+        ],
+        cwd=str(tmp_path),
+        env=isolated_env(tmp_path),
+        input=payload,
+        capture_output=True,  # bytes, not text: "byte-exact" has to mean bytes
+        timeout=60,
+    )
+
+    assert result.stdout == b"\x1b[32m--my-own-flag\x1b[0m|" + payload
+    assert result.stderr == b""
+    assert result.returncode == 3  # the wrapped status line's, never the capture's
+    # And the capture the operator installed it for actually landed.
+    assert json.loads(sink.read_text(encoding="utf-8"))["rate_limits"] == {
+        "five_hour": {"used_percentage": 12.5, "resets_at": 1785290400}
+    }
 
 
 def test_health_is_public(served: str):

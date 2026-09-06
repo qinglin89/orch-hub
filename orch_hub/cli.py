@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import (
+    DATA_DIR_ENV,
+    DEFAULT_DATA_DIR,
     DEFAULT_HOST,
     DEFAULT_PORT,
     HOST_ENV,
@@ -68,8 +70,22 @@ if TYPE_CHECKING:  # imported lazily in the handlers; see `_open_catalog`
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    raw = list(sys.argv[1:] if argv is None else argv)
+    # `statusline` wraps the operator's own status line command, so everything
+    # after `--` is that command's argv and must never reach our parser — its
+    # flags are not ours to interpret. The split is scoped to that one verb
+    # rather than applied to every argv: the top-level parser takes no options
+    # before the subcommand, so `raw[0]` already decides it, and no other verb
+    # gets a silent change of meaning for a `--` an operator happened to type.
+    wrapped: list[str] = []
+    if raw[:1] == [STATUSLINE_COMMAND]:
+        from .statusline import split_argv
+
+        raw, wrapped = split_argv(raw)
     parser = _build_parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(raw)
+    if args.command == STATUSLINE_COMMAND:
+        return _cmd_statusline(args, wrapped)
     if args.command == "repos":
         return _cmd_repos(json_output=args.json)
     if args.command == "launchd":
@@ -185,6 +201,34 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_plist_path_arg(notify_test_p)
     notify_test_p.set_defaults(notify_handler=_cmd_notify_test)
 
+    # The Claude Code statusLine wrapper, as a verb. Same reason `serve` is one:
+    # a compiled release ships one executable, so the `orch-hub-statusline`
+    # console script a source install gets from packaging metadata is not
+    # reachable there — and the module ships in the payload regardless, because
+    # the payload carries the whole first-party package. Both runtimes therefore
+    # agree on one spelling of "wrap my status line", and the sink stays an
+    # available fallback carrier on a compiled install (it is the only carrier
+    # that also names the plan tier). Installing it remains the operator's own
+    # edit to their own settings; the hub never writes `~/.claude/**`.
+    statusline_p = sub.add_parser(
+        STATUSLINE_COMMAND,
+        help="capture Claude Code statusLine usage, then run the wrapped command",
+        epilog="Everything after `--` is your own statusLine command (argv, no shell).",
+    )
+    statusline_p.add_argument(
+        "--sink",
+        help="explicit sink path (default: <data-dir>/usage/claude-statusline.json)",
+    )
+    statusline_p.add_argument(
+        "--data-dir",
+        help=f"hub data dir (default: ${DATA_DIR_ENV} or {DEFAULT_DATA_DIR})",
+    )
+    statusline_p.add_argument(
+        "--print-sink",
+        action="store_true",
+        help="print the resolved sink path and exit (troubleshooting; reads no stdin)",
+    )
+
     # Optional task-evaluation operations. `doctor` is a config/availability smoke
     # check for the Layer 2 semantic evaluator; the verb group is `eval` so later
     # evaluation ops (e.g. prune) can be added without a rename.
@@ -239,6 +283,14 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_json_arg(catalog_repair_p)
     catalog_repair_p.set_defaults(eval_handler=_cmd_eval_catalog_repair)
     return parser
+
+
+STATUSLINE_COMMAND = "statusline"
+"""The verb whose trailing argv belongs to a wrapped command, not to us.
+
+Named because `main` has to recognise it *before* building the parser, and a
+literal repeated in the dispatch and the split would be a rename away from
+silently passing an operator's status-line flags to our own parser."""
 
 
 # Commands that operate on a user-local installed runtime rather than on a
@@ -527,6 +579,24 @@ def _cmd_version(*, json_output: bool) -> int:
         runtime = "frozen" if info.frozen else "source"
         print(f"orch-hub {info.version} ({runtime}, python {info.python_version})")
     return 0
+
+
+def _cmd_statusline(args: argparse.Namespace, wrapped: Sequence[str]) -> int:
+    """Run the Claude Code statusLine writer.
+
+    Imported here, not at module scope: the writer pulls in `orch_hub.usage` and
+    through it the run stack, which every other verb would otherwise pay for.
+    The behavior itself is the writer's — this verb only supplies the already
+    split-off wrapped argv, so the two spellings cannot drift.
+    """
+    from .statusline import run as run_statusline
+
+    return run_statusline(
+        sink=args.sink,
+        data_dir=args.data_dir,
+        print_sink=args.print_sink,
+        wrapped=wrapped,
+    )
 
 
 def _cmd_install(args: argparse.Namespace) -> int:

@@ -27,6 +27,10 @@ orch-hub = "orch_hub.cli:main"
 orch-hub-api = "orch_hub.api:run"
 # Operator-installed Claude Code statusLine wrapper: captures the CLI's own
 # subscription usage for the Overview and passes the wrapped status line through.
+# Kept as the legacy spelling — existing `statusLine.command` settings point at
+# this name, and removing it would break their status line. `orch-hub
+# statusline` is the same wrapper under the one verb a compiled release (which
+# has no console scripts) can reach.
 orch-hub-statusline = "orch_hub.statusline:main"
 
 [tool.setuptools]

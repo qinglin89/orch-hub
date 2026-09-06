@@ -90,13 +90,14 @@ This installs two primary console scripts:
 - `.venv/bin/orch-hub` — operational CLI, including launchd management.
 - `.venv/bin/orch-hub-api` — the resident HTTP service launchd runs.
 
-It also installs the optional `.venv/bin/orch-hub-statusline` wrapper used for
-Codex subscription-usage collection.
+It also installs the optional `.venv/bin/orch-hub-statusline` wrapper, a legacy
+fallback carrier for Claude subscription usage ([Claude usage](claude-usage.md)).
 
 A compiled release has none of these console scripts: it ships one executable
-that answers `orch-hub serve` where a source install runs `orch-hub-api`. If
-that is what you have, skip to [installing from a release](release.md) and use
-`orch-hub setup` in place of sections 1 and 2.
+that answers `orch-hub serve` where a source install runs `orch-hub-api`, and
+`orch-hub statusline` where one runs `orch-hub-statusline`. If that is what you
+have, skip to [installing from a release](release.md) and use `orch-hub setup`
+in place of sections 1 and 2.
 
 The official operational entry point is `orch-hub launchd ...`. The
 `deploy/launchd/` directory holds deployment artifacts, including the plist

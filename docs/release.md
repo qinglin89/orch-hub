@@ -200,6 +200,8 @@ orch-hub notify test          # prove push delivery end to end
 orch-hub eval doctor          # Layer 2 semantic evaluator readiness
 orch-hub eval queue           # Layer 2 attempts: census plus the rows worth reading
 orch-hub eval catalog verify  # global report catalog integrity
+
+orch-hub statusline           # optional Claude statusLine wrapper (see below)
 ```
 
 Commands with a stable machine-readable form take `--json`, including `repos`,
@@ -208,10 +210,12 @@ Commands with a stable machine-readable form take `--json`, including `repos`,
 `serve` exists because a compiled release ships **one** executable: the
 `orch-hub-api` console script a source install gets from packaging metadata
 does not exist here, so both runtimes agree on one spelling of "serve the API".
-The optional `orch-hub-statusline` wrapper is likewise a source-install console
-script and is not reachable from a release — nothing is lost by that today,
-because Claude subscription usage is read from the CLI's own local cache and
-needs no statusLine setup ([Claude usage](claude-usage.md)).
+`statusline` is the same story for the optional Claude statusLine wrapper —
+`orch-hub-statusline` on a checkout, `orch-hub statusline` here, one wrapper
+either way, with everything after `--` passed to your own status line command
+untouched. It is not something a release needs you to install: Claude
+subscription usage is read from the CLI's own local cache and requires no
+statusLine setup ([Claude usage](claude-usage.md)).
 
 `launchd deploy` and `update` are **not** for an installed runtime: they install
 a checkout's package into `<checkout>/.venv` and point launchd at that. Use
@@ -310,7 +314,7 @@ removing the hub if you want them ended.
 | Configure the service | `orch-hub launchd deploy \| update` | `orch-hub setup` |
 | Program launchd runs | `<checkout>/.venv/bin/orch-hub-api` | `<prefix>/current/orch-hub serve` |
 | Foreground service | `orch-hub-api` | `orch-hub serve` |
-| statusLine wrapper | `orch-hub-statusline` (optional, legacy) | not shipped |
+| statusLine wrapper | `orch-hub-statusline` (optional, legacy) | `orch-hub statusline` (same, optional) |
 | Update | `git pull` + `launchd update` | run the newer `.run`, or `orch-hub upgrade --from` |
 | Go back a version | `git checkout` + `launchd update` | `orch-hub rollback` |
 | Remove | delete the checkout, `launchd stop`, remove the plist | `orch-hub uninstall` |

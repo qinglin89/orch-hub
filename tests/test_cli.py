@@ -6,6 +6,7 @@ are exercised without touching real repos or subprocesses.
 
 from __future__ import annotations
 
+import io
 import json
 import plistlib
 import sys
@@ -18,6 +19,7 @@ import pytest
 from orch_hub import cli
 from orch_hub import __version__
 from orch_hub import semantic_jobs
+from orch_hub import statusline
 from orch_hub.config import (
     BARK_URL_ENV,
     DATA_DIR_ENV,
@@ -1177,6 +1179,95 @@ def test_serve_reports_an_unbindable_address_as_an_operational_error(monkeypatch
 
     assert cli.main(["serve"]) == 1
     assert capsys.readouterr().err.startswith("error: address already in use")
+
+
+# --------------------------------------------------------------------------
+# the Claude Code statusLine wrapper, as a verb
+# --------------------------------------------------------------------------
+
+
+def _statusline_payload() -> bytes:
+    return json.dumps(
+        {
+            "rate_limits": {"five_hour": {"used_percentage": 12.5, "resets_at": 1785290400}},
+            "subscription_type": "max",
+        }
+    ).encode()
+
+
+def _run_statusline(argv: list[str], stdin: bytes, monkeypatch) -> int:
+    """Drive the verb with a fake stdin buffer, as Claude Code would."""
+    monkeypatch.setattr(sys, "stdin", io.TextIOWrapper(io.BytesIO(stdin), encoding="utf-8"))
+    return cli.main(argv)
+
+
+def test_statusline_verb_captures_and_relays(tmp_path: Path, monkeypatch, capfd):
+    # A compiled release has no console scripts, so this verb is the only way an
+    # installed runtime can be named in `statusLine.command`. It must be the same
+    # wrapper: capture the figures, relay the wrapped command untouched.
+    sink = tmp_path / "sink.json"
+    script = tmp_path / "mystatus.py"
+    script.write_text("import sys\nsys.stdout.write('my status line')\nsys.exit(3)\n")
+
+    rc = _run_statusline(
+        ["statusline", "--sink", str(sink), "--", sys.executable, str(script)],
+        _statusline_payload(),
+        monkeypatch,
+    )
+
+    assert rc == 3  # the wrapped command's, never the capture's
+    assert capfd.readouterr().out == "my status line"
+    assert json.loads(sink.read_text())["rate_limits"]["five_hour"]["used_percentage"] == 12.5
+
+
+def test_statusline_verb_leaves_the_wrapped_command_s_flags_alone(tmp_path: Path, monkeypatch, capfd):
+    # The wrapped status line has its own flags, and some of them are spelled
+    # like ours. Everything after `--` must reach the child, not our parser.
+    sink = tmp_path / "sink.json"
+    script = tmp_path / "mystatus.py"
+    script.write_text("import sys\nsys.stdout.write(' '.join(sys.argv[1:]))\n")
+
+    rc = _run_statusline(
+        [
+            "statusline",
+            "--sink",
+            str(sink),
+            "--",
+            sys.executable,
+            str(script),
+            "--sink",
+            "/not/ours",
+            "--print-sink",
+        ],
+        _statusline_payload(),
+        monkeypatch,
+    )
+
+    assert rc == 0
+    assert capfd.readouterr().out == "--sink /not/ours --print-sink"
+    assert sink.is_file()  # our own --sink still decided where capture went
+
+
+def test_statusline_verb_resolves_the_same_sink_as_the_console_script(tmp_path: Path, monkeypatch, capsys):
+    # Two spellings, one wrapper: an operator switching from the console script
+    # to the verb must not silently start feeding a different file.
+    monkeypatch.setenv(DATA_DIR_ENV, str(tmp_path))
+
+    assert cli.main(["statusline", "--print-sink"]) == 0
+    from_verb = capsys.readouterr().out
+    assert statusline.main(["--print-sink"]) == 0
+
+    assert from_verb == capsys.readouterr().out
+    assert from_verb.strip() == str(tmp_path / "usage" / "claude-statusline.json")
+
+
+def test_a_double_dash_is_split_off_for_no_other_verb():
+    # The split is scoped to `statusline` so `--` keeps meaning to every other
+    # verb exactly what argparse says it means. Stripping it globally would turn
+    # this rejection into a successful `repos --json`.
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["repos", "--", "--json"])
+    assert exit_info.value.code == 2
 
 
 # --------------------------------------------------------------------------
