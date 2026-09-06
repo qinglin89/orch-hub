@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Architecture: Core Flows
@@ -164,8 +164,12 @@ Release install: the shell preamble checks ARM64 macOS and the manifest's
 minimum version, verifies the embedded archive digest, then extracts. The
 Python installer validates the cross-language manifest and payload, stages a
 versioned runtime below the selected prefix, and updates `current`, `previous`,
-and the command link after validation. Setup renders launchd from either a
-checkout program or the compiled `current/orch-hub serve` program while
-preserving installed host, port, data, Mandrel, token, and Bark values when not
-overridden. Uninstall stops the fixed service and removes only a prefix whose
-ownership marker is valid and bound to its payload.
+and the command link after validation. The install transaction then retains the
+newest three versions plus `current`, `previous`, and the executing frozen
+payload; hard-linked spares make candidate removal all-or-nothing. Prefix
+placement, selection, prune, and uninstall serialize per mutation, and
+scratch-suffix version names are reserved case-insensitively. Setup renders
+launchd from either a checkout program or the compiled `current/orch-hub serve`
+program while preserving installed host, port, data, Mandrel, token, and Bark
+values when not overridden. Uninstall stops the fixed service and removes only
+a prefix whose ownership marker is valid and bound to its payload.

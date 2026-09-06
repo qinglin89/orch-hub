@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-09-06
-verified-against: 36007bd48472fb0d1b91b8042c5dfc5810636054
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # APIs: CLI
@@ -61,7 +61,8 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 
 - `install --from PAYLOAD [--prefix P] [--bin-dir B] [--no-link] [--json]`
   validates and places one payload, atomically selects it, and optionally links
-  `orch-hub` through `current`.
+  `orch-hub` through `current`; it then prunes by the retention policy and
+  reports removed/kept versions plus any fail-soft cleanup note.
 - `setup [--prefix P] [--mandrel M] [--token T] [--host H] [--port N]
   [--data-dir D] [--plist-path P] [--log-dir L]` configures the compiled
   program in launchd and exits non-zero unless health reaches `ok`.
@@ -73,7 +74,9 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
   non-zero on restart/health failure. Bind parsing happens before selection and
   fails closed.
 - `versions [--prefix P] [--json]` lists installed versions plus
-  current/previous markers.
+  current/previous markers and the `keep = 3` policy. Installs keep the newest
+  three plus `current`, `previous`, and the executing frozen payload; candidate
+  removal is all-or-nothing.
 - `uninstall [--prefix P] [--bin-dir B] [--plist-path P]
   [--purge-data --yes]` proves prefix ownership, stops the singleton service
   before deletion, removes only its own link/plist/runtime, and keeps hub data
@@ -81,6 +84,9 @@ gating. Human `repos` output does not show commit or housekeeping metadata.
 - A frozen installed command infers its own non-default prefix; a `.run`
   self-extractor runs from temporary payload state, so later installer runs
   must repeat a non-default `--prefix`/`--bin-dir`.
+- Placement, selection, prune, and uninstall serialize individual prefix
+  mutations under `<prefix>/.lock`; restart/health work is outside that lock, so
+  overlapping whole commands remain unsupported.
 
 ## `orch-hub launchd deploy|update`
 

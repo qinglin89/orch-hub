@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-05
-verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Modules: Release Delivery
@@ -16,11 +16,15 @@ this boundary; product modules do not reconstruct bundle paths.
 `install.py` validates `runtime.json`, target compatibility, executable/name,
 and safe version components before writes. It owns versioned placement,
 `current`/`previous` selection, command linking, checkout-independent setup,
-upgrade, rollback, version inventory, and uninstall. Version selection is an
-atomic symlink swap; uninstall positively proves prefix ownership from valid
-payload content bound to its directory and aborts all deletion on a real
-launchd stop error. Hub data is independent and survives unless purge is
-explicitly confirmed.
+upgrade, rollback, version inventory, retention, and uninstall. Version
+selection is an atomic symlink swap; all prefix mutations serialize under a
+mutation-scoped lock. Install-time retention keeps the newest three plus
+`current`, `previous`, and the running frozen payload; it removes all candidates
+or none by holding hard-linked spares until commit. Case-insensitively reserved
+scratch suffixes cannot be payload versions. Uninstall positively proves prefix
+ownership from valid payload content bound to its directory and aborts all
+deletion on a real launchd stop error. Hub data is independent and survives
+unless purge is explicitly confirmed.
 
 `atomic_dir.py` is a replace-with-last-good primitive: stage alongside the
 destination filesystem, swap, restore the prior tree on failure. Build payload,

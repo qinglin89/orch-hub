@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Architecture: Ownership and Boundaries
@@ -28,7 +28,7 @@ invariants: `index.md`. Runtime flows: `flows.md`.
 | Commit metadata | target repo git history | display/evidence only; never gates |
 | Housekeeping marker | target repo `.ai/.housekeeping-pending` | display-only; never gates |
 | Notifications | derived from run/question/intake/semantic-job state | best-effort delivery; must not affect state writes |
-| Installed runtime | selected user prefix with version directories, `current`/`previous`, and payload-bound ownership marker | installer-owned immutable program bytes; mutable hub data stays outside; uninstall refuses unproven prefixes |
+| Installed runtime | selected user prefix with version directories, `current`/`previous`, mutation lock, reserved scratch namespace, and payload-bound ownership marker | installer-owned immutable program bytes; newest-three-plus-in-use retention is all-or-nothing; mutable hub data stays outside; uninstall refuses unproven prefixes |
 | Release artifacts | local `build/release/`, `dist/release/`, and immutable per-tag publication destination | producer-owned generated state; validate staged bytes before canonical replace, and never overwrite a published tag |
 
 ## Component Boundaries

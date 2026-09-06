@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Project Map
@@ -31,7 +31,7 @@ behavior and rationale stay in the owning doc.
 | Auth and private access | api, config | fail-closed bearer middleware; private network still required |
 | Notifications | notifications, config, runs, intake, semantic_jobs, monitor, launchd, api, cli | Bark backend; isolated best-effort delivery |
 | Launchd service | launchd, cli, config, api, docs, deploy | plist template = truth; fixed service label only |
-| Compiled release delivery | resources, macho, release_audit, release_build, release_python, install, atomic_dir, release_package, release_publish, cli, launchd, docs, deploy | pinned/measured floor; audit frozen archives; versioned selection; deterministic artifacts; tag/byte gates; published tags never replaced |
+| Compiled release delivery | resources, macho, release_audit, release_build, release_python, install, atomic_dir, release_package, release_publish, cli, launchd, docs, deploy | pinned/measured floor; audit frozen archives; versioned selection; newest-three-plus-in-use retention; mutation lock; all-or-none prune; deterministic artifacts; tag/byte gates; published tags never replaced |
 | Run history and audit | history, runs, orch_config, sessions, task_snapshots, api, models, control_dir, task_store, evaluation | append-only events.jsonl; metadata only, never answer text |
 
 ## Feature -> APIs
@@ -73,7 +73,7 @@ behavior and rationale stay in the owning doc.
 | cli | human/JSON output; launchd/notify/eval-doctor/queue/catalog dispatch |
 | launchd | plist render/install; launchctl lifecycle; status probe |
 | resources | source/frozen resource-root resolution |
-| install | versioned payload placement/selection; setup/upgrade/rollback/uninstall |
+| install | versioned payload placement/selection; mutation lock; bounded all-or-none retention; setup/upgrade/rollback/uninstall |
 | atomic_dir | last-good replace placement; never publication no-clobber |
 | macho | Mach-O architectures + minimum-macOS scan |
 | release_audit | filesystem/archive/CArchive/PYZ source/path/secret audit |

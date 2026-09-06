@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-05
-verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Architecture
@@ -129,7 +129,9 @@ archives.
 - Compiled installs are versioned under one user-owned prefix; `current` and
   `previous` move only after a staged candidate validates, while mutable data
   stays outside the prefix and uninstall requires a payload-bound ownership
-  marker.
+  marker. Prefix mutations serialize; scratch-shaped version names are reserved
+  case-insensitively; install-time retention keeps the newest three plus in-use
+  versions and removes all candidates or none through hard-linked spares.
 - Release build and package outputs keep the last known-good canonical bytes
   until a staged replacement passes. Publication is immutable per tag and
   uses create-only placement, not the replace-oriented atomic-directory helper.

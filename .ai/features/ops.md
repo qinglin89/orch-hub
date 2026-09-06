@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-05
-verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Features: Operations Surfaces
@@ -173,6 +173,12 @@ Implemented behavior:
   restart the fixed service without rewriting data or configuration; uninstall
   proves prefix ownership and stops the service before deletion, preserving
   hub data unless purge is explicitly confirmed.
+- Every install automatically retains the newest three versions plus selected
+  `current`, recorded `previous`, and the executing frozen payload. Prefix
+  mutations serialize under one mutation-scoped lock; version names reserve
+  installer scratch suffixes case-insensitively. Pruning removes all candidates
+  or none by keeping hard-linked spares through the transaction, and reports
+  removed/kept versions plus unreclaimed scratch without failing the install.
 - The self-extracting POSIX-shell `.run` checks os/arch, minimum macOS, and its
   appended archive digest before unpacking, then delegates install/setup to the
   extracted runtime. `--extract` verifies integrity but intentionally skips the
@@ -183,8 +189,6 @@ Implemented behavior:
   revision equals the tag commit; filesystem storage uses atomic `mkdir`
   no-clobber while GitHub publication uses `gh release create --verify-tag`.
   `publication.json` pins the checksum file's digest and source tag/commit.
-- Installed-version retention and statusLine reachability remain separate
-  tasks.
 - Human workflow and refusal tables live in `docs/release.md`; the artifact is
   unsigned, with signing/notarization reserved as an optional future wrapper.
 

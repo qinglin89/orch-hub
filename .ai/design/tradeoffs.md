@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-05
-verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
+last-updated: 2026-09-06
+verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
 ---
 
 # Design: Tradeoffs
@@ -197,8 +197,19 @@ verified-against: a283a610b718babbc8c0752ffbe81e2429bd61f2
   `previous` links.
 - Reason: a staged candidate can validate before activation and rollback keeps
   a concrete known-good version.
-- Consequence: later installs must use the same nondefault prefix/bin directory,
-  and version retention is a separate policy task.
+- Consequence: later installs must use the same nondefault prefix/bin directory;
+  version names also reserve installer scratch suffixes case-insensitively.
+
+## Tradeoff: automatic newest-three retention vs minimal or explicit pruning
+
+- Chose: each install keeps the newest three versions plus selected `current`,
+  recorded `previous`, and the payload executing the frozen command.
+- Reason: current-plus-previous silently removes still-addressable rollback
+  targets, while explicit-only pruning leaves normal upgrades unbounded.
+- Consequence: the cap may exceed three for protected old versions. Prefix
+  mutations serialize, and pruning keeps hard-linked spares until every
+  candidate is gone so a removal failure restores all candidates; cleanup can
+  cost unreclaimed disk but never a rollback target.
 
 ## Tradeoff: pinned standalone CPython vs the host Python
 
