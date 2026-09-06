@@ -512,6 +512,15 @@ def install_series(tmp_path, prefix, *versions, keep=KEEP_VERSIONS):
     return result
 
 
+def scratch_under(prefix: Path) -> list[Path]:
+    """Removal scratch left under ``versions/``, which a clean prune leaves none of."""
+    return [
+        entry
+        for entry in (prefix / "versions").iterdir()
+        if entry.name.endswith(REMOVING_SUFFIX)
+    ]
+
+
 def test_a_prefix_below_the_limit_keeps_every_version(tmp_path):
     prefix = tmp_path / "prefix"
 
@@ -657,7 +666,8 @@ def test_a_prune_that_cannot_delete_a_version_keeps_it_selectable(tmp_path):
         tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0", keep=9
     )
     # Read-only version directory: the tree can still be moved aside, but
-    # nothing inside it can be unlinked.
+    # nothing inside it can be unlinked. The survey that precedes the deletion
+    # is what finds that, while the payload is still whole.
     (prefix / "versions" / "0.2.0").chmod(0o500)
     try:
         result = prune_versions(prefix, keep=1)
@@ -678,8 +688,15 @@ def test_a_prune_that_cannot_delete_a_version_keeps_it_selectable(tmp_path):
         assert read_current(prefix) == version
 
 
-def test_a_prune_does_not_put_back_a_version_it_started_deleting(tmp_path, monkeypatch):
-    """The one thing that cannot be undone is reported, never re-listed."""
+def test_a_deletion_that_removes_nothing_leaves_the_version_selectable(
+    tmp_path, monkeypatch
+):
+    """A refusal the survey could not foresee still costs the operator nothing.
+
+    The acceptance is that a failed prune leaves every version selectable, and
+    a deletion that raised without unlinking anything has not made that
+    impossible: the payload is exactly what it was, so it goes back.
+    """
     prefix = tmp_path / "prefix"
     install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
 
@@ -690,16 +707,38 @@ def test_a_prune_does_not_put_back_a_version_it_started_deleting(tmp_path, monke
 
     result = prune_versions(prefix, keep=1)
 
-    # The manifest is deleted first, so this tree is no longer a payload: it
-    # cannot go back without listing something that would not run.
-    assert result.removed == ("0.1.0",)
+    assert result.removed == ()
+    assert "stopped at 0.1.0" in result.problem
+    assert "still installed" in result.problem
+    assert read_installation(prefix).versions == ("0.1.0", "0.2.0", "0.3.0")
+    assert not scratch_under(prefix)
+    select_version(prefix, "0.1.0")
+    assert read_current(prefix) == "0.1.0"
+    assert (prefix / "current" / "orch-hub").is_file()
+
+
+def test_a_prune_does_not_put_back_a_version_it_started_deleting(tmp_path, monkeypatch):
+    """The one thing that cannot be undone is reported, never re-listed."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    real_rmtree = install.shutil.rmtree
+
+    def half_delete(path, *args, **kwargs):
+        # Deletes part of the payload and then gives up, which is the only
+        # state a version cannot be restored from — and the only one in which
+        # the prune is allowed to leave a version out of the version set.
+        real_rmtree(Path(path) / "_internal")
+        raise OSError("input/output error")
+
+    monkeypatch.setattr(install.shutil, "rmtree", half_delete)
+
+    result = prune_versions(prefix, keep=1)
+
+    # Not reported as removed: its files are not gone, they are half gone.
+    assert result.removed == ()
     assert "part-deleted" in result.problem
     assert read_installation(prefix).versions == ("0.2.0", "0.3.0")
-    stranded = [
-        entry
-        for entry in (prefix / "versions").iterdir()
-        if entry.name.endswith(REMOVING_SUFFIX)
-    ]
+    stranded = scratch_under(prefix)
     assert len(stranded) == 1
     assert str(stranded[0]) in result.problem
     # Never offered as a rollback target while it is half a payload.
@@ -715,6 +754,28 @@ def test_a_version_named_like_installer_scratch_is_refused(tmp_path, suffix):
     suffixes. A payload allowed to declare `0.1.0.removing` would install as a
     directory that reads as debris: hidden from `versions`, unreachable by
     rollback, and waved through by uninstall's ownership proof.
+    """
+    payload = make_payload(tmp_path, f"0.1.0{suffix}")
+    prefix = tmp_path / "prefix"
+
+    with pytest.raises(InstallError, match="may not end with"):
+        read_payload_manifest(payload)
+    with pytest.raises(InstallError, match="may not end with"):
+        install_version(payload, prefix=prefix, link=False)
+
+    assert not prefix.exists()
+
+
+@pytest.mark.parametrize("suffix", [".INCOMING", ".Previous", ".REMOVING"])
+def test_a_scratch_suffix_in_another_case_is_reserved_too(tmp_path, suffix):
+    """The shipped target's filesystem is case-insensitive, so the rule must be.
+
+    On APFS `versions/0.1.0.INCOMING` and `versions/0.1.0.incoming` are one
+    directory. A version allowed to wear the first is therefore a valid,
+    selected payload sitting at exactly the path the placement of `0.1.0`
+    clears before it stages — so installing an ordinary version would
+    recursively delete it. Reserving only the lowercase spelling would lapse on
+    the one filesystem where the collision exists.
     """
     payload = make_payload(tmp_path, f"0.1.0{suffix}")
     prefix = tmp_path / "prefix"
@@ -806,11 +867,17 @@ def test_a_rollback_cannot_land_inside_a_prune(tmp_path, monkeypatch):
     assert (prefix / "current" / "orch-hub").is_file()
 
 
-def test_prune_scratch_is_not_an_installed_version(tmp_path):
-    """Debris from a killed prune must not be listed, kept, or rolled back to."""
+@pytest.mark.parametrize("suffix", [REMOVING_SUFFIX, ".REMOVING"])
+def test_prune_scratch_is_not_an_installed_version(tmp_path, suffix):
+    """Debris from a killed prune must not be listed, kept, or rolled back to.
+
+    Told apart from a version by name, in whatever case it was written: the
+    same rule that refuses these as versions is what makes reading them as
+    debris safe.
+    """
     prefix = tmp_path / "prefix"
     install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
-    debris = prefix / "versions" / f"0.0.9{REMOVING_SUFFIX}"
+    debris = prefix / "versions" / f"0.0.9{suffix}"
     debris.mkdir()
     (debris / "half-deleted").write_text("x", encoding="utf-8")
 
@@ -833,6 +900,64 @@ def test_a_prune_with_nothing_to_do_touches_nothing(tmp_path):
 
     assert (result.removed, result.kept, result.problem) == ((), ("0.1.0",), None)
     assert (prefix / "versions" / "0.1.0" / "orch-hub").is_file()
+
+
+def test_a_symlinked_lock_is_refused_without_creating_its_target(tmp_path):
+    """`.lock` is ours by name, so what sits at that name has to be proven.
+
+    An `O_CREAT` open that followed the link would create and lock a file
+    wherever it points: one planted symlink turns every mutation of the prefix
+    into a write outside it, aimed by whoever wrote the link.
+    """
+    prefix = tmp_path / "prefix"
+    install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
+    outside = tmp_path / "elsewhere" / "victim"
+    # The target's directory exists and the target does not, which is the case
+    # a following `O_CREAT` open resolves by creating the file there.
+    outside.parent.mkdir()
+    lock = prefix / install.LOCK_NAME
+    lock.unlink()
+    lock.symlink_to(outside)
+
+    with pytest.raises(InstallError, match="is a symlink"):
+        install_version(make_payload(tmp_path, "0.2.0"), prefix=prefix, link=False)
+
+    assert not outside.exists()
+    assert list(outside.parent.iterdir()) == []
+    # Refused before anything moved: the installation is exactly as it was, and
+    # the entry the operator has to deal with is still there to be seen.
+    assert read_installation(prefix).versions == ("0.1.0",)
+    assert lock.is_symlink()
+
+
+def test_a_lock_that_is_not_a_regular_file_is_refused(tmp_path):
+    """Not following links is not enough; the opened inode has to be ours too."""
+    prefix = tmp_path / "prefix"
+    install_version(make_payload(tmp_path, "0.1.0"), prefix=prefix, link=False)
+    lock = prefix / install.LOCK_NAME
+    lock.unlink()
+    os.mkfifo(lock)
+
+    with pytest.raises(InstallError, match="not a regular file"):
+        select_version(prefix, "0.1.0")
+
+
+def test_a_prune_that_cannot_lock_the_prefix_keeps_every_version(tmp_path):
+    """Retention is the one mutator that reports a lock it cannot take."""
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    victim = tmp_path / "elsewhere" / "victim"
+    victim.parent.mkdir()
+    lock = prefix / install.LOCK_NAME
+    lock.unlink()
+    lock.symlink_to(victim)
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ()
+    assert "kept every version: cannot lock" in result.problem
+    assert result.kept == ("0.1.0", "0.2.0", "0.3.0")
+    assert list(victim.parent.iterdir()) == []
 
 
 def test_prune_of_an_empty_prefix_is_not_an_error(tmp_path):

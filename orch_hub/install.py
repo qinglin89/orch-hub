@@ -34,6 +34,7 @@ import json
 import os
 import platform
 import shutil
+import stat
 import sys
 import threading
 import time
@@ -114,6 +115,13 @@ name. Reserving them costs a version a suffix nothing numbers with, and makes
 "anything under ``versions/`` wearing one of these is not an installed version"
 true by construction rather than by luck.
 
+The match is case-insensitive (:func:`is_reserved_version`), because the
+shipped target's filesystem is: on APFS ``0.1.0.INCOMING`` and
+``0.1.0.incoming`` are one path, so a version allowed to wear the first is
+recursively deleted the moment a placement clears the second. A reservation
+that held only where names are case-sensitive would lapse on exactly the
+filesystem where the collision is possible.
+
 :mod:`orch_hub.release_package` applies the same reservation, so a release
 cannot be published under a version this installer would then refuse."""
 
@@ -125,7 +133,13 @@ in particular decides what to remove from an inventory it read a moment earlier.
 Without exclusion a concurrent ``rollback`` landing between that reading and the
 removal would leave ``current`` pointing at a version the prune then deleted.
 Everything these operations touch lives under the prefix, so one lock file there
-is the whole boundary."""
+is the whole boundary.
+
+The unit is one mutation, not one command: ``upgrade`` releases it before it
+restarts the service and ``rollback`` before it waits for health, because those
+steps talk to launchd and to the running service rather than to the prefix.
+What this guarantees is that no two prefix mutations interleave — not that two
+commands cannot overlap, which is an operator's business to avoid."""
 
 KEEP_VERSIONS = 3
 """How many installed versions a prefix keeps, on top of the fail-safes below.
@@ -195,10 +209,12 @@ class PruneResult:
 
     ``removed`` names only versions whose files are actually gone, so a prune
     that stopped early is visible in the two lists as well as here: what it did
-    not get to is still in ``kept``. Reclaiming disk is never worth failing an
-    install over, so this is reported rather than raised — but it is reported,
-    because a version left half-deleted, or one that could not be put back, is
-    a state the operator has to know about to act on."""
+    not get to is still in ``kept``, and a version whose deletion failed partway
+    is in neither — it is not installed any more and its bytes are not
+    reclaimed, which is the state this names. Reclaiming disk is never worth
+    failing an install over, so this is reported rather than raised — but it is
+    reported, because a version left half-deleted, or one that could not be put
+    back, is a state the operator has to know about to act on."""
 
     def to_dict(self) -> dict:
         return {
@@ -374,13 +390,32 @@ def _payload_version(manifest: dict, path: Path) -> str:
             f"{path} declares version {version!r}; a version must be a single "
             "path component naming a directory under versions/"
         )
-    if version.endswith(RESERVED_VERSION_SUFFIXES):
+    if is_reserved_version(version):
         raise InstallError(
             f"{path} declares version {version!r}; a version may not end with "
-            f"{' or '.join(RESERVED_VERSION_SUFFIXES)}, which name this "
-            "installer's own scratch paths beside a version"
+            f"{' or '.join(RESERVED_VERSION_SUFFIXES)} in any capitalisation, "
+            "which name this installer's own scratch paths beside a version"
         )
     return version
+
+
+def is_reserved_version(name: str) -> bool:
+    """Whether ``name`` falls in the namespace this module keeps for scratch.
+
+    One predicate for two questions that must never disagree: a payload
+    declaring such a version is refused, and a directory found under
+    ``versions/`` wearing such a name is debris rather than an installed
+    version — skipped by :func:`read_installation`, so it is never offered as a
+    rollback target or allowed to occupy a retention slot, and waved through by
+    uninstall's ownership proof rather than read as evidence of a foreign
+    prefix.
+
+    Deciding "debris or version" by name is safe only because the same names
+    are refused as versions, and only on a case-insensitive filesystem if the
+    refusal covers every capitalisation of them
+    (:data:`RESERVED_VERSION_SUFFIXES`).
+    """
+    return name.lower().endswith(RESERVED_VERSION_SUFFIXES)
 
 
 def check_target(
@@ -442,7 +477,7 @@ def read_installation(prefix: Path | None = None) -> Installation:
             (
                 entry.name
                 for entry in versions_dir.iterdir()
-                if entry.is_dir() and not _is_installer_scratch(entry.name)
+                if entry.is_dir() and not is_reserved_version(entry.name)
             ),
             key=_version_sort_key,
         )
@@ -555,11 +590,15 @@ def prune_versions(
     the files deleted. A rename that fails puts back the ones already moved and
     removes nothing, so a refused prune leaves every version selectable.
 
-    A delete that fails stops the prune there rather than working through the
-    rest: what has not been touched goes back into the version set, and so does
-    the one that refused if nothing of it was deleted. Only a tree the deletion
-    had already started on stays out — it is no longer a version anybody could
-    run, and its path is reported so the bytes can be dealt with by hand.
+    A version's files are deleted only after its whole tree has been surveyed
+    for the permission the deletion needs, so the ordinary reason a payload
+    will not delete is found while it is still whole: it goes back untouched
+    and the prune stops there rather than working through the rest. Should a
+    deletion fail anyway, the tree is measured against that survey — unchanged
+    means nothing was lost and the version goes back too. Only a tree the
+    deletion had really started on stays out; it is no longer a version anybody
+    could run, it is not reported as removed, and its path is named so the
+    bytes can be dealt with by hand.
 
     The whole transaction runs under the prefix lock. Which versions are in use
     is read once at the top, and a selection arriving in the middle would
@@ -621,12 +660,8 @@ def _prune_locked(root: Path, *, keep: int) -> PruneResult:
     for index, (name, scratch) in enumerate(staged):
         try:
             _delete_staged(scratch)
-        except OSError as exc:
-            problem, restored = _abandon_removal(
-                name, scratch, exc, staged[index + 1 :]
-            )
-            if not restored:
-                removed.append(name)
+        except _RemovalFailed as failure:
+            problem = _abandon_removal(name, scratch, failure, staged[index + 1 :])
             break
         removed.append(name)
     return PruneResult(
@@ -637,49 +672,126 @@ def _prune_locked(root: Path, *, keep: int) -> PruneResult:
     )
 
 
-def _delete_staged(scratch: Path) -> None:
-    """Delete one moved-aside version, its manifest first.
+class _RemovalFailed(Exception):
+    """One staged version would not delete, and whether it is still whole.
 
-    ``rmtree`` can fail partway, and what it leaves then has to be answerable:
-    put this tree back into the version set, or not? The manifest is what makes
-    a directory an installed version, so removing it before anything else makes
-    that question exact. A tree that survives a failed deletion either still
-    carries its manifest, in which case nothing was deleted at all and it can go
-    back, or does not, in which case it is already not a version and must not.
-    No cheaper signal separates those: an executable can outlive the libraries
-    it needs and still look like a payload.
+    ``intact`` is the one thing the caller has to know and cannot work out for
+    itself: whether putting the tree back restores a runnable version or lists
+    one that would not run.
     """
-    (scratch / MANIFEST_NAME).unlink()
-    shutil.rmtree(scratch)
+
+    def __init__(self, reason: str, *, intact: bool) -> None:
+        super().__init__(reason)
+        self.intact = intact
+
+
+def _delete_staged(scratch: Path) -> None:
+    """Delete one moved-aside version, refusing before it damages anything.
+
+    A ``rmtree`` that fails partway leaves a payload nothing can put back, so
+    everything knowable beforehand is established first: the tree is walked and
+    every directory in it checked for the write and execute permission that
+    unlinking its entries needs. The ordinary reason a version will not delete
+    — something in it is read-only, or it cannot be read at all — is therefore
+    found while the payload is still whole, and it goes back untouched.
+
+    That survey also counts the tree. Nothing else writes into a staged tree —
+    it is out of the version namespace and the prefix is locked — and deleting
+    only ever removes entries, so an unchanged count after a failure proves the
+    payload is still whole. Nothing about the tree itself proves that: an
+    executable and a manifest can outlive the libraries they need, so a
+    surviving payload *shape* is not evidence that nothing was deleted.
+    """
+    try:
+        counted = _survey_removal(scratch)
+    except OSError as exc:
+        raise _RemovalFailed(str(exc), intact=True) from exc
+    try:
+        shutil.rmtree(scratch)
+    except OSError as exc:
+        raise _RemovalFailed(str(exc), intact=_is_unchanged(scratch, counted)) from exc
+
+
+def _survey_removal(root: Path) -> int:
+    """Count the entries under ``root``, refusing a tree that will not delete.
+
+    Unlinking an entry needs write and execute permission on the *directory*
+    holding it, so that is what is checked: every directory in the tree, plus
+    the one ``root`` sits in, since the last step of the deletion is removing
+    ``root`` from it. A directory the walk cannot read raises here too.
+
+    A pre-check, not a guarantee: it answers for the process's real user id and
+    can be stale by the time the deletion runs. Wrong in the permissive
+    direction, it falls through to the deletion's own failure path, which
+    reports what it finds rather than assuming; wrong in the restrictive
+    direction, it refuses a prune, which costs disk and nothing else.
+    """
+    for directory in (root.parent, root):
+        if not os.access(directory, os.W_OK | os.X_OK):
+            raise PermissionError(f"{directory} does not allow removing its entries")
+    total = 0
+    for entry in _tree_entries(root):
+        total += 1
+        if entry.is_dir(follow_symlinks=False) and not os.access(
+            entry.path, os.W_OK | os.X_OK
+        ):
+            raise PermissionError(f"{entry.path} does not allow removing its entries")
+    return total
+
+
+def _is_unchanged(root: Path, counted: int) -> bool:
+    """Whether ``root`` still holds every entry the survey counted."""
+    total = 0
+    try:
+        for _ in _tree_entries(root):
+            total += 1
+    except OSError:
+        # A tree that cannot be walked cannot be proven whole, and that is the
+        # side to be wrong on: putting a half-deleted payload back would offer
+        # a version that does not run.
+        return False
+    return total == counted
+
+
+def _tree_entries(root: Path) -> Iterator[os.DirEntry]:
+    """Every entry under ``root``, without following symlinks out of it."""
+    pending = [root]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                yield entry
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
 
 
 def _abandon_removal(
-    name: str, scratch: Path, exc: OSError, pending: list[tuple[str, Path]]
-) -> tuple[str, bool]:
-    """Give up a prune at ``name``, returning the note and whether it survived.
+    name: str,
+    scratch: Path,
+    failure: _RemovalFailed,
+    pending: list[tuple[str, Path]],
+) -> str:
+    """Give up a prune at ``name``, returning what to report about it.
 
-    A failed deletion must not cost the operator versions it never got to.
-    Everything after this one is untouched and goes straight back. The one that
-    refused goes back too when it is still a payload this installer would
-    accept — a ``rmtree`` can fail on its first entry — and only a tree that is
-    already part-deleted stays out, because putting *that* back would list
-    something as installed that cannot run.
+    A failed deletion must not cost the operator versions it never got to:
+    everything after this one is untouched and goes straight back, and so does
+    this one whenever it is still whole — which, after the survey
+    :func:`_delete_staged` runs first, is what a refusal normally means. Only a
+    tree the deletion had really started on stays out, because putting *that*
+    back would list something as installed that cannot run.
     """
-    whole = _installed_version_problem(scratch, version=name) is None
-    putback = [(name, scratch), *pending] if whole else list(pending)
+    putback = [(name, scratch), *pending] if failure.intact else list(pending)
     stranded = _restore_staged(putback)
-    restored = whole and scratch not in stranded
-    note = f"stopped at {name}: cannot delete it: {exc}"
-    if restored:
-        note += "; it is still installed"
-    elif whole:
+    note = f"stopped at {name}: cannot delete it: {failure}"
+    if not failure.intact:
+        note += f"; it is part-deleted, not selectable, and left at {scratch}"
+    elif scratch in stranded:
         note += f"; it is whole at {scratch} but could not be put back"
     else:
-        note += f"; it is part-deleted, not selectable, and left at {scratch}"
+        note += "; it is still installed"
     others = [path for path in stranded if path != scratch]
     if others:
         note += "; could not put back " + ", ".join(str(path) for path in others)
-    return note, restored
+    return note
 
 
 def _prunable_versions(installation: Installation, *, keep: int) -> tuple[str, ...]:
@@ -1082,18 +1194,45 @@ def _prefix_lock(root: Path, *, create: bool = False) -> Iterator[None]:
 
 
 def _open_prefix_lock(root: Path) -> int:
-    """Open and lock ``<prefix>/.lock``, or fail as an operational error."""
+    """Open and lock ``<prefix>/.lock``, or fail as an operational error.
+
+    ``.lock`` is accepted under the prefix by name, so what sits at that name
+    has to be proven rather than assumed. Opening it with ``O_CREAT`` alone
+    would follow a symlink planted there and *create* its target: a mutation of
+    any prefix would then write and lock an unrelated file outside it. The open
+    refuses to follow a link, and what it did open is checked to be a regular
+    file — a directory, a device, or a fifo at that name is somebody else's, and
+    locking it is not this installer's business either.
+    """
     path = root / LOCK_NAME
     try:
-        handle = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+        handle = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     except OSError as exc:
-        raise InstallError(f"cannot lock {root}: {exc}") from exc
+        # ELOOP reads as "too many levels of symbolic links", which describes
+        # neither what is wrong nor what to do about it.
+        detail = (
+            f"{path} is a symlink; the lock has to be a regular file inside "
+            "the prefix. Remove it and retry"
+            if path.is_symlink()
+            else str(exc)
+        )
+        raise InstallError(f"cannot lock {root}: {detail}") from exc
+    locked = False
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX)
-    except OSError as exc:
-        os.close(handle)
-        raise InstallError(f"cannot lock {root}: {exc}") from exc
-    return handle
+        if not stat.S_ISREG(os.fstat(handle).st_mode):
+            raise InstallError(
+                f"cannot lock {root}: {path} is not a regular file; "
+                "remove it and retry"
+            )
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        except OSError as exc:
+            raise InstallError(f"cannot lock {root}: {exc}") from exc
+        locked = True
+        return handle
+    finally:
+        if not locked:
+            os.close(handle)
 
 
 def _verify_removable_prefix(root: Path) -> bool:
@@ -1147,10 +1286,10 @@ def _verify_removable_prefix(root: Path) -> bool:
         if problem is None:
             installed += 1
             continue
-        # Debris from an interrupted publication is ours, but it is not a
-        # version: it is skipped rather than counted, so it can never be the
+        # Debris from an interrupted placement or prune is ours, but it is not
+        # a version: it is skipped rather than counted, so it can never be the
         # only thing "proving" ownership.
-        if _is_installer_scratch(entry.name):
+        if is_reserved_version(entry.name):
             continue
         raise InstallError(
             f"{entry} is not an installed orch-hub version ({problem}); "
@@ -1164,7 +1303,7 @@ def _verify_removable_prefix(root: Path) -> bool:
     return True
 
 
-def _installed_version_problem(entry: Path, *, version: str | None = None) -> str | None:
+def _installed_version_problem(entry: Path) -> str | None:
     """Why ``entry`` is not an installed orch-hub version, or ``None``.
 
     The test is the one :func:`read_payload_manifest` already applies to a
@@ -1173,12 +1312,6 @@ def _installed_version_problem(entry: Path, *, version: str | None = None) -> st
     that function rather than re-listing its rules is deliberate — a second copy
     would decide "is this ours" by different rules than the ones that put it
     there.
-
-    ``version`` names what the directory is filed as, defaulting to its own
-    name. Retention passes the original when it asks about a tree it has already
-    moved aside for deletion: that tree is still exactly the payload it was, and
-    matching the manifest against the scratch name would answer "not a version"
-    for every one of them.
     """
     if entry.is_symlink() or not entry.is_dir():
         return "not a directory"
@@ -1186,27 +1319,10 @@ def _installed_version_problem(entry: Path, *, version: str | None = None) -> st
         manifest = read_payload_manifest(entry)
     except InstallError as exc:
         return str(exc)
-    filed_as = entry.name if version is None else version
     declared = _payload_version(manifest, entry / MANIFEST_NAME)
-    if declared != filed_as:
-        return f"declares version {declared!r} but is filed as {filed_as!r}"
+    if declared != entry.name:
+        return f"declares version {declared!r} but is filed as {entry.name!r}"
     return None
-
-
-def _is_installer_scratch(name: str) -> bool:
-    """Whether ``name`` is a scratch path this module's own writes make.
-
-    ``place_directory`` stages beside its target and holds the tree it replaces
-    beside it too, and :func:`prune_versions` moves a doomed version aside before
-    deleting it. One survives only a kill mid-operation or a deletion that could
-    not finish. Refusing to uninstall because of debris the installer itself left
-    would be a fault of this check, not evidence of a foreign prefix.
-
-    Deciding this by name is safe only because the same names are refused as
-    versions (:data:`RESERVED_VERSION_SUFFIXES`): no installed version can be
-    mistaken for debris, and no debris can be offered as a version.
-    """
-    return name.endswith(RESERVED_VERSION_SUFFIXES)
 
 
 def _list_dir(path: Path) -> list[Path]:

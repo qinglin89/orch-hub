@@ -134,15 +134,21 @@ runtime's own answers, never paths the shell script re-derives.
 ~/.local/orch-hub/current -> versions/X  which one is live; swapped atomically
 ~/.local/orch-hub/previous               which one it was; written the first
                                          time the selection moves
-~/.local/orch-hub/.lock                  held while a command changes any of
+~/.local/orch-hub/.lock                  held while one step changes any of
                                          the above
 ~/.local/bin/orch-hub -> ~/.local/orch-hub/current/orch-hub
 ```
 
-`install`, `upgrade`, `rollback`, and `uninstall` hold the prefix exclusively
-while they run, so two of them against the same prefix queue rather than
-interleave. A version number may not end in `.incoming`, `.previous`, or
-`.removing`: those name the installer's own scratch paths beside a version.
+Placing a version, selecting one, pruning, and removing an installation each
+hold `.lock` exclusively for the length of that step, so those steps queue
+rather than interleave against one prefix. **The lock does not span a whole
+command**: `upgrade` releases it before it restarts the service, and `rollback`
+before it waits for health, so two commands running at once against one prefix
+can still finish in an order neither of them reports. Run them one at a time.
+
+A version number may not end in `.incoming`, `.previous`, or `.removing`, in
+any capitalisation: those name the installer's own scratch paths beside a
+version, and the filesystem here does not tell the spellings apart.
 
 Nothing is installed system-wide and nothing needs `sudo`. The launchd plist
 names `<prefix>/current/orch-hub`, so **selecting a version is a symlink swap
@@ -325,17 +331,19 @@ prefix and are untouched by any of this.
 
 Pruning never fails an install or an upgrade; the version you asked for is
 installed and running either way. A doomed version is renamed out of
-`versions/` before its files are deleted, and a deletion that fails stops the
-prune where it is rather than working through the rest. Every outcome below is
-reported as a `note:` line, and none of them leaves a directory that still
-looks installed and no longer runs:
+`versions/` before its files are deleted, and its whole tree is checked for the
+permission the deletion needs before any of it is unlinked — so a version that
+will not delete is found while it is still whole, and it simply goes back. A
+deletion that fails stops the prune where it is rather than working through the
+rest. Every outcome below is reported as a `note:` line, and none of them
+leaves a directory that still looks installed and no longer runs:
 
 | What happened | What you see | What is true |
 |---|---|---|
 | A version could not be moved aside | `note: kept every version: cannot remove <version>: <reason>` | Nothing was removed; every version is still selectable |
 | The prefix was busy or unwritable | `note: kept every version: cannot lock <prefix>: <reason>` | Nothing was removed; retention runs on the next install |
-| A deletion refused before it removed anything | `note: stopped at <version>: cannot delete it: <reason>; it is still installed` | That version and everything the prune had not reached are still installed and selectable |
-| A deletion refused partway through | `note: stopped at <version>: cannot delete it: <reason>; it is part-deleted, not selectable, and left at <path>` | Only that version is gone from `versions`; its remains are in a `.removing` directory you can remove by hand, and everything the prune had not reached is still installed |
+| A deletion refused without removing anything | `note: stopped at <version>: cannot delete it: <reason>; it is still installed` | That version and everything the prune had not reached are still installed and selectable |
+| A deletion refused after deleting part of a payload | `note: stopped at <version>: cannot delete it: <reason>; it is part-deleted, not selectable, and left at <path>` | That version is *not* reported as removed — its files are only partly gone — and it is no longer listed; its remains are in a `.removing` directory you can remove by hand, and everything the prune had not reached is still installed and selectable |
 
 ## Uninstall
 

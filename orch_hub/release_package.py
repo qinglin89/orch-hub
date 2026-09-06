@@ -53,7 +53,7 @@ from pathlib import Path
 from .atomic_dir import PlacementError, place_directory
 # The one rule the packager reads from the runtime rather than restating: which
 # version names the installer will not place. Restating it is how the two drift.
-from .install import RESERVED_VERSION_SUFFIXES
+from .install import RESERVED_VERSION_SUFFIXES, is_reserved_version
 from .macho import version_key
 from .release_audit import AuditReport, ForbiddenLiteral, audit_payload
 from .release_build import (
@@ -254,13 +254,15 @@ def read_payload_manifest(payload_dir: Path) -> dict:
         ),
     )
     # The installer works beside a version under these suffixes and therefore
-    # refuses them as versions; a release published under one could be built
-    # and downloaded but never installed.
-    if version.endswith(RESERVED_VERSION_SUFFIXES):
+    # refuses them as versions — in any capitalisation, since the target
+    # filesystem is case-insensitive. A release published under one could be
+    # built and downloaded but never installed, and a release is immutable, so
+    # the only remedy after the fact is withdrawing it.
+    if is_reserved_version(version):
         raise PackageError(
             f"{path} declares version {version!r}; the installer reserves "
-            f"{' or '.join(RESERVED_VERSION_SUFFIXES)} for its own scratch "
-            "paths beside a version"
+            f"{' or '.join(RESERVED_VERSION_SUFFIXES)} (in any capitalisation) "
+            "for its own scratch paths beside a version"
         )
     _check_target_identity(manifest, path)
     _check_declared_macos(manifest, path)
