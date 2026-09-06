@@ -146,9 +146,9 @@ command**: `upgrade` releases it before it restarts the service, and `rollback`
 before it waits for health, so two commands running at once against one prefix
 can still finish in an order neither of them reports. Run them one at a time.
 
-A version number may not end in `.incoming`, `.previous`, or `.removing`, in
-any capitalisation: those name the installer's own scratch paths beside a
-version, and the filesystem here does not tell the spellings apart.
+A version number may not end in `.incoming`, `.previous`, `.removing`, or
+`.spare`, in any capitalisation: those name the installer's own scratch paths
+beside a version, and the filesystem here does not tell the spellings apart.
 
 Nothing is installed system-wide and nothing needs `sudo`. The launchd plist
 names `<prefix>/current/orch-hub`, so **selecting a version is a symlink swap
@@ -330,20 +330,32 @@ Nothing goes with it — service configuration and hub data live outside the
 prefix and are untouched by any of this.
 
 Pruning never fails an install or an upgrade; the version you asked for is
-installed and running either way. A doomed version is renamed out of
-`versions/` before its files are deleted, and its whole tree is checked for the
-permission the deletion needs before any of it is unlinked — so a version that
-will not delete is found while it is still whole, and it simply goes back. A
-deletion that fails stops the prune where it is rather than working through the
-rest. Every outcome below is reported as a `note:` line, and none of them
-leaves a directory that still looks installed and no longer runs:
+installed and running either way. **Removal is all or nothing.** Before a doomed
+version's files are deleted it is renamed out of `versions/` and copied to a
+`.spare` name beside it — a copy that shares the payload's files rather than
+duplicating them, so it costs directory entries and not another 30MB. Those
+spares are dropped only after every doomed version has been deleted, which is
+what lets a deletion that fails halfway be undone: it removed one of two names
+for each file, and the version goes back exactly as it was. Deleting a directory
+tree is not an operation the filesystem can promise to finish, and no check made
+beforehand changes that — so retention keeps the means to undo it instead.
+
+So **a prune that reports a problem has removed nothing**, and everything
+`orch-hub versions` listed before it is still installed and still a valid
+`rollback --to` target. What a failure can cost is disk, never a version:
 
 | What happened | What you see | What is true |
 |---|---|---|
-| A version could not be moved aside | `note: kept every version: cannot remove <version>: <reason>` | Nothing was removed; every version is still selectable |
-| The prefix was busy or unwritable | `note: kept every version: cannot lock <prefix>: <reason>` | Nothing was removed; retention runs on the next install |
-| A deletion refused without removing anything | `note: stopped at <version>: cannot delete it: <reason>; it is still installed` | That version and everything the prune had not reached are still installed and selectable |
-| A deletion refused after deleting part of a payload | `note: stopped at <version>: cannot delete it: <reason>; it is part-deleted, not selectable, and left at <path>` | That version is *not* reported as removed — its files are only partly gone — and it is no longer listed; its remains are in a `.removing` directory you can remove by hand, and everything the prune had not reached is still installed and selectable |
+| A version could not be moved aside or copied | `note: kept every version: cannot remove <version>: <reason>` | Nothing was removed; every version is still selectable |
+| The prefix was busy or unwritable | `note: kept every version: cannot lock <prefix>: <reason>` | Nothing was removed; retention runs again on the next install |
+| A deletion failed, having already removed part of a payload | `note: kept every version: cannot remove <version>: <reason>; left scratch at <path>` | Every version was put back whole and is selectable. What is left at that path shares its files with the version that came back, so it costs no disk while that version is installed — remove it by hand; no later prune will touch a path it did not create |
+| A version could not be put back | `note: cannot remove <version>: <reason>; <version> is whole at <path> but could not be put back` | Nothing of that version is lost; it is not listed until you rename that path to `versions/<version>` |
+| Every version was removed, but a spare would not go | `note: removed every version, but their disk is not all reclaimed: <path> could not be removed; remove by hand` | The versions are gone as intended; that path holds one payload's bytes until you remove it |
+
+A version that refuses to delete therefore stops retention for the whole prefix
+until you deal with it, and says so on every install. Working around it would
+mean removing other versions while that one cannot be put back, which is the
+trade this refuses to make.
 
 ## Uninstall
 

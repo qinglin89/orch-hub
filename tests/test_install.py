@@ -14,6 +14,7 @@ import os
 import platform
 import plistlib
 import shutil
+import stat
 import threading
 from pathlib import Path
 
@@ -26,6 +27,7 @@ from orch_hub.install import (
     KEEP_VERSIONS,
     REMOVING_SUFFIX,
     RESERVED_VERSION_SUFFIXES,
+    SPARE_SUFFIX,
     InstallError,
     SetupOptions,
     check_target,
@@ -513,12 +515,31 @@ def install_series(tmp_path, prefix, *versions, keep=KEEP_VERSIONS):
 
 
 def scratch_under(prefix: Path) -> list[Path]:
-    """Removal scratch left under ``versions/``, which a clean prune leaves none of."""
+    """Installer scratch under ``versions/``, which a clean prune leaves none of."""
     return [
         entry
         for entry in (prefix / "versions").iterdir()
-        if entry.name.endswith(REMOVING_SUFFIX)
+        if install.is_reserved_version(entry.name)
     ]
+
+
+def tree_of(root: Path) -> dict[str, str]:
+    """Everything under ``root``: what each entry is, its mode, and its content.
+
+    Fine-grained on purpose — a version put back after a failed removal has to
+    be the payload that was there, not a directory of the right shape.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        key = str(path.relative_to(root))
+        mode = stat.S_IMODE(path.lstat().st_mode)
+        if path.is_symlink():
+            found[key] = f"-> {os.readlink(path)}"
+        elif path.is_dir():
+            found[key] = f"dir {mode:o}"
+        else:
+            found[key] = f"{mode:o} {path.read_text(encoding='utf-8')}"
+    return found
 
 
 def test_a_prefix_below_the_limit_keeps_every_version(tmp_path):
@@ -548,6 +569,9 @@ def test_an_install_at_the_limit_removes_the_oldest(tmp_path):
     assert (installation.current, installation.previous) == ("0.4.0", "0.3.0")
     for version in installation.versions:
         assert (prefix / "versions" / version / "orch-hub").is_file()
+    # The spare each removal keeps is dropped once the prune commits; leaving
+    # one would hold the payload's bytes and reclaim nothing.
+    assert not scratch_under(prefix)
 
 
 def test_repeated_upgrades_stop_growing_the_prefix(tmp_path):
@@ -564,6 +588,7 @@ def test_repeated_upgrades_stop_growing_the_prefix(tmp_path):
     # Both are still runnable, not just still listed.
     assert (prefix / "current" / "orch-hub").is_file()
     assert (prefix / "versions" / installation.previous / "orch-hub").is_file()
+    assert not scratch_under(prefix)
 
 
 def test_retention_keeps_current_and_previous_outside_the_window(tmp_path):
@@ -654,20 +679,26 @@ def test_a_prune_that_fails_partway_puts_back_what_it_moved(tmp_path, monkeypatc
     assert (prefix / "versions" / "0.1.0" / "orch-hub").is_file()
 
 
-def test_a_prune_that_cannot_delete_a_version_keeps_it_selectable(tmp_path):
-    """A deletion that never started must cost the operator nothing.
+def test_a_prune_that_cannot_delete_a_version_keeps_every_version(tmp_path):
+    """The acceptance, at its hardest point: a failed prune removes nothing.
 
-    The acceptance is "refuse rather than half-remove": a version whose files
-    would not delete goes back into the version set, and the prune stops there
-    instead of working through the ones behind it.
+    A version whose files will not delete does not just stop the prune where it
+    is — everything the prune had already removed comes back too, from the
+    spare each removal keeps until the last one has succeeded. Anything less
+    would leave an operator with fewer rollback targets than before a prune
+    that reports it did nothing.
     """
     prefix = tmp_path / "prefix"
     install_series(
         tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0", keep=9
     )
-    # Read-only version directory: the tree can still be moved aside, but
-    # nothing inside it can be unlinked. The survey that precedes the deletion
-    # is what finds that, while the payload is still whole.
+    before = {
+        version: tree_of(prefix / "versions" / version)
+        for version in ("0.1.0", "0.2.0", "0.3.0")
+    }
+    # Read-only version directory: the tree can still be copied and moved
+    # aside, but nothing inside it can be unlinked, so the deletion gets partway
+    # and stops. 0.1.0 is already deleted by then.
     (prefix / "versions" / "0.2.0").chmod(0o500)
     try:
         result = prune_versions(prefix, keep=1)
@@ -675,58 +706,98 @@ def test_a_prune_that_cannot_delete_a_version_keeps_it_selectable(tmp_path):
         for entry in (prefix / "versions").iterdir():
             entry.chmod(0o700)
 
-    assert result.removed == ("0.1.0",)
-    assert "stopped at 0.2.0" in result.problem
-    assert "still installed" in result.problem
-    assert result.kept == ("0.2.0", "0.3.0", "0.4.0", "0.5.0")
-    # 0.2.0 is back under its own name and whole; 0.3.0 was doomed too and the
-    # prune never reached it.
-    assert read_installation(prefix).versions == ("0.2.0", "0.3.0", "0.4.0", "0.5.0")
-    for version in ("0.2.0", "0.3.0"):
-        assert (prefix / "versions" / version / "orch-hub").is_file()
+    assert result.removed == ()
+    assert "kept every version: cannot remove 0.2.0" in result.problem
+    assert result.kept == ("0.1.0", "0.2.0", "0.3.0", "0.4.0", "0.5.0")
+    assert read_installation(prefix).versions == result.kept
+    for version, contents in before.items():
+        assert tree_of(prefix / "versions" / version) == contents
         select_version(prefix, version)
         assert read_current(prefix) == version
+        assert (prefix / "current" / "orch-hub").is_file()
+    # What the deletion did manage to unlink is scratch holding no bytes of its
+    # own: every file left in it is one the restored version holds too.
+    assert "left scratch at" in result.problem
+
+
+def test_a_later_prune_is_not_wedged_by_what_an_earlier_one_left(tmp_path):
+    """Both scratch names carry a fresh token, so debris blocks nothing twice.
+
+    Nothing is ever cleared to make room — an entry sitting at a scratch name is
+    not this prune's to remove — so a fixed name would let one stranded tree
+    refuse every later prune of that version, and the prefix would never shrink
+    again.
+    """
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", "0.4.0", keep=9)
+    (prefix / "versions" / "0.2.0").chmod(0o500)
+    try:
+        refused = prune_versions(prefix, keep=1)
+    finally:
+        for entry in (prefix / "versions").iterdir():
+            entry.chmod(0o700)
+    assert refused.removed == ()
+    debris = set(scratch_under(prefix))
+    assert debris, "the refused deletion left a tree it could not unlink"
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ("0.1.0", "0.2.0")
+    assert read_installation(prefix).versions == ("0.3.0", "0.4.0")
+    # Still not this prune's to remove, and it did not have to be.
+    assert set(scratch_under(prefix)) == debris
 
 
 def test_a_deletion_that_removes_nothing_leaves_the_version_selectable(
     tmp_path, monkeypatch
 ):
-    """A refusal the survey could not foresee still costs the operator nothing.
-
-    The acceptance is that a failed prune leaves every version selectable, and
-    a deletion that raised without unlinking anything has not made that
-    impossible: the payload is exactly what it was, so it goes back.
-    """
+    """A refusal nothing could have foreseen still costs the operator nothing."""
     prefix = tmp_path / "prefix"
     install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    before = tree_of(prefix / "versions" / "0.1.0")
+    real_rmtree = install.shutil.rmtree
 
-    def refuse(path, *args, **kwargs):
-        raise OSError("permission denied")
+    def refuse(path, *args, ignore_errors=False, **kwargs):
+        # Fails when the deletion asks to be told about errors and works when
+        # the cleanup sweep asks it to ignore them: a transient refusal, which
+        # is the kind of surprise no check beforehand can rule out.
+        if ignore_errors:
+            return real_rmtree(path, ignore_errors=True)
+        raise OSError("resource temporarily unavailable")
 
     monkeypatch.setattr(install.shutil, "rmtree", refuse)
 
     result = prune_versions(prefix, keep=1)
 
     assert result.removed == ()
-    assert "stopped at 0.1.0" in result.problem
-    assert "still installed" in result.problem
+    assert "kept every version: cannot remove 0.1.0" in result.problem
+    assert "left scratch" not in result.problem
     assert read_installation(prefix).versions == ("0.1.0", "0.2.0", "0.3.0")
+    assert tree_of(prefix / "versions" / "0.1.0") == before
     assert not scratch_under(prefix)
     select_version(prefix, "0.1.0")
     assert read_current(prefix) == "0.1.0"
     assert (prefix / "current" / "orch-hub").is_file()
 
 
-def test_a_prune_does_not_put_back_a_version_it_started_deleting(tmp_path, monkeypatch):
-    """The one thing that cannot be undone is reported, never re-listed."""
+def test_a_prune_puts_back_a_version_a_deletion_had_started_on(tmp_path, monkeypatch):
+    """The case the spare exists for, and the one nothing else can answer.
+
+    ``rmtree`` is not transactional: it can unlink half a payload and then
+    raise, and no survey taken beforehand can prevent that. Retention therefore
+    holds a second set of links to the payload's files while it deletes the
+    first, so unlinking one of two links loses nothing and the version goes back
+    exactly as it was — rather than being left out of the version set as
+    something that cannot run.
+    """
     prefix = tmp_path / "prefix"
     install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    before = tree_of(prefix / "versions" / "0.1.0")
     real_rmtree = install.shutil.rmtree
 
-    def half_delete(path, *args, **kwargs):
-        # Deletes part of the payload and then gives up, which is the only
-        # state a version cannot be restored from — and the only one in which
-        # the prune is allowed to leave a version out of the version set.
+    def half_delete(path, *args, ignore_errors=False, **kwargs):
+        if ignore_errors:
+            return real_rmtree(path, ignore_errors=True)
         real_rmtree(Path(path) / "_internal")
         raise OSError("input/output error")
 
@@ -734,16 +805,94 @@ def test_a_prune_does_not_put_back_a_version_it_started_deleting(tmp_path, monke
 
     result = prune_versions(prefix, keep=1)
 
-    # Not reported as removed: its files are not gone, they are half gone.
     assert result.removed == ()
-    assert "part-deleted" in result.problem
+    assert "kept every version: cannot remove 0.1.0" in result.problem
+    assert read_installation(prefix).versions == ("0.1.0", "0.2.0", "0.3.0")
+    # Byte for byte, mode for mode, symlinks unresolved: the payload that was
+    # there, not a directory of the right shape.
+    assert tree_of(prefix / "versions" / "0.1.0") == before
+    assert not scratch_under(prefix)
+    select_version(prefix, "0.1.0")
+    assert read_current(prefix) == "0.1.0"
+    assert (prefix / "current" / "orch-hub").is_file()
+
+
+def test_a_version_that_cannot_be_copied_whole_is_not_removed(tmp_path):
+    """A payload is files, directories, and symlinks; anything else refuses.
+
+    Linking is what makes the removal undoable, and an entry that cannot be
+    reproduced by linking would make the spare an unfaithful copy of the
+    version. Restoring from it would be worse than keeping the version.
+    """
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    os.mkfifo(prefix / "versions" / "0.1.0" / "pipe")
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ()
+    assert "kept every version: cannot remove 0.1.0" in result.problem
+    assert "not a file, a directory, or a symlink" in result.problem
+    assert read_installation(prefix).versions == ("0.1.0", "0.2.0", "0.3.0")
+    assert (prefix / "versions" / "0.1.0" / "orch-hub").is_file()
+    # The half-built spare went with the refusal, and nothing else moved.
+    assert not scratch_under(prefix)
+
+
+def test_a_prune_that_cannot_drop_a_spare_still_removed_the_version(
+    tmp_path, monkeypatch
+):
+    """After the last deletion there is nothing left to lose but disk.
+
+    The version is out of the version set as intended; what its spare still
+    holds is the payload's bytes, which is the one thing a prune can fail to
+    deliver without costing the operator anything it could roll back to.
+    """
+    prefix = tmp_path / "prefix"
+    install_series(tmp_path, prefix, "0.1.0", "0.2.0", "0.3.0", keep=9)
+    real_rmtree = install.shutil.rmtree
+
+    def keep_spares(path, *args, **kwargs):
+        if str(path).endswith(SPARE_SUFFIX):
+            return None
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(install.shutil, "rmtree", keep_spares)
+
+    result = prune_versions(prefix, keep=1)
+
+    assert result.removed == ("0.1.0",)
+    assert "not all reclaimed" in result.problem
     assert read_installation(prefix).versions == ("0.2.0", "0.3.0")
+    with pytest.raises(InstallError, match="version 0.1.0 is not installed"):
+        select_version(prefix, "0.1.0")
     stranded = scratch_under(prefix)
     assert len(stranded) == 1
     assert str(stranded[0]) in result.problem
-    # Never offered as a rollback target while it is half a payload.
-    with pytest.raises(InstallError, match="version 0.1.0 is not installed"):
-        select_version(prefix, "0.1.0")
+    # Named by path because that is where the unreclaimed bytes are.
+    assert (stranded[0] / "orch-hub").is_file()
+
+
+def test_a_spare_shares_the_payload_rather_than_copying_it(tmp_path):
+    """A copy of the bytes would cost the ~30MB the prune is reclaiming."""
+    source = make_payload(tmp_path, "0.1.0")
+    versions = source / "_internal" / "framework" / "Versions"
+    versions.chmod(0o500)
+    target = tmp_path / "spare"
+    try:
+        install._link_tree(source, target)
+
+        assert tree_of(target) == tree_of(source)
+        # The same file, not a second copy of it: two names for one inode.
+        linked, original = target / "orch-hub", source / "orch-hub"
+        assert linked.stat().st_ino == original.stat().st_ino
+        assert (target / "orch-hub").stat().st_nlink == 2
+        # A directory that denies writes is reproduced as one, which is only
+        # possible because it was filled before its permissions were applied.
+        mirrored = target / "_internal" / "framework" / "Versions"
+        assert stat.S_IMODE(mirrored.stat().st_mode) == 0o500
+    finally:
+        versions.chmod(0o700)
 
 
 @pytest.mark.parametrize("suffix", RESERVED_VERSION_SUFFIXES)
@@ -766,7 +915,7 @@ def test_a_version_named_like_installer_scratch_is_refused(tmp_path, suffix):
     assert not prefix.exists()
 
 
-@pytest.mark.parametrize("suffix", [".INCOMING", ".Previous", ".REMOVING"])
+@pytest.mark.parametrize("suffix", [".INCOMING", ".Previous", ".REMOVING", ".Spare"])
 def test_a_scratch_suffix_in_another_case_is_reserved_too(tmp_path, suffix):
     """The shipped target's filesystem is case-insensitive, so the rule must be.
 
@@ -867,7 +1016,7 @@ def test_a_rollback_cannot_land_inside_a_prune(tmp_path, monkeypatch):
     assert (prefix / "current" / "orch-hub").is_file()
 
 
-@pytest.mark.parametrize("suffix", [REMOVING_SUFFIX, ".REMOVING"])
+@pytest.mark.parametrize("suffix", [REMOVING_SUFFIX, ".REMOVING", SPARE_SUFFIX])
 def test_prune_scratch_is_not_an_installed_version(tmp_path, suffix):
     """Debris from a killed prune must not be listed, kept, or rolled back to.
 

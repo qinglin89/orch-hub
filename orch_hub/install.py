@@ -103,7 +103,25 @@ like an installed version but no longer runs. Moving it out of the version
 namespace first is one rename inside ``versions/`` — it happens completely or
 not at all — so what is left listed is always whole."""
 
-RESERVED_VERSION_SUFFIXES = (INCOMING_SUFFIX, PREVIOUS_SUFFIX, REMOVING_SUFFIX)
+SPARE_SUFFIX = ".spare"
+"""Suffix the standby copy of a version being removed is held under.
+
+Moving a version aside keeps a half-deleted tree out of the version set, but it
+does not make the deletion undoable: once ``rmtree`` has unlinked a file, no
+rename brings it back, and no amount of checking beforehand makes a recursive
+delete transactional. So before anything is deleted the version is copied to
+this name by *linking* its files rather than copying their bytes — a second set
+of directory entries for the same data, costing entries instead of the ~30MB
+the prune is reclaiming. Deleting the moved-aside tree then drops one of two
+links to each file, and the version can be restored whole from its spare for as
+long as the spare exists (:func:`prune_versions`)."""
+
+RESERVED_VERSION_SUFFIXES = (
+    INCOMING_SUFFIX,
+    PREVIOUS_SUFFIX,
+    REMOVING_SUFFIX,
+    SPARE_SUFFIX,
+)
 """Suffixes an installed version's name may not end with.
 
 Placement and pruning both work beside the version they are handling, under a
@@ -203,18 +221,22 @@ class PruneResult:
 
     prefix: Path
     removed: tuple[str, ...]
+    """Versions this prune removed: all of the ones it set out to, or none.
+
+    Retention holds a restorable copy of every version it is removing until the
+    last removal has succeeded, so a prune that hit a problem put everything
+    back — this is then empty and ``kept`` is the whole set the prefix had."""
+
     kept: tuple[str, ...]
     problem: str | None = None
     """Why the prune did less than it set out to, or ``None``.
 
-    ``removed`` names only versions whose files are actually gone, so a prune
-    that stopped early is visible in the two lists as well as here: what it did
-    not get to is still in ``kept``, and a version whose deletion failed partway
-    is in neither — it is not installed any more and its bytes are not
-    reclaimed, which is the state this names. Reclaiming disk is never worth
-    failing an install over, so this is reported rather than raised — but it is
-    reported, because a version left half-deleted, or one that could not be put
-    back, is a state the operator has to know about to act on."""
+    Never a version lost: removal is all or nothing, so this reports either
+    "nothing was removed, here is why" or "everything was removed, but some of
+    its disk is not reclaimed yet". Both name the paths involved. Reclaiming
+    disk is never worth failing an install over, so this is reported rather than
+    raised — and it is reported rather than swallowed, because scratch that will
+    not go needs an operator to deal with it."""
 
     def to_dict(self) -> dict:
         return {
@@ -583,22 +605,27 @@ def prune_versions(
     install is left alone rather than deleted on the strength of sitting in
     ``versions/``. Such an entry does not occupy a retention slot either.
 
-    Removal is two-phase, because a ``rmtree`` that fails partway would leave a
-    directory that still looks installed and no longer runs. Every doomed
-    version is first renamed aside — one rename inside ``versions/``, so it
-    either leaves the version set completely or not at all — and only then are
-    the files deleted. A rename that fails puts back the ones already moved and
-    removes nothing, so a refused prune leaves every version selectable.
+    Removal is all or nothing. Before a doomed version's files are touched, a
+    spare copy of it is made beside it — the same directories and symlinks, and
+    the same files shared as extra links rather than duplicated bytes — and the
+    version itself is renamed out of the version set, so nothing ever lists a
+    directory whose files are being deleted. The spares are dropped only once
+    every doomed version has been deleted, and that is what makes any failure
+    recoverable: a deletion that fails halfway has removed one of two links to
+    each file, so the version comes back whole from its spare. A prune that
+    reports a problem has therefore removed nothing, and every version the
+    prefix had is still installed and still selectable. Nothing weaker would do
+    — ``rmtree`` is not transactional, and a check made before it runs cannot
+    make it so.
 
-    A version's files are deleted only after its whole tree has been surveyed
-    for the permission the deletion needs, so the ordinary reason a payload
-    will not delete is found while it is still whole: it goes back untouched
-    and the prune stops there rather than working through the rest. Should a
-    deletion fail anyway, the tree is measured against that survey — unchanged
-    means nothing was lost and the version goes back too. Only a tree the
-    deletion had really started on stays out; it is no longer a version anybody
-    could run, it is not reported as removed, and its path is named so the
-    bytes can be dealt with by hand.
+    What a failure can cost is disk, never a version. A prune that gave up
+    leaves scratch that shares its files with the version it put back, so it
+    costs nothing while that version is installed; a prune that removed every
+    version but could not then drop a spare leaves that one payload's bytes
+    unreclaimed. Neither is ever cleared by a later prune — nothing here removes
+    a path it did not create — so both are named in ``problem`` for an operator
+    to deal with, rather than raised: reclaiming disk is never worth failing the
+    install that triggered it.
 
     The whole transaction runs under the prefix lock. Which versions are in use
     is read once at the top, and a selection arriving in the middle would
@@ -620,178 +647,203 @@ def prune_versions(
         )
 
 
+@dataclass(frozen=True)
+class _Staged:
+    """One version taken out of the version set, and the copy that undoes that.
+
+    ``tree`` is the version itself, renamed aside so nothing lists it while its
+    files are being deleted. ``spare`` is a second whole copy of it, made before
+    any of that and holding the same files as extra links. Deleting an entry
+    from ``tree`` therefore drops one of two links rather than the data, which
+    is what lets :func:`_keep_every_version` put the version back after a
+    deletion has already started on it.
+    """
+
+    name: str
+    home: Path
+    """Where the version lives when it is installed, and where it goes back to."""
+
+    tree: Path
+    spare: Path
+
+
 def _prune_locked(root: Path, *, keep: int) -> PruneResult:
-    """Body of :func:`prune_versions`, with the prefix already held."""
+    """Body of :func:`prune_versions`, with the prefix already held.
+
+    All or nothing, by the shape of the loop: every spare stays until the last
+    removal has succeeded, so a failure at any point — staging, copying, or
+    deleting — puts back every version, including the ones whose files are
+    already gone.
+    """
     installation = read_installation(root)
     versions_dir = root / VERSIONS_DIR
     doomed = _prunable_versions(installation, keep=keep)
     if not doomed:
         return PruneResult(prefix=root, removed=(), kept=installation.versions)
 
-    staged: list[tuple[str, Path]] = []
+    staged: list[_Staged] = []
     for name in doomed:
-        scratch = versions_dir / f"{name}.{uuid.uuid4().hex[:8]}{REMOVING_SUFFIX}"
         try:
-            # Nothing is ever cleared to make room: an existing path here is
-            # not this prune's, so it is not this prune's to delete. The name
-            # carries a fresh token so that debris from an earlier failure —
-            # or anything else sitting under `versions/` — neither blocks a
-            # prune nor gets recursively removed by one.
-            if os.path.lexists(scratch):
-                raise OSError(f"{scratch} already exists")
-            (versions_dir / name).rename(scratch)
+            entry = _stage_removal(versions_dir, name)
+            staged.append(entry)
+            shutil.rmtree(entry.tree)
         except OSError as exc:
-            stranded = _restore_staged(staged)
-            note = (
-                "; could not put back " + ", ".join(str(path) for path in stranded)
-                if stranded
-                else ""
-            )
-            return PruneResult(
-                prefix=root,
-                removed=(),
-                kept=read_installation(root).versions,
-                problem=f"kept every version: cannot remove {name}: {exc}{note}",
-            )
-        staged.append((name, scratch))
-
-    removed: list[str] = []
-    problem: str | None = None
-    for index, (name, scratch) in enumerate(staged):
-        try:
-            _delete_staged(scratch)
-        except _RemovalFailed as failure:
-            problem = _abandon_removal(name, scratch, failure, staged[index + 1 :])
-            break
-        removed.append(name)
+            return _keep_every_version(root, staged, f"cannot remove {name}: {exc}")
+    # The commit point. Every doomed version has left the version set and every
+    # spare is still whole, so from here nothing can cost a version — only the
+    # bytes a spare that will not go still holds.
     return PruneResult(
         prefix=root,
-        removed=tuple(removed),
+        removed=tuple(entry.name for entry in staged),
         kept=read_installation(root).versions,
-        problem=problem,
+        problem=_drop_spares(staged),
     )
 
 
-class _RemovalFailed(Exception):
-    """One staged version would not delete, and whether it is still whole.
+def _stage_removal(versions_dir: Path, name: str) -> _Staged:
+    """Take one version out of the version set, keeping a spare of it.
 
-    ``intact`` is the one thing the caller has to know and cannot work out for
-    itself: whether putting the tree back restores a runnable version or lists
-    one that would not run.
+    The spare is made first, from the version still under its own name: if it
+    cannot be made, nothing has moved and the version is untouched. Only then is
+    the version renamed aside — one rename inside ``versions/``, so it either
+    leaves the set completely or not at all.
+
+    Nothing is cleared to make room. Both scratch names carry a fresh token, so
+    an entry already sitting at one is not this prune's and is not this prune's
+    to remove: staging refuses instead. Fresh tokens also stop debris from an
+    earlier failure from wedging every later prune of the same version, which a
+    fixed name would.
     """
-
-    def __init__(self, reason: str, *, intact: bool) -> None:
-        super().__init__(reason)
-        self.intact = intact
-
-
-def _delete_staged(scratch: Path) -> None:
-    """Delete one moved-aside version, refusing before it damages anything.
-
-    A ``rmtree`` that fails partway leaves a payload nothing can put back, so
-    everything knowable beforehand is established first: the tree is walked and
-    every directory in it checked for the write and execute permission that
-    unlinking its entries needs. The ordinary reason a version will not delete
-    — something in it is read-only, or it cannot be read at all — is therefore
-    found while the payload is still whole, and it goes back untouched.
-
-    That survey also counts the tree. Nothing else writes into a staged tree —
-    it is out of the version namespace and the prefix is locked — and deleting
-    only ever removes entries, so an unchanged count after a failure proves the
-    payload is still whole. Nothing about the tree itself proves that: an
-    executable and a manifest can outlive the libraries they need, so a
-    surviving payload *shape* is not evidence that nothing was deleted.
-    """
+    token = uuid.uuid4().hex[:8]
+    staged = _Staged(
+        name=name,
+        home=versions_dir / name,
+        tree=versions_dir / f"{name}.{token}{REMOVING_SUFFIX}",
+        spare=versions_dir / f"{name}.{token}{SPARE_SUFFIX}",
+    )
+    for path in (staged.tree, staged.spare):
+        if os.path.lexists(path):
+            raise OSError(f"{path} already exists")
+    _link_tree(staged.home, staged.spare)
     try:
-        counted = _survey_removal(scratch)
-    except OSError as exc:
-        raise _RemovalFailed(str(exc), intact=True) from exc
-    try:
-        shutil.rmtree(scratch)
-    except OSError as exc:
-        raise _RemovalFailed(str(exc), intact=_is_unchanged(scratch, counted)) from exc
-
-
-def _survey_removal(root: Path) -> int:
-    """Count the entries under ``root``, refusing a tree that will not delete.
-
-    Unlinking an entry needs write and execute permission on the *directory*
-    holding it, so that is what is checked: every directory in the tree, plus
-    the one ``root`` sits in, since the last step of the deletion is removing
-    ``root`` from it. A directory the walk cannot read raises here too.
-
-    A pre-check, not a guarantee: it answers for the process's real user id and
-    can be stale by the time the deletion runs. Wrong in the permissive
-    direction, it falls through to the deletion's own failure path, which
-    reports what it finds rather than assuming; wrong in the restrictive
-    direction, it refuses a prune, which costs disk and nothing else.
-    """
-    for directory in (root.parent, root):
-        if not os.access(directory, os.W_OK | os.X_OK):
-            raise PermissionError(f"{directory} does not allow removing its entries")
-    total = 0
-    for entry in _tree_entries(root):
-        total += 1
-        if entry.is_dir(follow_symlinks=False) and not os.access(
-            entry.path, os.W_OK | os.X_OK
-        ):
-            raise PermissionError(f"{entry.path} does not allow removing its entries")
-    return total
-
-
-def _is_unchanged(root: Path, counted: int) -> bool:
-    """Whether ``root`` still holds every entry the survey counted."""
-    total = 0
-    try:
-        for _ in _tree_entries(root):
-            total += 1
+        staged.home.rename(staged.tree)
     except OSError:
-        # A tree that cannot be walked cannot be proven whole, and that is the
-        # side to be wrong on: putting a half-deleted payload back would offer
-        # a version that does not run.
-        return False
-    return total == counted
+        # Only a spare this staging made is ever dropped, and dropping one
+        # cannot lose anything: every file in it is shared with the version it
+        # was made from, which has not moved.
+        _sweep(staged.spare)
+        raise
+    return staged
 
 
-def _tree_entries(root: Path) -> Iterator[os.DirEntry]:
-    """Every entry under ``root``, without following symlinks out of it."""
-    pending = [root]
-    while pending:
-        with os.scandir(pending.pop()) as entries:
-            for entry in entries:
-                yield entry
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(Path(entry.path))
+def _link_tree(source: Path, target: Path) -> None:
+    """Build a second whole copy of ``source`` at ``target``, sharing its files.
 
+    Directories and symlinks are recreated; regular files are hard-linked, so
+    the copy costs directory entries rather than bytes and both trees name the
+    same data until the last link to it is gone. File permissions come along by
+    definition — a link is another name for one inode. Directory permissions are
+    applied only once each directory has been filled, because a payload
+    directory that denies writes could not be written into otherwise.
 
-def _abandon_removal(
-    name: str,
-    scratch: Path,
-    failure: _RemovalFailed,
-    pending: list[tuple[str, Path]],
-) -> str:
-    """Give up a prune at ``name``, returning what to report about it.
-
-    A failed deletion must not cost the operator versions it never got to:
-    everything after this one is untouched and goes straight back, and so does
-    this one whenever it is still whole — which, after the survey
-    :func:`_delete_staged` runs first, is what a refusal normally means. Only a
-    tree the deletion had really started on stays out, because putting *that*
-    back would list something as installed that cannot run.
+    Anything that is not a file, a directory, or a symlink refuses the copy: it
+    cannot be reproduced by linking, and a spare that is not a faithful copy of
+    the version is worse than no spare at all. Creating ``target`` is what
+    proves the name is free — an entry already there refuses here — so a copy
+    abandoned below is one this call made, and clearing it removes nothing the
+    caller did not create.
     """
-    putback = [(name, scratch), *pending] if failure.intact else list(pending)
-    stranded = _restore_staged(putback)
-    note = f"stopped at {name}: cannot delete it: {failure}"
-    if not failure.intact:
-        note += f"; it is part-deleted, not selectable, and left at {scratch}"
-    elif scratch in stranded:
-        note += f"; it is whole at {scratch} but could not be put back"
-    else:
-        note += "; it is still installed"
-    others = [path for path in stranded if path != scratch]
-    if others:
-        note += "; could not put back " + ", ".join(str(path) for path in others)
-    return note
+    os.mkdir(target)
+    try:
+        modes: list[tuple[Path, int]] = []
+        pending = [(source, target)]
+        while pending:
+            src, dst = pending.pop()
+            modes.append((dst, os.stat(src).st_mode))
+            with os.scandir(src) as entries:
+                for entry in entries:
+                    copy = dst / entry.name
+                    if entry.is_symlink():
+                        os.symlink(os.readlink(entry.path), copy)
+                    elif entry.is_dir():
+                        os.mkdir(copy)
+                        pending.append((Path(entry.path), copy))
+                    elif entry.is_file():
+                        os.link(entry.path, copy)
+                    else:
+                        raise OSError(
+                            f"{entry.path} is not a file, a directory, or a symlink"
+                        )
+        for path, mode in modes:
+            os.chmod(path, mode)
+    except OSError:
+        _sweep(target)
+        raise
+
+
+def _keep_every_version(root: Path, staged: list[_Staged], reason: str) -> PruneResult:
+    """Undo a prune that could not finish, and report what it could not undo.
+
+    Every version staged so far comes back from its spare, whether or not its
+    own tree was already deleted — that is what the spare is for, and it is why
+    the answer is "kept every version" rather than "kept the ones it had not
+    reached yet". What the deletion had already unlinked is gone from the tree
+    it left behind and not from the version, so that scratch shares its files
+    with what was put back and costs no disk while it is installed.
+    """
+    unrestored: list[str] = []
+    debris: list[Path] = []
+    for entry in staged:
+        try:
+            entry.spare.rename(entry.home)
+        except OSError:
+            unrestored.append(
+                f"{entry.name} is whole at {entry.spare} but could not be put back"
+            )
+        residue = _sweep(entry.tree)
+        if residue is not None:
+            debris.append(residue)
+    note = reason if unrestored else f"kept every version: {reason}"
+    for stranded in unrestored:
+        note += f"; {stranded}"
+    if debris:
+        note += "; left scratch at " + ", ".join(str(path) for path in debris)
+    return PruneResult(
+        prefix=root, removed=(), kept=read_installation(root).versions, problem=note
+    )
+
+
+def _drop_spares(staged: list[_Staged]) -> str | None:
+    """Free the disk the removed versions' spares still hold.
+
+    Their versions are gone from the prefix by now, so a spare is the last name
+    a payload has and removing it is what actually reclaims the space. One that
+    will not go costs those bytes until an operator removes it, and nothing
+    else — which is why it is reported rather than raised.
+    """
+    stranded = [_sweep(entry.spare) for entry in staged]
+    left = [str(path) for path in stranded if path is not None]
+    if not left:
+        return None
+    return (
+        "removed every version, but their disk is not all reclaimed: "
+        + ", ".join(left)
+        + " could not be removed; remove by hand"
+    )
+
+
+def _sweep(path: Path) -> Path | None:
+    """Remove one of this prune's own scratch trees; return what is left of it.
+
+    Ignoring errors is right here and only here: by the time a tree is swept it
+    is either the leftovers of a version that has been put back or the spare of
+    one that is gone, so removing as much of it as possible is the only useful
+    thing left to do. :func:`atomic_dir.discard_path` stops at the first error
+    instead, which would strand bytes this is trying to reclaim. What will not go
+    is returned, to be reported by path rather than left silently.
+    """
+    shutil.rmtree(path, ignore_errors=True)
+    return path if os.path.lexists(path) else None
 
 
 def _prunable_versions(installation: Installation, *, keep: int) -> tuple[str, ...]:
@@ -824,22 +876,6 @@ def _running_version(prefix: Path, versions: tuple[str, ...]) -> str | None:
         if target == running or target in running.parents:
             return name
     return None
-
-
-def _restore_staged(staged: list[tuple[str, Path]]) -> list[Path]:
-    """Put moved-aside versions back, returning the ones that would not go.
-
-    Only ever called with trees that are still whole — nothing deleted yet, or
-    proven intact after a deletion refused — so putting one back restores a
-    runnable version rather than a half-emptied one.
-    """
-    stranded: list[Path] = []
-    for name, scratch in staged:
-        try:
-            scratch.rename(scratch.with_name(name))
-        except OSError:
-            stranded.append(scratch)
-    return stranded
 
 
 def install_version(
