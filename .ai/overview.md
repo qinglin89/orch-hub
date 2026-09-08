@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Project Overview
@@ -48,8 +48,9 @@ published to one append-only, globally ordered catalog with stable keys,
 cursor-paged discovery, contained bundle export, and byte-exact per-artifact
 verification reads. Report protocol provenance is the unanimous atomic pair of
 source commit plus deploy-lock payload digest, backed per run by actual deployed
-file checks at launch and observed end; reconciliation heals missed publication
-without re-running the evaluator. The dashboard renders
+file checks at launch and observed end, with the lock schema version published
+beside it only when all runs recorded the same value; reconciliation heals missed
+publication without re-running the evaluator. The dashboard renders
 Claude/Codex subscription
 usage as a separate Overview capacity section over protected `GET /api/usage`:
 Codex is read from local session rollout `rate_limits`; Claude reads a

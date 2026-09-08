@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-06
-verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Project Map
@@ -15,7 +15,7 @@ behavior and rationale stay in the owning doc.
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | registry = truth; fail-closed readiness; mandrel-owned opaque protocol placement; git/housekeeping display-only |
 | Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads |
-| Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v18 evidence packs; unanimous protocol identity; hub-owned artifacts; descriptor containment |
+| Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v19 evidence packs; unanimous protocol identity + optional unanimous lock schema version; hub-owned artifacts; descriptor containment |
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
 | Task semantic evaluator | completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | automatic Layer 1 only; explicit evidence-bounded Layer 2; deadline/reap bound; exact cancel/settle boundary; inert legacy holds |
 | Global evaluation report feed | report_catalog, protocol_provenance, evaluation, semantic, task_store, models, api, cli, web | append-only catalog; seq + report_key identity; reconciliation; verify/repair CLI; consumers decide evolution |

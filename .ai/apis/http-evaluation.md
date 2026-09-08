@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # APIs: HTTP — Task Evaluation
@@ -74,9 +74,11 @@ Cross-cutting auth/app behavior: `http-core.md`.
   run/git/protocol/config provenance availability. Protocol provenance includes
   the atomic `effective_revision` plus `deploy_lock_hash` pair only when every
   contributing run's persisted launch/end snapshot verified the same deployed
-  identity against actual target files at the observed boundaries; otherwise
-  `available:false`, both fields are null, and `detail` explains missing,
-  unverified, legacy, revision-mixed, or payload-mixed evidence.
+  identity against actual target files at the observed boundaries. Its
+  `lock_schema_version` field is the unanimous per-run lock-file schema version,
+  or null when missing/mixed; it is not part of the identity and never gates the
+  pair. Otherwise `available:false`, all three fields are null, and `detail`
+  explains missing, unverified, legacy, revision-mixed, or payload-mixed evidence.
 - Integrity failure: duplicate durable `seq` or `report_key` makes cursor
   traversal ambiguous and returns 500 naming the defect.
 - Auth/disabled behavior: protected; disabled returns 404.

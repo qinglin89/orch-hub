@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-29
-verified-against: b0df3407d9cf9420ddb7e616fa5e3e4b147ac584
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Modules: Global Report Catalog
@@ -47,9 +47,12 @@ published `seq`/`report_key` identities.
 
 Protocol provenance is copied only from the persisted evidence pack's
 fail-closed aggregate into the atomic `provenance.protocol.effective_revision`
-plus `deploy_lock_hash` pair. The catalog never reads current target state or
-invents/completes an identity for legacy revision-only, unverified, or mixed
-runs; append-only legacy lines demote at readback.
+plus `deploy_lock_hash` pair. An optional `lock_schema_version` is copied beside
+the pair when all contributing runs recorded it unanimously; it is bookkeeping,
+not an identity or deployment-mapping generation, and never gates the pair. The
+catalog never reads current target state or invents/completes an identity for
+legacy revision-only, unverified, or mixed runs; append-only legacy lines demote
+at readback, while pre-field lines keep the version null.
 
 `protocol_coverage()` is a lock-free read over catalog lines. It counts distinct
 published `(repo_slug, task_id)` pairs using the newest published evaluation by

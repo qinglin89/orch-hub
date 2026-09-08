@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Features: Semantic Evaluation and Report Feed
@@ -189,10 +189,12 @@ Implemented behavior:
   evaluation-time target source plus publication-time archived state, evaluator
   backend/model/schema, artifact size/hash manifests, run/git provenance, and
   atomic `provenance.protocol.effective_revision` plus `deploy_lock_hash` when
-  the persisted pack's runs share one verified deployed identity. Missing/mixed
-  protocol evidence, legacy revision-only records, and absent config evidence
-  are explicitly unavailable with a reason, never inferred from current target
-  state.
+  the persisted pack's runs share one verified deployed identity. The lock's own
+  `lock_schema_version` rides beside that pair only when every run recorded the
+  same value; it never participates in identity comparison or gating and does
+  not identify deployment-mapping generations. Missing/mixed protocol evidence,
+  legacy revision-only records, and absent config evidence are explicitly
+  unavailable with a reason, never inferred from current target state.
 - Feed cards render the persisted protocol provenance block beside run/git
   provenance; unavailable identity always includes its cataloged reason.
 - `ReportCatalog.protocol_coverage()` counts distinct published

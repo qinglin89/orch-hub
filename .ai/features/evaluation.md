@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Features: Task Evaluation
@@ -57,7 +57,7 @@ Implemented behavior:
   fallback (`topic.md` versus `topic/index.md`). Snapshot roots and child reads
   stay inside the managed repo; document/router reads and git patch output are
   bounded at their producers, and a failed patch read preserves collected docs.
-- `evidence.json` records its shape as schema v18; pre-version and older-schema
+- `evidence.json` records its shape as schema v19; pre-version and older-schema
   packs remain readable as earlier shapes. Schema 16 adds bounded session-entry
   files/fidelity/prefetch-source provenance; schema 17 adds each run's persisted
   `protocol.json`; schema 18 makes the aggregate the atomic source-revision plus
@@ -65,6 +65,9 @@ Implemented behavior:
   verdict. The pair is available only when every contributing run completed a
   stable end check for the same identity; missing, corrupt, unverified,
   revision-mixed, or payload-mixed provenance carries a reason and neither half.
+  Schema 19 additionally publishes `lock_schema_version` only when those runs
+  unanimously recorded it; missing or mixed versions stay null and never affect
+  identity availability, comparison, or gating.
   Earlier stable/revision-only artifacts remain readable but unavailable and are
   never repaired from current target state.
 - Git evidence uses ambient commit-date history reachable from HEAD over the

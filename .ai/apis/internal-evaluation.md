@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # APIs: Internal — Evaluation Chain
@@ -15,7 +15,7 @@ control/log/history/notifier interfaces: `internal-runtime.md`. HTTP surface:
 Input: managed repo, exact task id, and optional evaluation id.
 
 Output: `EvaluationTarget`, `RelatedRun` values, or a bounded `EvidencePack`
-persisted as schema-v18 `evidence.json` under the hub data dir.
+persisted as schema-v19 `evidence.json` under the hub data dir.
 
 Behavior: `EvaluationService` is gated by `Config.evaluation_enabled` and raises
 `EvaluationDisabledError` from every operation when disabled. Target resolution
@@ -29,7 +29,9 @@ effective source-revision/deploy-lock-payload-digest pair only when every
 contributing run durably verified the same identity using its actual-file-backed
 end verdict; legacy, malformed, unverified, revision-mixed, and payload-mixed
 captures remain unavailable with a reason and are never backfilled from the live
-target. Whole entry files
+target. `lock_schema_version` is copied beside an available pair only when every
+run recorded the same value; missing/mixed versions remain null and never affect
+identity comparison or gating. Whole entry files
 drive exact/partial/reconstructed fidelity; complete entry frontmatter is the
 preferred source for session-time prefetch facts and the pack's `.ai/` prefetch
 slice. The reader then uses persisted session ids against the Claude transcript
@@ -200,6 +202,7 @@ and the retention guard treats the same damaged candidate as non-debt.
 uncertain debt is protected from pruning. The catalog publishes
 provenance/artifacts only and never decides protocol evolution. Report protocol
 provenance comes from the persisted pack aggregate and serializes atomically as
-`provenance.protocol.effective_revision` plus `deploy_lock_hash`; current target
+`provenance.protocol.effective_revision` plus `deploy_lock_hash`, with unanimous
+optional `lock_schema_version` bookkeeping beside the pair; current target
 deployment state is never consulted at catalog or API time, and legacy
 revision-only records read back unavailable.

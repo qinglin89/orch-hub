@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-06
-verified-against: 1db8feb95ac7961dbd207fb399b7c0260a52891f
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Architecture: Core Flows
@@ -58,11 +58,13 @@ a producer-bounded best-effort git window, bounded per-session entry task files,
 and a producer-bounded `.ai/` eager/prefetch snapshot plus same-window `.ai/`
 patches, plus bounded ordered session read behavior from persisted ids and the
 configured Claude transcript store, plus each run's persisted deployed-protocol
-snapshot → schema-v18 `evidence.json` under the hub data dir. The pack publishes
+snapshot → schema-v19 `evidence.json` under the hub data dir. The pack publishes
 one effective protocol identity only when every contributing run verified the
 same `(source_git_commit, canonical_payload_sha256)` pair; legacy, malformed,
 unverified, revision-mixed, or payload-mixed provenance is explicitly
-unavailable and never backfilled from current target state. Entry files come from existing log
+unavailable and never backfilled from current target state. The lock's schema
+version is published beside that pair only when every run recorded the same
+value; missing/mixed versions remain null and never affect the identity. Entry files come from existing log
 brackets, live in the run dir, and carry exact/partial/reconstructed fidelity;
 snapshot-derived prefetch declarations
 supersede accumulated task state only when their frontmatter is complete.
@@ -112,7 +114,8 @@ archived → semantic-completion hook or deterministic startup reconciliation �
 one append-only catalog entry with global `seq`, stable opaque `report_key`,
 artifact hashes, evaluator identity, and explicit provenance availability,
 including the atomic `provenance.protocol.effective_revision` plus
-`deploy_lock_hash` copied from the persisted evidence aggregate when available;
+`deploy_lock_hash` copied from the persisted evidence aggregate when available,
+plus its unanimous optional `lock_schema_version` bookkeeping field;
 older revision-only packs/catalog lines read back unavailable rather than being
 completed from later state.
 Reconciliation retries missed/newly eligible reports without a model call; a

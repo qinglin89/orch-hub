@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-08
+verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
 ---
 
 # Modules: Task Evaluation Layers
@@ -21,13 +21,15 @@ pid probing, or writes; `build_evidence` assembles a bounded `EvidencePack`
 from task content, related run records, metadata-only events, persisted session
 summaries and entry-task snapshots, bounded orchestrator-log and `spawn.out`
 excerpts, terminal fields, best-effort git-window commits, and a bounded `.ai/`
-snapshot. Schema-v18 packs keep each entry task file beside its session and each
+snapshot. Schema-v19 packs keep each entry task file beside its session and each
 run's durable schema-2 `protocol.json`; the computed top-level protocol section
 publishes one source-revision/deploy-lock-digest pair only when all runs completed
 actual-file-backed stable end checks for the same identity. Missing, malformed,
 unverified, revision-mixed, and payload-mixed captures remain explicitly
-unavailable. Entry files are capped at 64KB per entry and 192KB per pack, UTF-8
-boundary safe. Only a whole file counts toward
+unavailable. The section also carries `lock_schema_version` only when all
+contributing runs recorded the same value; missing/mixed versions remain null
+without affecting the pair. Entry files are capped at 64KB per entry and 192KB
+per pack, UTF-8 boundary safe. Only a whole file counts toward
 `exact`/`partial`/`reconstructed` fidelity; a kept head remains marked partial
 and is a declaration source only when its frontmatter is complete.
 
