@@ -1864,6 +1864,15 @@ class ReportProvenance:
     only the revision; both are unavailable for their own stated reason — never
     completed or backfilled from the repo's current deployment, which by
     publication time is usually a later one.
+
+    ``protocol_lock_schema_version`` rides beside that pair without joining it:
+    it is the deploy lock's own shape version, published only when every
+    contributing run recorded the same one and absent otherwise, and nothing here
+    or downstream cohorts, ranks, or gates on it. It is deliberately not a
+    generation marker for the *deployment mapping* — a relabel of target paths
+    moves the digest while leaving this version where it was — so it narrows what
+    a stored ``deploy_lock_hash`` compares across only as far as the lock's own
+    shape, and no further.
     """
 
     runs_available: bool = False
@@ -1878,6 +1887,7 @@ class ReportProvenance:
     protocol_available: bool = False
     protocol_revision: str | None = None
     protocol_payload_sha256: str | None = None
+    protocol_lock_schema_version: int | None = None
     protocol_detail: str | None = None
     config_available: bool = False
     config_detail: str | None = None
@@ -1902,6 +1912,7 @@ class ReportProvenance:
                 "available": self.protocol_available,
                 "effective_revision": self.protocol_revision,
                 "deploy_lock_hash": self.protocol_payload_sha256,
+                "lock_schema_version": self.protocol_lock_schema_version,
                 "detail": self.protocol_detail,
             },
             "orchestrator_config": {

@@ -1276,11 +1276,13 @@ def snap(
     payload: str = PAYLOAD,
     stability: str = STABILITY_STABLE,
     available: bool = True,
+    lock_schema_version: int | None = None,
 ) -> ProtocolSnapshot:
     return ProtocolSnapshot(
         available=available,
         source_git_commit=commit if available else None,
         canonical_payload_sha256=payload if available else None,
+        lock_schema_version=lock_schema_version,
         captured_ts=CAPTURED_AT.isoformat(),
         stability=stability,
         checked_ts=(
@@ -1300,6 +1302,60 @@ def test_unanimous_verified_runs_have_an_effective_identity() -> None:
     # this is, and which receipt the digest comes from.
     assert result.to_dict()["effective_revision"] == COMMIT
     assert result.to_dict()["deploy_lock_hash"] == PAYLOAD
+
+
+def test_a_unanimous_lock_schema_version_is_published_beside_the_identity() -> None:
+    result = effective_protocol(
+        [snap(lock_schema_version=2), snap(lock_schema_version=2)]
+    )
+
+    assert result.available is True
+    assert result.lock_schema_version == 2
+    # Beside the pair, under its own name: it says which file's schema it versions
+    # in either place, so it is the one field the wire does not rename.
+    assert result.to_dict()["lock_schema_version"] == 2
+
+
+def test_a_run_that_recorded_no_lock_schema_version_leaves_it_absent() -> None:
+    # `1` is the only value any lock has ever carried, so completing it from the
+    # runs that did record one would make the report assert what the other never
+    # observed. The identity is unaffected — the version is beside it, never a
+    # condition of it.
+    result = effective_protocol([snap(lock_schema_version=1), snap()])
+
+    assert result.available is True
+    assert (result.revision, result.payload_sha256) == (COMMIT, PAYLOAD)
+    assert result.lock_schema_version is None
+
+
+def test_runs_disagreeing_about_the_lock_schema_version_still_publish() -> None:
+    # A lock that bumped its own shape mid-task without changing the protocol
+    # text. The verdict compares the two identity fields and deliberately not this
+    # one, so the pair is unanimous and publishes; only the version, which has no
+    # unanimous answer, drops out.
+    result = effective_protocol(
+        [snap(lock_schema_version=1), snap(lock_schema_version=2)]
+    )
+
+    assert result.available is True
+    assert (result.revision, result.payload_sha256) == (COMMIT, PAYLOAD)
+    assert result.lock_schema_version is None
+
+
+def test_a_set_with_no_identity_publishes_no_lock_schema_version() -> None:
+    # Every run agrees about the version and none verified an identity. A set that
+    # publishes no identity has no lock to state the version of, and a lone
+    # version is not a weaker cohort key a consumer could fall back on.
+    result = effective_protocol(
+        [
+            snap(COMMIT, lock_schema_version=1),
+            snap(OTHER_COMMIT, lock_schema_version=1),
+        ]
+    )
+
+    assert result.available is False
+    assert result.lock_schema_version is None
+    assert result.to_dict()["lock_schema_version"] is None
 
 
 def test_one_unverifiable_run_costs_the_whole_task_its_identity() -> None:
@@ -1400,9 +1456,61 @@ def test_a_task_with_no_runs_has_no_effective_identity() -> None:
 
 
 def test_persisted_aggregates_round_trip() -> None:
-    original = effective_protocol([snap(), snap()])
+    original = effective_protocol(
+        [snap(lock_schema_version=1), snap(lock_schema_version=1)]
+    )
 
     assert effective_protocol_from_dict(original.to_dict()) == original
+
+
+def test_a_persisted_lock_schema_version_is_read_back_beside_the_identity() -> None:
+    result = effective_protocol_from_dict(
+        {
+            "available": True,
+            "effective_revision": COMMIT,
+            "deploy_lock_hash": PAYLOAD,
+            "lock_schema_version": 2,
+        }
+    )
+
+    assert result.available is True
+    assert result.lock_schema_version == 2
+
+
+def test_a_section_from_before_the_lock_schema_version_reads_it_absent() -> None:
+    # Every aggregate written before the field. Absence is the ordinary case here,
+    # not a defect: the identity publishes exactly as it did, and the version it
+    # never recorded stays unknown instead of being filled in with `1`.
+    result = effective_protocol_from_dict(
+        {
+            "available": True,
+            "effective_revision": COMMIT,
+            "deploy_lock_hash": PAYLOAD,
+        }
+    )
+
+    assert result.available is True
+    assert (result.revision, result.payload_sha256) == (COMMIT, PAYLOAD)
+    assert result.lock_schema_version is None
+
+
+def test_a_malformed_lock_schema_version_costs_only_the_version() -> None:
+    # Nothing compares this field, so refusing the section over it would cost a
+    # verified identity to reject bookkeeping. `True` is checked with the strings:
+    # a bool is an int in Python and would otherwise read back as version 1.
+    for value in ("1", 1.0, True, None, [1]):
+        result = effective_protocol_from_dict(
+            {
+                "available": True,
+                "effective_revision": COMMIT,
+                "deploy_lock_hash": PAYLOAD,
+                "lock_schema_version": value,
+            }
+        )
+
+        assert result.available is True, value
+        assert (result.revision, result.payload_sha256) == (COMMIT, PAYLOAD), value
+        assert result.lock_schema_version is None, value
 
 
 def test_an_absent_section_is_distinguished_from_a_damaged_one() -> None:

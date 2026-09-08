@@ -16,6 +16,27 @@ source tree, the digest names the file set taken from it — so publishing one
 alone would let a consumer cohort by a revision whose payload the hub never
 confirmed, which is the same false membership a mixed run set produces.
 
+What a *stored* digest supports is narrower than it looks, and worth stating
+because the value outlives the deploy it came from. ``mandrel`` computes it over
+each deployed file's **target path** and its canonical content, so a release that
+only relabels targets moves every digest without a line of protocol text
+changing (``e650456`` did exactly that, moving the payload to
+``.mandrel/orchestrator/``). The comparisons *this* module makes are unharmed,
+because a relabel is a true answer to the question they ask: did this repo's
+deployment move under this run, or under this task's run set. Both stay inside
+one repo's own window and never compare across reports, so neither needs to know
+which kind of move it was. A consumer comparing digests **across reports** is
+asking a different question — "is this the same protocol text" — and there the
+answer is one-sided:
+equal digests mean the same payload under the same mapping, while unequal ones
+mean only "not the same" and are not evidence that the text changed.
+``lock_schema_version``, published beside the identity, does not close that gap:
+it versions the lock *file's* shape, and stayed ``1`` across that relabel. Two
+digests agreeing on it therefore prove nothing about the mapping that produced
+them. A marker of the mapping's own generation would have to come from
+``mandrel``, and neither receipt carries one — so the hub publishes the version
+it can actually see and claims nothing further.
+
 The lock is **live target state**, and that is the first problem this module
 exists to solve: by the time a task is evaluated, the repo has usually been
 redeployed, so reading the lock at evaluation time would attribute today's
@@ -431,7 +452,9 @@ class ProtocolSnapshot:
     ``source_repo`` and ``lock_schema_version`` are the lock's own bookkeeping,
     carried for audit but deliberately *not* part of the identity: the same commit
     and payload hash mean the same protocol text whatever the lock calls its
-    source.
+    source. The version travels on into the published aggregate as a courtesy to
+    a consumer holding stored digests (:class:`EffectiveProtocol`); doing so
+    changes nothing here, since being published is not being compared.
 
     ``captured_ts`` is when the launch capture ran, ``checked_ts`` when the end
     comparison ran (``None`` while it has not), and ``payload_files`` how many
@@ -623,21 +646,35 @@ class EffectiveProtocol:
     comparison key — and set together or not at all, for the reason the identity
     is atomic in the first place.
 
+    ``lock_schema_version`` is the deploy lock's own shape version, published
+    *beside* the identity and never part of it — the same bookkeeping
+    :class:`ProtocolSnapshot` carries per run, lifted to the set under the same
+    unanimity rule and set only when every contributing run recorded the same
+    value. Nothing compares it, here or downstream: it neither joins the cohort
+    key nor gates anything, so a set can carry an identity and no version, and a
+    version it never had is never supplied. A run captured before the field
+    recorded none, and an unknown version stays unknown — ``1`` is the only value
+    any lock has carried, so a default would make every legacy report assert what
+    it never recorded. It is absent whenever the identity is, because a set that
+    publishes no identity has no lock to state the version of.
+
     ``run_count`` and ``verified_count`` are kept beside the verdict so the shape
     of the failure is machine-readable without parsing ``detail``: ``0/0`` is a
     task with no runs, ``1/3`` an incomplete set, and ``3/3`` with no identity the
     disagreement case.
 
-    Both fields are renamed by :meth:`to_dict`, because a consumer reading
-    ``provenance.protocol`` needs what is redundant inside this record: that the
-    revision is the *set's* and not one run's captured one, and that the digest is
-    the one the deploy lock names for the payload (not a hash of the report, the
-    pack, or the tree the hub walked).
+    The two identity halves are renamed by :meth:`to_dict`, because a consumer
+    reading ``provenance.protocol`` needs what is redundant inside this record:
+    that the revision is the *set's* and not one run's captured one, and that the
+    digest is the one the deploy lock names for the payload (not a hash of the
+    report, the pack, or the tree the hub walked). ``lock_schema_version`` keeps
+    its name, which already says which file's schema it versions in either place.
     """
 
     available: bool
     revision: str | None = None
     payload_sha256: str | None = None
+    lock_schema_version: int | None = None
     run_count: int = 0
     verified_count: int = 0
     detail: str | None = None
@@ -646,7 +683,15 @@ class EffectiveProtocol:
         return {
             "available": self.available,
             "effective_revision": self.revision,
+            # Kept in the published block even though ``mandrel`` — the only
+            # consumer today — decides nothing from it, deriving the deployable
+            # canonical identity locally from ``effective_revision`` instead. Its
+            # feed translation still requires *both* halves and nulls the pair
+            # when either is missing, so dropping the digest as dead weight would
+            # silently null the one field that consumer does read, on every
+            # future report.
             "deploy_lock_hash": self.payload_sha256,
+            "lock_schema_version": self.lock_schema_version,
             "run_count": self.run_count,
             "verified_count": self.verified_count,
             "detail": self.detail,
@@ -685,6 +730,14 @@ def effective_protocol(
     *and* have the verified ones disagree — about the revision, about the payload,
     or about both — and naming only the first would suggest the missing evidence
     is all that stands between the task and an identity.
+
+    ``lock_schema_version`` is carried across the same set under the same
+    unanimity rule, and that is the whole of its treatment: it is additional, not
+    a fourth thing to agree on. A set whose runs recorded two versions — or any
+    run that recorded none — publishes its identity with the version absent,
+    because the identity is what the runs verified and the version is only the
+    lock's account of its own shape. The converse never happens: the version is
+    never a reason a set publishes half an identity, or none.
     """
     total = len(snapshots)
     if not total:
@@ -734,10 +787,21 @@ def effective_protocol(
             verified_count=len(identities),
             detail="; ".join(reasons),
         )
+    # Over the same contributing runs — which, on this path, is every one of them,
+    # since an identity was reached. A run that recorded no version contributes
+    # ``None``, so it either is the whole set (nobody recorded one) or makes the
+    # set plural (someone did not), and both leave the version absent rather than
+    # letting the runs that did record one answer for the one that did not.
+    versions = {
+        snapshot.lock_schema_version
+        for snapshot in snapshots
+        if snapshot is not None and snapshot.verified_identity is not None
+    }
     return EffectiveProtocol(
         available=True,
         revision=distinct[0].source_git_commit,
         payload_sha256=distinct[0].canonical_payload_sha256,
+        lock_schema_version=next(iter(versions)) if len(versions) == 1 else None,
         run_count=total,
         verified_count=len(identities),
     )
@@ -779,6 +843,13 @@ def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
     (:data:`LEGACY_AGGREGATE_DETAIL`). Its revision is *not* completed from
     anything — not the runs, not the repo's current lock — because the digest
     those would supply is not one this record's runs were shown to have used.
+
+    ``lock_schema_version`` is read back only where the identity is, and its
+    absence is never a defect: a section from before the field carries none, and
+    so does one whose runs disagreed about it. A malformed one reads as absent
+    for the same reason it is never a demotion — nothing compares it, so an
+    unreadable version costs a report nothing but the version, and refusing the
+    whole section over it would cost a real identity to reject bookkeeping.
     """
     if data is None:
         return EffectiveProtocol(
@@ -824,6 +895,7 @@ def effective_protocol_from_dict(data: object) -> EffectiveProtocol:
         available=True,
         revision=revision,
         payload_sha256=payload,
+        lock_schema_version=_int_field(data, "lock_schema_version"),
         run_count=runs,
         verified_count=verified,
         detail=_str_field(data, "detail"),

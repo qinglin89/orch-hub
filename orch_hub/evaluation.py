@@ -122,7 +122,7 @@ run manager's ``runs/`` and the intake manager's ``intake/`` trees."""
 EVIDENCE_NAME = "evidence.json"
 """The persisted evidence pack, written in each evaluation's artifact dir."""
 
-EVIDENCE_SCHEMA_VERSION = "18"
+EVIDENCE_SCHEMA_VERSION = "19"
 """Version of the serialized ``evidence.json`` shape, stamped into every pack.
 
 Bumped when the shape gains or changes inputs the downstream evaluators reason
@@ -188,14 +188,20 @@ reads, while a v18 one compared the deployed files against their receipt. So the
 same two runs can be publishable in v17 and unavailable here, and a v17
 ``effective_revision`` is not this section's revision with a field missing: it is
 a weaker claim, and is read back unavailable rather than completed
-(:data:`orch_hub.protocol_provenance.LEGACY_AGGREGATE_DETAIL`). A persisted pack
-with no ``schema_version`` key is version 1 and predates all of it.
+(:data:`orch_hub.protocol_provenance.LEGACY_AGGREGATE_DETAIL`). ``19`` publishes
+the deploy lock's own shape version (``protocol.lock_schema_version``) beside
+that identity, unanimity-gated over the same runs and absent whenever they
+disagreed or any of them recorded none. It is the one bump here that adds only a
+field: the identity, its rule, and every gate are untouched, nothing compares the
+new value, and a v18 section is a v19 one with the version unknown rather than a
+different claim. A persisted pack with no ``schema_version`` key is version 1 and
+predates all of it.
 
 Only *additive* in shape, deliberately: every consumer of a persisted pack reads
 named keys and tolerates absent ones (:mod:`orch_hub.report_catalog`, the
 evaluation detail route), so packs written before a bump stay readable rather
 than needing migration. Additive shape is not additive *meaning*, which is what
-the stamp is for — v18 is the first bump that also narrows what an existing
+the stamp is for — v18 is the one bump so far that also narrows what an existing
 section is allowed to claim.
 """
 
@@ -1036,6 +1042,9 @@ class EvidencePack:
         published report claims about protocol cohort membership. A pack with no
         runs, with a run that recorded no verified identity, or whose runs verified
         different revisions or different payloads carries the reason instead.
+        The deploy lock's own schema version rides along under the same rule and
+        is not part of the key; it is absent whenever the runs disagreed about it
+        or any of them recorded none.
         """
         return effective_protocol([run.protocol for run in self.runs])
 

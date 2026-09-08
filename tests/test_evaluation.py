@@ -1711,16 +1711,20 @@ def protocol_artifact(
     payload: str = PAYLOAD,
     stability: str = STABILITY_STABLE,
     available: bool = True,
+    lock_schema_version: int | None = 1,
     detail: str | None = None,
 ) -> dict:
-    """One run's persisted capture, in the shape ``protocol.json`` holds."""
-    return {
+    """One run's persisted capture, in the shape ``protocol.json`` holds.
+
+    ``lock_schema_version=None`` writes no such key, which is exactly how a
+    capture taken before the field looks on disk.
+    """
+    artifact = {
         "schema_version": PROTOCOL_SCHEMA_VERSION,
         "available": available,
         "source_git_commit": commit if available else None,
         "canonical_payload_sha256": payload if available else None,
         "source_repo": "mandrel",
-        "lock_schema_version": 1,
         "captured_ts": "2026-07-22T09:00:00+00:00",
         "stability": stability,
         "checked_ts": (
@@ -1731,6 +1735,9 @@ def protocol_artifact(
         "payload_files": 117 if stability == STABILITY_STABLE else None,
         "detail": detail,
     }
+    if lock_schema_version is not None:
+        artifact["lock_schema_version"] = lock_schema_version
+    return artifact
 
 
 def build_with_protocols(tmp_path, *protocols: dict | str | None):
@@ -1772,6 +1779,9 @@ def test_pack_publishes_the_identity_every_run_verified(tmp_path):
         "available": True,
         "effective_revision": COMMIT_A,
         "deploy_lock_hash": PAYLOAD,
+        # Beside the identity, not part of it: the lock's own shape version, which
+        # both runs recorded the same.
+        "lock_schema_version": 1,
         "run_count": 2,
         "verified_count": 2,
         "detail": None,
@@ -1780,6 +1790,55 @@ def test_pack_publishes_the_identity_every_run_verified(tmp_path):
     assert data["runs"][0]["protocol"]["stability"] == STABILITY_STABLE
     assert data["summary"]["protocol_available"] is True
     assert data["summary"]["protocol_verified_runs"] == 2
+
+
+def test_pack_publishes_no_lock_schema_version_a_run_never_recorded(tmp_path):
+    # One run captured before the field existed. `1` is the only value any lock
+    # has ever carried, so completing it from the run that did record one would
+    # make the report assert a version the other run never observed. The identity
+    # is untouched: the version is beside it, never a condition of it.
+    pack = build_with_protocols(
+        tmp_path, protocol_artifact(), protocol_artifact(lock_schema_version=None)
+    )
+
+    assert pack.protocol.available is True
+    assert (pack.protocol.revision, pack.protocol.payload_sha256) == (
+        COMMIT_A,
+        PAYLOAD,
+    )
+    assert pack.protocol.lock_schema_version is None
+    assert pack.to_dict()["protocol"]["lock_schema_version"] is None
+
+
+def test_pack_publishes_no_lock_schema_version_when_runs_disagree_about_it(tmp_path):
+    # A lock that bumped its own shape mid-task without changing the protocol
+    # text: the identity is unanimous and publishes, because the verdict compares
+    # the identity fields and deliberately not this one. Two versions have no
+    # unanimous answer, so the version alone drops out.
+    pack = build_with_protocols(
+        tmp_path,
+        protocol_artifact(lock_schema_version=1),
+        protocol_artifact(lock_schema_version=2),
+    )
+
+    assert pack.protocol.available is True
+    assert pack.protocol.revision == COMMIT_A
+    assert pack.protocol.lock_schema_version is None
+
+
+def test_pack_publishes_no_lock_schema_version_without_an_identity(tmp_path):
+    # Every run recorded the same version, and none of them verified an identity.
+    # The section publishes nothing at all: a set with no identity has no lock to
+    # state the version of, and a lone version is not a weaker cohort key.
+    pack = build_with_protocols(
+        tmp_path,
+        protocol_artifact(stability=STABILITY_UNVERIFIED),
+        protocol_artifact(stability=STABILITY_UNVERIFIED),
+    )
+
+    assert pack.protocol.available is False
+    assert pack.protocol.lock_schema_version is None
+    assert pack.to_dict()["protocol"]["lock_schema_version"] is None
 
 
 def test_pack_reports_a_run_without_a_capture_as_missing_not_absent(tmp_path):

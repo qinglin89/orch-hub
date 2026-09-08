@@ -625,6 +625,27 @@ hub cannot show the sessions read, and the digest alone names bytes with no plac
 in any history; a consumer cohorting by half of it would group reports the hub
 never confirmed belong together.
 
+A third field rides beside the pair without joining it:
+
+- `lock_schema_version` — the shape version `.ai-deploy-lock.json` states for
+  itself. Published only when **every** contributing run recorded the same one,
+  and `null` otherwise, including when a run captured before the field recorded
+  none: `1` is the only value any lock has ever carried, so defaulting would make
+  a report assert a version it never observed. Nothing in the hub compares,
+  cohorts, or gates on it — a set of runs can disagree about the version and
+  still publish one identity, because the verdict compares the identity fields
+  and deliberately not this one.
+
+It is **not** a generation marker for the deployment *mapping*, and it should not
+be read as one. `deploy_lock_hash` digests each deployed file's target path along
+with its canonical content, so a release that only relabels targets — `e650456`
+moved the payload to `.mandrel/orchestrator/` — moves every stored digest while
+`schema_version` stays where it was. Comparing two stored digests is therefore
+one-sided: equal means the same payload under the same mapping, unequal means
+only "not the same" and is not evidence the protocol text changed. Agreeing on
+`lock_schema_version` does not narrow that. A real mapping generation would have
+to come from mandrel, and neither receipt carries one.
+
 Three distinct things stand behind that pair, and they are worth keeping apart
 when reading a `detail`:
 
@@ -659,7 +680,7 @@ when reading a `detail`:
    several runs worked, so the pair is published only when **every** contributing
    run verified **one and the same** pair.
 
-Anything else is `available: false` with both fields `null` and a `detail`
+Anything else is `available: false` with every field above `null` and a `detail`
 naming which case it was: a run from before the hub captured this, a deployment
 that moved mid-run, deployed files that no longer matched their receipt, a run
 whose end the hub was not up to observe, runs that span a redeployment, or runs

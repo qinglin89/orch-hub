@@ -4651,6 +4651,7 @@ def test_report_feed_serializes_the_effective_protocol_identity(tmp_path, monkey
             "available": True,
             "effective_revision": revision,
             "deploy_lock_hash": payload,
+            "lock_schema_version": 1,
             "run_count": 2,
             "verified_count": 2,
             "detail": None,
@@ -4663,6 +4664,9 @@ def test_report_feed_serializes_the_effective_protocol_identity(tmp_path, monkey
         "available": True,
         "effective_revision": revision,
         "deploy_lock_hash": payload,
+        # Beside the pair, never part of it: the deploy lock's own shape version,
+        # which the contributing runs agreed on. Nothing cohorts by it.
+        "lock_schema_version": 1,
         "detail": None,
     }
 

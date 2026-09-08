@@ -201,6 +201,7 @@ def protocol_section(
     available: bool = True,
     runs: int = 1,
     verified: int | None = None,
+    lock_schema_version: object = _OMIT,
     detail: str | None = None,
 ) -> dict:
     """A pack's protocol section, in the shape `EffectiveProtocol` serializes.
@@ -208,6 +209,9 @@ def protocol_section(
     Written literally rather than through the producer for the same reason the
     artifacts are: the catalog's contract is over the bytes on disk, so the tests
     have to be able to hand it a section the evidence layer would never emit.
+
+    ``lock_schema_version`` defaults to omitted, which is every pack written
+    before the field — the shape the catalog reads most of.
     """
     section = {
         "available": available,
@@ -220,6 +224,8 @@ def protocol_section(
         # Absent, not null: a pack written before the identity became a pair has
         # no such key at all, which is what the legacy read has to recognize.
         section["deploy_lock_hash"] = payload
+    if lock_schema_version is not _OMIT:
+        section["lock_schema_version"] = lock_schema_version
     return section
 
 
@@ -717,8 +723,67 @@ def test_entry_publishes_the_protocol_identity_its_runs_verified(tmp_path):
         "available": True,
         "effective_revision": PROTOCOL_COMMIT,
         "deploy_lock_hash": PROTOCOL_PAYLOAD,
+        # A pack from before the field: the version is stated absent rather than
+        # filled in with the only value a lock has ever carried.
+        "lock_schema_version": None,
         "detail": None,
     }
+
+
+def test_entry_carries_the_lock_schema_version_beside_the_identity(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(
+        config,
+        run_ids=("r1", "r2"),
+        protocol=protocol_section(runs=2, lock_schema_version=2),
+    )
+
+    entry = catalog(config).reconcile()[0]
+
+    # Published beside the pair, read from the pack rather than re-derived, and
+    # not part of what a consumer cohorts by. It survives the append-only line as
+    # its own field, so a stored digest can be read with the lock generation that
+    # produced it.
+    assert entry.provenance.protocol_lock_schema_version == 2
+    assert entry.to_dict()["provenance"]["protocol"]["lock_schema_version"] == 2
+    assert catalog(config).entries()[0] == entry
+
+
+def test_a_line_from_before_the_lock_schema_version_reads_back_absent(tmp_path):
+    config = cfg(tmp_path)
+    write_eval(config, protocol=protocol_section(lock_schema_version=1))
+    published = catalog(config).reconcile()[0]
+
+    # Every line a running hub appended before this field. The catalog is
+    # append-only and never migrated, so it has to read back unchanged: the
+    # identity still publishes, and the version it never recorded stays unknown
+    # rather than being filled in with the only value any lock has carried.
+    path = config.data_dir / CATALOG_SUBDIR / CATALOG_NAME
+    line = published.to_dict()
+    del line["provenance"]["protocol"]["lock_schema_version"]
+    path.write_text(json.dumps(line) + "\n", encoding="utf-8")
+
+    entry = catalog(config).entries()[0]
+
+    assert entry.provenance.protocol_available is True
+    assert entry.provenance.protocol_revision == PROTOCOL_COMMIT
+    assert entry.provenance.protocol_payload_sha256 == PROTOCOL_PAYLOAD
+    assert entry.provenance.protocol_lock_schema_version is None
+
+
+def test_a_malformed_lock_schema_version_costs_the_entry_nothing_else(tmp_path):
+    config = cfg(tmp_path)
+    # A rewritten pack. Nothing compares this field, so refusing the whole section
+    # over it would cost a real identity to reject bookkeeping: the version drops
+    # to absent and the pair publishes exactly as it would have.
+    write_eval(config, protocol=protocol_section(lock_schema_version="1"))
+
+    entry = catalog(config).reconcile()[0]
+
+    assert entry.provenance.protocol_available is True
+    assert entry.provenance.protocol_revision == PROTOCOL_COMMIT
+    assert entry.provenance.protocol_lock_schema_version is None
+    assert entry.provenance.protocol_detail is None
 
 
 def test_entry_carries_the_packs_reason_when_no_identity_is_effective(tmp_path):
