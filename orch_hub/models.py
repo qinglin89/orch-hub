@@ -851,6 +851,14 @@ class EffectiveConfig:
     evidence that the deployment understands ``--dev-profile``/
     ``--review-profile``.
 
+    ``review_enabled`` is the resolved review on/off run axis (schema 4). It is
+    read, never chosen: the hub sends no review flag and gates nothing on the
+    value — a review-off run is a cost decision its operator made in the
+    orchestrator's own configuration. A payload without the field is a schema-3
+    deployment that has no switch, and resolves to ``True``
+    (:func:`orch_hub.orch_config._review_enabled`), so the value is always a real
+    boolean here and "review happens" needs no absent-field handling downstream.
+
     ``options`` is the orchestrator's selection-independent launch catalog — what
     any launch MAY select, beside the values this one DID select — normalized by
     :func:`orch_hub.orch_config.parse_option_catalog` to the subset a caller
@@ -864,6 +872,7 @@ class EffectiveConfig:
     """
 
     schema_version: int
+    review_enabled: bool
     config_revision: str | None
     effective_revision: str | None
     profile: str
@@ -887,6 +896,7 @@ class EffectiveConfig:
     def to_dict(self) -> dict:
         return {
             "schema_version": self.schema_version,
+            "review_enabled": self.review_enabled,
             "config_revision": self.config_revision,
             "effective_revision": self.effective_revision,
             "profile": self.profile,
@@ -1314,8 +1324,15 @@ class ProtocolMetrics:
     partition them (a heading that does not parse is malformed).
     ``uncovered_work_entries`` are work session ids with no ``review of <id>``
     entry; ``pass_verdict_count``/``changes_requested_count`` tally review
-    verdicts; ``remediation_count`` is work entries whose most recent preceding
-    review requested changes (the taskfile remediation predicate), and
+    verdicts, and ``review_skipped_count`` tallies the review entries that
+    declared *no* verdict — the orchestrator-written record a review-off run
+    leaves for each work session, so a non-zero count reads "review was disabled
+    for that many sessions". It is a coverage fact, not a defect: a review-off
+    run is a configuration its operator chose, and the count is deliberately a
+    count rather than a task-level boolean, because a task whose configuration
+    changed mid-flight is genuinely part reviewed (compare against
+    ``review_entry_count``). ``remediation_count`` is work entries whose most
+    recent preceding review requested changes (the taskfile remediation predicate), and
     ``advancement_entry_count`` is the complementary partition — the work entries
     that advanced planned scope rather than converging on review findings, so
     ``remediation_count + advancement_entry_count == work_entry_count``;
@@ -1357,6 +1374,7 @@ class ProtocolMetrics:
     uncovered_work_entries: tuple[str, ...]
     pass_verdict_count: int
     changes_requested_count: int
+    review_skipped_count: int
     remediation_count: int
     advancement_entry_count: int
     blocked_entry_count: int
@@ -1395,6 +1413,7 @@ class ProtocolMetrics:
             "uncovered_work_entries": list(self.uncovered_work_entries),
             "pass_verdict_count": self.pass_verdict_count,
             "changes_requested_count": self.changes_requested_count,
+            "review_skipped_count": self.review_skipped_count,
             "remediation_count": self.remediation_count,
             "advancement_entry_count": self.advancement_entry_count,
             "blocked_entry_count": self.blocked_entry_count,

@@ -257,11 +257,13 @@ def test_query_round_trips_the_effective_config_shape(tmp_path):
     # to_dict reproduces the orchestrator's known fields (typed, hub-owned shape)
     # plus the hub-owned capability marker the UI gates split selection on. The
     # option catalog is the one projected field: what a caller renders, not the
-    # whole published object.
+    # whole published object. `review_enabled` is the schema-3 sample's derived
+    # value: no switch existed, so review ran.
     assert config.to_dict() == {
         **SAMPLE,
         "split_profiles": True,
         "options": CATALOG_PROJECTION,
+        "review_enabled": True,
     }
 
 
@@ -339,6 +341,78 @@ def test_a_target_behind_the_hub_is_told_to_redeploy_it(tmp_path):
     message = str(exc.value)
     assert "redeploy the orchestrator payload" in message
     assert "update orch-hub" not in message
+
+
+# -- schema range and the review switch ---------------------------------------
+
+
+def test_both_wave_schema_versions_parse(tmp_path):
+    """The pin is two versions wide for the duration of the redeploy wave.
+
+    A canonical schema bump reaches a portfolio one redeploy at a time, and the
+    wave cannot be ordered away: a target on 4 cannot launch until the hub accepts
+    4, so mandrel cannot redeploy first. Either single pin therefore stops half
+    the portfolio launching.
+    """
+    repo = make_repo(tmp_path)
+
+    for version in (3, 4):
+        runner = FakeRunner(stdout=_json({**SAMPLE, "schema_version": version}))
+        assert query_effective_config(repo, runner=runner).schema_version == version
+
+
+def test_unsupported_schema_names_every_accepted_version(tmp_path):
+    repo = make_repo(tmp_path)
+    runner = FakeRunner(stdout=_json({**SAMPLE, "schema_version": 2}))
+
+    with pytest.raises(OrchestratorConfigError) as exc:
+        query_effective_config(repo, runner=runner)
+    message = str(exc.value)
+    assert "this hub supports 3, 4" in message
+    # Still direction-aware: 2 is below the range, so the remedy is the target's.
+    assert "redeploy the orchestrator payload" in message
+
+
+def test_review_off_config_carries_the_switch(tmp_path):
+    """The schema-4 review axis reaches the hub-owned config shape verbatim.
+
+    Read, never chosen: the hub sends no review flag and gates nothing on the
+    value. Carrying it is what lets a run's launch config say the run had no
+    review, instead of showing a review profile for sessions that never ran.
+    """
+    repo = make_repo(tmp_path)
+    runner = FakeRunner(
+        stdout=_json({**SAMPLE, "schema_version": 4, "review_enabled": False})
+    )
+
+    config = query_effective_config(repo, runner=runner)
+
+    assert config.review_enabled is False
+    assert config.to_dict()["review_enabled"] is False
+    # A boolean adds no vocabulary, so it must not appear in the option catalog.
+    assert config.options == CATALOG_PROJECTION
+
+
+def test_absent_review_switch_reads_as_review_enabled():
+    """Additive like `profiles`: absence is a deployment that has no switch.
+
+    Deliberately tolerant rather than required-on-4. Requiring it would turn a
+    field-name drift into "no redeployed target can launch" — precisely the
+    outcome the two-version pin exists to prevent — where the tolerant reading
+    costs one mislabelled display row until the name is corrected.
+    """
+    schema_4 = {**SAMPLE, "schema_version": 4}
+    assert "review_enabled" not in schema_4
+
+    assert parse_effective_config(schema_4).review_enabled is True
+    assert parse_effective_config(SAMPLE).review_enabled is True
+
+
+def test_non_boolean_review_switch_fails_closed():
+    # Present but not a real boolean is a malformed response, not a truthy "off".
+    with pytest.raises(OrchestratorConfigError) as exc:
+        parse_effective_config({**SAMPLE, "schema_version": 4, "review_enabled": "off"})
+    assert "review_enabled" in str(exc.value)
 
 
 def test_parse_missing_backend_raises():

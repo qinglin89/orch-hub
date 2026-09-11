@@ -907,6 +907,148 @@ def test_protocol_pass_final_review_reaching_completed_stays_legal():
     assert report_of(COMPLETED, source=SOURCE_ARCHIVED).protocol.illegal_transitions == ()
 
 
+# -- protocol score: the review-off shape --------------------------------------
+
+# A completed task run with review disabled (mandrel
+# `2026-08-17-optional-review-session`). No review session ran; the orchestrator
+# accounted for each work session with a skipped record stating the absence
+# instead of a verdict, and the final gate's `final_review -> completed` edge
+# rests on the dev session's own completeness claim. Written to the shape that
+# task's body states — if its session-1 lands a different string, this fixture is
+# what gets corrected, before any target is redeployed.
+#
+# The skipped records carry no Group/Findings (there was no judgment to group or
+# report) and no Open (the caller writes no flow state into the task file).
+REVIEW_OFF = """---
+id: 2026-07-22-task-static-quality-metrics
+status: completed
+session-est: 2/2
+blockers: []
+prefetch: [.ai/modules/core.md]
+claimed-by: sid-b@2026-07-22T10:00:00Z
+---
+
+# Review-off task
+
+## Goal
+Compute metrics.
+
+## Scope
+- one
+
+## Acceptance
+- done
+
+## Session log
+
+### 2026-07-22 / sid-a / (pending → in_progress)
+- Done: first slice
+- Next: session-2
+- Open: nothing
+
+### 2026-07-22 / orch-1 / review of sid-a / (in_progress → in_progress)
+- Verdict: none — review disabled for this run
+
+### 2026-07-22 / sid-b / (in_progress → final_review)
+- Done: finished scope
+- Next: none
+- Open: none
+
+### 2026-07-22 / orch-2 / review of sid-b / (final_review → completed)
+- Verdict: none — review disabled for this run
+"""
+
+
+def test_review_off_task_scores_no_protocol_violation():
+    # The whole point: a review-off run is a cost decision its operator made in
+    # the orchestrator's own configuration. Charging it 0.20 per skipped record
+    # reported a wall of violations that are not violations.
+    report = report_of(REVIEW_OFF, source=SOURCE_ARCHIVED)
+    pm = report.protocol
+
+    assert pm.illegal_transitions == ()
+    assert pm.transition_continuity_ok and pm.final_status_matches
+    # The dev entry that set final_review owes `Open: none` and carries it; the
+    # trailing skipped record is stepped over rather than read as an omission.
+    assert pm.final_open_none is True
+    sp = score(report, SCORE_PROTOCOL)
+    assert sp.score == 1.0 and sp.warnings == ()
+
+
+def test_review_off_task_reports_review_as_disabled():
+    # Reported as a coverage fact, read from the record alone — never from the
+    # run's effective config, which a task with no hub run does not have.
+    pm = report_of(REVIEW_OFF, source=SOURCE_ARCHIVED).protocol
+
+    assert pm.review_skipped_count == 2
+    assert pm.review_entry_count == 2
+    assert pm.pass_verdict_count == 0 and pm.changes_requested_count == 0
+
+
+def test_review_off_skipped_records_cover_their_work_sessions():
+    # Coverage asks whether a work session was accounted for, not whether it was
+    # judged — and a skipped record that cost a handoff penalty for its missing
+    # Group/Findings would just move the same false violation to another axis.
+    report = report_of(REVIEW_OFF, source=SOURCE_ARCHIVED)
+    pm = report.protocol
+
+    assert pm.uncovered_work_entries == ()
+    assert pm.incomplete_entries == ()
+    assert score(report, SCORE_HANDOFF).score == 1.0
+
+
+def test_review_off_work_sessions_are_advancement_not_remediation():
+    # A declared absence is not `changes-requested`, so the work that follows a
+    # skipped record advances planned scope and is charged to the estimate.
+    report = report_of(REVIEW_OFF, source=SOURCE_ARCHIVED)
+
+    assert report.protocol.remediation_count == 0
+    assert report.protocol.advancement_entry_count == 2
+    assert score(report, SCORE_ESTIMATE).score == 1.0
+
+
+def test_skipped_verdict_is_matched_on_its_leading_token():
+    # The absence is the machine fact; the rest of the line is a human-readable
+    # reason. Pinning the exact sentence would re-create the false-violation wall
+    # the first time it is reworded.
+    reworded = REVIEW_OFF.replace(
+        "- Verdict: none — review disabled for this run",
+        "- Verdict: none - no review session ran (review off)",
+    )
+    assert report_of(reworded, source=SOURCE_ARCHIVED).protocol.illegal_transitions == ()
+
+
+def test_review_enabled_verdict_rules_are_untouched():
+    # The provision is narrow: only a declared absence completes beside a pass.
+    # A changes-requested final gate still holds the status, and a task whose
+    # final gate claims neither is still an illegal transition.
+    judged_gate = REVIEW_OFF.replace(
+        "### 2026-07-22 / orch-2 / review of sid-b / (final_review → completed)\n"
+        "- Verdict: none — review disabled for this run",
+        "### 2026-07-22 / orch-2 / review of sid-b / (final_review → completed)\n"
+        "- Verdict: changes-requested\n- Group: sid-b\n- Findings: one",
+    )
+    pm = report_of(judged_gate, source=SOURCE_ARCHIVED).protocol
+
+    assert "final_review -> completed" in pm.illegal_transitions
+    assert pm.review_skipped_count == 1
+
+
+def test_a_review_entry_with_no_verdict_line_is_still_incomplete():
+    # `review_skipped` needs a Verdict line that DECLARES the absence. An entry
+    # that simply omits the field claims nothing, and is the degraded review entry
+    # the existing rule already catches.
+    silent = REVIEW_OFF.replace(
+        "### 2026-07-22 / orch-1 / review of sid-a / (in_progress → in_progress)\n"
+        "- Verdict: none — review disabled for this run\n",
+        "### 2026-07-22 / orch-1 / review of sid-a / (in_progress → in_progress)\n",
+    )
+    pm = report_of(silent, source=SOURCE_ARCHIVED).protocol
+
+    assert pm.review_skipped_count == 1
+    assert "orch-1" in pm.incomplete_entries
+
+
 # -- protocol score: the collapsed first-session edge --------------------------
 
 # A task finished in its first dev session: the session found the task `pending`,

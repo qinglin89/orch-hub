@@ -1314,11 +1314,14 @@ def test_orchestrator_config_returns_effective_config(tmp_path, monkeypatch):
     )
     assert resp.status_code == 200
     # The hub-owned capability marker rides along with the orchestrator's fields,
-    # and the option catalog reaches the caller keyed by backend/role/agent.
+    # and the option catalog reaches the caller keyed by backend/role/agent. The
+    # schema-3 sample predates the review switch, so the resolved value is the
+    # axis's default: review ran.
     assert resp.json() == {
         **SAMPLE_CONFIG,
         "split_profiles": True,
         "options": SAMPLE_CONFIG_OPTIONS,
+        "review_enabled": True,
     }
     assert resp.json()["options"]["agents"]["cc-codex"]["review"]["codex"]["efforts"] == [
         "none",

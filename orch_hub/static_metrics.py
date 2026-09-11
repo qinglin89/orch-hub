@@ -143,7 +143,7 @@ STATIC_METRICS_NAME = "static_metrics.json"
 """The persisted static-metrics report, written beside ``evidence.json`` in the
 evaluation's artifact dir (one dir per evaluation)."""
 
-STATIC_SCHEMA_VERSION = "4"
+STATIC_SCHEMA_VERSION = "5"
 """Version of the ``static_metrics.json`` shape, stamped into every report.
 
 The counterpart of :data:`orch_hub.evaluation.EVIDENCE_SCHEMA_VERSION` for this
@@ -170,7 +170,18 @@ first session no longer carries an illegal-transition penalty), and the estimate
 axis counts dev advancement sessions rather than all work sessions (so
 review-driven remediation no longer reads as an overrun). Both corrections raise
 scores for well-run tasks, which is exactly why the cohort must be separable: a
-population mixing v3 and v4 would read the fix as tasks having improved."""
+population mixing v3 and v4 would read the fix as tasks having improved.
+
+``5`` keeps the v4 score set and adds the review-off provision: a skipped review
+record is a legal review entry carrying no verdict, its ``final_review ->
+completed`` edge is legal, and ``review_skipped_count`` reports how many work
+sessions went unreviewed *by configuration*. The stamp matters even though no v4
+report can score a review-off task differently — the record shape did not exist
+while v4 was current — because it is what tells a consumer whether a report could
+have expressed disabled review at all. Reading an absent
+``review_skipped_count`` as "review was enabled" is the misreading this version
+exists to prevent, and review coverage is exactly the kind of thing the published
+report feed is aggregated for."""
 
 # -- score axes ---------------------------------------------------------------
 SCORE_PROTOCOL = "protocol"
@@ -644,8 +655,30 @@ _FIELD_LINE = re.compile(r"^-\s+(?P<name>[A-Za-z][A-Za-z0-9-]*)\s*:\s*(?P<value>
 
 _WORK_REQUIRED = frozenset({"done", "next", "open"})
 _REVIEW_REQUIRED = frozenset({"verdict", "group", "findings"})
+_REVIEW_SKIPPED_REQUIRED = frozenset({"verdict"})
+"""What a *skipped* review record must carry. ``Group``/``Findings`` are review
+judgment: a convergence group that was reviewed, and what the review found. A
+record that declares no judgment has neither to state, so charging it for their
+absence would penalise a review-off run for the one thing it is honest about."""
+
 _VERDICT_CHANGES = "changes-requested"
 _VERDICT_PASS = "pass"
+_VERDICT_NONE = "none"
+"""The declared-absence verdict head: the orchestrator-written record a review-off
+run leaves in place of a review session (mandrel
+``2026-08-17-optional-review-session``), e.g. ``Verdict: none — review disabled
+for this run``.
+
+Matched on the leading token, not the whole line. The absence is the machine
+fact; the rest of the line is the human-readable reason, and pinning the exact
+wording here would re-create the false-violation wall this provision removes the
+first time that sentence is reworded. ``none`` is not otherwise a verdict — the
+review contract's vocabulary is ``pass``/``changes-requested`` — so the token
+cannot collide with a judgment."""
+
+_VERDICT_HEAD_SPLIT = re.compile(r"[\s\u2014]")
+"""Splits a verdict at its first space or em dash. Not at ``-``: the ASCII hyphen
+is inside ``changes-requested``."""
 
 
 @dataclass(frozen=True)
@@ -666,6 +699,21 @@ class _LogEntry:
     def is_review(self) -> bool:
         return self.reviews is not None
 
+    @property
+    def review_skipped(self) -> bool:
+        """True when this is a review entry whose ``Verdict`` declares an absence
+        of judgment rather than a judgment — the record a review-off run leaves
+        for a work session (:data:`_VERDICT_NONE`).
+
+        Read from the record alone, never from the run's effective config. The
+        session log is what a static check can verify, it is what a human reading
+        the archive sees, and it is the only source available for a task with no
+        hub run at all.
+        """
+        if not self.is_review or self.verdict is None:
+            return False
+        return _VERDICT_HEAD_SPLIT.split(self.verdict, maxsplit=1)[0] == _VERDICT_NONE
+
 
 @dataclass(frozen=True)
 class _LogFacts:
@@ -678,6 +726,7 @@ class _LogFacts:
     uncovered_work_entries: tuple[str, ...]
     pass_verdict_count: int
     changes_requested_count: int
+    review_skipped_count: int
     remediation_count: int
     advancement_entry_count: int
     blocked_entry_count: int
@@ -741,6 +790,7 @@ def _parse_protocol(target: EvaluationTarget) -> ProtocolMetrics:
         uncovered_work_entries=facts.uncovered_work_entries,
         pass_verdict_count=facts.pass_verdict_count,
         changes_requested_count=facts.changes_requested_count,
+        review_skipped_count=facts.review_skipped_count,
         remediation_count=facts.remediation_count,
         advancement_entry_count=facts.advancement_entry_count,
         blocked_entry_count=facts.blocked_entry_count,
@@ -781,6 +831,7 @@ def _empty_protocol() -> ProtocolMetrics:
         uncovered_work_entries=(),
         pass_verdict_count=0,
         changes_requested_count=0,
+        review_skipped_count=0,
         remediation_count=0,
         advancement_entry_count=0,
         blocked_entry_count=0,
@@ -840,7 +891,19 @@ def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFact
     # task's final entry resolves every forward-looking item, i.e. `Open: none`).
     # Read strictly from the last entry — an earlier entry's `Open: none` must not
     # stand in for a final entry that omits it, and a missing Open is not `none`.
-    final_open_none = bool(entries) and entries[-1].open_value == "none"
+    #
+    # A trailing *skipped* review record is the one entry stepped over, and not as
+    # a relaxation: it is the caller's mechanical account of a disabled review, and
+    # the caller writes no flow state into the task file, so the record has no Open
+    # of its own to read. Under review-off it is always the last entry, so reading
+    # it literally would charge every review-off task for an omission the protocol
+    # requires. The claim still has to come from a session — the dev entry that set
+    # `final_review`, which owes `Open: none` exactly as before.
+    claimant = next(
+        (e for e in reversed(entries) if not e.review_skipped),
+        entries[-1] if entries else None,
+    )
+    final_open_none = claimant is not None and claimant.open_value == "none"
 
     return _LogFacts(
         entry_count=len(entries),
@@ -852,6 +915,7 @@ def _aggregate_entries(entries: list[_LogEntry], status: str | None) -> _LogFact
         changes_requested_count=sum(
             1 for e in review if e.verdict == _VERDICT_CHANGES
         ),
+        review_skipped_count=sum(1 for e in review if e.review_skipped),
         remediation_count=remediation,
         advancement_entry_count=advancement,
         blocked_entry_count=sum(1 for e in wellformed if e.after == "blocked"),
@@ -929,8 +993,14 @@ def _parse_one_entry(lines: list[str]) -> _LogEntry:
 
 def _entry_fields_ok(entry: _LogEntry) -> bool:
     """True when a well-formed entry carries its required fields (Done/Next/Open
-    for work; Verdict/Group/Findings for review)."""
-    required = _REVIEW_REQUIRED if entry.is_review else _WORK_REQUIRED
+    for work; Verdict/Group/Findings for review, or Verdict alone for a skipped
+    review record — see :data:`_REVIEW_SKIPPED_REQUIRED`)."""
+    if entry.review_skipped:
+        required = _REVIEW_SKIPPED_REQUIRED
+    elif entry.is_review:
+        required = _REVIEW_REQUIRED
+    else:
+        required = _WORK_REQUIRED
     return required <= entry.field_names
 
 
@@ -958,7 +1028,15 @@ def _transition_legal(entry: _LogEntry) -> bool:
     ``changes-requested`` leaves status at ``final_review`` — which the raw status
     pair cannot express. So a changes-requested review recorded as
     ``final_review -> completed`` is caught here, where a pair-only check passed it
-    (the pair is structurally in :data:`_LEGAL_TRANSITIONS`)."""
+    (the pair is structurally in :data:`_LEGAL_TRANSITIONS`).
+
+    A **skipped** review record completes too (:attr:`_LogEntry.review_skipped`).
+    With review disabled for the run no session judged the work, so the forward
+    edge rests on the dev session's own completeness claim — a different thing
+    from a pass, and recorded as such rather than as a marked pass only insiders
+    could read correctly. Requiring a ``pass`` there charged every review-off task
+    0.20 for a transition the protocol allows, turning an operator's cost decision
+    into a wall of violations that are not violations."""
     before, after = entry.before, entry.after
     if after == "blocked":
         return before in LEGAL_STATUSES
@@ -968,7 +1046,8 @@ def _transition_legal(entry: _LogEntry) -> bool:
         return False  # only a dev session collapses the claim into completion
     if entry.is_review and before == "final_review":
         if after == "completed":
-            return entry.verdict == _VERDICT_PASS  # only a pass completes
+            # A pass completes; so does a skipped record (review off).
+            return entry.verdict == _VERDICT_PASS or entry.review_skipped
         if after == "final_review":
             return entry.verdict != _VERDICT_PASS  # a pass must complete, not hold
         # after == "in_progress": the documented "final_review set in error"
@@ -1168,7 +1247,15 @@ def _score_reliability(rm: RunMetrics) -> ScoreComponent:
 
 def _score_handoff(pm: ProtocolMetrics) -> ScoreComponent:
     """Session-log entry structure: malformed/incomplete entries, review coverage
-    (once completed), and unresolved disputes."""
+    (once completed), and unresolved disputes.
+
+    Coverage asks whether each work session was *accounted for*, not whether it was
+    judged: a skipped review record covers its work session exactly as a verdict
+    would, which is what keeps a review-off run off this axis. How many sessions
+    went unjudged is reported as a fact instead
+    (:attr:`~orch_hub.models.ProtocolMetrics.review_skipped_count`) — the operator
+    chose that, and pricing their choice here would be this hub holding an opinion
+    on a configuration it only accepts."""
     if not pm.task_content_present:
         return ScoreComponent(
             SCORE_HANDOFF,

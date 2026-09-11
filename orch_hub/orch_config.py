@@ -52,18 +52,46 @@ ORCHESTRATOR_PYTHON = Path(".mandrel") / "orchestrator" / ".venv" / "bin" / "pyt
 
 PRINT_CONFIG_FLAG = "--print-config"
 
-SUPPORTED_SCHEMA_VERSION = 3
-"""The ``--print-config`` schema this hub understands. A different value fails
+REVIEW_ENABLED_KEY = "review_enabled"
+"""The schema-4 launch field carrying the resolved review on/off switch.
+
+A run configuration axis the orchestrator resolves (mandrel
+``2026-08-17-optional-review-session``) and publishes beside the other launch
+selections. Deliberately absent from the ``options`` catalog: that catalog
+carries the flags with a *vocabulary* to offer, and a boolean has none.
+
+orch-hub reads it and never writes it. The hub sends no review-on/off flag, and
+the switch gates nothing here — not readiness, not launch, not intake, not
+evaluation. This hub accepts the configuration; it does not choose it."""
+
+SUPPORTED_SCHEMA_VERSIONS = (3, 4)
+"""The ``--print-config`` schemas this hub understands. Any other value fails
 closed rather than being parsed on guesswork.
 
-Exactly one version, not a supported range. A range only buys something when the
+Normally exactly one version, not a range. A range only buys something when the
 other side is out of reach, and it is not: every managed repository is deployed
 from one canonical checkout, so the remedy for a mismatch is always to bring the
 lagging side forward. Pinning keeps a stale target loud instead of quietly
 half-understood.
 
+**Two versions here is a redeploy-wave exception, and it is temporary.** That
+rationale assumes one target at a time; this hub consumes *many* at once, and a
+canonical schema bump reaches them one redeploy at a time. During the wave a
+single pin is wrong in whichever position it takes: pinned at 4 every target not
+yet redeployed stops launching, pinned at 3 every target already redeployed
+stops launching. The wave also cannot be ordered away — mandrel cannot redeploy
+first, because a target on 4 cannot launch until this hub accepts 4. So both
+versions are accepted for the duration, and the pin returns to one value
+afterwards.
+
+3 is the transitional half: drop it once every managed repo reports 4 (mandrel
+``2026-08-17-optional-review-session`` session-2 is the redeploy that makes that
+true). Nothing below 3 was ever accepted, so dropping it costs no compatibility
+the hub had — only the ability to tell a lagging target apart from an unknown
+one, which the direction-aware remedy below already handles.
+
 Which side lags decides the remedy, and the two are not the same action. A target
-below this version needs its payload redeployed. A target *above* it means the
+below this range needs its payload redeployed. A target *above* it means the
 canonical suite moved and this hub has not caught up yet — redeploying then pushes
 the target further away, so the fix is here, not there."""
 
@@ -193,8 +221,8 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     """Strictly parse a ``--print-config`` JSON object into an :class:`EffectiveConfig`.
 
     Fail-closed on every launch-relevant field the orchestrator always emits in its
-    ``launch_config_dict``: a non-object, a ``schema_version`` other than
-    :data:`SUPPORTED_SCHEMA_VERSION`, a missing/blank ``backend``, a missing
+    ``launch_config_dict``: a non-object, a ``schema_version`` outside
+    :data:`SUPPORTED_SCHEMA_VERSIONS`, a missing/blank ``backend``, a missing
     ``dev``/``review`` role, or any required field of the wrong type or empty —
     ``config_revision``/``effective_revision``/``profile`` (non-empty strings),
     ``available_profiles`` (string list), role ``model``/``effort`` (non-empty
@@ -224,23 +252,32 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     run snapshots stay readable. Present but not an object of two non-empty
     strings is malformed and fails closed like every other field — a deployment
     that emits ``profiles`` at all emits both roles.
+
+    ``review_enabled`` is additive the same way and for the same reason
+    (:func:`_review_enabled`): absent is the schema-3 deployment that has no
+    review switch, and resolves to ``True``. Reading it as strictly required on
+    schema 4 would turn a field-name drift into "no redeployed target can
+    launch", which is precisely the outcome the two-version pin above exists to
+    avoid; the cost of the tolerant reading is one mislabelled display row until
+    the field name is corrected here.
     """
     if not isinstance(data, dict):
         raise OrchestratorConfigError(
             "orchestrator --print-config did not return a JSON object"
         )
     version = data.get("schema_version")
-    if version != SUPPORTED_SCHEMA_VERSION:
+    if version not in SUPPORTED_SCHEMA_VERSIONS:
         # Name the remedy for the direction the mismatch actually runs in.
         # Telling an operator to redeploy a target that is already ahead sends
         # them further from a working pair.
-        if isinstance(version, int) and version > SUPPORTED_SCHEMA_VERSION:
+        if isinstance(version, int) and version > max(SUPPORTED_SCHEMA_VERSIONS):
             remedy = "update orch-hub; the canonical suite has moved ahead of it"
         else:
             remedy = "redeploy the orchestrator payload to this target"
+        supported = ", ".join(str(v) for v in SUPPORTED_SCHEMA_VERSIONS)
         raise OrchestratorConfigError(
             f"unsupported orchestrator config schema_version {version!r}"
-            f" (this hub supports {SUPPORTED_SCHEMA_VERSION}); {remedy}"
+            f" (this hub supports {supported}); {remedy}"
         )
     profile = _req_str(data, "profile")
     dev_profile, review_profile, split_profiles = _role_profiles(
@@ -248,6 +285,7 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     )
     return EffectiveConfig(
         schema_version=version,
+        review_enabled=_review_enabled(data.get(REVIEW_ENABLED_KEY)),
         config_revision=_req_str(data, "config_revision"),
         effective_revision=_req_str(data, "effective_revision"),
         profile=profile,
@@ -268,6 +306,33 @@ def parse_effective_config(data: object) -> EffectiveConfig:
         plan_gate=_req_bool(data, "plan_gate"),
         control_dir=_opt_str(data.get("control_dir")),
     )
+
+
+def _review_enabled(value: object) -> bool:
+    """Resolve the schema-4 review on/off switch from the launch config.
+
+    Additive, like ``profiles``: absent (or null) is a payload that predates the
+    axis — schema 3, which has no switch and always dispatches review — so it
+    resolves to ``True``, the axis's own default and the only behavior any
+    earlier deployment had. Present but not a real boolean is malformed and fails
+    closed like every other resolved field.
+
+    Absence deliberately does *not* get a capability marker of the
+    ``split_profiles`` kind. That marker exists because the hub SELECTS role
+    profiles and must not send a flag an old deployment cannot parse; this switch
+    is one the orchestrator resolves and the hub only reads (it never sends a
+    review-on/off flag and never gates readiness, launch, or intake on the
+    value), so "derived" and "observed" would label a distinction with no
+    consequence.
+    """
+    if value is None:
+        return True
+    if not isinstance(value, bool):
+        raise OrchestratorConfigError(
+            f"orchestrator --print-config field {REVIEW_ENABLED_KEY!r} must be a"
+            " boolean"
+        )
+    return value
 
 
 def _role_profiles(value: object, profile: str) -> tuple[str, str, bool]:

@@ -3157,15 +3157,27 @@
   function effectiveConfigBlock(cfg) {
     if (!cfg || typeof cfg !== "object") return "";
     const profiles = roleProfileLabels(cfg);
-    const roleSummary =
-      profiles.dev === profiles.review
+    // The schema-4 review on/off axis. Strict `=== false`, so every payload
+    // without the field — schema 3, and every snapshot written before it — reads
+    // exactly as it does today. A review-off run still RESOLVES a review profile
+    // and model (the orchestrator resolves the whole config either way), so
+    // rendering that row unchanged would show a role that never ran.
+    const reviewOff = cfg.review_enabled === false;
+    const roleSummary = reviewOff
+      ? "dev " + profiles.dev + " · review off"
+      : profiles.dev === profiles.review
         ? profiles.dev
         : "dev " + profiles.dev + " · review " + profiles.review;
     const summary = escapeHtml(roleSummary + " · " + (cfg.backend || "?"));
     const rows = [
       ["backend", cfg.backend || "—"],
       ["dev", profiles.dev + " · " + roleValueText(cfg.dev)],
-      ["review", profiles.review + " · " + roleValueText(cfg.review)],
+      [
+        "review",
+        reviewOff
+          ? "disabled for this run"
+          : profiles.review + " · " + roleValueText(cfg.review),
+      ],
       ["config rev", shortRev(cfg.config_revision)],
       ["effective rev", shortRev(cfg.effective_revision)],
     ];
@@ -4043,6 +4055,11 @@
         <p class="muted">No task file was found, so protocol metrics are not
            applicable.</p></section>`;
     const yn = (b) => (b ? "yes" : "no");
+    // Review coverage the run's CONFIGURATION removed, not a defect: the count is
+    // work sessions the orchestrator accounted for with a skipped record because
+    // review was off. Rendered only when non-zero (and absent in reports written
+    // before the fact existed), so a reviewed task's grid is unchanged.
+    const skipped = p.review_skipped_count || 0;
     const rows = [
       ["frontmatter status", p.frontmatter_status],
       ["status legal", yn(p.status_legal)],
@@ -4054,6 +4071,9 @@
         p.work_entry_count + " / " + p.review_entry_count + " / " + p.malformed_entry_count,
       ],
       ["pass / changes-requested", p.pass_verdict_count + " / " + p.changes_requested_count],
+      ...(skipped
+        ? [["review", "disabled — " + skipped + " session(s) not reviewed"]]
+        : []),
       ["remediations", p.remediation_count],
       ["blocked entries", p.blocked_entry_count],
       ["dispute-unresolved", p.dispute_unresolved_count],

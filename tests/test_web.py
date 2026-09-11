@@ -386,6 +386,17 @@ def test_run_history_renders_the_effective_config_snapshot():
     assert "effective rev" in body
 
 
+def test_run_history_says_a_review_off_run_had_no_review():
+    # The schema-4 review switch reaches the run's launch config. A review-off run
+    # still RESOLVES a review profile and model, so rendering that row unchanged
+    # would show a role that never ran. Strict `=== false` keeps every payload
+    # without the field — schema 3, and snapshots written before it — as today.
+    body = app_js()
+    assert "cfg.review_enabled === false" in body
+    assert "review off" in body
+    assert "disabled for this run" in body
+
+
 def test_run_history_summarizes_both_role_profiles():
     # `profiles.dev`/`profiles.review` are authoritative; an older snapshot
     # without them derives both roles from the run-wide `profile`. A Custom role
@@ -2086,6 +2097,17 @@ def test_evaluation_view_renders_layer1_metrics():
     assert "unreviewed work entries: " in body
     assert "illegal transitions: " in body
     assert "Evidence warnings" in body
+
+
+def test_evaluation_view_reports_review_disabled_as_coverage_not_a_defect():
+    # Work sessions the run's CONFIGURATION left unreviewed are a coverage fact,
+    # so they read as a row beside the verdict tallies — not as a flag, which is
+    # where this view puts problems. Absent/zero renders nothing, so a reviewed
+    # task's grid and every pre-existing report are unchanged.
+    body = app_js()
+    assert "p.review_skipped_count || 0" in body
+    assert "disabled — " in body
+    assert "session(s) not reviewed" in body
 
 
 def test_evaluation_view_distinguishes_static_and_semantic_layers():
