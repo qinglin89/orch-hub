@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Features: Mobile Dashboard — Routed Views
@@ -104,7 +104,10 @@ Implemented behavior:
   shows the verified revision only for verified coverage. Snapshot
   rows use authoritative `profiles.dev`/`profiles.review`, identify Custom from
   CLI model provenance, and derive both roles from legacy top-level `profile`
-  when the additive fields are absent. Evaluation-enabled history payloads also
+  when the additive fields are absent. A snapshot with
+  `review_enabled === false` labels the summary `review off` and replaces the
+  resolved review-role row with `disabled for this run`; an absent field keeps
+  legacy/schema-3 rendering. Evaluation-enabled history payloads also
   carry one deduplicated newest-evaluation state per task group; the inline
   `Evaluation →` action shows a compact grey/amber/green light for not
   evaluated, L1, or L1 + L2, with the exact state only in title/ARIA text.
@@ -162,7 +165,9 @@ Implemented behavior:
   `evaluation_id` so the fresh semantic report paints.
   The view probes `GET /api/evaluation/doctor`; an enabled but unavailable
   semantic backend disables only the Layer 2 trigger with an explanation while
-  Layer 1 stays usable. Semantic reports render evaluator provenance including
+  Layer 1 stays usable. Layer 1 protocol facts render non-zero
+  `review_skipped_count` as review-disabled coverage, not as a problem flag.
+  Semantic reports render evaluator provenance including
   the input evidence-schema cohort, per-axis rationales, severity/confidence/
   evidence-ref findings, suggested improvements, JSON and `report.md` downloads,
   and history-picker model/schema labels. Raw

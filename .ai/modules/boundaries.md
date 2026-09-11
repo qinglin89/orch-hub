@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Modules: Boundary Rules
@@ -55,7 +55,8 @@ detail files.
 - Run manager launches subprocesses; no task-protocol parsing beyond pre-start
   checks.
 - Orchestrator launch config queries deployed `--print-config` and builds argv
-  from structured selections; never imports orchestrator code or reads
+  from structured selections; it carries the resolved review switch read-only
+  and never selects or gates on it. It never imports orchestrator code or reads
   `orchestrator.toml`.
 - History serializes run/audit metadata only; `RunManager` decides event
   timing.

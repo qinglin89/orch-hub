@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-08
-verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # APIs: Internal — Evaluation Chain
@@ -79,7 +79,11 @@ returns six transparent score components with evidence-backed warnings and
 confidence. The sixth,
 `prefetch_set_read_completeness`, scores complete applicable/assessable
 session-time sets while keeping unmeasured and reader-capped candidates in the
-confidence denominator only. Reports stamp static schema v4. `generate_metrics`
+confidence denominator only. Reports stamp static schema v5. A review-off entry
+whose `Verdict` head is `none` counts as review coverage without a judgment,
+needs no `Group`/`Findings`, permits `final_review → completed`, and is stepped
+over when locating the dev claimant's final `Open`; `review_skipped_count`
+reports the non-penalized coverage fact. `generate_metrics`
 delegates to `EvaluationService.generate_evidence`, writes `static_metrics.json`
 atomically into the same evaluation artifact directory, and removes the
 reserved dir on report-write failure. It mints evidence with retention deferred

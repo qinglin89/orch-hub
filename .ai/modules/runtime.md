@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-04
-verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Modules: Runtime
@@ -137,8 +137,14 @@ policy. `query_effective_config` runs the repo-local deployed orchestrator
 Python with `orchestrator.py --print-config`, `cwd=<repo>`, and optional shared
 backend, legacy run-wide profile, and independent DEV/REVIEW profile flags. It
 fails closed on missing deployment binaries, timeouts, nonzero exits, non-JSON,
-unsupported schema versions, or malformed launch-resolving fields. The advisory
-`options` catalog is the sole tolerant field: it is normalized to an
+unsupported schema versions, or malformed launch-resolving fields. During the
+schema-4 redeploy wave it accepts exactly schemas 3 and 4; schema 3 is the
+temporary half and is dropped once every managed repo reports 4. The schema-4
+`review_enabled` boolean is carried through `EffectiveConfig` and API payloads
+but never selected or used to gate readiness, launch, intake, or evaluation;
+absence derives `True` for schema-3 compatibility, while any present non-boolean
+(including null) fails closed. It adds no `options` entry. The advisory
+`options` catalog remains tolerant: it is normalized to an
 `agents[backend][role][agent]` projection, with absent/unusable content becoming
 `None` rather than disabling launch or supplying hub-owned choices. An observed
 `profiles.dev`/`profiles.review` pair sets the hub-owned split capability

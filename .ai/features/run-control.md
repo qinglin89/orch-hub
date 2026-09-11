@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-04
-verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Features: Run Control
@@ -63,7 +63,11 @@ Implemented behavior:
   derive both roles from top-level `profile` for display but carry
   `split_profiles=false`. Missing deployments, nonzero exits, malformed
   launch-resolving fields, or unsupported schema versions fail closed. The
-  advisory `options` catalog is normalized by backend/role/agent; absent or
+  redeploy-wave exception accepts schemas 3 and 4 until every managed repo
+  reports 4, then drops 3. Schema-4 `review_enabled` is a read-only resolved
+  boolean: absent schema-3 payloads derive `true`, present non-booleans fail
+  closed, and the hub never selects or gates on it. The advisory `options`
+  catalog is normalized by backend/role/agent; absent or
   unusable catalog content becomes no offered list rather than a query failure
   or hub-owned fallback.
 - Structured dashboard launches use `LaunchSpec`/`build_launch_args` before

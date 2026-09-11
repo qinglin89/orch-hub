@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-08
-verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Modules: Task Evaluation Layers
@@ -85,10 +85,15 @@ taskfile/session-log protocol facts, six transparent score axes
 `prefetch_set_read_completeness`), confidence values, per-session read
 diagnosis, and evidence-backed warnings. The read axis scores complete
 session-time sets only across applicable assessable sessions and keeps missing
-or capped candidates in confidence rather than quality. Static schema v4 makes
+or capped candidates in confidence rather than quality. Static schema v4 made
 transition legality entry-kind-aware (`pending → final_review` is dev-only) and
-partitions work entries into advancement versus remediation; estimate fit counts
-only advancement while remediation remains neutral diagnostic evidence.
+partitioned work entries into advancement versus remediation; estimate fit counts
+only advancement while remediation remains neutral diagnostic evidence. Static
+schema v5 adds the review-off record: a review entry whose `Verdict` head is
+`none` needs no `Group`/`Findings`, covers its named work session, and makes
+`final_review → completed` legal without a pass; a trailing skipped record is
+stepped over when reading the dev claimant's final `Open`. The report exposes
+`review_skipped_count` as non-penalized configuration coverage.
 `generate_metrics(repo, task_id,
 evaluation_id=None)` delegates to `EvaluationService.generate_evidence`, writes
 `static_metrics.json` atomically in the same evaluation dir, and cleans the

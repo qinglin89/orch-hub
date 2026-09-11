@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-08
-verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Features: Task Evaluation
@@ -140,10 +140,15 @@ Implemented behavior:
   candidates, including sessions dropped by the reader cap. Penalties append
   evidence-naming warnings; missing or partial evidence lowers confidence or
   makes an axis not assessable instead of crashing. `static_metrics.json`
-  stamps static schema v4 so interpretation cohorts remain separable. Estimate
+  stamps static schema v5 so interpretation cohorts remain separable. Estimate
   fit counts advancement work entries only; work after a `changes-requested`
   review stays remediation until the next review, remains a diagnostic, and is
-  not charged to the advancement estimate.
+  not charged to the advancement estimate. A review-off skipped record is a
+  legal review entry whose `Verdict` head is `none`: it covers its work session,
+  needs no judgment-only `Group`/`Findings`, permits the final
+  `final_review → completed` edge, and is skipped when locating the dev
+  claimant's final `Open`. `review_skipped_count` reports this as
+  non-penalized configuration coverage rather than unreviewed-work debt.
 - Two knowledge signals are intentionally omitted because the evidence pack
   cannot derive them: per-commit touched file paths and archived-task blocker
   references across other tasks.

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-08-31
-verified-against: af1d7a6a07599b2a23c4f0c723e0b5ce3aa94fec
+last-updated: 2026-09-11
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # APIs: HTTP — Core
@@ -112,15 +112,20 @@ routes: `http-evaluation.md`. Intake routes: `http-intake.md`.
   `orchestrator.toml` directly and is not readiness-gated.
 - Shape: `EffectiveConfig.to_dict()` with schema/revisions/profile list,
   authoritative-or-derived `profiles.dev`/`profiles.review`, hub-owned
-  `split_profiles`, backend, resolved role values, budgets, sandbox, provenance
-  `sources`, preview launch fields, and optional normalized
+  `split_profiles`, the resolved read-only `review_enabled` boolean, backend,
+  resolved role values, budgets, sandbox, provenance `sources`, preview launch
+  fields, and optional normalized
   `options.agents[backend][role][agent]` model/effort choices. Missing legacy
   `profiles` derives both roles from top-level `profile` but leaves
-  `split_profiles=false`; absent/unusable advisory `options` becomes `null`
-  without supplying a hub fallback or failing the otherwise valid query.
+  `split_profiles=false`; a schema-3 payload missing `review_enabled` derives
+  `true`, while a present non-boolean fails closed. Absent/unusable advisory
+  `options` becomes `null` without supplying a hub fallback or failing the
+  otherwise valid query.
 - Errors: unknown repo returns 404; unrecognized backend returns 400; missing
   old deployments, nonzero `--print-config`, malformed output, or unsupported
   schema return 502 with the orchestrator/parser reason so launch fails closed.
+  Schemas 3 and 4 are accepted during the schema-4 redeploy wave; schema 3 is
+  dropped once every managed repo reports 4.
 
 ## Current HTTP Behavior
 

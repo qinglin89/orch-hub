@@ -1,6 +1,6 @@
 ---
 last-updated: 2026-09-11
-verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
+verified-against: 782efbd5cfd56b6852fb2ed61e19eb51433a1549
 ---
 
 # Modules: Web UI Views
@@ -116,9 +116,11 @@ for not evaluated, L1, or L1 + L2; the state is from the same newest evaluation
 the sidecar route opens and is exposed through title/ARIA text, not a visible
 badge or per-group list request. Effective-config rows prefer
 `profiles.dev`/`profiles.review`, derive both from legacy top-level `profile`,
-and label Custom from CLI model provenance. Rollups show observed dev-session
-count vs estimate, peak context, and summed wall-clock from run-record ISO
-timestamps.
+and label Custom from CLI model provenance. When `review_enabled === false`,
+the launch summary says `review off` and the review row says `disabled for this
+run`; an absent field preserves legacy/schema-3 display. Rollups show observed
+dev-session count vs estimate, peak context, and summed wall-clock from
+run-record ISO timestamps.
 
 ## Report feed and evaluation sidecar
 
@@ -145,7 +147,9 @@ Task evaluation uses `#/evaluations/{repo}/{task}[/{evaluation_id}]` with the
 Tasks tab active. It probes availability first, distinguishes disabled,
 never-generated, evidence-only, static-metrics, and semantic-report states,
 renders target active/archive state plus deterministic score/run/protocol/
-evidence-warning rollups, and offers raw evidence/static/semantic JSON plus
+evidence-warning rollups; a non-zero `review_skipped_count` appears as a
+review-disabled coverage row, never a problem flag. The view offers raw
+evidence/static/semantic JSON plus
 semantic `report.md` only as Copy/Download artifacts. Active Task detail has no
 evaluation entry and performs no evaluation availability/list read. Run-history
 inline rollup links appear only when enabled and stay outside collapse toggles
