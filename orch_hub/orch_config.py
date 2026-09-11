@@ -285,7 +285,7 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     )
     return EffectiveConfig(
         schema_version=version,
-        review_enabled=_review_enabled(data.get(REVIEW_ENABLED_KEY)),
+        review_enabled=_review_enabled(data),
         config_revision=_req_str(data, "config_revision"),
         effective_revision=_req_str(data, "effective_revision"),
         profile=profile,
@@ -308,14 +308,14 @@ def parse_effective_config(data: object) -> EffectiveConfig:
     )
 
 
-def _review_enabled(value: object) -> bool:
+def _review_enabled(data: dict) -> bool:
     """Resolve the schema-4 review on/off switch from the launch config.
 
-    Additive, like ``profiles``: absent (or null) is a payload that predates the
-    axis — schema 3, which has no switch and always dispatches review — so it
-    resolves to ``True``, the axis's own default and the only behavior any
-    earlier deployment had. Present but not a real boolean is malformed and fails
-    closed like every other resolved field.
+    Additive, like ``profiles``: absent is a payload that predates the axis —
+    schema 3, which has no switch and always dispatches review — so it resolves
+    to ``True``, the axis's own default and the only behavior any earlier
+    deployment had. Present but not a real boolean, including explicit null, is
+    malformed and fails closed like every other resolved field.
 
     Absence deliberately does *not* get a capability marker of the
     ``split_profiles`` kind. That marker exists because the hub SELECTS role
@@ -325,8 +325,9 @@ def _review_enabled(value: object) -> bool:
     value), so "derived" and "observed" would label a distinction with no
     consequence.
     """
-    if value is None:
+    if REVIEW_ENABLED_KEY not in data:
         return True
+    value = data[REVIEW_ENABLED_KEY]
     if not isinstance(value, bool):
         raise OrchestratorConfigError(
             f"orchestrator --print-config field {REVIEW_ENABLED_KEY!r} must be a"

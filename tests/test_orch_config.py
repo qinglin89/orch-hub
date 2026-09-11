@@ -408,10 +408,12 @@ def test_absent_review_switch_reads_as_review_enabled():
     assert parse_effective_config(SAMPLE).review_enabled is True
 
 
-def test_non_boolean_review_switch_fails_closed():
-    # Present but not a real boolean is a malformed response, not a truthy "off".
+@pytest.mark.parametrize("value", [None, "off"], ids=["null", "string"])
+def test_non_boolean_review_switch_fails_closed(value):
+    # Present but not a real boolean is a malformed response, not an omitted
+    # schema-3 field or a truthy "off".
     with pytest.raises(OrchestratorConfigError) as exc:
-        parse_effective_config({**SAMPLE, "schema_version": 4, "review_enabled": "off"})
+        parse_effective_config({**SAMPLE, "schema_version": 4, "review_enabled": value})
     assert "review_enabled" in str(exc.value)
 
 

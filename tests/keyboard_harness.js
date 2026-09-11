@@ -1078,6 +1078,7 @@ var EVAL_REPORT = {
     uncovered_work_entries: [],
     pass_verdict_count: 1,
     changes_requested_count: 0,
+    review_skipped_count: 0,
     remediation_count: 0,
     blocked_entry_count: 0,
     dispute_unresolved_count: 0,
@@ -2344,6 +2345,41 @@ async function scenarioTaskEval() {
   );
   check("eval: the protocol facts render", !!doc.querySelector(".eval-protocol"), "no .eval-protocol");
   check(
+    "eval: a reviewed report has no review-disabled coverage row",
+    doc.querySelector(".eval-protocol").textContent.indexOf("session(s) not reviewed") === -1,
+    "a zero review-skipped count rendered as disabled"
+  );
+
+  // A schema-5 report names skipped review records as coverage, not as a defect.
+  // Drive the real report renderer with a non-zero count, then restore the
+  // default reviewed fixture for the remaining Layer 1/Layer 2 interactions.
+  var reviewOffReport = Object.assign({}, EVAL_REPORT, {
+    protocol: Object.assign({}, EVAL_REPORT.protocol, { review_skipped_count: 2 }),
+  });
+  route("GET", listPath + "/" + EVAL_ID, {
+    evaluation_id: EVAL_ID,
+    evidence: EVAL_EVIDENCE,
+    static_metrics: reviewOffReport,
+    semantic_report: null,
+    report_md: null,
+  });
+  await navigate(evalPath);
+  check(
+    "eval: review-disabled coverage renders as a protocol fact",
+    doc.querySelector(".eval-protocol").textContent.indexOf(
+      "disabled — 2 session(s) not reviewed"
+    ) !== -1,
+    doc.querySelector(".eval-protocol").textContent
+  );
+  route("GET", listPath + "/" + EVAL_ID, {
+    evaluation_id: EVAL_ID,
+    evidence: EVAL_EVIDENCE,
+    static_metrics: EVAL_REPORT,
+    semantic_report: null,
+    report_md: null,
+  });
+  await navigate(evalPath);
+  check(
     "eval: pack evidence warnings render",
     !!doc.querySelector(".eval-evidence-warnings"),
     "no evidence warnings section"
@@ -3414,12 +3450,21 @@ async function scenarioRunHistory() {
       sources: { "dev.model": "profile:standard" },
     },
   });
+  // A schema-4 run still resolves review role values, but the authoritative
+  // switch says they were never used. Keep a separate run so the split and
+  // legacy rendering checks above remain independent.
+  var reviewOffRun = Object.assign({}, histRun, {
+    run_id: RUN + "-review-off",
+    effective_config: Object.assign({}, histRun.effective_config, {
+      review_enabled: false,
+    }),
+  });
   var historyPayload = function (level, enabled) {
     return {
-      runs: [histRun, legacyRun],
+      runs: [histRun, legacyRun, reviewOffRun],
       page: 1,
       page_size: 50,
-      total_runs: 2,
+      total_runs: 3,
       total_pages: 1,
       has_prev: false,
       has_next: false,
@@ -3460,7 +3505,7 @@ async function scenarioRunHistory() {
   var configs = doc.querySelectorAll(".run-config").map(function (d) {
     return d.querySelectorAll("summary")[0].textContent.trim();
   });
-  eq("run history: each run keeps its launch-config disclosure", configs.length, 2);
+  eq("run history: each run keeps its launch-config disclosure", configs.length, 3);
   eq(
     "run history: a split run summarizes both roles (Custom read from provenance)",
     configs[0],
@@ -3471,6 +3516,11 @@ async function scenarioRunHistory() {
     configs[1],
     "Launch config: standard · cursor"
   );
+  eq(
+    "run history: a review-off run says the review role did not run",
+    configs[2],
+    "Launch config: dev custom · review off · cc-codex"
+  );
   var splitRows = doc.querySelectorAll(".run-config .kv dd").map(function (d) {
     return d.textContent;
   });
@@ -3478,6 +3528,11 @@ async function scenarioRunHistory() {
     "run history: each role row carries its own profile plus resolved values",
     splitRows.indexOf("custom · claude:claude-opus-4-8 @ max") !== -1 &&
       splitRows.indexOf("standard · codex:gpt-5.5 @ xhigh") !== -1,
+    splitRows.join(" | ")
+  );
+  check(
+    "run history: a review-off run replaces resolved role values with its status",
+    splitRows.indexOf("disabled for this run") !== -1,
     splitRows.join(" | ")
   );
 
