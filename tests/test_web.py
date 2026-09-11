@@ -599,7 +599,7 @@ def test_run_surfaces_open_the_task_and_fall_back_to_logs():
     # resolve the same destination and fall back to the run's logs only when the
     # run carries no task attribution.
     assert body.count("runTaskDestination(run) || logsHash(run.run_id)") == 2
-    for func in ("function activityCard(run) {", "function historyRunCard(run) {"):
+    for func in ("function activityCard(run, taskRepos) {", "function historyRunCard(run) {"):
         assert func in body
         section = body[body.index(func) :]
         assert "runTaskDestination(run) || logsHash(run.run_id)" in section.split(

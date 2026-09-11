@@ -4139,7 +4139,7 @@ async function scenarioRunNavigation() {
   route("GET", "/api/runs/" + ENDED_RUN + "/task", {
     run_id: ENDED_RUN,
     task_id: TASK,
-    source: "archive",
+    source: "archived",
     present: true,
     content: "# Demo task\n",
   });
@@ -4159,6 +4159,125 @@ async function scenarioRunNavigation() {
   );
 
   installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
+// Archival can precede process exit by minutes. Refresh must retain the real
+// live run while keeping its task reachable, then clear every live indicator.
+async function scenarioRunArchival() {
+  installRoutes({ waiting: false });
+  var taskPath = "/api/repos/" + REPO + "/tasks/" + TASK;
+  var runPath = "/api/runs/" + RUN;
+  var live = {
+    run_id: RUN, repo_name: REPO, task_id: TASK, state: "active",
+    started_ts: "2026-09-11T02:00:00Z", ended_ts: null,
+  };
+  var ended = Object.assign({}, live, {
+    state: "completed", ended_ts: "2026-09-11T02:46:00Z", exit_code: 0,
+  });
+  var panel = function () {
+    return doc.querySelectorAll(".overview-panels .section").filter(function (s) {
+      return s.querySelector("h2").textContent === "Current activity";
+    })[0];
+  };
+  route("GET", "/api/runs", { runs: [live] });
+  route("GET", runPath, live);
+  await navigate("#/overview");
+  eq("run archival: indexed live task opens full controls",
+     panel().querySelector("a").getAttribute("href"), "#/tasks/" + REPO + "/" + TASK);
+
+  // The task has left the index, but the process really is still alive.
+  route("GET", "/api/tasks", { repos: [{ name: REPO, index_present: true, tasks: [] }] });
+  routeError("GET", taskPath, 404, { detail: "task is not in the active index" });
+  route("GET", runPath + "/task", {
+    run_id: RUN, task_id: TASK, source: "archived", present: true,
+    content: "# Archived completion evidence\n",
+  });
+  await runTimers();
+  eq("run archival: background refresh opens run-scoped file after archival",
+     panel().querySelector("a").getAttribute("href"), "#/runs/" + RUN + "/task");
+  check("run archival: activity explains the task/run distinction",
+        panel().textContent.indexOf("Task left the active list") !== -1, panel().textContent);
+  check("run archival: refresh bypasses previously cached run data",
+        lastCall("GET", "/api/runs").init.cache === "no-store", "missing no-store");
+
+  // Bookmarks, history cards and a click racing close-out can still hold the
+  // old active-task URL. Its 404 must resolve through the matching known run.
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check("run archival: stale task URL still shows the archived file",
+        doc.getElementById("view").textContent.indexOf("Archived completion evidence") !== -1,
+        doc.getElementById("view").textContent);
+  check("run archival: archived view explains the live process",
+        doc.getElementById("view").textContent.indexOf("Run has not exited yet") !== -1,
+        doc.getElementById("view").textContent);
+  check("run archival: archived task never offers Start",
+        doc.querySelector(".open-run-options") === null, "Start offered");
+  var stop = doc.querySelector(".stop-form button");
+  check("run archival: live archived run keeps its Stop control", !!stop, "no Stop");
+  if (stop) { pressEnter(stop); await flush(); }
+  check("run archival: Stop still posts through the run endpoint",
+        !!lastCall("POST", runPath + "/stop"), "no stop POST");
+
+  route("GET", runPath, Object.assign({}, live, { state: "waiting", pending_questions: 1 }));
+  route("GET", "/api/escalations", { escalations: [{
+    run_id: RUN, repo_name: REPO, task_id: TASK,
+    question: { seq: 1, kind: "escalation", message: "Confirm the final cleanup" },
+  }] });
+  await navigate("#/runs/" + RUN + "/task");
+  check("run archival: waiting archived run keeps its answer form",
+        doc.querySelector(".answer-form") !== null, "no answer form");
+
+  route("GET", runPath, ended);
+  var refresh = doc.getElementById("run-task-refresh");
+  check("run archival: archived view offers an explicit refresh", !!refresh, "no Refresh");
+  if (refresh) { pressEnter(refresh); await flush(); }
+  check("run archival: manual refresh shows the completed run",
+        doc.getElementById("view").textContent.indexOf("completed") !== -1 &&
+        doc.getElementById("view").textContent.indexOf("Run has not exited yet") === -1,
+        doc.getElementById("view").textContent);
+
+  await navigate("#/overview");
+  route("GET", "/api/runs", { runs: [ended] });
+  route("GET", "/api/history/runs", { runs: [ended], evaluation_enabled: false });
+  await runTimers();
+  check("run archival: exit clears current activity on the next tick",
+        panel().textContent.indexOf("No live runs") !== -1, panel().textContent);
+  await navigate("#/repos");
+  check("run archival: repo becomes idle after the same exit",
+        doc.querySelector(".run-dot.idle") !== null && doc.querySelector(".run-dot.active") === null,
+        doc.getElementById("view").textContent);
+  await navigate("#/runs");
+  check("run archival: completed run remains in history",
+        !!doc.querySelector('a.card-link[href="#/runs/' + RUN + '/task"]'),
+        doc.getElementById("view").textContent);
+
+  // Missing/failed inventory is not proof a task left it.
+  route("GET", "/api/runs", { runs: [live] });
+  routeError("GET", "/api/tasks", 500, { detail: "unavailable" });
+  await navigate("#/overview");
+  eq("run archival: unavailable inventory preserves the normal live destination",
+     panel().querySelector("a").getAttribute("href"), "#/tasks/" + REPO + "/" + TASK);
+
+  routeError("GET", taskPath, 500, { detail: "task read failed" });
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check("run archival: non-404 task failures remain visible",
+        doc.getElementById("view").textContent.indexOf("task read failed") !== -1,
+        doc.getElementById("view").textContent);
+  routeError("GET", taskPath, 404, { detail: "no matching task" });
+  route("GET", "/api/runs", { runs: [Object.assign({}, ended, { repo_name: "different-repo" })] });
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  check("run archival: another repo's run cannot resolve a missing task",
+        doc.getElementById("view").textContent.indexOf("no matching task") !== -1,
+        doc.getElementById("view").textContent);
+
+  route("GET", "/api/runs", { runs: [ended] });
+  var release = defer("GET", "/api/runs");
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  await navigate("#/runs/" + RUN + "/task");
+  var destination = pageHeading();
+  await release();
+  check("run archival: stale fallback cannot repaint a newer route",
+        pageHeading() === destination, "newer heading was replaced");
+  installRoutes({ waiting: false });
 }
 
 // Live-run readiness display: a repo whose ONLY raw readiness failure is a dirty
@@ -6201,6 +6320,7 @@ async function scenarioRepoProtocolLine() {
     await scenarioRunHistory();
     await scenarioRunHistoryPaging();
     await scenarioRunNavigation();
+    await scenarioRunArchival();
     await scenarioLiveRunReadiness();
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();

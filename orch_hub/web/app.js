@@ -344,7 +344,8 @@
   async function api(path, options) {
     const opts = options || {};
     const headers = authHeaders();
-    const init = { method: opts.method || "GET", headers };
+    // Refreshes must reach the hub even if an older response was cached.
+    const init = { method: opts.method || "GET", headers, cache: "no-store" };
     if (opts.body !== undefined) {
       headers["Content-Type"] = "application/json";
       init.body = JSON.stringify(opts.body);
@@ -2796,14 +2797,30 @@
   async function renderTaskDetail(repoName, taskId) {
     const superseded = routeGuard();
     view().innerHTML = loadingView(taskId, "Loading task…");
-    // Required: the task's inventory fields + raw file body. Unknown repo/task
-    // is a 404 the router surfaces as an error view.
-    const detail = await api(
-      "/api/repos/" +
-        encodeURIComponent(repoName) +
-        "/tasks/" +
-        encodeURIComponent(taskId)
-    );
+    // A card/bookmark may outlive the active index entry: native close-out can
+    // archive the task before its run exits. Resolve that 404 through a known
+    // matching run, retaining the active-only inventory API and its read gates.
+    let detail;
+    try {
+      detail = await api(
+        "/api/repos/" +
+          encodeURIComponent(repoName) +
+          "/tasks/" +
+          encodeURIComponent(taskId)
+      );
+    } catch (err) {
+      if (!(err instanceof ApiError) || err.status !== 404) throw err;
+      let fallbackRun = null;
+      try {
+        const data = await api("/api/runs");
+        fallbackRun = pickRunForTask(data.runs, repoName, taskId);
+      } catch (runError) {
+        if (runError instanceof ApiError && runError.status === 401) throw runError;
+      }
+      if (superseded()) return;
+      if (fallbackRun) return renderRunTask(fallbackRun.run_id);
+      throw err;
+    }
 
     // Best-effort run overlay; a runs failure must not hide the task file.
     // `busyRun` is any live run in this repo — it decides whether Start is
@@ -3776,6 +3793,24 @@
     const superseded = routeGuard();
     view().innerHTML = loadingView("Task file", "Loading task…");
     const data = await api("/api/runs/" + encodeURIComponent(runId) + "/task"); // unknown run → 404
+    let run = null;
+    try {
+      run = await api("/api/runs/" + encodeURIComponent(runId));
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) throw err;
+      // File access remains useful when current run status is unavailable.
+    }
+    let questions = [];
+    if (run && run.state === "waiting" && run.pending_questions) {
+      try {
+        const esc = await api("/api/escalations");
+        questions = (esc.escalations || [])
+          .filter((e) => e.run_id === runId)
+          .map((e) => e.question);
+      } catch (err) {
+        if (err instanceof ApiError && err.status === 401) throw err;
+      }
+    }
     if (superseded()) return; // a newer route owns the view
     const taskId = data.task_id || runId;
     const sourceBadge = data.source ? badge(data.source) : "";
@@ -3789,8 +3824,21 @@
         ${pageTitle(taskId, "task-id big")}
         ${sourceBadge}
       </div>
-      <p><a class="text-link" href="${logsHash(runId)}">View logs →</a></p>
+      ${data.source === "archived" && run && LIVE_STATES.has(run.state)
+        ? `<p class="muted">Task archived. Run has not exited yet; activity clears after it exits.</p>`
+        : ""}
+      ${run ? runStatusSection(run, null)
+        : `<p><a class="text-link" href="${logsHash(runId)}">View logs →</a></p>`}
+      ${run && LIVE_STATES.has(run.state)
+        ? runControlsSection(run.repo_name, data, run, run, null, null) : ""}
+      ${answerSection(runId, questions)}
+      <p><button id="run-task-refresh" type="button">Refresh</button></p>
       <section class="section"><h2>Task file</h2>${body}</section>`;
+    wireRunControls();
+    wireAnswerForms();
+    document.getElementById("run-task-refresh").addEventListener("click", () => {
+      rerender(renderRunTask(runId));
+    });
   }
 
   // ---- task evaluation (deterministic Layer 1 metrics) ----
@@ -6290,10 +6338,14 @@
   // falling back to the logs directly when the run carries no task attribution.
   // The waiting ones also appear in the attention panel, where the same task
   // link answers the question.
-  function activityCard(run) {
+  function activityCard(run, taskRepos) {
     const accent = run.state === "waiting" ? " run-waiting" : " run-active";
     const meta = [run.repo_name, run.task_id].filter(Boolean).join(" · ");
-    const href = runTaskDestination(run) || logsHash(run.run_id);
+    const inventory = (taskRepos || []).find((r) => r.name === run.repo_name);
+    const leftInventory = run.task_id && inventory && inventory.index_present &&
+      !(inventory.tasks || []).some((t) => t.task_id === run.task_id);
+    const href = leftInventory ? runTaskHash(run.run_id)
+      : runTaskDestination(run) || logsHash(run.run_id);
     return (
       `<li class="card run${accent}">` +
       `<a class="card-link" href="${href}">` +
@@ -6302,13 +6354,14 @@
       `<span class="badges">${runBadge(run.state)}</span>` +
       `</div>` +
       (meta ? `<div class="muted">${escapeHtml(meta)}</div>` : "") +
+      (leftInventory ? `<div class="muted">Task left the active list. Run has not exited yet.</div>` : "") +
       `</a></li>`
     );
   }
 
   // The "current activity" panel of live runs (active + waiting). A null source
   // reads as "unavailable"; an empty live set as "no live runs".
-  function currentActivityPanel(runs) {
+  function currentActivityPanel(runs, taskRepos) {
     const head = `<section class="section"><h2>Current activity</h2>`;
     const foot = `</section>`;
     if (runs === null)
@@ -6316,7 +6369,7 @@
     const live = liveRunList(runs);
     if (!live.length)
       return head + `<p class="muted">No live runs.</p>` + foot;
-    return head + `<ul class="list">${live.map(activityCard).join("")}</ul>` + foot;
+    return head + `<ul class="list">${live.map((run) => activityCard(run, taskRepos)).join("")}</ul>` + foot;
   }
 
   // One ended run in the recent-outcomes panel: its end-state badge (completed →
@@ -6943,7 +6996,7 @@
       overviewMetrics(data.repos, data.taskRepos, data.runs, data.escalations) +
       `<div class="overview-panels">` +
       attentionPanel(data.repos, data.runs, data.escalations) +
-      currentActivityPanel(data.runs) +
+      currentActivityPanel(data.runs, data.taskRepos) +
       recentOutcomesPanel(data.history) +
       `</div>` +
       // Its own section AFTER the operational grid: display-only capacity, kept
