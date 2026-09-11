@@ -1296,9 +1296,18 @@ def create_app(
                 "evaluation_states": _history_evaluation_states(entries, evaluation),
             }
         result = manager.history_page(cursor=cursor)
+        page = result.to_dict()
+        # Decorate the page's already-serialized runs rather than rebuilding
+        # them: `to_dict()` carries each entry's events, sessions, effective
+        # config and protocol, so re-serializing the whole page to attach one
+        # key doubled the heaviest route's work. Same list, same order.
+        task_cache: dict = {}
+        page["runs"] = [
+            {**run, "current_task": _current_task_state(entry.status.record, task_cache)}
+            for run, entry in zip(page["runs"], result.entries)
+        ]
         return {
-            **result.to_dict(),
-            "runs": _history_run_payloads(result.entries),
+            **page,
             "evaluation_enabled": evaluation.enabled,
             "evaluation_states": _history_evaluation_states(
                 result.entries, evaluation
