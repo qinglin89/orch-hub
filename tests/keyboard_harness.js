@@ -4060,7 +4060,7 @@ async function scenarioRunNavigation() {
   };
 
   installRoutes({ waiting: true });
-  route("GET", "/api/runs", { runs: [liveRun, orphanLiveRun] });
+  route("GET", "/api/runs", { runs: [endedRun, liveRun, orphanLiveRun] });
   route("GET", "/api/history/runs", {
     runs: [liveRun, orphanLiveRun, endedRun],
     page: 1,
@@ -4159,6 +4159,102 @@ async function scenarioRunNavigation() {
   );
 
   installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
+// All views must agree for fixed data, independently of any completion race.
+async function scenarioCrossEntryState() {
+  installRoutes({ waiting: false });
+  var live = {
+    run_id: RUN, repo_name: REPO, repo_path: "/repos/" + REPO,
+    task_id: TASK, task_status: "in_progress", state: "active",
+    started_ts: "2026-09-11T02:00:00Z", ended_ts: null,
+    current_task: { status: "completed", source: "archived", present: true },
+  };
+  var ended = Object.assign({}, live, { state: "completed", ended_ts: "2026-09-11T02:46:00Z" });
+  var inventory = { repos: [{ name: REPO, path: "/repos/" + REPO, index_present: true, tasks: [] }] };
+  route("GET", "/api/tasks", inventory);
+  route("GET", "/api/repos/" + REPO + "/tasks", inventory);
+  route("GET", "/api/runs", { runs: [live] });
+  route("GET", "/api/runs/" + RUN, live);
+  route("GET", "/api/runs/" + RUN + "/task", Object.assign({
+    run_id: RUN, task_id: TASK, content: "# Completed archive\n",
+  }, live.current_task));
+  routeError("GET", "/api/repos/" + REPO + "/tasks/" + TASK, 404, { detail: "unlisted" });
+  route("GET", "/api/history/runs", { runs: [live], evaluation_enabled: false });
+  var dualState = function (root, label) {
+    var text = root ? root.textContent : "";
+    check("cross entry: " + label + " shows both current task and run states",
+      text.indexOf("task completed") !== -1 && text.indexOf("run active") !== -1, text);
+  };
+  for (var repeat = 0; repeat < 2; repeat++) {
+    await navigate("#/overview");
+    dualState(doc.querySelector(".overview-panels .card.run"), "overview " + repeat);
+    eq("cross entry: overview opens the known archived file",
+      doc.querySelector(".overview-panels .card.run a").getAttribute("href"), "#/runs/" + RUN + "/task");
+    await navigate("#/repos");
+    check("cross entry: repo activity remains process-backed", !!doc.querySelector(".run-dot.active"), "no active repo");
+    await navigate("#/repos/" + REPO);
+    dualState(doc.querySelector(".repo-activity"), "repo detail " + repeat);
+    check("cross entry: repo detail retains the active archived task link",
+      !!doc.querySelector('.repo-activity a[href="#/runs/' + RUN + '/task"]'), "no task link");
+    await navigate("#/runs");
+    dualState(doc.querySelector(".task-group-head"), "collapsed history group " + repeat);
+    await navigate("#/tasks/" + REPO + "/" + TASK);
+    check("cross entry: stale task detail resolves completion from the archive",
+      doc.querySelector(".detail-head").textContent.indexOf("task completed") !== -1 &&
+      doc.getElementById("view").textContent.indexOf("Run has not exited yet") !== -1,
+      doc.getElementById("view").textContent);
+  }
+
+  // One overview tick must not union contradictory run or escalation snapshots.
+  route("GET", "/api/history/runs", { runs: [ended] });
+  var before = CALLS.length;
+  await navigate("#/overview");
+  check("cross entry: overview derives outcomes from the same run request",
+    CALLS.slice(before).filter(function (c) { return c.path === "/api/runs"; }).length === 1 &&
+    !CALLS.slice(before).some(function (c) { return c.path === "/api/history/runs"; }), "split requests");
+  check("cross entry: a still-live run is absent from outcomes despite newer history",
+    doc.querySelectorAll(".overview-panels .card.run").length === 1, "run duplicated");
+  var oldLink = doc.querySelector(".overview-panels .card.run a");
+  oldLink.focus();
+  await runTimers();
+  activeIs("cross entry: background paint restores the same task link",
+    doc.querySelector(".overview-panels .card.run a"));
+
+  route("GET", "/api/runs", { runs: [ended] });
+  route("GET", "/api/escalations", { escalations: [{
+    run_id: RUN, repo_name: REPO, task_id: TASK, question: { message: "Stale question" },
+  }] });
+  await runTimers();
+  check("cross entry: focused link cannot freeze completed activity",
+    doc.getElementById("view").textContent.indexOf("No live runs") !== -1,
+    doc.getElementById("view").textContent);
+  check("cross entry: stale question cannot keep an ended run waiting",
+    doc.querySelector(".overview-attention").textContent.indexOf("Stale question") === -1,
+    doc.querySelector(".overview-attention").textContent);
+  check("cross entry: refreshed outcomes retain the completed run link",
+    !!doc.querySelector('.overview-panels a[href="#/runs/' + RUN + '/logs"]'), "no outcome link");
+  await navigate("#/runs");
+  var head = doc.querySelector(".task-group-head");
+  check("cross entry: completion remains visible while history group is collapsed",
+    head.textContent.indexOf("task completed") !== -1 && head.textContent.indexOf("run completed") !== -1,
+    head.textContent);
+
+  // Explicit refresh must replace the entire snapshot too.
+  await navigate("#/overview");
+  route("GET", "/api/runs", { runs: [live] });
+  pressEnter(doc.getElementById("overview-refresh"));
+  await flush();
+  dualState(doc.querySelector(".overview-panels .card.run"), "manual refresh");
+  route("GET", "/api/runs", { runs: [Object.assign({}, live, {
+    current_task: { status: "missing", source: null, present: false },
+  })] });
+  await runTimers();
+  check("cross entry: a missing file is never displayed as task completion",
+    doc.querySelector(".overview-panels .card.run").textContent.indexOf("task missing") !== -1 &&
+    doc.querySelector(".overview-panels .card.run").textContent.indexOf("task completed") === -1,
+    doc.querySelector(".overview-panels .card.run").textContent);
+  installRoutes({ waiting: false });
 }
 
 // Archival can precede process exit by minutes. Refresh must retain the real
@@ -4825,6 +4921,19 @@ async function scenarioEvaluationQueue() {
   // anchor is invalid, and every tap aimed at it would also navigate away.
   eq("evalqueue: Cancel sits beside the row link, never inside it",
      rows[0].querySelector("a").querySelectorAll(".evq-cancel").length, 0);
+  // A focused queue control must survive a tick, while run activity still moves.
+  var queueFocus = rows[0].querySelector(".evq-cancel");
+  queueFocus.focus();
+  route("GET", "/api/runs", { runs: [{ run_id: RUN, repo_name: REPO,
+    task_id: TASK, state: "active" }] });
+  await runTimers();
+  check("evalqueue: focused control does not block current run refresh",
+    !!doc.querySelector(".overview-panels .run-active"), "no refreshed activity");
+  route("GET", "/api/runs", { runs: [] });
+  await runTimers();
+  check("evalqueue: focused control does not retain departed run activity",
+    doc.getElementById("view").textContent.indexOf("No live runs") !== -1, "stale activity");
+  activeIs("evalqueue: refresh preserves the original queue button", queueFocus);
   // After the cancel the section's own figures move, so it re-reads the queue
   // rather than splicing one row out of a stale census.
   route("GET", "/api/evaluation/queue", queuePayload({
@@ -6321,6 +6430,7 @@ async function scenarioRepoProtocolLine() {
     await scenarioRunHistoryPaging();
     await scenarioRunNavigation();
     await scenarioRunArchival();
+    await scenarioCrossEntryState();
     await scenarioLiveRunReadiness();
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();

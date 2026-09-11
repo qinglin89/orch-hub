@@ -31,7 +31,7 @@
   const INTAKE_POLL_MS = 2000; // review-view poll cadence for an in-flight intake turn
   const SEMANTIC_JOB_POLL_MS = 3000; // eval-view poll cadence for an in-flight semantic-eval job
   const OVERVIEW_REFRESH_MS = 15000; // Overview background auto-refresh cadence (passive dashboard)
-  const OVERVIEW_HISTORY_LIMIT = 12; // recent-run window fetched for the outcomes panel
+  const OVERVIEW_HISTORY_LIMIT = 12; // recent-run window from the shared run snapshot
   const OVERVIEW_OUTCOME_COUNT = 5; // ended runs shown in the outcomes panel
   let activeStream = null; // AbortController for the in-flight SSE log stream, if any
   let activeIntakePoll = null; // { cancelled, timer } for the in-flight intake poll, if any
@@ -535,7 +535,7 @@
   // activity, Run history, the log view's own back-link) resolves the
   // destination here so the rule is stated once.
   //
-  // Which task route depends on liveness. A live (active/waiting) run with full
+  // Which task route depends on file presence and liveness. A live run with full
   // repo+task attribution opens the complete task detail, which is index-gated
   // (active tasks only) but carries the run controls and answer forms a live run
   // needs. Anything else — an ended run, whose task close-out may already have
@@ -547,7 +547,8 @@
   // caller to fall back to what it can still show.
   function runTaskDestination(run) {
     if (!run || !run.task_id) return null;
-    if (LIVE_STATES.has(run.state) && run.repo_name)
+    if (LIVE_STATES.has(run.state) && run.repo_name &&
+        (!run.current_task || run.current_task.source === "active"))
       return taskHash(run.repo_name, run.task_id);
     return runTaskHash(run.run_id);
   }
@@ -1327,6 +1328,8 @@
       <div class="path muted">${escapeHtml(repoPath || "")}</div>
       ${housekeepingPending ? housekeepingWarning(false) : ""}
       ${reasons}
+      ${liveRun ? `<section class="section repo-activity"><h2>Current run</h2>
+        <ul class="list">${activityCard(liveRun, [entry])}</ul></section>` : ""}
       ${intakeSection(repoName, inflightIntake, readiness, liveRun)}
       ${
         entry.index_present
@@ -3490,6 +3493,7 @@
       `<span class="tg-meta muted">${escapeHtml(
         group.repo_name || ""
       )} · ${runCount} run${runCount === 1 ? "" : "s"}</span>` +
+      `<span class="badges">${taskRunBadges(group.runs.find((r) => LIVE_STATES.has(r.state)) || group.runs[0])}</span>` +
       `</button>` +
       taskRollup(group, evalAction) +
       `<ul class="list">${cards}</ul>` +
@@ -3735,7 +3739,7 @@
             "All repos"
           )}</select>
         </label>
-        <label for="rf-state">State
+        <label for="rf-state">Run state
           <select id="rf-state">${optionList(
             states,
             runFilters.state,
@@ -3823,6 +3827,7 @@
       <div class="detail-head">
         ${pageTitle(taskId, "task-id big")}
         ${sourceBadge}
+        ${data.status ? badge("task " + data.status, statusBadgeKind(data.status)) : ""}
       </div>
       ${data.source === "archived" && run && LIVE_STATES.has(run.state)
         ? `<p class="muted">Task archived. Run has not exited yet; activity clears after it exits.</p>`
@@ -6188,6 +6193,9 @@
       });
     }
     for (const esc of escalations || []) {
+      // Questions are a separate request and may predate the run snapshot.
+      // They enrich waiting runs; only use them alone when runs failed to load.
+      if (runs !== null && !byRun.has(esc.run_id)) continue;
       const item = byRun.get(esc.run_id) || {
         run_id: esc.run_id,
         repo_name: esc.repo_name,
@@ -6338,6 +6346,12 @@
   // falling back to the logs directly when the run carries no task attribution.
   // The waiting ones also appear in the attention panel, where the same task
   // link answers the question.
+  function taskRunBadges(run) {
+    const task = run.current_task;
+    return (task ? badge("task " + task.status, statusBadgeKind(task.status)) : "") +
+      badge("run " + run.state, runBadgeKind(run.state));
+  }
+
   function activityCard(run, taskRepos) {
     const accent = run.state === "waiting" ? " run-waiting" : " run-active";
     const meta = [run.repo_name, run.task_id].filter(Boolean).join(" · ");
@@ -6351,10 +6365,12 @@
       `<a class="card-link" href="${href}">` +
       `<div class="card-head">` +
       `<span class="run-id">${escapeHtml(run.run_id)}</span>` +
-      `<span class="badges">${runBadge(run.state)}</span>` +
+      `<span class="badges">${taskRunBadges(run)}</span>` +
       `</div>` +
       (meta ? `<div class="muted">${escapeHtml(meta)}</div>` : "") +
-      (leftInventory ? `<div class="muted">Task left the active list. Run has not exited yet.</div>` : "") +
+      (run.current_task && run.current_task.status === "completed"
+        ? `<div class="muted">Task completed. Run has not exited yet.</div>`
+        : leftInventory ? `<div class="muted">Task left the active list. Run has not exited yet.</div>` : "") +
       `</a></li>`
     );
   }
@@ -6390,7 +6406,7 @@
     );
   }
 
-  // The most recent ended runs from /api/history/runs (already newest-first):
+  // The recent run window from the shared snapshot (already newest-first):
   // drop the live ones (they're in current activity) and cap the list so the
   // Overview stays glanceable rather than duplicating the full Runs page.
   function recentOutcomeList(history, max) {
@@ -6949,7 +6965,6 @@
       tasksData,
       runsData,
       escData,
-      historyData,
       usageData,
       queueData,
     ] = await Promise.all([
@@ -6957,19 +6972,21 @@
       overviewSource("/api/tasks"),
       overviewSource("/api/runs"),
       overviewSource("/api/escalations"),
-      overviewSource("/api/history/runs?limit=" + OVERVIEW_HISTORY_LIMIT),
       overviewSource("/api/usage"),
       // Its own reader, not overviewSource: this is the one panel that has to
       // tell a 404 (evaluation switched off — nothing to show) apart from a
       // failed read (unknown — must not read as an empty queue).
       overviewEvalQueue(),
     ]);
+    // /api/runs contains all runs oldest-first. Deriving both live activity and
+    // recent outcomes here prevents opposite states from two refresh requests.
+    const runs = runsData ? runsData.runs || [] : null;
     return {
       repos: reposData ? reposData.repos || [] : null,
       taskRepos: tasksData ? tasksData.repos || [] : null,
-      runs: runsData ? runsData.runs || [] : null,
+      runs,
       escalations: escData ? escData.escalations || [] : null,
-      history: historyData ? historyData.runs || [] : null,
+      history: runs === null ? null : runs.slice(-OVERVIEW_HISTORY_LIMIT).reverse(),
       // The whole /api/usage payload is `{providers:[...]}`; a failed fetch is
       // null (this section only). [] = loaded but no providers reported.
       usage: usageData ? usageData.providers || [] : null,
@@ -6989,10 +7006,20 @@
     let body = document.getElementById("overview-body");
     if (!body) {
       view().innerHTML =
-        pageTitle("Operations overview") + `<div id="overview-body"></div>`;
+        pageTitle("Operations overview") +
+        `<p><button id="overview-refresh" type="button">Refresh</button></p>` +
+        `<div id="overview-body"><div id="overview-status"></div>` +
+        `<div id="${EVQ_SLOT_ID}"></div></div>`;
       body = document.getElementById("overview-body");
+      document.getElementById("overview-refresh").addEventListener("click", () => {
+        rerender(renderOverview());
+      });
     }
-    body.innerHTML =
+    const status = document.getElementById("overview-status");
+    const active = document.activeElement;
+    const restoringFocus = active && status.contains(active);
+    const href = restoringFocus && active.getAttribute("href");
+    status.innerHTML =
       overviewMetrics(data.repos, data.taskRepos, data.runs, data.escalations) +
       `<div class="overview-panels">` +
       attentionPanel(data.repos, data.runs, data.escalations) +
@@ -7002,37 +7029,19 @@
       // Its own section AFTER the operational grid: display-only capacity, kept
       // clear of the attention/activity/outcomes flow so quota never reads as
       // health. A failed usage source degrades only this section.
-      subscriptionUsagePanel(data.usage) +
-      // Its own section after the operational grid, so an unmeasured corpus never
-      // reads as a blocked run. A disabled subsystem renders nothing at all. It is
-      // no longer display-only — pause/resume and per-job cancel live here — but
-      // it stays out of the attention/activity flow: acting on the queue changes
-      // what gets measured, never what is running. Wrapped in a stable slot so a
-      // control can repaint its own section without rebuilding the panels above.
-      `<div id="${EVQ_SLOT_ID}">` +
-      evaluationQueuePanel(data.evalQueue) +
-      `</div>`;
-    // Bind the queue's controls to the nodes this paint just created. The 15-second
-    // refresh calls paintOverview again, so this runs on every tick; it is skipped
-    // entirely while focus sits inside the body (focusInsideOverviewBody), which is
-    // what keeps a repaint from destroying a button mid-press.
-    wireEvaluationQueueControls();
-  }
-
-  // True when focus sits on something inside the repaintable Overview body. A
-  // background repaint would destroy that node and strand the keyboard user at
-  // <body>, so a refresh tick skips the paint (and retries next tick) rather
-  // than ripping the list out from under them. Pointer/touch use leaves focus on
-  // <body>, so the ordinary mobile case still repaints every tick.
-  function focusInsideOverviewBody() {
-    const body = document.getElementById("overview-body");
-    const active = document.activeElement;
-    return !!(
-      body &&
-      active &&
-      active !== document.body &&
-      body.contains(active)
-    );
+      subscriptionUsagePanel(data.usage);
+    // Keep evaluation controls in a stable slot separate from run activity.
+    const queue = document.getElementById(EVQ_SLOT_ID);
+    // Preserve a queue button mid-interaction without freezing run activity.
+    if (!active || !queue.contains(active)) {
+      queue.innerHTML = evaluationQueuePanel(data.evalQueue);
+      wireEvaluationQueueControls();
+    }
+    if (restoringFocus) {
+      const target = href && Array.from(status.querySelectorAll("a[href]"))
+        .find((a) => a.getAttribute("href") === href);
+      (target || document.getElementById("overview-refresh")).focus({ preventScroll: true });
+    }
   }
 
   // Tear down the Overview background refresh (mirrors stopIntakePoll): cancel the
@@ -7066,7 +7075,7 @@
         // kill the refresh.
       }
       if (refresh.cancelled || activeOverviewRefresh !== refresh) return; // left / superseded
-      if (data && !focusInsideOverviewBody()) paintOverview(data);
+      if (data) paintOverview(data);
       refresh.timer = setTimeout(tick, OVERVIEW_REFRESH_MS);
     };
     refresh.timer = setTimeout(tick, OVERVIEW_REFRESH_MS);

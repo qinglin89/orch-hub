@@ -1894,6 +1894,93 @@ def test_run_task_unknown_run_is_404(tmp_path, monkeypatch):
     assert resp.status_code == 404
 
 
+def test_current_task_and_run_states_agree_across_all_read_routes(tmp_path, monkeypatch):
+    """Hold archival and process state fixed while visiting every API entry."""
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    started = start_a_run(client, repo)
+    run_id = started["run_id"]
+    assert started["current_task"] == {
+        "status": "in_progress", "source": "active", "present": True,
+    }
+    archive_run_task(repo, RUN_TASK_ID, "---\nstatus: completed\n---\n# Completed task\n")
+    current = {"status": "completed", "source": "archived", "present": True}
+
+    def read_entries():
+        return [
+            client.get("/api/runs").json()["runs"][0],
+            client.get("/api/history/runs").json()["runs"][0],
+            client.get("/api/history/runs?limit=12").json()["runs"][0],
+            client.get(f"/api/runs/{run_id}").json(),
+        ]
+
+    # Refreshing cannot change a genuine still-live process into a completed run.
+    for _ in range(2):
+        for entry in read_entries():
+            assert entry["state"] == "active"
+            assert entry["task_status"] == "in_progress"  # launch evidence preserved
+            assert entry["current_task"] == current
+        detail = client.get(f"/api/runs/{run_id}/task").json()
+        assert {key: detail[key] for key in current} == current
+        assert client.get("/api/tasks").json()["repos"][0]["tasks"] == []
+        assert client.get(f"/api/repos/{repo.name}/tasks").json()["repos"][0]["tasks"] == []
+        assert client.get(f"/api/repos/{repo.name}/tasks/{RUN_TASK_ID}").status_code == 404
+    # Per-run evidence, followed by process exit, changes the run verdict everywhere.
+    write_run_log(manager, run_id, [
+        "[03:00:10] --- dev session start: sid=dev1 backend=claude:x@max status_before=in_progress",
+        "[03:15:00] --- dev session end: sid=dev1 status=completed+archived",
+    ])
+    spawner.procs[0].returncode = 0
+    for entry in read_entries():
+        assert entry["state"] == "completed"
+        assert entry["current_task"] == current
+
+
+def test_current_task_missing_and_unreadable_do_not_imply_completion(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    run_id = start_a_run(client, repo)["run_id"]
+    (repo.path / ".ai-tasks" / f"{RUN_TASK_ID}.md").unlink()
+    body = client.get(f"/api/runs/{run_id}").json()
+    assert body["state"] == "active"
+    assert body["current_task"] == {"status": "missing", "source": None, "present": False}
+    assert client.get(f"/api/runs/{run_id}/task").json()["status"] == "missing"
+
+    def unreadable(*args):
+        raise PermissionError("unreadable task file")
+
+    monkeypatch.setattr(api, "read_task_state", unreadable)
+    body = client.get("/api/runs").json()["runs"][0]
+    assert body["state"] == "active"
+    assert body["current_task"] is None
+
+
+def test_current_task_is_read_once_per_task_per_request(tmp_path, monkeypatch):
+    client, manager, spawner, repo = make_run_client(tmp_path, monkeypatch)
+    start_a_run(client, repo)
+    spawner.procs[0].returncode = 0
+    start_a_run(client, repo)
+    original = api.read_task_state
+    reads = []
+
+    def counted(repo, task_id):
+        reads.append((repo.path, task_id))
+        return original(repo, task_id)
+
+    monkeypatch.setattr(api, "read_task_state", counted)
+    for path in ("/api/runs", "/api/history/runs", "/api/history/runs?limit=12"):
+        reads.clear()
+        entries = client.get(path).json()["runs"]
+        assert len(entries) == 2
+        assert len(reads) == 1
+        assert all(entry["current_task"]["status"] == "in_progress" for entry in entries)
+    archive_run_task(repo, RUN_TASK_ID, "---\nstatus: completed\n---\n")
+    reads.clear()
+    entries = client.get("/api/runs").json()["runs"]
+    assert len(reads) == 1
+    assert all(entry["current_task"]["status"] == "completed" for entry in entries)
+    # Current task completion must never rewrite an earlier run's frozen verdict.
+    assert entries[0]["state"] == "ended"
+
+
 # -- stop ----------------------------------------------------------------------
 
 

@@ -73,6 +73,8 @@ from .logs import DEFAULT_TAIL_LINES, read_recent, read_spawn_out, tail_events
 from .models import (
     LaunchSpec,
     ManagedRepo,
+    RunRecord,
+    RunStatus,
     repos_payload,
     tasks_payload,
 )
@@ -121,8 +123,8 @@ from .static_metrics import STATIC_METRICS_NAME, StaticEvaluator
 from .task_store import (
     list_repo_tasks,
     list_tasks,
-    read_archived_task_content,
     read_task_content,
+    read_task_state,
 )
 from .usage import ClaudeUsageCollector, UsageService
 
@@ -436,6 +438,40 @@ def _evaluation_summary(stored, evaluator: dict | None = None) -> dict:
         "has_semantic_report": SEMANTIC_REPORT_NAME in stored.artifacts,
         "evaluator": evaluator,
     }
+
+
+def _current_task_state(record: RunRecord, cache: dict) -> dict | None:
+    """Request-local, shared task state for all runs of the same repo/task.
+
+    RunRecord.task_status is launch evidence and must never be overwritten.
+    Current file state is a separate display projection; unreadable is null,
+    distinct from a successfully observed missing file, and cannot alter runs.
+    """
+    repo = record.managed_repo()
+    if repo is None or not record.task_id:
+        return None
+    key = (repo.path, record.task_id)
+    if key not in cache:
+        try:
+            cache[key] = read_task_state(repo, record.task_id).to_dict()
+        except (OSError, UnicodeError):
+            cache[key] = None
+    return cache[key]
+
+
+def _run_payload(status: RunStatus, cache: dict) -> dict:
+    return {
+        **status.to_dict(),
+        "current_task": _current_task_state(status.record, cache),
+    }
+
+
+def _history_run_payloads(entries) -> list[dict]:
+    cache: dict = {}
+    return [
+        {**entry.to_dict(), "current_task": _current_task_state(entry.status.record, cache)}
+        for entry in entries
+    ]
 
 
 def _history_evaluation_states(entries, evaluation: EvaluationService) -> list[dict]:
@@ -1197,12 +1233,17 @@ def create_app(
             extra_args=extra_args,
             acknowledge_blocked=req.acknowledge_blocked,
         )
-        return manager.get_run(record.run_id).to_dict()
+        return _run_payload(manager.get_run(record.run_id), {})
 
     @app.get("/api/runs")
     def list_runs() -> dict:
-        """List every known run (oldest first) with its computed live/end state."""
-        return {"runs": [status.to_dict() for status in manager.list_runs()]}
+        """List all runs oldest-first with process state and current task facts.
+
+        ``task_status`` stays the launch-time value; ``current_task`` is read
+        afresh from the active or archived file and cannot change a run verdict.
+        """
+        cache: dict = {}
+        return {"runs": [_run_payload(status, cache) for status in manager.list_runs()]}
 
     @app.get("/api/history/runs")
     def list_run_history(
@@ -1224,8 +1265,8 @@ def create_app(
           The payload carries its own pagination metadata
           (``page``/``page_size``/``total_runs``/``total_pages``/``has_prev``/
           ``has_next``), so a client never infers a boundary from a short page.
-        * *Summary* (``?limit=N``): the N newest runs for a glanceable strip (the
-          Overview's recent outcomes). It carries no cursors and no totals, so it
+        * *Summary* (``?limit=N``): the N newest runs for a glanceable strip.
+          It carries no cursors and no totals, so it
           can be neither walked nor mistaken for a page — which is what keeps a
           caller-chosen size from becoming a page size.
 
@@ -1250,13 +1291,14 @@ def create_app(
                 )
             entries = manager.recent_runs(limit=limit)
             return {
-                "runs": [entry.to_dict() for entry in entries],
+                "runs": _history_run_payloads(entries),
                 "evaluation_enabled": evaluation.enabled,
                 "evaluation_states": _history_evaluation_states(entries, evaluation),
             }
         result = manager.history_page(cursor=cursor)
         return {
             **result.to_dict(),
+            "runs": _history_run_payloads(result.entries),
             "evaluation_enabled": evaluation.enabled,
             "evaluation_states": _history_evaluation_states(
                 result.entries, evaluation
@@ -1266,7 +1308,7 @@ def create_app(
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
         """Return one run's current :class:`RunStatus`; unknown ids are 404."""
-        return manager.get_run(run_id).to_dict()
+        return _run_payload(manager.get_run(run_id), {})
 
     @app.get("/api/runs/{run_id}/task")
     def get_run_task(run_id: str) -> dict:
@@ -1292,18 +1334,17 @@ def create_app(
         repo = record.managed_repo()
         source = None
         content = None
+        task_status = None
         if repo is not None and record.task_id:
-            content = read_task_content(repo, record.task_id)
-            if content is not None:
-                source = "active"
-            else:
-                content = read_archived_task_content(repo, record.task_id)
-                if content is not None:
-                    source = "archived"
+            task = read_task_state(repo, record.task_id)
+            content = task.content
+            source = task.source
+            task_status = task.status
         return {
             "run_id": run_id,
             "task_id": record.task_id,
             "source": source,
+            "status": task_status,
             "present": content is not None,
             "content": content,
         }

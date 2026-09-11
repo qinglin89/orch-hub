@@ -585,7 +585,7 @@ def test_run_destination_rule_is_shared_and_liveness_aware():
     # ...splitting on liveness plus attribution: a live run with a repo goes to
     # the index-gated active task detail, anything else to the run-scoped
     # active-then-archive view...
-    assert "if (LIVE_STATES.has(run.state) && run.repo_name)" in body
+    assert 'run.current_task.source === "active"' in body
     assert "return taskHash(run.repo_name, run.task_id);" in body
     assert "return runTaskHash(run.run_id);" in body
     # ...and a run with no task id has no task destination at all, leaving the
@@ -1362,11 +1362,11 @@ def test_overview_metric_tiles_use_the_shared_status_colours():
 # line.
 
 
-def test_overview_recent_outcomes_from_history_api():
+def test_overview_recent_outcomes_from_shared_run_snapshot():
     body = app_js()
-    # Recent outcomes come from the existing history payload — no new route — as a
-    # fifth best-effort source with a bounded window.
-    assert '"/api/history/runs?limit="' in body
+    # Current activity and recent outcomes must not read different run snapshots.
+    assert 'overviewSource("/api/history/runs' not in body
+    assert 'runs.slice(-OVERVIEW_HISTORY_LIMIT).reverse()' in body
     assert "OVERVIEW_HISTORY_LIMIT" in body
     assert "recentOutcomesPanel" in body
     assert "recentOutcomeCard" in body
@@ -1608,11 +1608,12 @@ def test_background_repaints_do_not_steal_focus():
     body = app_js()
     # The Overview heading lives outside the repainted region, so the refresh
     # can neither destroy the focus target nor re-announce the page...
-    assert '`<div id="overview-body"></div>`' in body
+    assert '<div id="overview-body"><div id="overview-status"></div>' in body
     assert 'document.getElementById("overview-body")' in body
-    # ...and a tick skips the repaint entirely while focus is inside that region.
-    assert "function focusInsideOverviewBody" in body
-    assert "if (data && !focusInsideOverviewBody()) paintOverview(data);" in body
+    # Operational state refreshes even with focus inside the body. The harness
+    # verifies link focus restoration and queue controls surviving a tick.
+    assert "if (data) paintOverview(data);" in body
+    assert "queue.contains(active)" in body
 
 
 def test_disabled_controls_hand_focus_back():

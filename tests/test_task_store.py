@@ -19,6 +19,7 @@ from orch_hub.task_store import (
     read_archived_task_content,
     read_session_est,
     read_task_content,
+    read_task_state,
 )
 
 
@@ -78,6 +79,43 @@ def test_reads_ids_from_index_and_status_from_frontmatter(tmp_path):
     assert by_id["2026-07-05-alpha"].status == "pending"
     assert by_id["2026-07-05-beta"].status == "in_progress"
     assert by_id["2026-07-05-alpha"].summary == "Alpha work"
+
+
+def test_known_task_state_uses_current_file_even_when_not_indexed(tmp_path):
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    task_id = "2026-09-11-current"
+    archive = tasks_dir / "archive"
+    archive.mkdir()
+    write_task(archive, task_id, "completed")
+    assert read_task_state(repo, task_id).to_dict() == {
+        "status": "completed", "source": "archived", "present": True,
+    }
+    write_task(tasks_dir, task_id, "in_progress")
+    assert read_task_state(repo, task_id).to_dict() == {
+        "status": "in_progress", "source": "active", "present": True,
+    }
+    (tasks_dir / f"{task_id}.md").write_text("# No status\n")
+    assert read_task_state(repo, task_id).status == STATUS_UNKNOWN
+    assert list_repo_tasks(repo).tasks == ()
+    assert read_task_state(repo, "../index").status == STATUS_MISSING
+
+
+def test_known_task_state_follows_an_archive_move_during_read(tmp_path, monkeypatch):
+    from orch_hub import task_store
+
+    repo, tasks_dir = make_repo_with_index(tmp_path, [])
+    task_id = "2026-09-11-current"
+    archive = tasks_dir / "archive"
+    archive.mkdir()
+    write_task(archive, task_id, "completed")
+
+    def moved(*args):
+        raise FileNotFoundError("moved after the existence check")
+
+    monkeypatch.setattr(task_store, "read_task_content", moved)
+    assert read_task_state(repo, task_id).to_dict() == {
+        "status": "completed", "source": "archived", "present": True,
+    }
 
 
 @pytest.mark.parametrize(

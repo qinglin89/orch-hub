@@ -93,6 +93,7 @@ def test_keyboard_smoke_actually_ran(harness_output: str):
         "run history:",
         "run nav:",
         "run archival:",
+        "cross entry:",
         "readiness:",
         "admission:",
         "usage:",

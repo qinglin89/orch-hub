@@ -223,6 +223,26 @@ class TaskSummary:
 
 
 @dataclass(frozen=True)
+class TaskFileState:
+    """Current task-file facts, separate from a run's launch-time task status.
+
+    No file means missing, not completed. The body is carried for detail reads
+    but omitted from list payloads; source and status come from that same read.
+    """
+
+    status: str
+    source: str | None
+    content: str | None
+
+    def to_dict(self) -> dict:
+        return {
+            "status": self.status,
+            "source": self.source,
+            "present": self.content is not None,
+        }
+
+
+@dataclass(frozen=True)
 class RepoTaskInventory:
     """A managed repo paired with its active-task summaries.
 

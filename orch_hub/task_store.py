@@ -19,7 +19,7 @@ import re
 from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 
-from .models import ManagedRepo, RepoTaskInventory, SessionEst, TaskSummary
+from .models import ManagedRepo, RepoTaskInventory, SessionEst, TaskFileState, TaskSummary
 
 STATUS_MISSING = "missing"
 """Sentinel status: a task id is listed in the index but has no ``<id>.md``."""
@@ -106,6 +106,27 @@ def read_archived_task_content(repo: ManagedRepo, task_id: str) -> str | None:
     enumerating ``archive/``.
     """
     return _read_contained_task_file(repo.path / ".ai-tasks" / "archive", task_id)
+
+
+def read_task_state(repo: ManagedRepo, task_id: str) -> TaskFileState:
+    """Resolve a known task active-then-archived, with status from the same file.
+
+    This does not enumerate archives or change index-gated task admission. A
+    disappearing active file can be an atomic archive move; follow through to
+    the archive, while other read failures remain failures rather than absence.
+    """
+    for source, reader in (
+        ("active", read_task_content),
+        ("archived", read_archived_task_content),
+    ):
+        try:
+            content = reader(repo, task_id)
+        except FileNotFoundError:
+            content = None
+        if content is not None:
+            status = _parse_frontmatter(content).get("status") or STATUS_UNKNOWN
+            return TaskFileState(status=status, source=source, content=content)
+    return TaskFileState(status=STATUS_MISSING, source=None, content=None)
 
 
 def read_session_est(repo: ManagedRepo, task_id: str) -> SessionEst | None:
