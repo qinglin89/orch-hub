@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-08
-verified-against: 3a8b4afe4e6e2c12071429594a974fd215039f6a
+last-updated: 2026-09-11
+verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
 ---
 
 # Project Map
@@ -14,7 +14,7 @@ behavior and rationale stay in the owning doc.
 | Feature | Modules | Key Decisions |
 |---|---|---|
 | Repo discovery and readiness | config, registry, readiness, git_meta, housekeeping, subprocess_utils, cli, api, models | registry = truth; fail-closed readiness; mandrel-owned opaque protocol placement; git/housekeeping display-only |
-| Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads |
+| Task inventory | task_store, api, models | frontmatter-authoritative status; index-gated contained reads; active-then-archive state reads |
 | Task evaluation foundation | evaluation, protocol_provenance, ai_snapshot, session_reads, task_snapshots, config, task_store, runs, history, sessions, logs, git_meta, subprocess_utils, models, api, web | gated read-only schema-v19 evidence packs; unanimous protocol identity + optional unanimous lock schema version; hub-owned artifacts; descriptor containment |
 | Task static metrics | static_metrics, session_reads, evaluation, config, models, api, web | deterministic Layer 1; static schema v4; no model call |
 | Task semantic evaluator | completion_eval, eval_dispatch, semantic_jobs, semantic, ai_snapshot, session_reads, static_metrics, evaluation, usage, runs, monitor, config, models, notifications, api, cli, web | automatic Layer 1 only; explicit evidence-bounded Layer 2; deadline/reap bound; exact cancel/settle boundary; inert legacy holds |
@@ -23,7 +23,7 @@ behavior and rationale stay in the owning doc.
 | Agent subscription usage | usage, statusline, runs, models, config, api, intake_agent, semantic, web, docs | fail-soft display only; cache-primary Claude; model-free refresh |
 | HTTP API foundation | api, config, registry, readiness, task_store, models | thin routes over shared helpers; only health + shell public |
 | Control-dir file channel | control_dir, models | file-channel only; atomic answers; idempotent stop.flag |
-| Run lifecycle | admission, runs, intake, orch_config, sessions, task_snapshots, protocol_provenance, api, config, control_dir, models, readiness, task_store | admission before readiness; per-repo serialization; detached launch; pre-spawn protocol capture + observed-end recheck |
+| Run lifecycle | admission, runs, intake, orch_config, sessions, task_snapshots, protocol_provenance, api, config, control_dir, models, readiness, task_store | admission before readiness; per-repo serialization; detached launch; pre-spawn protocol capture + observed-end recheck; current task state separate from immutable launch-time status |
 | Human question relay | control_dir, runs, api, notifications, models, web | fail-closed answer modes; metadata-only audit; one push per (run_id, seq) |
 | Log viewing | logs, runs, api | run-record located; bounded tails; bearer-header SSE |
 | Mobile dashboard | api, web | mobile-first SPA; scoped API-backed state and controls; details in features/dashboard.md + dashboard-views.md |

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-11
+verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
 ---
 
 # Modules: Web UI
@@ -46,6 +46,8 @@ effective-config disclosures, a run-scoped task-file view, task-evaluation
 Layer 1/Layer 2 sidecar view and global evaluation-report feed reached from Run
 history, remote intake start/review views, and recent/live log views;
 `styles.css` holds the mobile-first responsive layout. The dashboard
+issues every API request with `cache: no-store` so a manual or background
+refresh cannot be served an earlier cached response,
 reads only HTTP payloads, uses `fetch` +
 `ReadableStream.getReader()` for SSE log streaming so the bearer header is
 present, aborts active streams on navigation/reload/pause, and writes untrusted

@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-11
+verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
 ---
 
 # Modules: Web UI Views
@@ -70,10 +70,22 @@ diagnostic and falls back to it when a live stream ends before any orchestrator
 log line is seen. Overview Current activity, Run history, and the log view's
 task back-link share one task-first destination rule: live `active`/`waiting`
 runs with repo+task attribution open full task detail for
-controls/questions/session strips; other runs carrying a task id use
+controls/questions/session strips, but only while the run's `current_task`
+still reads `source: active`; a run whose task has been archived, and any other
+run carrying a task id, uses
 `#/runs/{run_id}/task` so archived task files stay reachable; cards without a
 task id fall back to logs, while the log view falls back to Runs. Both task
-destinations retain `View logs`, and normal task views stay active-only.
+destinations retain `View logs`, and normal task views stay active-only. Task
+detail that receives a 404 on an outlived bookmark resolves it through a run
+matching BOTH repo and task and re-renders the run-scoped view; an unrelated
+run, no run, or a non-404 error keeps the original failure.
+
+Repo detail renders a Current run section outside task-inventory filtering, so
+archiving the task cannot remove the live run's link from the repo view. The
+run-scoped task view carries the run's status, its Stop control and waiting
+answer forms while the run is live, an explicit Refresh, and — when the file is
+archived under a live process — a line saying activity clears once the run
+exits. It never offers Start.
 
 ## Task detail and run history
 

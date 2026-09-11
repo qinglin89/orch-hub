@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-11
+verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
 ---
 
 # Design Principles and Decisions
@@ -63,6 +63,9 @@ verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
 - Running multiple orchestrators against the same repo.
 - Using readiness/`git_clean` as a proxy for run↔intake admission, or keeping a
   second in-memory occupancy truth beside persisted run/intake records.
+- Inferring that a task completed from its absence from the active index, or
+  letting a task's current lifecycle state rewrite an earlier run's recorded
+  outcome — launch-time and current task facts are separate readings.
 - Treating an unconfirmed intake draft as a task or exposing it through active
   task inventory.
 - Duplicating run start/stop behavior inside the intake flow after a task is

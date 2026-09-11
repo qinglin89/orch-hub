@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-03
-verified-against: 4d6e1a3b7c31a073417b9b681d5a009e288b71cf
+last-updated: 2026-09-11
+verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
 ---
 
 # Features: Mobile Dashboard — Shell and Infrastructure
@@ -65,9 +65,15 @@ Implemented behavior:
   minimum target sizes cover dashboard controls and keyboard-scrollable blocks.
 - The Operations Overview is the default authenticated landing route
   (`#/overview`). It remains client-side over existing protected APIs,
-  parallel-fetching repos, tasks, live runs, escalations, run history,
+  parallel-fetching repos, tasks, runs, escalations,
   subscription usage, and Layer 2 attempt state into summary metrics, prioritized
   attention items, current activity, recent outcomes, and sidecar capacity/state.
+  Current activity and recent outcomes derive from one `/api/runs` snapshot
+  rather than a second history fetch, so two requests can never render opposite
+  states for the same run; escalation text only enriches runs already waiting in
+  that snapshot, and stands alone only when the run source failed. A live run
+  whose task has left the active index keeps its card, links to the run-scoped
+  file, and says the run has not exited.
   Waiting questions,
   display-readiness failures, housekeeping, live runs, and ended runs deep-link
   to existing task/repo/log views.
@@ -77,6 +83,13 @@ Implemented behavior:
   cancellation handle before the initial load, drops stale paints after
   navigation, and tears down through the router so requests never overlap or
   keep polling after the view is left.
+- Refresh repaints rather than skipping. The operational panels repaint on every
+  tick and restore focus to the same link by `href`, falling back to a Refresh
+  button that sits outside every repainted region; the evaluation-queue controls
+  live in their own stable slot that is skipped only while focus is inside it.
+  This replaces an earlier rule that skipped the whole paint whenever focus sat
+  anywhere in the body, under which a keyboard user parked on a link could hold
+  the Overview stale indefinitely.
 - The Overview Subscription usage section is a separate section below the
   operational panels over protected `GET /api/usage`. It renders independent
   Claude and Codex cards with plan/tier, every available window, used and

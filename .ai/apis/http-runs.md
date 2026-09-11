@@ -1,6 +1,6 @@
 ---
-last-updated: 2026-09-04
-verified-against: 370050db7d568c3ba44524f1358937c39c3b58de
+last-updated: 2026-09-11
+verified-against: c4015d65684b7e9318eece87cc3599b2f2480f66
 ---
 
 # APIs: HTTP — Runs, Logs, Escalations
@@ -38,6 +38,14 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 - Shape: `{"runs": [RunStatus.to_dict(), ...]}`. Live run entries include
   `stop_requested: true` after `POST /stop` writes `stop.flag`; terminal entries
   keep `stop_requested: false` and express honored stops through `state/detail`.
+- Every run payload (create, list, detail, and both history shapes) carries an
+  additive `current_task`: `{status, source, present}` read afresh per request
+  from the active-then-archive file, or `null` when the file could not be read
+  or the run has no repo/task attribution. `null` (unreadable) stays distinct
+  from an observed `status: "missing"`. Launch-time `task_status` is immutable
+  launch evidence and is never overwritten by it, so a task's current lifecycle
+  can never rewrite an earlier run's verdict. Reads are cached within one
+  request, once per `(repo, task)`.
 
 ## `GET /api/history/runs`
 
@@ -65,8 +73,8 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 - Every run entry embeds the normal `RunStatus` fields, including
   `stop_requested`, plus `events`, persisted session snapshot fields
   (`sessions`, `context_budget`), `session_est`
-  (`{"current","total"}` or `null`), and the catalog-free run snapshot
-  `effective_config` (`null` when no startup snapshot exists). Both top-level
+  (`{"current","total"}` or `null`), `current_task`, and the catalog-free run
+  snapshot `effective_config` (`null` when no startup snapshot exists). Both top-level
   contracts also include
   `evaluation_enabled` plus `evaluation_states`, one entry per distinct
   returned task group: `{repo_name, repo_path, task_id, latest_evaluation_id,
@@ -91,15 +99,18 @@ human-question routes. Cross-cutting auth/app behavior: `http-core.md`.
 - Purpose: fetch the task file associated with a persisted run, even after
   close-out archives the task.
 - Source: resolves `run_id` through `RunManager.get_run`, reconstructs the repo
-  from `RunRecord.repo_path`/`task_id`, reads active
-  `.ai-tasks/<task_id>.md` first, then falls back to
-  `.ai-tasks/archive/<task_id>.md`.
-- Shape: `{"run_id", "task_id", "source", "present", "content"}` where
-  `source` is `"active"`, `"archived"`, or `null`. Unknown runs return HTTP
+  from `RunRecord.repo_path`/`task_id`, then resolves the file through
+  `task_store.read_task_state` (active first, then
+  `.ai-tasks/archive/<task_id>.md`).
+- Shape: `{"run_id", "task_id", "source", "status", "present", "content"}` where
+  `source` is `"active"`, `"archived"`, or `null` and `status` is the file's
+  own frontmatter status. Unknown runs return HTTP
   404; missing active/archive files return HTTP 200 with `present: false`.
 - Boundary: this route is run-scoped and non-index-gated so historical run task
   links survive archival; `/api/tasks` and `/api/repos/{repo_id}/tasks/{task_id}`
-  remain active-only and provide no general archived-task listing.
+  remain active-only and provide no general archived-task listing. A 404 from
+  those index-gated routes therefore means absence from the active index, never
+  proof that the task completed.
 
 ## `GET /api/runs/{run_id}/sessions`
 
