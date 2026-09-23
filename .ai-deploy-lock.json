@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "b22ba7a2351b9e1f1340b9ccd670428d71ce8a56551caf2186d935a784333d12",
+  "canonical_payload_sha256": "c25af224af220a03f54b3ccd1a468225d6ee6f68f7aa88b34abb56d7b3e37e87",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -213,14 +213,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-config-profiles.md",
-      "canonical_sha256": "a18eec39dc85f6bc775ed3062bbabe26bfdb392656c3838c845873d3119c3124",
-      "canonical_size_bytes": 8530,
+      "canonical_sha256": "dc007d9e39af79b2299d48e828274b994a1357fc3107db4a532c5fcda8182fc7",
+      "canonical_size_bytes": 8532,
       "target_relative_path": ".mandrel/orchestrator/HANDOFF-orch-hub-config-profiles.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-split-role-profiles.md",
-      "canonical_sha256": "cfcbca0ed483c8f31aaa033d2bb1fede256ecea079242a2f3495122405a6285b",
-      "canonical_size_bytes": 10246,
+      "canonical_sha256": "e5df2611d0600cc79e2d09ec7923dc10190777cbb25d7082a0bd18dd638aa165",
+      "canonical_size_bytes": 10248,
       "target_relative_path": ".mandrel/orchestrator/HANDOFF-orch-hub-split-role-profiles.md"
     },
     {
@@ -231,20 +231,20 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "8299d300f7b699c38a07001c41d0ba1dc2837525fec6937657cafc7d6170d1c7",
-      "canonical_size_bytes": 40345,
+      "canonical_sha256": "b55606da8555e17ece16aadf60e18788ed8665931e59a90d1013c18cc10b1067",
+      "canonical_size_bytes": 40393,
       "target_relative_path": ".mandrel/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "1edd737e99c3c852e5a9d5e7a7e18a2e233e51d95c8dc415d61d33739d873eb4",
-      "canonical_size_bytes": 155674,
+      "canonical_sha256": "067bbf09a0ac46b7405d6da039f23fc6c05f9c6f3fd0fd0890b720562565cc29",
+      "canonical_size_bytes": 155676,
       "target_relative_path": ".mandrel/orchestrator/orchestrator.py"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.toml",
-      "canonical_sha256": "30c79716faa07292ec9b020deccbcf53b15644f966c0870e6ca2c79d0bfda00a",
-      "canonical_size_bytes": 2252,
+      "canonical_sha256": "dbbc6597a2112df12fa71a3dee95d0e3e4bc80d084b04a8200ccd014f93d3717",
+      "canonical_size_bytes": 2320,
       "target_relative_path": ".mandrel/orchestrator/orchestrator.toml"
     },
     {
@@ -693,8 +693,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "542e553443df29ea3d3f85ae40435c0b4c6337f4be4fc6ce2ad4097bafa0d013",
-      "canonical_size_bytes": 112976,
+      "canonical_sha256": "f35d62cc33f7e936091d7b014bd86abfa69632e013245b774a3ac0db8db2405d",
+      "canonical_size_bytes": 113062,
       "target_relative_path": ".mandrel/orchestrator/test_loop_mock.py"
     },
     {
@@ -705,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "78c3866a1830b77b00b409e1855dce9cc8e9be62",
+  "source_git_commit": "08e83c9158e2d73d0f4d12435d5c802509d6c678",
   "source_repo": "mandrel"
 }
