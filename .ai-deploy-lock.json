@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "c25af224af220a03f54b3ccd1a468225d6ee6f68f7aa88b34abb56d7b3e37e87",
+  "canonical_payload_sha256": "056484ce09421d351f8c53050e5429740417059386b127cc01ad0b8af9bf05d2",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -213,8 +213,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/HANDOFF-orch-hub-config-profiles.md",
-      "canonical_sha256": "dc007d9e39af79b2299d48e828274b994a1357fc3107db4a532c5fcda8182fc7",
-      "canonical_size_bytes": 8532,
+      "canonical_sha256": "b76d4373a074d46ef04f3cae7df1a2a6f5c1ad6f445ede3caf6a73f418b0db5b",
+      "canonical_size_bytes": 8536,
       "target_relative_path": ".mandrel/orchestrator/HANDOFF-orch-hub-config-profiles.md"
     },
     {
@@ -231,20 +231,20 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "b55606da8555e17ece16aadf60e18788ed8665931e59a90d1013c18cc10b1067",
-      "canonical_size_bytes": 40393,
+      "canonical_sha256": "b2df445b539b6f037fb742cba7a9c60c76bbff1f5a129db771cc0124f2b11f0a",
+      "canonical_size_bytes": 40409,
       "target_relative_path": ".mandrel/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "067bbf09a0ac46b7405d6da039f23fc6c05f9c6f3fd0fd0890b720562565cc29",
-      "canonical_size_bytes": 155676,
+      "canonical_sha256": "822b5e6a017bbf333097809391d72ce4a642c350167d84b59a7424e24bedabea",
+      "canonical_size_bytes": 155680,
       "target_relative_path": ".mandrel/orchestrator/orchestrator.py"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.toml",
-      "canonical_sha256": "dbbc6597a2112df12fa71a3dee95d0e3e4bc80d084b04a8200ccd014f93d3717",
-      "canonical_size_bytes": 2320,
+      "canonical_sha256": "722310213353aef1a1912803f84bd49ebc65ffe026c314045ee66f0b2b56bb77",
+      "canonical_size_bytes": 2328,
       "target_relative_path": ".mandrel/orchestrator/orchestrator.toml"
     },
     {
@@ -705,6 +705,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "08e83c9158e2d73d0f4d12435d5c802509d6c678",
+  "source_git_commit": "d86981a8950ae32d2b1a231fea6301936e43afb9",
   "source_repo": "mandrel"
 }
