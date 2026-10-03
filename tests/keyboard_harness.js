@@ -1515,6 +1515,85 @@ async function scenarioTaskDetail() {
   eq("task: it carries the typed reply", call && call.body.answer, "go left");
 }
 
+async function scenarioTasksLoading() {
+  installRoutes({ waiting: true });
+  var inventory = JSON.parse(JSON.stringify(TASKS));
+  inventory.repos[0].tasks.push({
+    task_id: "later-task", status: "pending", summary: "Deferred task", blockers: [],
+  });
+  // Task ids are only unique within a repo. A matching id in another repo
+  // must not inherit the first repo's run accent.
+  inventory.repos.push({
+    name: "Other & repo", index_present: true, tasks: [TASKS.repos[0].tasks[0]],
+  });
+  route("GET", "/api/tasks", inventory);
+  route("GET", "/api/runs", { runs: [
+    { run_id: RUN, repo_name: REPO, task_id: TASK, state: "waiting" },
+    { run_id: "later-run", repo_name: REPO, task_id: "later-task", state: "active" },
+  ] });
+  var releaseRuns = defer("GET", "/api/runs");
+  await navigate("#/tasks");
+  eq("task: pending run accents do not delay the inventory", doc.querySelectorAll(".card.task").length, 3);
+  eq("task: pending run accents do not delay the title", doc.title, "Tasks · orch-hub");
+  activeIs("task: pending run accents do not delay heading focus", pageHeading());
+  eq("task: pending runs do not invent accents", doc.querySelectorAll(".run-waiting, .run-active").length, 0);
+
+  var inventoryCalls = countCalls("GET", "/api/tasks");
+  choose(doc.getElementById("f-repo"), REPO);
+  choose(doc.getElementById("f-status"), "pending");
+  var search = doc.getElementById("f-search");
+  type(search, "Demo task");
+  var card = doc.querySelector(".card.task");
+  var link = card.querySelector(".card-link");
+  link.focus();
+  await releaseRuns();
+  eq("task: late accents retain the filtered cards", doc.querySelectorAll(".card.task").length, 1);
+  check("task: late accents preserve the search control", doc.getElementById("f-search") === search, "the search control was replaced");
+  eq("task: late accents preserve the search value", search.value, "Demo task");
+  eq("task: late accents preserve the repo filter", doc.getElementById("f-repo").value, REPO);
+  eq("task: late accents preserve the status filter", doc.getElementById("f-status").value, "pending");
+  check("task: late accents preserve the task link", doc.querySelector(".card.task .card-link") === link, "the task link was replaced");
+  activeIs("task: late accents preserve task-link focus", link);
+  check("task: a delayed waiting accent fills in", card.classList.contains("run-waiting"), card.className);
+  eq("task: filters and run accents never refetch inventory", countCalls("GET", "/api/tasks"), inventoryCalls);
+
+  pressEnter(doc.getElementById("f-clear"));
+  eq("task: clearing filters restores every task", doc.querySelectorAll(".card.task").length, 3);
+  eq("task: newly revealed tasks use the delayed run data", doc.querySelectorAll(".card.task.run-active").length, 1);
+  eq("task: equal task ids in different repos keep separate accents", doc.querySelectorAll(".card.task.run-waiting").length, 1);
+
+  // Even a response that arrives after navigating away cannot mutate the
+  // obsolete cards or interfere with the newer view's landing.
+  releaseRuns = defer("GET", "/api/runs");
+  await navigate("#/tasks");
+  var staleCard = doc.querySelector(".card.task");
+  await navigate("#/runs");
+  var newerHeading = pageHeading();
+  await releaseRuns();
+  check("task: a stale run overlay leaves the newer view intact", pageHeading() === newerHeading, "the newer heading was replaced");
+  activeIs("task: a stale run overlay leaves focus alone", newerHeading);
+  check("task: a stale run overlay never decorates obsolete cards", !staleCard.classList.contains("run-waiting"), staleCard.className);
+
+  routeError("GET", "/api/runs", 500, { detail: "run listing unavailable" });
+  releaseRuns = defer("GET", "/api/runs");
+  await navigate("#/tasks");
+  var list = doc.getElementById("task-list");
+  await releaseRuns();
+  check("task: a failed run overlay preserves the task list", doc.getElementById("task-list") === list, "the task list was replaced");
+  eq("task: a failed run overlay leaves tasks usable", doc.querySelectorAll(".card.task").length, 3);
+
+  routeError("GET", "/api/runs", 401, { detail: "unauthorized" });
+  releaseRuns = defer("GET", "/api/runs");
+  await navigate("#/tasks");
+  eq("task: a pending authentication check still permits initial paint", doc.querySelectorAll(".card.task").length, 3);
+  await releaseRuns();
+  check("task: a delayed run-overlay 401 returns to login", !!doc.getElementById("token-input"), "no login gate");
+  eq("task: a delayed run-overlay 401 clears the token", localStorage.getItem("orch-hub-token"), null);
+
+  installRoutes({ waiting: true });
+  localStorage.setItem("orch-hub-token", "secret-token");
+}
+
 async function scenarioRunOptions() {
   installRoutes({ waiting: false }); // no live run → the Start control is offered
   await navigate("#/repos");
@@ -6473,6 +6552,7 @@ async function scenarioRepoProtocolLine() {
     await scenarioNavigation();
     await scenarioAppearance();
     await scenarioTaskDetail();
+    await scenarioTasksLoading();
     await scenarioRunOptions();
     await scenarioLaunchCatalog();
     await scenarioIntakeReview();
