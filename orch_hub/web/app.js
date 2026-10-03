@@ -1051,15 +1051,9 @@
     view().innerHTML = loadingView("Tasks", "Loading tasks…");
     const data = await api("/api/tasks");
     const repos = data.repos || [];
-    // Best-effort run overlay so task cards show run-state accents here too; a
-    // runs failure must not hide the task list (a 401 still re-gates).
+    // Run accents are optional: paint the inventory before reading them so a
+    // slow runs request cannot hold the list or the router's focus/title work.
     let liveByRepoTask = {};
-    try {
-      const runsData = await api("/api/runs");
-      liveByRepoTask = liveRunsByRepoTask(runsData.runs);
-    } catch (err) {
-      if (err instanceof ApiError && err.status === 401) throw err;
-    }
     // Before the filter reconciliation below, so a superseded route neither
     // paints nor edits the shared filter state the live route is showing.
     if (superseded()) return;
@@ -1119,6 +1113,30 @@
       renderTaskList(repos, liveByRepoTask);
     });
     renderTaskList(repos, liveByRepoTask);
+    const taskList = document.getElementById("task-list");
+    api("/api/runs")
+      .then((runsData) => {
+        if (superseded()) return;
+        liveByRepoTask = liveRunsByRepoTask(runsData.runs);
+        const statesByLink = new Map();
+        for (const [repoName, tasks] of Object.entries(liveByRepoTask)) {
+          for (const [taskId, run] of Object.entries(tasks))
+            statesByLink.set(taskHash(repoName, taskId), run.state);
+        }
+        // Update only the accents on the currently filtered cards. Rebuilding
+        // the list would discard a focused task link; the held map supplies
+        // accents for cards revealed by later filter changes.
+        for (const card of taskList.querySelectorAll(".card.task")) {
+          const link = card.querySelector(".card-link");
+          const state = statesByLink.get(link.getAttribute("href"));
+          card.classList.toggle("run-waiting", state === "waiting");
+          card.classList.toggle("run-active", state === "active");
+        }
+      })
+      .catch(() => {
+        // The list remains usable without accents. api() itself clears a
+        // rejected token and renders login before throwing a 401.
+      });
   }
 
   // ---- repo detail ----
