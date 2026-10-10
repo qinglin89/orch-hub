@@ -1,5 +1,5 @@
 {
-  "canonical_payload_sha256": "8ddcb2e96c97e9e1e801465b7e5585b5ae4e67f56262d18bee8e91b498160d7a",
+  "canonical_payload_sha256": "03477a3fc5f98f26164b1f1e2ee7f9593dd095554811b0dbcff3008eaa93505b",
   "deployed_files": [
     {
       "canonical_relative_path": "canonical/meta/init.md",
@@ -15,8 +15,8 @@
     },
     {
       "canonical_relative_path": "canonical/meta/taskfile.md",
-      "canonical_sha256": "4be3afdc25918dd25ddda997643ffd5359f5f1c65e0aab5b51943fd7854f83cd",
-      "canonical_size_bytes": 8496,
+      "canonical_sha256": "dc1011a59f47c96593e7d4301a2dd232758f1526085346bdc91aa40a2d26d1ef",
+      "canonical_size_bytes": 12845,
       "target_relative_path": ".ai-protocol/meta/taskfile.md"
     },
     {
@@ -39,8 +39,8 @@
     },
     {
       "canonical_relative_path": "canonical/protocols/intake.md",
-      "canonical_sha256": "252a0fec9da308bfbb3163291fc0903803fc93253e7662689b733d2405786fbe",
-      "canonical_size_bytes": 3175,
+      "canonical_sha256": "d69b4f0bb395fa9d160e3e0f5e93d382f7bc3f0004c5590f45f2ef8f7d424994",
+      "canonical_size_bytes": 3900,
       "target_relative_path": ".ai-protocol/protocols/intake.md"
     },
     {
@@ -51,32 +51,32 @@
     },
     {
       "canonical_relative_path": "canonical/protocols/review.md",
-      "canonical_sha256": "147ddbf43e972498384af012b807e9081d53a58eb8d03bc4eb55ff29122c70d2",
-      "canonical_size_bytes": 6788,
+      "canonical_sha256": "bd3854187ea3f988147e9bb774df132adaa49e65b428ee523e88ae16144a5dc5",
+      "canonical_size_bytes": 7368,
       "target_relative_path": ".ai-protocol/protocols/review.md"
     },
     {
       "canonical_relative_path": "canonical/workflow/rolemapping.md",
-      "canonical_sha256": "aedcaae0a130c47f4842aabced58f7b69668ef27f0c22740607872a57d227479",
-      "canonical_size_bytes": 5190,
+      "canonical_sha256": "1d7a1c1b6e5227b2a882a99e1d48e8264de892f66b7c66af81fd289b3cd558a2",
+      "canonical_size_bytes": 6553,
       "target_relative_path": ".ai-protocol/workflow/rolemapping.md"
     },
     {
       "canonical_relative_path": "canonical/workflow/runbook.md",
-      "canonical_sha256": "cbbbd0ca6085016b945b601dd0753edac59d281a91a57b77ea0e29e2dc6ab0bd",
-      "canonical_size_bytes": 10022,
+      "canonical_sha256": "1a3fa7f90a5214d0e022516d1b45fbb2b91b71de41e2d54984737ff176cde515",
+      "canonical_size_bytes": 13355,
       "target_relative_path": ".ai-protocol/workflow/runbook.md"
     },
     {
       "canonical_relative_path": "canonical/workflow/skills/closeout.md",
-      "canonical_sha256": "f80cd869f4fc4bfea2935db3a83c93af5334b6098e1a7ba7e6463dc934e8f2ab",
-      "canonical_size_bytes": 2328,
+      "canonical_sha256": "837a6e9ff877112bdf6058efbed4c06bbb9baaf611210de2bc3974b93cc81844",
+      "canonical_size_bytes": 3557,
       "target_relative_path": ".ai-protocol/workflow/skills/closeout.md"
     },
     {
       "canonical_relative_path": "canonical/workflow/skills/session-end.md",
-      "canonical_sha256": "e7a09b82ff815f51e4eac8821aeebf459fd6cfa10c8ff20fb399d9f113a6367b",
-      "canonical_size_bytes": 3540,
+      "canonical_sha256": "78412272db9861578f6f3b6ceea4e66bf5e44a6e76e7837d5f497910298706a4",
+      "canonical_size_bytes": 3713,
       "target_relative_path": ".ai-protocol/workflow/skills/session-end.md"
     },
     {
@@ -117,8 +117,8 @@
     },
     {
       "canonical_relative_path": "canonical/claude/skills/ai-sync-v2/SKILL.md",
-      "canonical_sha256": "39c90dfb21493a6d793708a2d904580fceed5a9b6f92cae8602dc738ef583618",
-      "canonical_size_bytes": 6049,
+      "canonical_sha256": "ba57afa0e4087325617e2a2e17c27a1fa9ffd1a64fad5599ff23e3d4cd267f7e",
+      "canonical_size_bytes": 7054,
       "target_relative_path": ".claude/skills/ai-sync-v2/SKILL.md"
     },
     {
@@ -135,8 +135,8 @@
     },
     {
       "canonical_relative_path": "canonical/claude/skills/intake-task/SKILL.md",
-      "canonical_sha256": "f16ea12a658b9524bdba5ffec61dac52c853a05fdcf1fbdfa699e79dbeeb22c9",
-      "canonical_size_bytes": 4521,
+      "canonical_sha256": "d527cc139b5f05221a6be0545c0babe1fa32a3b5efe36208722d5d91e70c2e24",
+      "canonical_size_bytes": 4963,
       "target_relative_path": ".claude/skills/intake-task/SKILL.md"
     },
     {
@@ -144,6 +144,12 @@
       "canonical_sha256": "e1a3de3147571fb73112417943e85f3b0ef1ea2b6c271a2c995ca50ae0b193c5",
       "canonical_size_bytes": 2690,
       "target_relative_path": ".claude/skills/invoke/SKILL.md"
+    },
+    {
+      "canonical_relative_path": "canonical/claude/skills/split-task/SKILL.md",
+      "canonical_sha256": "06958f6abe4e81bab603b484dc8e730b16657d1a9118f14453008d1796c0d6fc",
+      "canonical_size_bytes": 9206,
+      "target_relative_path": ".claude/skills/split-task/SKILL.md"
     },
     {
       "canonical_relative_path": "canonical/codex/README.md",
@@ -231,14 +237,14 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/README.md",
-      "canonical_sha256": "69f25caec393a5875d01d2236d006ff37ea4f3b20ea598d1576b15655bf9fbcd",
-      "canonical_size_bytes": 40411,
+      "canonical_sha256": "cae17a57d060557bee89e6a676da06e0a8452038431071b62079dc09046a6e11",
+      "canonical_size_bytes": 42677,
       "target_relative_path": ".mandrel/orchestrator/README.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/orchestrator.py",
-      "canonical_sha256": "822b5e6a017bbf333097809391d72ce4a642c350167d84b59a7424e24bedabea",
-      "canonical_size_bytes": 155680,
+      "canonical_sha256": "d5f43cfa7e38ea27ae687b32d6db137ee8ba58bd78da9dae161b78c5538f1326",
+      "canonical_size_bytes": 170949,
       "target_relative_path": ".mandrel/orchestrator/orchestrator.py"
     },
     {
@@ -426,6 +432,12 @@
       "canonical_sha256": "1e83245f9e7ffe06f01f8c70147edb4768b6be74c714fc8877caab762f108e34",
       "canonical_size_bytes": 28,
       "target_relative_path": ".mandrel/orchestrator/prompts/entry/sid-line.md"
+    },
+    {
+      "canonical_relative_path": "canonical/orchestrator/prompts/entry/split.md",
+      "canonical_sha256": "e8dc69fbd70d8937fa77552f34f1e1db7cbb0df81f828a47629d0fda77e155c4",
+      "canonical_size_bytes": 1031,
+      "target_relative_path": ".mandrel/orchestrator/prompts/entry/split.md"
     },
     {
       "canonical_relative_path": "canonical/orchestrator/prompts/entry/stall-ruling.md",
@@ -638,6 +650,12 @@
       "target_relative_path": ".mandrel/orchestrator/prompts/midflight/run-error-retry.md"
     },
     {
+      "canonical_relative_path": "canonical/orchestrator/prompts/midflight/split-incomplete.md",
+      "canonical_sha256": "4f94d265cbd0227ba8a363feffea537771c3ccd2a4e6346c6a1281f7597c3cb0",
+      "canonical_size_bytes": 427,
+      "target_relative_path": ".mandrel/orchestrator/prompts/midflight/split-incomplete.md"
+    },
+    {
       "canonical_relative_path": "canonical/orchestrator/prompts/midflight/violation-fix.md",
       "canonical_sha256": "f3811dd980f1d6dc77824c7cdb3faaeb27072f4ae6a76ecc8a456a43efaf291f",
       "canonical_size_bytes": 369,
@@ -675,8 +693,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/prompts/postcheck-contract.md",
-      "canonical_sha256": "0af2e6e6be2a44abf5becc9605adcd1455172e715047ddf2cdad583974852ade",
-      "canonical_size_bytes": 2295,
+      "canonical_sha256": "fe42f12a751a485429ba405994e44dc08d7da84d36b629eb7cefc9724d063cf7",
+      "canonical_size_bytes": 2474,
       "target_relative_path": ".mandrel/orchestrator/prompts/postcheck-contract.md"
     },
     {
@@ -693,8 +711,8 @@
     },
     {
       "canonical_relative_path": "canonical/orchestrator/test_loop_mock.py",
-      "canonical_sha256": "590ba41c99c9df39972909b0c35251333eac4e7b444bf150e9eba77959ac3876",
-      "canonical_size_bytes": 113066,
+      "canonical_sha256": "0315d886658d32f5f5c73d1bfe2296912bbb90ef2fc273cc4068a96d18db3af2",
+      "canonical_size_bytes": 142526,
       "target_relative_path": ".mandrel/orchestrator/test_loop_mock.py"
     },
     {
@@ -705,6 +723,6 @@
     }
   ],
   "schema_version": 1,
-  "source_git_commit": "1319fa7918e5cf78b6e08f3f0cd712fe453e956a",
+  "source_git_commit": "abd3f117642a5530b45bbbc91731ca65325e36c6",
   "source_repo": "mandrel"
 }
