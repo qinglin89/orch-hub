@@ -14,8 +14,19 @@ contains no repo data or secret.
 On first load, the dashboard asks for the bearer token and stores it in that
 browser profile's `localStorage`. Every data request carries
 `Authorization: Bearer <token>`. Tokens are not put in cookies, query strings,
-SSE URLs, or server logs. A 401 clears the stored token and returns to the login
-gate.
+URL fragments, SSE URLs, or server logs. A 401 clears the stored token and
+returns to the login gate.
+
+The login gate says where the token comes from: on the Mac running orch-hub,
+`orch-hub open` opens the dashboard and copies the token to the clipboard, and
+`orch-hub token --copy` only copies it. Paste it into the token field and press
+Connect. Where the browser can read the clipboard (a secure context, such as
+https or the `localhost` page `orch-hub open` uses, exposing
+`navigator.clipboard.readText`), the gate also shows a **Paste** button that
+fills the field from the clipboard, trimmed. Paste never submits; a refused
+clipboard permission or an empty clipboard leaves a short note instead. Over a
+plain-http tailnet address the button is absent, and an ordinary paste into the
+field works as before.
 
 Use only a trusted device and browser profile. The HTTP service must still stay
 on localhost or inside a private tailnet; bearer authentication is not a
@@ -39,6 +50,46 @@ replacement for that network boundary.
 The Overview refreshes while visible. Missing subscription-usage data degrades
 only its own panel; evaluation failures remain isolated to history and
 evaluation surfaces. Neither becomes repo health or a launch gate.
+
+## First run: adding a repo
+
+orch-hub lists only repos registered with Mandrel. When the repo list loads
+successfully and is empty, Overview, Repos, and Tasks show a **Get started**
+card instead of an empty state. The Overview also omits its all-clear texts
+("Nothing needs attention right now.", "No live runs.", "No recent runs.") so
+an empty hub never reads as healthy. A repo list that failed to load is not
+this state; those views keep their usual error or unavailable handling. The
+card offers two routes:
+
+- **Tell your coding agent.** *Copy prompt for your agent* copies a prompt that
+  points the agent at the
+  [add-a-repo guide](https://github.com/qinglin89/orch-hub/blob/dev/docs/agent-setup.md#add-a-repo).
+  Replace `/path/to/your-repo` before sending it. Without clipboard access (a
+  plain-http address) the button says so, and the prompt text stays
+  selectable.
+- **Run it yourself.** Deploy with
+  `~/.local/share/mandrel/bin/mandrel deploy --bootstrap-orchestrator /path/to/your-repo`
+  (the installer's default Mandrel location; use your own checkout's
+  `bin/mandrel` if Mandrel lives elsewhere), commit `.gitignore` and
+  `.ai-deploy-lock.json`, then run `/ai-init` in that repo with your coding
+  agent and commit `.ai/`.
+
+The card only explains and copies text. Every step runs on the Mac; no
+dashboard control writes into a target repo. Once Mandrel registers the repo,
+it appears on the next load or Overview refresh.
+
+## Readiness fixes
+
+Wherever the dashboard lists failed readiness checks (repo cards, repo detail,
+the task-detail run controls, and the New task intake refusal), each check shows
+its message and, under it in muted text, a one-line **Fix:** hint from the hub.
+The hint is usually a command to run on the Mac, for example
+`<mandrel>/bin/mandrel deploy --bootstrap-orchestrator <repo>` for a missing
+deploy piece, or the first few uncommitted paths for a dirty tree. Overview
+attention rows stay a compact list of failed check names; their hints ride the
+row's tooltip, and the row opens repo detail, where they are listed in full.
+Hints are guidance only. They never change which checks fail or what gates a
+launch or intake.
 
 ## Starting a run
 

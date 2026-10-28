@@ -2525,3 +2525,38 @@ def test_shell_assets_resolve_through_the_runtime_resource_root():
     assert api.WEB_DIR == resources.web_dir()
     for filename, _ in api.SHELL_ASSETS.values():
         assert (api.WEB_DIR / filename).is_file(), filename
+
+
+# ---- first-run onboarding: login source, Paste, Get started, fix hints --------
+#
+# Behaviour (card on Overview/Repos/Tasks, Paste gating, hint rendering) is
+# driven in tests/keyboard_harness.js (`first run:`, `paste:`, `hint:`); these
+# pin the static shell guarantees the public, secret-free shell must keep.
+
+
+def test_login_gate_explains_the_token_source_without_a_new_credential_path():
+    body = app_js()
+    assert "<code>orch-hub open</code>" in body
+    assert "<code>orch-hub token --copy</code>" in body
+    # Paste reads the clipboard on an explicit click, only in a secure context
+    # with readText — never from the URL, a cookie, or the fragment.
+    assert "window.isSecureContext" in body
+    assert 'typeof nav.clipboard.readText === "function"' in body
+    for forbidden in ("document.cookie", "location.search", "URLSearchParams"):
+        assert forbidden not in body, forbidden
+    assert "location.hash.replace(/^#/, \"\")" in body  # routes only, no token
+
+
+def test_get_started_card_is_text_and_copy_only():
+    body = app_js()
+    start = body.index("// ---- first run: no managed repos yet ----")
+    end = body.index("// ---- run overlay helpers")
+    section = body[start:end]
+    # It explains and copies; it never calls the API (so it cannot write a repo).
+    assert "api(" not in section
+    assert "agent-setup.md" in section and '"#add-a-repo"' in section
+    assert "~/.local/share/mandrel/bin/mandrel" in section
+    assert "copyText(" in section
+    css = styles_css()
+    for selector in (".get-started", ".get-started-code", ".reason-hint", ".token-paste"):
+        assert selector in css, selector

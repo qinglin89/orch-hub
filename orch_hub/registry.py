@@ -28,7 +28,8 @@ def discover_repos(
     Order:
       1. ``mandrel registry list --json`` — used when it runs and exits 0.
       2. ``<mandrel>/.registry/repos.local.json`` — used when the command is
-         unavailable (missing executable) or exits non-zero.
+         unavailable (missing executable, or one the OS refuses to run, such as
+         a non-executable ``bin/mandrel``) or exits non-zero.
 
     A missing registry file yields an empty list. Malformed JSON, or an entry
     missing a required key, raises :class:`RegistryError`. An exit-0 command is
@@ -48,6 +49,11 @@ def _load_from_command(config: Config, runner: Runner) -> Any | None:
     try:
         result = runner([config.mandrel_bin, "registry", "list", "--json"])
     except CommandNotFoundError:
+        return None
+    except OSError:
+        # Present but unrunnable (e.g. PermissionError on a non-executable
+        # bin/mandrel): same fallback as a missing command, so discovery — and
+        # GET /api/repos — degrades to the registry file instead of erroring.
         return None
     if not result.ok:
         return None

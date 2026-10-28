@@ -1164,6 +1164,8 @@ def _print_human(
         print(f"{status:9}  {repo.name}  {repo.path}")
         for check in report.failures:
             print(f"             - {check.name}: {check.message}")
+            if check.hint:
+                print(f"               fix: {check.hint}")
 
 
 if __name__ == "__main__":

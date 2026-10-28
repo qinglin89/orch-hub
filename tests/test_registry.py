@@ -138,3 +138,37 @@ def test_empty_command_array_is_empty_list(tmp_path):
 
     repos = discover_repos(make_config(tmp_path), runner=runner)
     assert repos == []
+
+
+def test_unrunnable_command_falls_back_to_file(tmp_path):
+    # A present-but-unrunnable mandrel (PermissionError is an OSError, not the
+    # CommandNotFoundError a missing one raises) degrades exactly like a missing
+    # command instead of escaping discovery and 500-ing GET /api/repos.
+    write_registry_file(tmp_path, SAMPLE)
+
+    def runner(args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    repos = discover_repos(make_config(tmp_path), runner=runner)
+    assert [r.name for r in repos] == ["repo-a", "repo-b"]
+
+
+def test_unrunnable_command_without_registry_file_is_empty(tmp_path):
+    def runner(args, **kwargs):
+        raise OSError(8, "Exec format error")
+
+    assert discover_repos(make_config(tmp_path), runner=runner) == []
+
+
+def test_non_executable_mandrel_bin_falls_back_to_file(tmp_path):
+    # End to end through the real subprocess wrapper: exec of a non-executable
+    # file (never a real mandrel) raises PermissionError, and discovery falls
+    # back to the registry file.
+    write_registry_file(tmp_path, SAMPLE[:1])
+    config = make_config(tmp_path)
+    config.mandrel_bin.parent.mkdir(parents=True)
+    config.mandrel_bin.write_text("#!/bin/sh\necho '[]'\n")
+    config.mandrel_bin.chmod(0o644)
+
+    repos = discover_repos(config)
+    assert [r.name for r in repos] == ["repo-a"]

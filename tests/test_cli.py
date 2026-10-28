@@ -1212,3 +1212,25 @@ def test_token_reads_a_real_installed_plist(tmp_path, capsys):
 
     assert cli.main(["token", "--plist-path", str(plist_path)]) == 0
     assert capsys.readouterr().out == f"{SECRET}\n"
+
+
+def test_repos_human_output_names_the_fix(monkeypatch, capsys):
+    repo = make_repo()
+    report = ReadinessReport(
+        (
+            ReadinessCheck("repo_path_exists", True, "ok"),
+            ReadinessCheck(
+                "task_index_exists",
+                False,
+                "missing: /p/r/.ai-tasks/index.md",
+                "initialize the repo: open your coding agent in /p/r and run /ai-init, then commit .ai/",
+            ),
+        )
+    )
+    monkeypatch.setattr(cli, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(cli, "check_readiness", lambda r, config: report)
+
+    assert cli.main(["repos"]) == 0
+    out = capsys.readouterr().out
+    assert "- task_index_exists: missing: /p/r/.ai-tasks/index.md" in out
+    assert "fix: initialize the repo: open your coding agent in /p/r and run /ai-init" in out

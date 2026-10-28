@@ -468,6 +468,39 @@
       label
     )}">${escapeHtml(text)}</pre>`;
 
+  // Copy `text` to the clipboard and report the outcome on `statusEl` (a
+  // `role="status"` line). The async Clipboard API only exists in a secure
+  // context (https or localhost), so over a plain-http tailnet address it is
+  // usually absent: the line then names `fallback` (e.g. "use Download") as the
+  // way out. Never throws — a synchronous throw or a rejection both land on the
+  // same failure message.
+  function copyText(text, statusEl, fallback) {
+    const say = (msg, isError) => {
+      if (!statusEl) return;
+      statusEl.classList.toggle("error-text", !!isError);
+      statusEl.textContent = msg;
+    };
+    if (!text) {
+      say("Nothing to copy.", false);
+      return;
+    }
+    const nav = globalThis.navigator;
+    if (nav && nav.clipboard && typeof nav.clipboard.writeText === "function") {
+      let pending;
+      try {
+        pending = nav.clipboard.writeText(text);
+      } catch (_) {
+        pending = Promise.reject();
+      }
+      Promise.resolve(pending).then(
+        () => say("Copied to clipboard.", false),
+        () => say("Copy failed — " + fallback + ".", true)
+      );
+    } else {
+      say("Clipboard unavailable — " + fallback + ".", true);
+    }
+  }
+
   // Build an in-app hash link. Each dynamic segment is encoded so a repo name
   // or task id is always exactly one path segment for the router to split back.
   const repoHash = (repo) => "#/repos/" + encodeURIComponent(repo);
@@ -650,11 +683,15 @@
     // Clear any prior route's width class: the login card centres itself and the
     // desktop rail is hidden, so the workspace should be the plain full-width view.
     view().className = "view";
+    const paste = canPasteToken();
     view().innerHTML = `
       <section class="card login">
         ${pageTitle("Connect to orch-hub")}
         <p class="muted">Paste the service bearer token
           (<code>ORCH_HUB_TOKEN</code>). It is stored only in this browser.</p>
+        <p class="muted login-where">To get it, on the Mac running orch-hub run
+          <code>orch-hub open</code> (opens this page and copies the token) or
+          <code>orch-hub token --copy</code>, then paste it here.</p>
         ${
           message
             ? `<p class="error-text" role="alert">${escapeHtml(message)}</p>`
@@ -662,8 +699,16 @@
         }
         <form id="login-form">
           <label for="token-input">Bearer token</label>
-          <input id="token-input" type="password" autocomplete="off"
-            autocapitalize="off" spellcheck="false" placeholder="bearer token" />
+          <div class="token-row">
+            <input id="token-input" type="password" autocomplete="off"
+              autocapitalize="off" spellcheck="false" placeholder="bearer token" />
+            ${
+              paste
+                ? `<button type="button" id="token-paste" class="token-paste">Paste</button>`
+                : ""
+            }
+          </div>
+          <p id="token-paste-status" class="muted token-paste-status" role="status"></p>
           <button type="submit">Connect</button>
         </form>
       </section>`;
@@ -675,7 +720,134 @@
       setToken(value);
       router();
     });
+    const pasteBtn = document.getElementById("token-paste");
+    if (pasteBtn) pasteBtn.addEventListener("click", pasteToken);
     landOnView();
+  }
+
+  // Whether the login gate can offer a one-tap Paste: the async Clipboard read
+  // exists only in a secure context (https, or localhost — the `orch-hub open`
+  // case), so over a plain-http tailnet address the button is simply absent and
+  // the field takes an ordinary paste. Nothing here touches the URL, cookies, or
+  // storage: the clipboard is read only on an explicit click.
+  function canPasteToken() {
+    const nav = globalThis.navigator;
+    return !!(
+      window.isSecureContext &&
+      nav &&
+      nav.clipboard &&
+      typeof nav.clipboard.readText === "function"
+    );
+  }
+
+  // Paste: read the clipboard into the token field (trimmed). It never submits —
+  // the operator still presses Connect — and never throws: a denied permission,
+  // a synchronous throw, or an empty clipboard each leave a short note on the
+  // status line instead. The token itself is never echoed.
+  function pasteToken() {
+    const input = document.getElementById("token-input");
+    const statusEl = document.getElementById("token-paste-status");
+    const say = (msg, isError) => {
+      if (!statusEl) return;
+      statusEl.classList.toggle("error-text", !!isError);
+      statusEl.textContent = msg;
+    };
+    let pending;
+    try {
+      pending = globalThis.navigator.clipboard.readText();
+    } catch (_) {
+      pending = Promise.reject();
+    }
+    Promise.resolve(pending).then(
+      (text) => {
+        const value = String(text == null ? "" : text).trim();
+        if (!value) {
+          say("The clipboard is empty — copy the token first.", true);
+          return;
+        }
+        if (input) input.value = value;
+        say("Token pasted. Press Connect.", false);
+      },
+      () =>
+        say(
+          "Couldn't read the clipboard — paste into the field instead.",
+          true
+        )
+    );
+  }
+
+  // ---- first run: no managed repos yet ----
+  //
+  // orch-hub only shows repos registered with mandrel, so a fresh install has
+  // nothing to list. When a repo-list payload loaded successfully AND is empty,
+  // Overview, Repos, and Tasks show this card instead of an empty state (and
+  // Overview drops its all-clear texts, which would otherwise read as "all is
+  // well"). A failed load is NOT this state — those views keep their own
+  // unavailable/error handling. The card only explains and copies text: every
+  // step runs on the operator's Mac, and no UI path here writes a target repo.
+  const AGENT_SETUP_URL =
+    "https://github.com/qinglin89/orch-hub/blob/dev/docs/agent-setup.md";
+  // The installer's default mandrel location; the card says to substitute your
+  // own checkout's bin/mandrel when it lives elsewhere.
+  const DEFAULT_MANDREL_BIN = "~/.local/share/mandrel/bin/mandrel";
+  const GET_STARTED_PROMPT =
+    "Add my repo at /path/to/your-repo to orch-hub by following " +
+    AGENT_SETUP_URL +
+    "#add-a-repo";
+
+  // True only for a loaded, empty list (null = the source failed: unknown).
+  function isFirstRun(repos) {
+    return Array.isArray(repos) && repos.length === 0;
+  }
+
+  function getStartedCard() {
+    const code = (text) =>
+      `<pre class="get-started-code">${escapeHtml(text)}</pre>`;
+    return `
+      <section class="card get-started" aria-labelledby="get-started-title">
+        <h2 id="get-started-title">Get started: add a repo</h2>
+        <p>No managed repos discovered yet. orch-hub shows the repos registered
+          with mandrel — add one either way below, then reload.</p>
+        <h3>Tell your coding agent</h3>
+        <p class="muted">Copy this prompt, put in your repo's path, and give it to
+          your coding agent:</p>
+        ${code(GET_STARTED_PROMPT)}
+        <div class="get-started-actions">
+          <button type="button" class="get-started-copy">Copy prompt for your agent</button>
+          <span class="control-status get-started-status" role="status"></span>
+        </div>
+        <h3>Or run it yourself</h3>
+        <ol class="get-started-steps">
+          <li>Deploy mandrel and the run scheduler into the repo:
+            ${code(
+              DEFAULT_MANDREL_BIN +
+                " deploy --bootstrap-orchestrator /path/to/your-repo"
+            )}
+            <span class="muted">(use your own mandrel checkout's
+              <code>bin/mandrel</code> if you installed it elsewhere)</span></li>
+          <li>Commit <code>.gitignore</code> and <code>.ai-deploy-lock.json</code>
+            in that repo.</li>
+          <li>Open your coding agent in that repo and run <code>/ai-init</code>,
+            then commit <code>.ai/</code>.</li>
+        </ol>
+        <p class="muted">Full walkthrough:
+          <a class="text-link" href="${AGENT_SETUP_URL}#add-a-repo"
+            target="_blank" rel="noopener noreferrer">Add a repo</a></p>
+      </section>`;
+  }
+
+  // Wire the card's copy button after each paint that included it (Overview's
+  // background refresh repaints its body, so it re-wires every time).
+  function wireGetStarted() {
+    const button = document.querySelector(".get-started-copy");
+    if (!button) return;
+    button.addEventListener("click", () =>
+      copyText(
+        GET_STARTED_PROMPT,
+        document.querySelector(".get-started-status"),
+        "select the prompt above and copy it"
+      )
+    );
   }
 
   // ---- run overlay helpers (shared by list + detail views) ----
@@ -803,14 +975,7 @@
     const badges = ready ? badge("ready", "ok") : badge("not ready", "bad");
     const reasons = ready
       ? ""
-      : `<ul class="reasons">${(readiness.checks || [])
-          .map(
-            (c) =>
-              `<li><code>${escapeHtml(c.name)}</code> ${escapeHtml(
-                c.message
-              )}</li>`
-          )
-          .join("")}</ul>`;
+      : `<ul class="reasons">${reasonItems(readiness.checks)}</ul>`;
     // Display-ready repos surface at-a-glance metadata (latest commit + active
     // task count); not-ready repos keep their failure reasons instead.
     const meta = ready ? repoMetaLine(repo.commit, taskCount) : "";
@@ -863,9 +1028,9 @@
       if (err instanceof ApiError && err.status === 401) throw err;
     }
     if (superseded()) return; // a newer route owns the view
-    if (!repos.length) {
-      view().innerHTML =
-        pageTitle("Repos") + centerHtml("No managed repos discovered.");
+    if (isFirstRun(repos)) {
+      view().innerHTML = pageTitle("Repos") + getStartedCard();
+      wireGetStarted();
       return;
     }
     view().innerHTML =
@@ -1057,6 +1222,13 @@
     // Before the filter reconciliation below, so a superseded route neither
     // paints nor edits the shared filter state the live route is showing.
     if (superseded()) return;
+    // The task payload has one entry per discovered repo, so an empty list means
+    // no managed repos at all: filters and run accents have nothing to act on.
+    if (isFirstRun(repos)) {
+      view().innerHTML = pageTitle("Tasks") + getStartedCard();
+      wireGetStarted();
+      return;
+    }
     const repoNames = repos.map((r) => r.name);
     const statuses = orderedStatuses(repos);
     if (taskFilters.repo && !repoNames.includes(taskFilters.repo))
@@ -1252,14 +1424,7 @@
       : "";
     const reasons =
       readiness && !ready
-        ? `<ul class="reasons">${(readiness.checks || [])
-            .map(
-              (c) =>
-                `<li><code>${escapeHtml(c.name)}</code> ${escapeHtml(
-                  c.message
-                )}</li>`
-            )
-            .join("")}</ul>`
+        ? `<ul class="reasons">${reasonItems(readiness.checks)}</ul>`
         : "";
 
     view().innerHTML = `
@@ -1637,12 +1802,20 @@
     return null;
   }
 
-  // Readiness failure reasons as <li> rows (shared shape with the repo views).
+  // Readiness failure reasons as <li> rows — the one renderer every readiness
+  // list shares (repo cards, repo detail, run controls, intake). A check's
+  // optional `hint` (a one-line fix, usually a command to run on the Mac) sits
+  // under its message, visually secondary; it is escaped like the rest, and an
+  // absent hint (older hub, or a check without one) renders nothing extra.
   function reasonItems(checks) {
     return (checks || [])
       .map(
         (c) =>
-          `<li><code>${escapeHtml(c.name)}</code> ${escapeHtml(c.message)}</li>`
+          `<li><code>${escapeHtml(c.name)}</code> ${escapeHtml(c.message)}${
+            c.hint
+              ? `<span class="reason-hint">Fix: ${escapeHtml(c.hint)}</span>`
+              : ""
+          }</li>`
       )
       .join("");
   }
@@ -4243,29 +4416,7 @@
   // Copy an artifact's JSON to the clipboard, degrading with a status hint when
   // the Clipboard API is unavailable (the Download link still works).
   function evalCopy(text) {
-    const statusEl = document.querySelector(".eval-copy-status");
-    if (statusEl) statusEl.classList.remove("error-text");
-    if (!text) {
-      if (statusEl) statusEl.textContent = "Nothing to copy.";
-      return;
-    }
-    const nav = globalThis.navigator;
-    if (nav && nav.clipboard && typeof nav.clipboard.writeText === "function") {
-      nav.clipboard.writeText(text).then(
-        () => {
-          if (statusEl) statusEl.textContent = "Copied to clipboard.";
-        },
-        () => {
-          if (statusEl) {
-            statusEl.classList.add("error-text");
-            statusEl.textContent = "Copy failed — use Download.";
-          }
-        }
-      );
-    } else if (statusEl) {
-      statusEl.classList.add("error-text");
-      statusEl.textContent = "Clipboard unavailable — use Download.";
-    }
+    copyText(text, document.querySelector(".eval-copy-status"), "use Download");
   }
 
   // Generate a fresh deterministic evaluation: POST /metrics writes hub-owned
@@ -5704,8 +5855,14 @@
     const sub = item.sub
       ? `<span class="attn-sub muted">${escapeHtml(item.sub)}</span>`
       : "";
+    // `detailTitle` (readiness fix hints) rides a hover tooltip so the row stays
+    // one compact line on a phone; the row links to repo detail, which lists the
+    // same hints in full under each failed check.
+    const detailTitle = item.detailTitle
+      ? ` title="${escapeHtml(item.detailTitle)}"`
+      : "";
     const detail = item.detail
-      ? `<div class="attn-detail muted">${escapeHtml(item.detail)}</div>`
+      ? `<div class="attn-detail muted"${detailTitle}>${escapeHtml(item.detail)}</div>`
       : "";
     return (
       `<li class="card attn attn-${item.kind}">` +
@@ -5753,6 +5910,10 @@
           title: r.name,
           sub: "readiness failed",
           detail: (r.readiness.checks || []).map((c) => c.name).join(", "),
+          detailTitle: (r.readiness.checks || [])
+            .filter((c) => c.hint)
+            .map((c) => c.name + ": " + c.hint)
+            .join("\n"),
           href: repoHash(r.name),
         });
     }
@@ -5767,10 +5928,14 @@
           href: repoHash(r.name),
         });
     }
-    if (!items.length)
+    if (!items.length) {
+      // First run: "nothing needs attention" would read as all-clear while the
+      // real next step (add a repo) is the Get started card above it.
+      if (isFirstRun(repos)) return "";
       return (
         head + `<p class="muted">Nothing needs attention right now.</p>` + foot
       );
+    }
     return (
       head +
       `<ul class="list attention-list">${items.map(attentionRow).join("")}</ul>` +
@@ -5801,13 +5966,16 @@
   }
 
   // The "current activity" panel of live runs (active + waiting). A null source
-  // reads as "unavailable"; an empty live set as "no live runs".
-  function currentActivityPanel(runs) {
+  // reads as "unavailable"; an empty live set as "no live runs" — or, on a
+  // first run (`firstRun`: no managed repos yet), as nothing at all, so the
+  // Overview carries no all-clear text beside the Get started card.
+  function currentActivityPanel(runs, firstRun) {
     const head = `<section class="section"><h2>Current activity</h2>`;
     const foot = `</section>`;
     if (runs === null)
       return head + `<p class="muted">Run activity is unavailable.</p>` + foot;
     const live = liveRunList(runs);
+    if (!live.length && firstRun) return "";
     if (!live.length)
       return head + `<p class="muted">No live runs.</p>` + foot;
     return head + `<ul class="list">${live.map(activityCard).join("")}</ul>` + foot;
@@ -5840,13 +6008,15 @@
   }
 
   // The "recent outcomes" panel. A null source reads as "unavailable"; an empty
-  // ended set (only live runs, or none yet) as "no recent runs".
-  function recentOutcomesPanel(history) {
+  // ended set (only live runs, or none yet) as "no recent runs" — omitted on a
+  // first run, like the other all-clear texts.
+  function recentOutcomesPanel(history, firstRun) {
     const head = `<section class="section"><h2>Recent outcomes</h2>`;
     const foot = `</section>`;
     if (history === null)
       return head + `<p class="muted">Recent outcomes are unavailable.</p>` + foot;
     const outcomes = recentOutcomeList(history, OVERVIEW_OUTCOME_COUNT);
+    if (!outcomes.length && firstRun) return "";
     if (!outcomes.length)
       return head + `<p class="muted">No recent runs.</p>` + foot;
     return (
@@ -6146,17 +6316,22 @@
         pageTitle("Operations overview") + `<div id="overview-body"></div>`;
       body = document.getElementById("overview-body");
     }
-    body.innerHTML =
-      overviewMetrics(data.repos, data.taskRepos, data.runs, data.escalations) +
-      `<div class="overview-panels">` +
+    // First run (the repo list loaded empty): lead with the Get started card,
+    // and let the panels drop their all-clear texts (an empty grid is omitted).
+    const firstRun = isFirstRun(data.repos);
+    const panels =
       attentionPanel(data.repos, data.runs, data.escalations) +
-      currentActivityPanel(data.runs) +
-      recentOutcomesPanel(data.history) +
-      `</div>` +
+      currentActivityPanel(data.runs, firstRun) +
+      recentOutcomesPanel(data.history, firstRun);
+    body.innerHTML =
+      (firstRun ? getStartedCard() : "") +
+      overviewMetrics(data.repos, data.taskRepos, data.runs, data.escalations) +
+      (panels ? `<div class="overview-panels">${panels}</div>` : "") +
       // Its own section AFTER the operational grid: display-only capacity, kept
       // clear of the attention/activity/outcomes flow so quota never reads as
       // health. A failed usage source degrades only this section.
       subscriptionUsagePanel(data.usage);
+    if (firstRun) wireGetStarted();
   }
 
   // True when focus sits on something inside the repaintable Overview body. A

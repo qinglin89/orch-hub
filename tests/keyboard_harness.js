@@ -4974,6 +4974,355 @@ async function scenarioRepoAdmission() {
   installRoutes({ waiting: false }); // restore defaults for any later scenario
 }
 
+// First run: a hub with no managed repos. Overview, Repos, and Tasks each show
+// the Get started card (copyable agent prompt + manual commands) instead of an
+// empty state, and the Overview drops its all-clear texts. A FAILED repo list is
+// not a first run, so it never shows the card.
+async function scenarioFirstRun() {
+  installRoutes({ waiting: false });
+  route("GET", "/api/repos", { repos: [] });
+  route("GET", "/api/tasks", { repos: [] });
+  var viewText = function () {
+    return doc.getElementById("view").textContent;
+  };
+  var card = function () {
+    return doc.querySelector("#view .get-started");
+  };
+  var cardText = function () {
+    return card() ? card().textContent : "";
+  };
+  var copyStatusEl = function () {
+    return doc.querySelector("#view .get-started-status");
+  };
+  var copyStatus = function () {
+    return copyStatusEl() ? copyStatusEl().textContent : "";
+  };
+  var clickCopy = function () {
+    var btn = doc.querySelector("#view .get-started-copy");
+    if (btn) pressEnter(btn);
+    return flush();
+  };
+  var copied = [];
+  var installClipboard = function (writeText) {
+    globalThis.navigator = { clipboard: { writeText: writeText } };
+  };
+
+  await navigate("#/overview");
+  check("first run: the overview leads with the Get started card", !!card(), "no .get-started on the overview");
+  [
+    "Nothing needs attention right now.",
+    "No live runs.",
+    "No recent runs.",
+  ].forEach(function (allClear) {
+    check(
+      "first run: the overview suppresses the all-clear text " + JSON.stringify(allClear),
+      viewText().indexOf(allClear) === -1,
+      "the empty overview still says " + JSON.stringify(allClear)
+    );
+  });
+  check(
+    "first run: the card names the agent guide's add-a-repo section",
+    cardText().indexOf(
+      "https://github.com/qinglin89/orch-hub/blob/dev/docs/agent-setup.md#add-a-repo"
+    ) !== -1,
+    "agent-setup.md#add-a-repo missing from the card"
+  );
+  check(
+    "first run: the card gives the manual deploy command at the installer's mandrel path",
+    cardText().indexOf(
+      "~/.local/share/mandrel/bin/mandrel deploy --bootstrap-orchestrator /path/to/your-repo"
+    ) !== -1,
+    "manual deploy command missing"
+  );
+  check(
+    "first run: the card says to use your own mandrel checkout when it lives elsewhere",
+    cardText().indexOf("if you installed it elsewhere") !== -1,
+    "no own-checkout note"
+  );
+  check(
+    "first run: the card covers committing the deploy receipts and /ai-init",
+    cardText().indexOf(".ai-deploy-lock.json") !== -1 &&
+      cardText().indexOf("/ai-init") !== -1,
+    "commit / ai-init steps missing"
+  );
+  checkOutline("first run overview");
+
+  // Copy prompt: writes the exact prompt and reports success.
+  installClipboard(function (text) {
+    copied.push(text);
+    return Promise.resolve();
+  });
+  var copyBtn = doc.querySelector("#view .get-started-copy");
+  check("first run: the card offers a copy-prompt button", !!copyBtn && copyBtn.tagName === "BUTTON", describe(copyBtn));
+  eq("first run: the button is labelled for the agent prompt", copyBtn && copyBtn.textContent.trim(), "Copy prompt for your agent");
+  await clickCopy();
+  eq(
+    "first run: Copy writes the agent prompt to the clipboard",
+    copied[0],
+    "Add my repo at /path/to/your-repo to orch-hub by following " +
+      "https://github.com/qinglin89/orch-hub/blob/dev/docs/agent-setup.md#add-a-repo"
+  );
+  eq(
+    "first run: Copy reports success on its status line",
+    copyStatus(),
+    "Copied to clipboard."
+  );
+  // A rejected write (permission) and a missing Clipboard API both degrade to a
+  // note, never a throw.
+  installClipboard(function () {
+    return Promise.reject(new Error("NotAllowedError"));
+  });
+  await clickCopy();
+  check(
+    "first run: a refused clipboard write leaves an inline note",
+    copyStatus().indexOf("Copy failed") === 0 &&
+      !!copyStatusEl() && copyStatusEl().classList.contains("error-text"),
+    copyStatus()
+  );
+  delete globalThis.navigator;
+  await clickCopy();
+  check(
+    "first run: no Clipboard API (plain-http tailnet) leaves an inline note",
+    copyStatus().indexOf("Clipboard unavailable") === 0,
+    copyStatus()
+  );
+
+  // The background refresh repaints the body: the card survives and its copy
+  // button is re-wired.
+  doc.activeElement = null; // a pointer user: focus is not inside the body
+  await runTimers();
+  installClipboard(function (text) {
+    copied.push(text);
+    return Promise.resolve();
+  });
+  copied = [];
+  check("first run: the refreshed overview still shows the card", !!card(), "card lost on refresh");
+  await clickCopy();
+  eq("first run: the refreshed card's copy button is wired", copied.length, 1);
+  delete globalThis.navigator;
+
+  await navigate("#/repos");
+  check("first run: Repos shows the Get started card", !!card(), "no .get-started on Repos");
+  eq("first run: Repos renders no repo cards", doc.querySelectorAll("#view .card.repo").length, 0);
+  checkOutline("first run repos");
+
+  await navigate("#/tasks");
+  check("first run: Tasks shows the Get started card", !!card(), "no .get-started on Tasks");
+  check(
+    "first run: Tasks drops the filters and the empty-inventory note",
+    doc.getElementById("f-repo") === null && viewText().indexOf("No tasks found.") === -1,
+    "tasks filters / empty note still rendered"
+  );
+  checkOutline("first run tasks");
+
+  // A failed repo list is "unknown", not "none": no card, and the Repos view
+  // shows its ordinary error instead.
+  routeError("GET", "/api/repos", 500, { detail: "registry unreadable" });
+  await navigate("#/overview");
+  check("first run: a failed repo list shows no Get started card", card() === null, "card shown for an unknown repo list");
+  await navigate("#/repos");
+  check("first run: a failed repo list on Repos shows no Get started card", card() === null, "card shown on a Repos error");
+
+  // One registered repo: the ordinary views come back.
+  installRoutes({ waiting: false });
+  await navigate("#/overview");
+  check("first run: a registered repo removes the card", card() === null, "card still shown with a repo");
+  check(
+    "first run: with a repo the all-clear text is back",
+    viewText().indexOf("Nothing needs attention right now.") !== -1,
+    "attention all-clear missing for a healthy repo"
+  );
+}
+
+// Fix hints: a failed readiness check's optional `hint` renders, escaped and
+// secondary, under its message on every readiness list (repo card, repo detail,
+// the intake refusal, task-detail run controls) and as the Overview attention
+// row's tooltip. A check without a hint renders exactly as before.
+async function scenarioReadinessHints() {
+  installRoutes({ waiting: false });
+  var HINT = "run /m/bin/mandrel deploy --bootstrap-orchestrator /tmp/demo-repo <b>now</b>";
+  route("GET", "/api/repos", {
+    repos: [
+      {
+        name: REPO,
+        path: "/tmp/" + REPO,
+        readiness: {
+          ready: false,
+          checks: [
+            { name: "venv_python_exists", message: "missing: /tmp/demo-repo/.mandrel/orchestrator/.venv/bin/python", hint: HINT },
+            { name: "mandrel_status", message: "mandrel status failed: drift" },
+          ],
+        },
+        housekeeping_pending: false,
+        commit: null,
+      },
+    ],
+  });
+  // `list` is one rendered `ul.reasons` (the harness selector engine has no
+  // child combinator, so callers pick the exact list element).
+  var checkHints = function (label, list) {
+    check("hint: " + label + " lists the failed checks", !!list, "no .reasons list");
+    if (!list) return;
+    var found = list.querySelectorAll(".reason-hint");
+    eq("hint: " + label + " renders one hint (the hint-less check adds none)", found.length, 1);
+    eq(
+      "hint: " + label + " shows the hint text, escaped",
+      found[0] && found[0].textContent,
+      "Fix: " + HINT
+    );
+    check(
+      "hint: " + label + " never parses hint markup",
+      list.querySelector(".reason-hint b") === null,
+      "hint HTML was injected"
+    );
+    var items = list.querySelectorAll("li");
+    check(
+      "hint: " + label + " keeps the hint under its own check",
+      items.length === 2 &&
+        items[0].querySelector(".reason-hint") !== null &&
+        items[1].querySelector(".reason-hint") === null,
+      "hint attached to the wrong row"
+    );
+  };
+
+  await navigate("#/repos");
+  checkHints("the repo card", doc.querySelector("#view .card.repo .reasons"));
+
+  await navigate("#/repos/" + REPO);
+  // The detail head's list comes first in document order, before the intake's.
+  var detailLists = doc.querySelectorAll("#view .reasons");
+  var intakeList = doc.querySelector("#view .section.intake .reasons");
+  check(
+    "hint: repo detail shows both its head and intake readiness lists",
+    detailLists.length === 2 && detailLists[1] === intakeList,
+    "unexpected .reasons lists on repo detail: " + detailLists.length
+  );
+  checkHints("repo detail", detailLists[0]);
+  checkHints("the intake refusal", intakeList);
+
+  await navigate("#/tasks/" + REPO + "/" + TASK);
+  checkHints("the run controls", doc.querySelector("#view .run-controls .reasons"));
+
+  await navigate("#/overview");
+  var detail = doc.querySelector(".attn-not-ready .attn-detail");
+  eq(
+    "hint: the attention row stays a compact list of check names",
+    detail && detail.textContent.trim(),
+    "venv_python_exists, mandrel_status"
+  );
+  eq(
+    "hint: the attention row carries the hints as its tooltip",
+    detail && detail.getAttribute("title"),
+    "venv_python_exists: " + HINT
+  );
+
+  installRoutes({ waiting: false }); // restore defaults for any later scenario
+}
+
+// The login gate explains where the token comes from, and offers Paste only
+// where the browser can read the clipboard (a secure context with
+// navigator.clipboard.readText). Paste fills the field (trimmed), never submits,
+// and degrades to a note — never a throw — when the read is refused.
+async function scenarioLoginPaste() {
+  installRoutes({ waiting: false });
+  var signOutToGate = function () {
+    dispatch(doc.getElementById("signout-btn"), new Event("click"));
+    return flush();
+  };
+  var statusEl = function () {
+    return doc.getElementById("token-paste-status");
+  };
+  var statusText = function () {
+    return statusEl() ? statusEl().textContent : "";
+  };
+
+  // Plain http (not a secure context): no Paste button, and the gate still says
+  // where the token comes from.
+  await signOutToGate();
+  check("paste: the gate is showing", !!doc.getElementById("token-input"), "no login form");
+  var gateText = doc.getElementById("view").textContent;
+  check(
+    "paste: the gate names `orch-hub open` and `orch-hub token --copy`",
+    gateText.indexOf("orch-hub open") !== -1 && gateText.indexOf("orch-hub token --copy") !== -1,
+    "token source not explained"
+  );
+  check("paste: no Paste button outside a secure context", doc.getElementById("token-paste") === null, "Paste rendered on plain http");
+
+  // Secure context but no readText (e.g. write-only clipboard): still absent.
+  win.isSecureContext = true;
+  globalThis.navigator = { clipboard: { writeText: function () {} } };
+  await signOutToGate();
+  check("paste: no Paste button without clipboard.readText", doc.getElementById("token-paste") === null, "Paste rendered without readText");
+
+  // Secure context + readText: the button appears between the field and Connect.
+  var reads = 0;
+  var clipboardValue = "  pasted-token \n";
+  globalThis.navigator = {
+    clipboard: {
+      readText: function () {
+        reads++;
+        return Promise.resolve(clipboardValue);
+      },
+    },
+  };
+  await signOutToGate();
+  var input = doc.getElementById("token-input");
+  var paste = doc.getElementById("token-paste");
+  var clickPaste = function () {
+    if (paste) dispatch(paste, new Event("click"));
+    return flush();
+  };
+  check("paste: a secure context with clipboard.readText offers Paste", !!paste, "no #token-paste");
+  eq("paste: Paste is a plain button, not a submit", paste && paste.getAttribute("type"), "button");
+  activeIs("paste: Tab from the heading reaches the token field", (pressTab(), input));
+  activeIs("paste: Tab again reaches Paste", (pressTab(), paste));
+  activeIs("paste: Tab again reaches Connect", (pressTab(), doc.querySelector('#login-form button[type="submit"]')));
+
+  var callsBefore = CALLS.length;
+  await clickPaste();
+  eq("paste: Paste reads the clipboard once", reads, 1);
+  eq("paste: Paste fills the field, trimmed", input.value, "pasted-token");
+  check("paste: Paste does not submit", !!doc.getElementById("token-input") && CALLS.length === callsBefore, "the gate submitted on paste");
+  eq("paste: Paste does not store the token", localStorage.getItem("orch-hub-token"), null);
+  eq("paste: Paste confirms without echoing the token", statusText(), "Token pasted. Press Connect.");
+
+  // An empty clipboard, a refused read, and a synchronous throw all leave a note.
+  input.value = "";
+  clipboardValue = "   ";
+  await clickPaste();
+  check("paste: an empty clipboard leaves a note", statusText().indexOf("clipboard is empty") !== -1, statusText());
+  eq("paste: an empty clipboard leaves the field empty", input.value, "");
+
+  globalThis.navigator.clipboard.readText = function () {
+    return Promise.reject(new Error("NotAllowedError"));
+  };
+  await clickPaste();
+  check(
+    "paste: a denied clipboard read leaves an inline note",
+    statusText().indexOf("Couldn't read the clipboard") === 0 &&
+      !!statusEl() && statusEl().classList.contains("error-text"),
+    statusText()
+  );
+
+  globalThis.navigator.clipboard.readText = function () {
+    throw new Error("SecurityError");
+  };
+  await clickPaste();
+  check(
+    "paste: a throwing clipboard read is caught as the same note",
+    statusText().indexOf("Couldn't read the clipboard") === 0,
+    statusText()
+  );
+
+  // Restore: a plain browser again, signed back in for any later scenario.
+  delete win.isSecureContext;
+  delete globalThis.navigator;
+  type(doc.getElementById("token-input"), "secret-token");
+  pressEnter(doc.querySelector('#login-form button[type="submit"]'));
+  await flush();
+  check("paste: Connect still signs in after a paste session", !doc.getElementById("token-input"), "still on the login gate");
+}
+
 /* --------------------------------------------------------------- run them */
 
 (async function main() {
@@ -4997,6 +5346,9 @@ async function scenarioRepoAdmission() {
     await scenarioLiveRunReadiness();
     await scenarioRepoAdmission();
     await scenarioSubscriptionUsage();
+    await scenarioFirstRun();
+    await scenarioReadinessHints();
+    await scenarioLoginPaste();
   } catch (err) {
     FAILED++;
     print("not ok - harness crashed: " + err + "\n" + (err && err.stack));

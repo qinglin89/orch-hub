@@ -689,6 +689,17 @@ code {
   margin: 2px 0;
 }
 
+/* A failed check's fix hint: its own line under the (red) message, in the calm
+   muted colour so the failure still reads first. Hints carry absolute paths and
+   commands, so they wrap anywhere rather than widening a phone layout. */
+.reason-hint {
+  display: block;
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
 .error-text {
   color: var(--bad-fg);
   font-size: 13px;
@@ -1361,6 +1372,107 @@ code {
   font-size: 14px;
 }
 
+/* Where the token comes from: the gate's second note sits a little below the
+   first so the two read as separate facts. */
+.login .login-where {
+  margin-top: 6px;
+}
+
+/* Keep each command whole: `--copy` must not wrap away from its verb. */
+.login .login-where code {
+  white-space: nowrap;
+}
+
+/* The token field plus the optional Paste button on one row (the button only
+   renders where the browser can read the clipboard). The field keeps the width;
+   Paste is a secondary, outlined control so Connect stays the one primary. */
+.login .token-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+.login .token-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.login .token-paste {
+  margin-top: 0;
+  flex: 0 0 auto;
+  background: transparent;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  box-shadow: none;
+}
+
+.login .token-paste-status {
+  margin: 0;
+}
+
+.login .token-paste-status.error-text {
+  color: var(--bad-fg);
+}
+
+/* ---- first run: the Get started card (no managed repos yet) ---- */
+
+/* A readable column even on the desktop list views, which otherwise fill the
+   workspace; the copyable prompt/command blocks wrap rather than scroll. */
+.get-started {
+  max-width: 720px;
+  margin-top: 4px;
+}
+
+.get-started h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.get-started h3 {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 16px 0 6px;
+}
+
+.get-started p {
+  margin: 6px 0;
+}
+
+.get-started-code {
+  margin: 6px 0;
+  padding: 10px 12px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.get-started-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.get-started-steps {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+
+.get-started-steps li {
+  margin: 8px 0;
+}
+
 /* ---- navigable cards ---- */
 
 /* The link fills the whole card (negative margin cancels the card padding, its
@@ -1908,7 +2020,8 @@ code {
   min-width: 8em;
 }
 
-.eval-copy {
+.eval-copy,
+.get-started-copy {
   background: transparent;
   color: var(--accent);
   border: 1px solid var(--accent);
