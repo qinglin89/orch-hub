@@ -49,34 +49,73 @@ change, but no other target is produced today.
   `--version` output identifies only the version and target. The current
   release declares macOS 11.0.
 - A local [Mandrel](https://github.com/qinglin89/mandrel) checkout with an
-  executable `bin/mandrel`, and at least one repo registered with it. orch-hub
-  needs no Python; **Mandrel is a separate program with its own requirements**,
-  and the hub reports an empty portfolio without it.
+  executable `bin/mandrel` that can find a Python 3.11+. orch-hub itself needs
+  no Python; **Mandrel is a separate program with its own requirements**, and
+  setup refuses a checkout the service could not run. The one-line installer
+  below provides both.
 - Optional: Tailscale for remote access, Bark for push notifications, and an
   installed/authenticated Claude CLI for remote intake and Layer 2 evaluation.
 
 ## Install
 
+### One command
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qinglin89/orch-hub/dev/install.sh | sh
+```
+
+[`install.sh`](../install.sh) is a bootstrap around the release installer
+described next. It refuses anything but macOS on Apple Silicon and refuses to
+run as root. It then:
+
+1. Picks Mandrel: `--mandrel DIR`, `ORCH_HUB_MANDREL_PATH`, the checkout an
+   installed service already names, or else a clone of Mandrel at a pinned
+   release tag into `~/.local/share/mandrel`. A checkout you already have is
+   used exactly as it is and never moved to another version, since that would
+   put every repo it manages out of sync.
+2. Gives a checkout it cloned its own `.venv` from the newest Python 3.11+ on
+   `PATH`. That pins Mandrel's interpreter independently of the service's
+   minimal `PATH`. With no such Python and Homebrew present, it installs
+   `python@3.13` first (announced; `--no-brew` stops with instructions instead).
+   `jq` is handled the same way.
+3. Downloads the pinned release's `.run`, `release.json`, and `SHA256SUMS`
+   into a temporary directory, verifies the checksums, and runs the `.run` by
+   path. `--host`, `--port`, `--token`, `--prefix`, `--bin-dir`, and
+   `--no-service` pass through to it.
+4. Runs `orch-hub open`, then prints how to add a repo.
+
+`--dry-run` prints that plan and changes nothing. `--version VERSION` (or
+`latest`) picks another release.
+
+Checksums from the same origin catch a truncated or corrupted download, not a
+compromised origin. To check provenance as well, verify the assets with
+`gh release verify-asset` before running the steps below by hand.
+
+### Step by step
+
 Fetch the artifacts, check them, and run the installer by path:
 
 ```bash
 # 1. Download the release files into one directory.
-curl -fLO <url>/orch-hub-0.1.0-darwin-arm64.run
-curl -fLO <url>/release.json
-curl -fLO <url>/SHA256SUMS
+base=https://github.com/qinglin89/orch-hub/releases/download/v0.2.0
+curl -fLO "$base/orch-hub-0.2.0-darwin-arm64.run"
+curl -fLO "$base/release.json"
+curl -fLO "$base/SHA256SUMS"
 
 # 2. Verify what you received before running it.
 shasum -a 256 -c SHA256SUMS
 
 # 3. Install the runtime and start the resident service.
-sh orch-hub-0.1.0-darwin-arm64.run --mandrel /absolute/path/to/mandrel
+sh orch-hub-0.2.0-darwin-arm64.run --mandrel /absolute/path/to/mandrel
 ```
 
 `sh <file>.run` is the intended invocation: a downloaded file is not executable
 and does not need to be. If no token was supplied or already installed, the run
-generates one and prints it — the only time it is echoed. It is also written
-into the installed plist, which is mode `600` because it embeds that secret, so
-a token you did not copy can be read back from there.
+generates one. It shows the token once, and only when its output is a terminal;
+a script's or a coding agent's captured output gets a pointer instead. The token
+is written into the installed plist, which is mode `600` because it embeds that
+secret. `orch-hub token --copy` puts it on the clipboard, and `orch-hub open`
+does that and opens the dashboard. Neither puts it in a URL or a log.
 
 Installer options:
 
@@ -182,9 +221,10 @@ Resolution order, per setting:
 
 | Setting | Resolution |
 |---|---|
-| Mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then the legacy `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then the installed plist. There is no portable default; the first setup fails with guidance if none exists. The value is verified: it must be a directory holding an **executable** `bin/mandrel`, because the registry runs that file directly. |
-| Bearer token | `--token`, then `ORCH_HUB_TOKEN`, then the installed plist, then a generated token printed once. |
+| Mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then the legacy `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then the installed plist. There is no portable default; the first setup fails with guidance if none exists. The value is verified: it must be a directory holding an **executable** `bin/mandrel`, because the registry runs that file directly, and that file must actually start: setup runs `bin/mandrel registry list --json` under the `PATH` the service will have, and refuses (before touching a running service) a checkout that fails there. |
+| Bearer token | `--token`, then `ORCH_HUB_TOKEN`, then the installed plist, then a generated token (shown once, to a terminal only). |
 | Host / port / data dir | corresponding flag, then environment, then the installed plist, then default (`127.0.0.1`, `8765`, `~/.orch-hub`). |
+| Service `PATH` | The directories the configuring shell finds `claude`, `codex`, `cursor-agent`, `node`, `git`, and `jq` in, then the installed plist's `PATH`, then `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. An agent CLI installed under nvm, volta, or `~/.local/bin` is therefore found by the service too. |
 | Plist / log paths | `--plist-path` / `--log-dir`, then the `~/Library/...` defaults. |
 | Bark push URL | `ORCH_HUB_BARK_URL`, then the value already in the installed plist, else disabled. No flag — the URL embeds a device-key secret, so it is supplied through the environment and never printed. |
 
@@ -415,7 +455,7 @@ and running with `sh` avoids the question entirely. If macOS does refuse a file
 you downloaded, clear the flag explicitly rather than disabling Gatekeeper:
 
 ```bash
-xattr -d com.apple.quarantine orch-hub-0.1.0-darwin-arm64.run
+xattr -d com.apple.quarantine orch-hub-0.2.0-darwin-arm64.run
 ```
 
 Because the artifacts are unsigned, `shasum -a 256 -c SHA256SUMS` against the
@@ -619,12 +659,12 @@ exactly what the third refuses.
 shasum -a 256 -c SHA256SUMS
 
 # Host compatibility and payload integrity, without installing anything.
-sh orch-hub-0.1.0-darwin-arm64.run --check
+sh orch-hub-0.2.0-darwin-arm64.run --check
 
 # Unpack the payload instead of installing it. Extraction is integrity-checked
 # but not host-checked, so it works even on a machine the runtime does not fit;
 # the extracted binary itself still only runs on the target.
-sh orch-hub-0.1.0-darwin-arm64.run --extract /tmp/inspect
+sh orch-hub-0.2.0-darwin-arm64.run --extract /tmp/inspect
 /tmp/inspect/orch-hub-darwin-arm64/orch-hub version
 ```
 

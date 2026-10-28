@@ -1,19 +1,62 @@
 # orch-hub
 
-A private-network control plane for operating a portfolio of
-[Mandrel](https://github.com/qinglin89/mandrel)-managed AI coding workflows
-from a Mac, phone, tablet, or another computer.
+**Run and supervise your AI coding agents across every repo from one browser
+tab.** Start a task and let Claude Code, Codex, or Cursor carry it through
+development and review in fresh sessions; answer their questions from your
+phone; see every run, log, and decision afterwards.
 
-Mandrel owns the repo-local protocol: task lifecycle, curated project memory,
-fresh-context development and review, and the optional scheduler. orch-hub is
-the optional layer above it. It discovers registered repositories, starts and
-supervises their deployed schedulers, brings human decisions to one dashboard,
-and keeps run history outside the repositories themselves.
+orch-hub is the dashboard for [Mandrel](https://github.com/qinglin89/mandrel),
+a protocol that keeps long-running AI coding work bounded: one task file as
+ground truth, curated project memory, and a deterministic scheduler outside the
+model. Mandrel works on its own; orch-hub puts a portfolio of Mandrel-managed
+repos behind one private web UI and keeps run history outside the repos.
+
+[![orch-hub operations overview across a synthetic three-repo portfolio](https://raw.githubusercontent.com/qinglin89/orch-hub-releases/main/assets/visual-demo/v0.1.0/01-overview.png)](https://github.com/qinglin89/orch-hub-releases#see-the-workflow)
+
+## Install (macOS on Apple Silicon)
+
+**Tell your coding agent** (Claude Code, Codex, Cursor):
+
+```text
+Set up orch-hub for me by following https://github.com/qinglin89/orch-hub/blob/dev/docs/agent-setup.md
+```
+
+It installs everything, asks which repos you want orch-hub to manage, prepares
+them, and opens the dashboard.
+
+**Or run it yourself:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/qinglin89/orch-hub/dev/install.sh | sh
+```
+
+One command checks your Mac, installs Mandrel (or reuses yours) with a Python
+3.11+ for it (from Homebrew when one is missing), downloads and verifies the
+orch-hub release, starts it as a background service on `127.0.0.1:8765`, and
+opens the dashboard with the sign-in token on your clipboard. No sudo, nothing
+system-wide; `sh install.sh --dry-run` prints the plan first if you would rather
+[read the script](install.sh) and run it yourself. Then add a repo: the
+dashboard shows how, or tell your agent
+
+```text
+Add my repo at /path/to/your-repo to orch-hub by following https://github.com/qinglin89/orch-hub/blob/dev/docs/agent-setup.md#add-a-repo
+```
+
+```bash
+orch-hub open             # the dashboard, with the token on the clipboard
+orch-hub launchd status   # is the service loaded and healthy?
+```
+
+Upgrading is running the installer again: the token, Mandrel checkout, bind
+address, and data directory are kept, and `orch-hub rollback` returns to the
+version an upgrade replaced. The step-by-step manual install, the options, and
+uninstalling are in [the release guide](docs/release.md).
 
 > [!IMPORTANT]
-> orch-hub can remotely launch coding agents that change local files. Treat it
-> as a remote code-execution surface. Run it only on localhost or a private
-> tailnet, require the bearer token, and never expose it to the public internet.
+> orch-hub launches coding agents that change files on your Mac: treat it as a
+> remote code-execution surface. It listens on localhost; reach it from a phone
+> only over a private network such as Tailscale, keep the bearer token secret,
+> and never expose it to the internet. See [Security boundary](#security-boundary).
 
 ## What it provides
 
@@ -35,55 +78,28 @@ matters after any one conversation has ended.
 
 ## Requirements
 
-- macOS for the supported resident-service workflow. The compiled release
-  targets Apple Silicon (`darwin-arm64`) and declares macOS 11.0 as its floor.
-- Python 3.10+ **only when running from a checkout**. A release install carries
-  its own interpreter and needs no Python, pip, or venv. Mandrel is a separate
-  program either way, and its end-to-end setup requires Python 3.11+.
-- A local Mandrel checkout with an executable `bin/mandrel`.
-- At least one repo registered with Mandrel. Follow the
-  [Mandrel Quickstart](https://github.com/qinglin89/mandrel#quickstart); before
-  starting runs or remote task intake from orch-hub, initialize the repo and
-  [bootstrap its scheduler](https://github.com/qinglin89/mandrel#running-the-loop-unattended).
-- A clean target-repo worktree when starting a run or remote intake.
-- Optional: Tailscale for remote access, Bark for push notifications, and an
-  installed/authenticated Claude CLI for remote intake and Layer 2 evaluation.
+- macOS 11+ on Apple Silicon for the one-line install and the resident
+  service. Elsewhere, [run from source](#run-from-source) in the foreground.
+- Git (the Xcode Command Line Tools: `xcode-select --install`).
+- Python 3.11+ for Mandrel. The installer offers Homebrew's `python@3.13` when
+  none is found; orch-hub itself carries its own interpreter.
+- `jq`, which Mandrel's agent hooks call (the installer adds it with Homebrew
+  when it can).
+- At least one coding-agent CLI, logged in: Claude Code, Codex, or Cursor.
+  Remote task intake and Layer 2 evaluation use Claude Code. The scheduler's
+  default pairs Claude for development with Codex for review; with only one
+  CLI, pick it for both roles when you start a run.
+- Per managed repo: Git history and a clean working tree, Mandrel deployed,
+  and `/ai-init` run once. [The agent guide](docs/agent-setup.md#add-a-repo)
+  walks through it, and the dashboard names the next step for any repo that is
+  not ready yet.
+- Optional: Tailscale for remote access, Bark for push notifications.
 
 orch-hub understands Mandrel's current backend/profile launch schema. The
 deployed orchestrator remains the source of truth for resolved defaults and
 published model/effort choices.
 
-## Quickstart
-
-### From a release: one command, no Python and no checkout
-
-```bash
-curl -fLO <url>/orch-hub-0.1.0-darwin-arm64.run
-curl -fLO <url>/release.json
-curl -fLO <url>/SHA256SUMS
-shasum -a 256 -c SHA256SUMS
-sh orch-hub-0.1.0-darwin-arm64.run --mandrel /absolute/path/to/mandrel
-```
-
-The installer refuses a machine it does not fit, an older macOS than it
-supports, and a corrupted download *before* unpacking anything. It then
-installs a user-local versioned runtime under `~/.local/orch-hub`, links
-`orch-hub` into `~/.local/bin`, configures the launchd service, waits for the
-health endpoint, and prints a generated bearer token once if it had to create
-one.
-
-```bash
-orch-hub launchd status   # label, plist, load state, dashboard URL, health
-orch-hub versions         # what is installed, and which is current
-```
-
-Upgrading is running a newer installer — the token, Mandrel path, bind address,
-data directory, and push endpoint are preserved, and the replaced version stays
-installed so `orch-hub rollback` can return to it. `orch-hub uninstall` removes
-the service and runtime while keeping hub-owned data. Full operator and
-maintainer detail: [installing from a release](docs/release.md).
-
-### From a checkout: development
+## Run from source
 
 ```bash
 git clone https://github.com/qinglin89/orch-hub
@@ -172,8 +188,10 @@ A repo can launch only when all readiness checks pass:
 | `git_clean` | `git status --porcelain` is empty |
 | `mandrel_status` | `mandrel status <repo-path>` exits successfully |
 
-Readiness fails closed. Repo admission is a separate gate: one repo cannot
-hold a live run and a non-terminal remote intake at the same time.
+Readiness fails closed. Every failed check carries a one-line `hint` with the
+command or step that fixes it, in `orch-hub repos --json`, `GET /api/repos`,
+and on the dashboard. Repo admission is a separate gate: one repo cannot hold a
+live run and a non-terminal remote intake at the same time.
 
 ## Dashboard and API
 
@@ -224,6 +242,10 @@ launchd deployment currently uses the defaults.
 .venv/bin/orch-hub repos
 .venv/bin/orch-hub repos --json
 
+# Dashboard hand-off on this Mac: never puts the token in a URL or a log
+.venv/bin/orch-hub open                 # open the dashboard, token on the clipboard
+.venv/bin/orch-hub token --copy         # just copy the token again
+
 # Resident service lifecycle
 .venv/bin/orch-hub launchd deploy --mandrel /absolute/path/to/mandrel
 .venv/bin/orch-hub launchd status
@@ -255,6 +277,8 @@ and point launchd at it, so they are checkout-only; a release uses `setup` and
 service — a compiled release ships one executable, so `orch-hub-api` exists only
 in a source install.
 
+`repos`, `token`, and `open` read the installed service's configuration from
+its plist, so they work from a fresh terminal without exporting anything.
 `repos --json` and `GET /api/repos` use the same payload builder. HTTP handlers
 delegate to the owning domain services rather than duplicating registry,
 readiness, or lifecycle logic.
@@ -304,7 +328,7 @@ already the target (there is no cross-building a compiled runtime):
 ```bash
 python3 -m orch_hub.release_build     # -> dist/orch-hub-darwin-arm64/
 python3 -m orch_hub.release_package   # -> dist/release/{*.run,release.json,SHA256SUMS}
-python3 -m orch_hub.release_publish --tag v0.1.0 --to ~/Releases/orch-hub
+python3 -m orch_hub.release_publish --tag v0.2.0 --to github:qinglin89/orch-hub
 ```
 
 The freezer and the bundled interpreter are pinned, the payload is audited for
@@ -316,8 +340,13 @@ inventory, or a destination already holding the tag. See
 
 ## Project status
 
-orch-hub is currently developed as a personal, local operator surface. It is
-not a hosted service, a multi-user control plane, or a replacement for Mandrel.
-The source repository remains private; an unsigned Apple Silicon binary preview
-is available from
-[orch-hub-releases](https://github.com/qinglin89/orch-hub-releases).
+orch-hub is preview software, developed as a personal, local operator surface:
+a single-operator control plane on your own Mac, not a hosted service, a
+multi-user platform, or a replacement for Mandrel. Release binaries are
+unsigned Apple Silicon builds published on
+[GitHub Releases](https://github.com/qinglin89/orch-hub/releases). Issues and
+feedback are welcome.
+
+## License
+
+[Apache-2.0](LICENSE).
