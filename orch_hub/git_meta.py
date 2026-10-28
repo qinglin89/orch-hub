@@ -277,7 +277,7 @@ def _git_log(
             cwd=repo.path,
             max_stdout_bytes=COMMIT_LOG_MAX_BYTES,
         )
-    except CommandNotFoundError:
+    except OSError:  # CommandNotFoundError included: missing, or cannot run here
         return CommitLog(available=False, commits=())
     if not result.ok:
         return CommitLog(available=False, commits=())

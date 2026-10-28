@@ -818,13 +818,20 @@
         </div>
         <h3>Or run it yourself</h3>
         <ol class="get-started-steps">
+          <li>Start from a clean working tree, and preview what deploy would
+            write. It owns and overwrites <code>CLAUDE.md</code>,
+            <code>.claude/</code>, <code>.cursor/</code>, <code>.codex/</code>,
+            <code>.ai-protocol/</code>, and <code>.mandrel/</code>, so move any
+            of your own files there aside first:
+            ${code(DEFAULT_MANDREL_BIN + " deploy --dry-run /path/to/your-repo")}
+            <span class="muted">(that is where the installer puts mandrel; use
+              the <code>bin/mandrel</code> of the checkout orch-hub was set up
+              with if it lives elsewhere)</span></li>
           <li>Deploy mandrel and the run scheduler into the repo:
             ${code(
               DEFAULT_MANDREL_BIN +
                 " deploy --bootstrap-orchestrator /path/to/your-repo"
-            )}
-            <span class="muted">(use your own mandrel checkout's
-              <code>bin/mandrel</code> if you installed it elsewhere)</span></li>
+            )}</li>
           <li>Commit <code>.gitignore</code> and <code>.ai-deploy-lock.json</code>
             in that repo.</li>
           <li>Open your coding agent in that repo and run <code>/ai-init</code>,

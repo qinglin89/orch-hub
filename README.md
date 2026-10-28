@@ -101,6 +101,9 @@ published model/effort choices.
 
 ## Run from source
 
+Running from a checkout needs Python 3.10+ for orch-hub itself (a release
+carries its own interpreter):
+
 ```bash
 git clone https://github.com/qinglin89/orch-hub
 cd orch-hub

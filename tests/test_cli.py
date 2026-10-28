@@ -279,14 +279,15 @@ def test_launchd_deploy_cli(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "launchd deploy ok" in out
-    # Captured output is not a terminal: the generated token stays in the plist.
-    assert "generated ORCH_HUB_TOKEN: not shown" in out
+    # The generated token stays in the plist; output only says how to copy it.
+    assert "generated ORCH_HUB_TOKEN: stored in the service plist, not printed" in out
     assert "orch-hub token --copy" in out
     assert "ORCH_HUB_TOKEN: generated" not in out
     assert "bark push: disabled" in out
 
 
-def test_launchd_deploy_cli_shows_a_generated_token_to_a_terminal(monkeypatch, capsys):
+def test_launchd_deploy_cli_never_echoes_a_generated_token_even_to_a_terminal(monkeypatch, capsys):
+    """Agents run commands in pseudo-terminals too; a TTY is not a person."""
     deployment = _fake_deployment()
     monkeypatch.setattr(
         cli,
@@ -298,7 +299,9 @@ def test_launchd_deploy_cli_shows_a_generated_token_to_a_terminal(monkeypatch, c
     rc = cli.main(["launchd", "deploy", "--skip-install"])
 
     assert rc == 0
-    assert "generated ORCH_HUB_TOKEN: generated" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "ORCH_HUB_TOKEN: generated" not in out
+    assert "orch-hub open" in out
 
 
 def test_launchd_deploy_help_explains_required_mandrel_path(capsys):
@@ -879,7 +882,7 @@ def test_setup_cli(monkeypatch, capsys):
     assert "orch-hub setup ok" in out
     assert "version: 0.2.0" in out
     assert "program: /tmp/.venv/bin/orch-hub-api" in out
-    assert "generated ORCH_HUB_TOKEN: not shown" in out
+    assert "generated ORCH_HUB_TOKEN: stored in the service plist, not printed" in out
     assert "ORCH_HUB_TOKEN: generated" not in out
     assert "bark push: disabled" in out
     assert "health: ok" in out

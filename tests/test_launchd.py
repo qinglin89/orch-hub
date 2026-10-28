@@ -1359,18 +1359,20 @@ def test_service_path_env_puts_the_shells_tool_dirs_first():
         "jq": "/opt/homebrew/bin/jq",
     }
 
+    shell = "/Users/u/.nvm/versions/node/v22/bin:/opt/homebrew/bin:/usr/bin:/bin"
+
     def which(name, path=None):
-        assert path == "/shell/path"
+        assert path == shell
         return found.get(name)
 
     existing = {"EnvironmentVariables": {"PATH": "/Users/u/.local/bin:/usr/bin:relative"}}
 
-    path = launchd.service_path_env({"PATH": "/shell/path"}, existing, which=which)
+    path = launchd.service_path_env({"PATH": shell}, existing, which=which)
 
     assert path.split(os.pathsep) == [
         "/Users/u/.nvm/versions/node/v22/bin",
-        "/usr/bin",
         "/opt/homebrew/bin",
+        "/usr/bin",
         "/Users/u/.local/bin",
         "/usr/local/bin",
         "/bin",
@@ -1410,7 +1412,7 @@ def test_probe_mandrel_runs_the_registry_read_under_the_given_path(tmp_path):
     assert record.read_text() == "/usr/bin:/bin|registry list --json"
 
 
-def test_probe_mandrel_explains_a_checkout_the_service_cannot_start(tmp_path):
+def test_probe_mandrel_sends_a_pre_resolution_mandrel_to_an_update(tmp_path):
     mandrel = _mandrel_with_entry(
         tmp_path, '#!/bin/sh\necho "bin/mandrel: 17: exec: python: not found" >&2\nexit 127\n'
     )
@@ -1420,7 +1422,28 @@ def test_probe_mandrel_explains_a_checkout_the_service_cannot_start(tmp_path):
     assert problem is not None
     assert "exec: python: not found" in problem
     assert "/usr/bin:/bin" in problem
+    assert f"git -C {mandrel} pull" in problem
+    assert ".venv" not in problem
+
+
+def test_probe_mandrel_explains_a_checkout_without_a_usable_python(tmp_path):
+    mandrel = _mandrel_with_entry(
+        tmp_path, '#!/bin/sh\necho "mandrel: needs Python 3.11 or newer and found none" >&2\nexit 1\n'
+    )
+
+    problem = launchd.probe_mandrel(mandrel, "/usr/bin:/bin")
+
+    assert problem is not None
     assert f"{mandrel}/.venv" in problem
+    assert "MANDREL_PYTHON" in problem
+
+
+def test_probe_mandrel_runs_from_the_root_like_launchd(tmp_path):
+    record = tmp_path / "cwd"
+    mandrel = _mandrel_with_entry(tmp_path, f'#!/bin/sh\npwd > "{record}"\n')
+
+    assert launchd.probe_mandrel(mandrel, "/usr/bin:/bin") is None
+    assert record.read_text().strip() == "/"
 
 
 def test_probe_mandrel_reports_an_entry_point_it_cannot_execute(tmp_path):

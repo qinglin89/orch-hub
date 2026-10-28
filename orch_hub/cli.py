@@ -761,19 +761,18 @@ def _cmd_open(args: argparse.Namespace) -> int:
 
 
 def _generated_token_line(token: str) -> str:
-    """A generated token is shown once, and only to a person.
+    """A generated token is never echoed by the commands that create it.
 
-    It exists nowhere else yet, so a human at a terminal needs to see it. Output
-    that is not a terminal is usually a script, a CI log, or a coding agent's
-    transcript (which a model provider receives) — a long-lived credential for
-    a code-execution surface does not belong in any of them, and the plist keeps
-    it retrievable with `orch-hub token`.
+    Their output is as likely to be a coding agent's transcript (which a model
+    provider receives), a CI log, or a terminal recording as a person's screen,
+    and no check on the output stream tells them apart: agents run commands in
+    pseudo-terminals too. The plist keeps the token, and `orch-hub token --copy`
+    or `orch-hub open` hands it over on request without printing it.
     """
-    if sys.stdout.isatty():
-        return f"generated ORCH_HUB_TOKEN: {token}"
+    del token  # stored in the plist; deliberately not part of this line
     return (
-        "generated ORCH_HUB_TOKEN: not shown (output is not a terminal); "
-        "copy it with `orch-hub token --copy`"
+        "generated ORCH_HUB_TOKEN: stored in the service plist, not printed; "
+        "`orch-hub open` or `orch-hub token --copy` copies it"
     )
 
 
@@ -781,9 +780,8 @@ def _print_service_summary(deployment, generated_token: bool) -> None:
     """Shared post-configuration summary for setup and upgrade.
 
     Secrets are handled the same way the launchd deploy path handles them: a
-    generated token is shown once, to a terminal only (see
-    `_generated_token_line`), and the Bark URL is never printed at all because
-    it embeds a device key.
+    generated token is never echoed (see `_generated_token_line`), and the Bark
+    URL is never printed at all because it embeds a device key.
     """
     print(f"label: {LABEL}")
     print(f"plist: {deployment.plist_path}")

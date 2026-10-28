@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from orch_hub.config import Config
 from orch_hub.models import (
     ManagedRepo,
@@ -15,6 +17,7 @@ from orch_hub.models import (
     ReadinessReport,
     repos_payload,
 )
+import orch_hub.readiness as readiness_module
 from orch_hub.readiness import check_readiness
 from orch_hub.subprocess_utils import CommandNotFoundError, CommandResult, run_command
 
@@ -244,9 +247,10 @@ def test_missing_repo_path_hint_names_redeploy_and_registry_remove(tmp_path):
     report = check_readiness(repo, cfg, runner=make_runner())
     got = hints(report)
     assert got["repo_path_exists"] == (
-        f"if the repo moved, redeploy it from the new location with"
-        f" {cfg.mandrel_bin} deploy /new/path/to/repo; otherwise drop it from"
-        f" the registry with {cfg.mandrel_bin} registry remove {missing}"
+        "if the repo lives on a volume that is not mounted, mount it; otherwise"
+        f" drop the stale entry with {cfg.mandrel_bin} registry remove {missing},"
+        " and if the repo moved, register it again with"
+        f" {cfg.mandrel_bin} deploy --bootstrap-orchestrator /new/path/to/repo"
     )
     # The subprocess checks it skipped point back at the root cause.
     skipped = "fix repo_path_exists first; this check runs once the path exists"
@@ -377,7 +381,8 @@ def test_mandrel_status_failure_hint(tmp_path):
     )
 
 
-def test_mandrel_missing_hint_points_at_the_configured_checkout(tmp_path):
+def test_mandrel_missing_hint_points_at_the_configured_checkout(tmp_path, monkeypatch):
+    monkeypatch.setattr(readiness_module, "is_frozen", lambda: True)
     repo = build_ready_repo(tmp_path)
     cfg = config(tmp_path)
 
@@ -395,10 +400,11 @@ def test_mandrel_missing_hint_points_at_the_configured_checkout(tmp_path):
     )
 
 
-def test_unrunnable_mandrel_is_a_failed_check_not_an_exception(tmp_path):
+def test_unrunnable_mandrel_is_a_failed_check_not_an_exception(tmp_path, monkeypatch):
     """A present-but-non-executable bin/mandrel raises PermissionError from the
     real subprocess wrapper; readiness must turn it into a failed check (it used
     to escape check_readiness and 500 GET /api/repos)."""
+    monkeypatch.setattr(readiness_module, "is_frozen", lambda: True)
     repo = build_ready_repo(tmp_path)
     mandrel_root = tmp_path / "mandrel"
     cfg = Config(mandrel_path=mandrel_root)
@@ -424,6 +430,56 @@ def test_unrunnable_mandrel_is_a_failed_check_not_an_exception(tmp_path):
         f" (ORCH_HUB_MANDREL_PATH is {mandrel_root}): orch-hub setup --mandrel"
         " /absolute/path/to/mandrel"
     )
+
+
+def test_a_checkout_service_is_reconfigured_with_launchd_update(tmp_path, monkeypatch):
+    """`orch-hub setup` needs an installed runtime; a checkout service has none."""
+    monkeypatch.setattr(readiness_module, "is_frozen", lambda: False)
+    repo = build_ready_repo(tmp_path)
+
+    def runner(args, **kwargs):
+        if str(args[0]) == "git":
+            return CommandResult(tuple(map(str, args)), 0, "", "")
+        raise CommandNotFoundError("mandrel")
+
+    report = check_readiness(repo, config(tmp_path), runner=runner)
+    assert hints(report)["mandrel_status"].endswith(
+        "orch-hub launchd update --mandrel /absolute/path/to/mandrel"
+    )
+
+
+@pytest.mark.parametrize(
+    ("rc", "out", "err"),
+    [
+        (1, "", "mandrel: needs Python 3.11 or newer and found none (tried ...)\n"),
+        (127, "", "bin/mandrel: 17: exec: python: not found\n"),
+        (1, "", "mandrel: MANDREL_PYTHON=/x is not a runnable Python 3.11 or newer\n"),
+    ],
+)
+def test_a_mandrel_that_cannot_start_is_not_called_drift(tmp_path, rc, out, err):
+    repo = build_ready_repo(tmp_path)
+    cfg = config(tmp_path)
+
+    report = check_readiness(
+        repo, cfg, runner=make_runner(mandrel_rc=rc, mandrel_out=out, mandrel_err=err)
+    )
+
+    hint = hints(report)["mandrel_status"]
+    assert hint.startswith("mandrel cannot start under the service's PATH")
+    assert f"python3.13 -m venv {tmp_path}/.venv" in hint
+    assert f"git -C {tmp_path} pull" in hint
+    assert "drift" not in hint
+
+
+def test_real_drift_keeps_the_redeploy_hint(tmp_path):
+    repo = build_ready_repo(tmp_path)
+    cfg = config(tmp_path)
+
+    report = check_readiness(
+        repo, cfg, runner=make_runner(mandrel_rc=1, mandrel_out="/x: drift detected (2 issues)\n")
+    )
+
+    assert hints(report)["mandrel_status"].startswith(f"run {cfg.mandrel_bin} status")
 
 
 def test_hint_commands_quote_paths_with_spaces(tmp_path):

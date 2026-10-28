@@ -45,14 +45,21 @@ as ready, and the user is signed in to the dashboard in their browser.
 2. Fetch the installer and ask it for its plan. This step changes nothing:
 
    ```bash
-   curl -fsSL https://raw.githubusercontent.com/qinglin89/orch-hub/dev/install.sh -o /tmp/orch-hub-install.sh
-   sh /tmp/orch-hub-install.sh --dry-run
+   ORCH_HUB_INSTALLER="$(mktemp -d)/install.sh"
+   curl -fsSL https://raw.githubusercontent.com/qinglin89/orch-hub/dev/install.sh -o "$ORCH_HUB_INSTALLER"
+   sh "$ORCH_HUB_INSTALLER" --dry-run
    ```
+
+   The directory is private to the user, so the file the user approves is the
+   file that runs. If your shell does not keep variables between commands,
+   note the path it printed and reuse it.
 
    The plan names the Mandrel checkout it will use or clone, the Python it
    found (or that it would install Python with Homebrew), the release it will
-   download, and the service address. If the plan stops on a missing Python
-   and there is no Homebrew, relay its instructions to the user. Stop there.
+   download, and the service address. It also confirms that the pinned
+   Mandrel release and orch-hub release exist. If the plan stops (for example
+   on a missing Python with no Homebrew), relay its message to the user and
+   stop there.
 
 3. **Ask** the user to approve the plan. Tell them what it installs:
    - Mandrel in `~/.local/share/mandrel` (or the checkout they already have);
@@ -66,12 +73,12 @@ as ready, and the user is signed in to the dashboard in their browser.
 4. Install:
 
    ```bash
-   sh /tmp/orch-hub-install.sh --no-open
+   sh "$ORCH_HUB_INSTALLER" --no-open
    ```
 
    It is safe to run again. An existing Mandrel checkout is reused unchanged,
-   and an existing service keeps its token and settings. When stdout is not a
-   terminal, the token is not printed. That is intended.
+   and an existing service keeps its token and settings. The token is never
+   printed; [Hand over](#hand-over) gets it to the user.
 
 5. Verify:
 
@@ -86,10 +93,18 @@ as ready, and the user is signed in to the dashboard in their browser.
    `<that checkout>/bin/mandrel`; with the defaults that is
    `~/.local/share/mandrel/bin/mandrel`.
 
-If setup fails with `mandrel cannot run under the service's PATH`, Mandrel
-could not find Python 3.11+ under the background service's minimal `PATH`. Give
-the checkout its own interpreter, then rerun step 4:
-`python3.13 -m venv <mandrel-checkout>/.venv` (any `python3.11` or newer works).
+If setup fails with `mandrel cannot run under the service's PATH`, the
+background service cannot start Mandrel. The message names the fix:
+
+- **It says the Mandrel predates interpreter resolution** (`python: not
+  found`): that checkout runs an unversioned `python`. **Ask** the user before
+  updating it (`git -C <mandrel-checkout> pull`, or checking out its newest
+  release tag), since every repo it manages is redeployed from it. Then rerun
+  step 4.
+- **Otherwise** Mandrel found no Python 3.11+ on the service's minimal `PATH`.
+  Give the checkout its own interpreter, then rerun step 4:
+  `python3.13 -m venv <mandrel-checkout>/.venv` (any `python3.11` or newer
+  works).
 
 ## Add a repo
 

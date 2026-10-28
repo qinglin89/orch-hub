@@ -19,6 +19,7 @@ from pathlib import Path
 
 from .config import MANDREL_PATH_ENV, Config
 from .models import ManagedRepo, ReadinessCheck, ReadinessReport
+from .resources import is_frozen
 from .subprocess_utils import CommandNotFoundError, Runner, run_command
 
 # How many dirty paths the git_clean hint names before summarizing the rest.
@@ -167,7 +168,27 @@ def _mandrel_status_check(
         "mandrel_status",
         False,
         f"mandrel status failed: {detail}",
-        _mandrel_drift_hint(repo.path, config),
+        _mandrel_runtime_hint(config)
+        if _mandrel_did_not_start(result)
+        else _mandrel_drift_hint(repo.path, config),
+    )
+
+
+def _mandrel_did_not_start(result) -> bool:
+    """Whether the failure came from bin/mandrel's interpreter, not from status.
+
+    Drift is reported on stdout with exit 1. A wrapper that cannot find (or an
+    older one that cannot run) a Python prints only to stderr, or exits 126/127
+    from the shell; redeploying a target would not help either.
+    """
+    if result.returncode in (126, 127):
+        return True
+    if result.stdout.strip():
+        return False
+    stderr = result.stderr
+    return any(
+        marker in stderr
+        for marker in ("needs Python 3.11", "MANDREL_PYTHON=", "python: not found")
     )
 
 
@@ -196,7 +217,12 @@ _GIT_TOOL_HINT = (
     " orch-hub runs with"
 )
 
-_ORCH_HUB_SETUP_CMD = "orch-hub setup --mandrel /absolute/path/to/mandrel"
+def _orch_hub_setup_cmd() -> str:
+    # A compiled install reconfigures with `setup`; a checkout-run service with
+    # `launchd update` (setup needs an installed runtime it does not have).
+    if is_frozen():
+        return "orch-hub setup --mandrel /absolute/path/to/mandrel"
+    return "orch-hub launchd update --mandrel /absolute/path/to/mandrel"
 
 
 def _cmd(*parts: object) -> str:
@@ -205,11 +231,17 @@ def _cmd(*parts: object) -> str:
 
 
 def _repo_path_hint(path: Path, config: Config) -> str:
-    redeploy = _cmd(config.mandrel_bin, "deploy") + " /new/path/to/repo"
+    # Remove first either way: the registry de-duplicates by path, so a redeploy
+    # from a new location alone would leave a second entry under the same name.
     remove = _cmd(config.mandrel_bin, "registry", "remove", path)
+    redeploy = (
+        _cmd(config.mandrel_bin, "deploy", "--bootstrap-orchestrator")
+        + " /new/path/to/repo"
+    )
     return (
-        f"if the repo moved, redeploy it from the new location with {redeploy};"
-        f" otherwise drop it from the registry with {remove}"
+        f"if the repo lives on a volume that is not mounted, mount it; otherwise"
+        f" drop the stale entry with {remove}, and if the repo moved, register"
+        f" it again with {redeploy}"
     )
 
 
@@ -271,10 +303,20 @@ def _mandrel_drift_hint(path: Path, config: Config) -> str:
     )
 
 
+def _mandrel_runtime_hint(config: Config) -> str:
+    venv = _cmd("python3.13", "-m", "venv", config.mandrel_path / ".venv")
+    pull = _cmd("git", "-C", config.mandrel_path, "pull")
+    return (
+        "mandrel cannot start under the service's PATH: give its checkout an"
+        f" interpreter with {venv} (any Python 3.11+); a mandrel that still runs"
+        f" an unversioned python needs updating first: {pull}"
+    )
+
+
 def _mandrel_location_hint(config: Config) -> str:
     return (
         f"point orch-hub at your mandrel checkout ({MANDREL_PATH_ENV} is"
-        f" {shlex.quote(str(config.mandrel_path))}): {_ORCH_HUB_SETUP_CMD}"
+        f" {shlex.quote(str(config.mandrel_path))}): {_orch_hub_setup_cmd()}"
     )
 
 
