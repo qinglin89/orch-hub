@@ -1315,3 +1315,167 @@ def test_wait_for_health_reports_the_last_failure():
 
     assert result == "unreachable: refused"
     assert len(sleeps) <= 2
+
+
+# --------------------------------------------------------------------------
+# first-run hand-off: token readback, service PATH, mandrel actually runs
+# --------------------------------------------------------------------------
+
+
+def _mandrel_with_entry(tmp_path: Path, body: str) -> Path:
+    mandrel = tmp_path / "mandrel"
+    (mandrel / "bin").mkdir(parents=True, exist_ok=True)
+    entry = mandrel / "bin" / "mandrel"
+    entry.write_text(body, encoding="utf-8")
+    entry.chmod(0o755)
+    return mandrel
+
+
+def test_installed_token_reads_the_plist(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    assert launchd.installed_token(plist_path=plist_path) is None
+
+    with plist_path.open("wb") as fh:
+        plistlib.dump({"EnvironmentVariables": {TOKEN_ENV: " abc123 "}}, fh)
+    assert launchd.installed_token(plist_path=plist_path) == "abc123"
+
+    with plist_path.open("wb") as fh:
+        plistlib.dump({"EnvironmentVariables": {TOKEN_ENV: "   "}}, fh)
+    assert launchd.installed_token(plist_path=plist_path) is None
+
+
+def test_installed_token_refuses_an_unreadable_plist(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    plist_path.write_text("not a plist", encoding="utf-8")
+    with pytest.raises(LaunchdError, match="cannot read the installed launchd plist"):
+        launchd.installed_token(plist_path=plist_path)
+
+
+def test_service_path_env_puts_the_shells_tool_dirs_first():
+    found = {
+        "claude": "/Users/u/.nvm/versions/node/v22/bin/claude",
+        "node": "/Users/u/.nvm/versions/node/v22/bin/node",
+        "git": "/usr/bin/git",
+        "jq": "/opt/homebrew/bin/jq",
+    }
+
+    def which(name, path=None):
+        assert path == "/shell/path"
+        return found.get(name)
+
+    existing = {"EnvironmentVariables": {"PATH": "/Users/u/.local/bin:/usr/bin:relative"}}
+
+    path = launchd.service_path_env({"PATH": "/shell/path"}, existing, which=which)
+
+    assert path.split(os.pathsep) == [
+        "/Users/u/.nvm/versions/node/v22/bin",
+        "/usr/bin",
+        "/opt/homebrew/bin",
+        "/Users/u/.local/bin",
+        "/usr/local/bin",
+        "/bin",
+        "/usr/sbin",
+        "/sbin",
+    ]
+
+
+def test_service_path_env_without_a_shell_path_is_the_default():
+    def which(name, path=None):  # pragma: no cover - must not be consulted
+        raise AssertionError("no PATH to search")
+
+    assert launchd.service_path_env({}, None, which=which) == launchd.DEFAULT_PATH_ENV
+
+
+def test_resolve_deployment_keeps_an_explicit_path_env(tmp_path):
+    deployment = resolve_deployment(
+        DeployOptions(
+            checkout=make_checkout(tmp_path),
+            mandrel_path=tmp_path / "mandrel",
+            plist_path=tmp_path / PLIST_NAME,
+            path_env="/only/this",
+        ),
+        environ={"PATH": "/usr/bin"},
+        token_generator=lambda: "t",
+    )
+    assert deployment.path_env == "/only/this"
+
+
+def test_probe_mandrel_runs_the_registry_read_under_the_given_path(tmp_path):
+    record = tmp_path / "record"
+    mandrel = _mandrel_with_entry(
+        tmp_path, f'#!/bin/sh\nprintf "%s|%s" "$PATH" "$*" > "{record}"\necho "[]"\n'
+    )
+
+    assert launchd.probe_mandrel(mandrel, "/usr/bin:/bin") is None
+    assert record.read_text() == "/usr/bin:/bin|registry list --json"
+
+
+def test_probe_mandrel_explains_a_checkout_the_service_cannot_start(tmp_path):
+    mandrel = _mandrel_with_entry(
+        tmp_path, '#!/bin/sh\necho "bin/mandrel: 17: exec: python: not found" >&2\nexit 127\n'
+    )
+
+    problem = launchd.probe_mandrel(mandrel, "/usr/bin:/bin")
+
+    assert problem is not None
+    assert "exec: python: not found" in problem
+    assert "/usr/bin:/bin" in problem
+    assert f"{mandrel}/.venv" in problem
+
+
+def test_probe_mandrel_reports_an_entry_point_it_cannot_execute(tmp_path):
+    mandrel = _mandrel_with_entry(tmp_path, "#!/bin/sh\n")
+    (mandrel / "bin" / "mandrel").chmod(0o644)
+
+    problem = launchd.probe_mandrel(mandrel, "/usr/bin:/bin")
+
+    assert problem is not None and problem.startswith("cannot run")
+
+
+def test_verified_deploy_refuses_before_touching_a_running_service(tmp_path):
+    plist_path = tmp_path / PLIST_NAME
+    runner = FakeRunner()
+    probed = []
+
+    def failing_probe(mandrel_path, path_env):
+        probed.append((mandrel_path, path_env))
+        return "mandrel cannot run under the service's PATH"
+
+    with pytest.raises(LaunchdError, match="cannot run under the service's PATH"):
+        deploy_service(
+            DeployOptions(
+                checkout=make_checkout(tmp_path),
+                mandrel_path=_mandrel_with_entry(tmp_path, "#!/bin/sh\n"),
+                plist_path=plist_path,
+                log_dir=tmp_path / "logs",
+                install_package=False,
+                verify_mandrel=True,
+            ),
+            runner=runner,
+            environ={},
+            token_generator=lambda: "t",
+            mandrel_probe=failing_probe,
+        )
+
+    assert probed and probed[0][1] == launchd.DEFAULT_PATH_ENV
+    assert not plist_path.exists()
+    assert runner.calls == []
+
+
+def test_unverified_deploy_does_not_probe_mandrel(tmp_path):
+    def probe(mandrel_path, path_env):  # pragma: no cover - must not run
+        raise AssertionError("checkout deploys do not probe mandrel")
+
+    deploy_service(
+        DeployOptions(
+            checkout=make_checkout(tmp_path),
+            mandrel_path=tmp_path / "mandrel",
+            plist_path=tmp_path / PLIST_NAME,
+            log_dir=tmp_path / "logs",
+            install_package=False,
+        ),
+        runner=FakeRunner(),
+        environ={},
+        token_generator=lambda: "t",
+        mandrel_probe=probe,
+    )
