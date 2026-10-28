@@ -292,8 +292,26 @@ def test_launchd_deploy_cli(monkeypatch, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "launchd deploy ok" in out
-    assert "generated ORCH_HUB_TOKEN: generated" in out
+    # Captured output is not a terminal: the generated token stays in the plist.
+    assert "generated ORCH_HUB_TOKEN: not shown" in out
+    assert "orch-hub token --copy" in out
+    assert "ORCH_HUB_TOKEN: generated" not in out
     assert "bark push: disabled" in out
+
+
+def test_launchd_deploy_cli_shows_a_generated_token_to_a_terminal(monkeypatch, capsys):
+    deployment = _fake_deployment()
+    monkeypatch.setattr(
+        cli,
+        "deploy_service",
+        lambda options: SimpleNamespace(deployment=deployment, generated_token=True),
+    )
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    rc = cli.main(["launchd", "deploy", "--skip-install"])
+
+    assert rc == 0
+    assert "generated ORCH_HUB_TOKEN: generated" in capsys.readouterr().out
 
 
 def test_launchd_deploy_help_explains_required_mandrel_path(capsys):
@@ -1369,7 +1387,8 @@ def test_setup_cli(monkeypatch, capsys):
     assert "orch-hub setup ok" in out
     assert "version: 0.2.0" in out
     assert "program: /tmp/.venv/bin/orch-hub-api" in out
-    assert "generated ORCH_HUB_TOKEN: generated" in out
+    assert "generated ORCH_HUB_TOKEN: not shown" in out
+    assert "ORCH_HUB_TOKEN: generated" not in out
     assert "bark push: disabled" in out
     assert "health: ok" in out
 
@@ -1615,3 +1634,123 @@ def test_uninstall_cli_reports_a_refused_removal(monkeypatch, capsys):
     captured = capsys.readouterr()
     assert "error: cannot stop" in captured.err
     assert "orch-hub uninstalled" not in captured.out
+
+
+# --- token / open: hand the dashboard and its token back on this Mac ---------
+
+
+SECRET = "s3cr3t-token-value"
+
+
+def _handoff(monkeypatch, *, token=SECRET, bind=("127.0.0.1", 8765), clipboard_error=None, opened=True):
+    calls = {"copied": [], "opened": []}
+
+    def fake_copy(text):
+        if clipboard_error:
+            raise cli.HandoffError(clipboard_error)
+        calls["copied"].append(text)
+
+    def fake_open(url):
+        calls["opened"].append(url)
+        return opened
+
+    monkeypatch.setattr(cli, "installed_token", lambda plist_path=None: token)
+    monkeypatch.setattr(cli, "installed_bind", lambda plist_path=None: bind)
+    monkeypatch.setattr(cli, "copy_to_clipboard", fake_copy)
+    monkeypatch.setattr(cli, "open_in_browser", fake_open)
+    return calls
+
+
+def test_token_prints_the_installed_token(monkeypatch, capsys):
+    _handoff(monkeypatch)
+
+    assert cli.main(["token"]) == 0
+    assert capsys.readouterr().out == f"{SECRET}\n"
+
+
+def test_token_copy_never_prints_it(monkeypatch, capsys):
+    calls = _handoff(monkeypatch)
+
+    assert cli.main(["token", "--copy"]) == 0
+    captured = capsys.readouterr()
+    assert calls["copied"] == [SECRET]
+    assert SECRET not in captured.out + captured.err
+    assert "copied to the clipboard" in captured.out
+
+
+def test_token_without_an_installed_service_fails(monkeypatch, capsys):
+    _handoff(monkeypatch, token=None)
+
+    assert cli.main(["token", "--copy"]) == 1
+    assert "orch-hub setup" in capsys.readouterr().err
+
+
+def test_token_copy_failure_is_reported(monkeypatch, capsys):
+    _handoff(monkeypatch, clipboard_error="pbcopy is not available on this machine")
+
+    assert cli.main(["token", "--copy"]) == 1
+    err = capsys.readouterr().err
+    assert "pbcopy is not available" in err
+    assert SECRET not in err
+
+
+def test_open_copies_the_token_and_opens_the_plain_url(monkeypatch, capsys):
+    calls = _handoff(monkeypatch, bind=("100.64.0.7", 9000))
+
+    assert cli.main(["open"]) == 0
+    captured = capsys.readouterr()
+    assert calls["copied"] == [SECRET]
+    # The token never rides in the URL handed to the browser, nor in output.
+    assert calls["opened"] == ["http://100.64.0.7:9000/"]
+    assert SECRET not in captured.out + captured.err
+    assert "dashboard: http://100.64.0.7:9000/" in captured.out
+    assert "copied to the clipboard" in captured.out
+
+
+def test_open_no_copy_and_no_browser_still_explains(monkeypatch, capsys):
+    calls = _handoff(monkeypatch, opened=False)
+
+    assert cli.main(["open", "--no-copy"]) == 0
+    out = capsys.readouterr().out
+    assert calls["copied"] == []
+    assert "orch-hub token --copy" in out
+    assert "open the dashboard URL above" in out
+
+
+def test_open_keeps_going_when_the_clipboard_fails(monkeypatch, capsys):
+    calls = _handoff(monkeypatch, clipboard_error="pbcopy failed")
+
+    assert cli.main(["open"]) == 0
+    captured = capsys.readouterr()
+    assert calls["opened"] == ["http://127.0.0.1:8765/"]
+    assert "warning: pbcopy failed" in captured.err
+    assert "orch-hub token --copy" in captured.out
+
+
+def test_open_before_setup_fails(monkeypatch, capsys):
+    calls = _handoff(monkeypatch, token=None)
+
+    assert cli.main(["open"]) == 1
+    assert calls["opened"] == []
+    assert "orch-hub setup" in capsys.readouterr().err
+
+
+def test_open_reports_an_unreadable_plist(monkeypatch, capsys):
+    _handoff(monkeypatch)
+
+    def broken(plist_path=None):
+        raise LaunchdError("cannot read the installed launchd plist /x: bad")
+
+    monkeypatch.setattr(cli, "installed_bind", broken)
+
+    assert cli.main(["open"]) == 1
+    assert "cannot read the installed launchd plist" in capsys.readouterr().err
+
+
+def test_token_reads_a_real_installed_plist(tmp_path, capsys):
+    plist_path = tmp_path / PLIST_NAME
+    with plist_path.open("wb") as fh:
+        plistlib.dump({"EnvironmentVariables": {TOKEN_ENV: f"  {SECRET}  "}}, fh)
+
+    assert cli.main(["token", "--plist-path", str(plist_path)]) == 0
+    assert capsys.readouterr().out == f"{SECRET}\n"

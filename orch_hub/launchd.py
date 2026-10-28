@@ -14,6 +14,8 @@ import os
 import plistlib
 import re
 import secrets
+import shutil
+import subprocess
 import sys
 import time
 import urllib.error
@@ -47,6 +49,15 @@ from .subprocess_utils import (
 LABEL = "com.qinglin89.orch-hub"
 PLIST_NAME = f"{LABEL}.plist"
 DEFAULT_PATH_ENV = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+SERVICE_TOOLS = ("claude", "codex", "cursor-agent", "node", "git", "jq")
+"""Commands the service runs, or whose interpreter a command it runs needs.
+
+launchd hands an agent a minimal PATH, and the places these live are personal:
+an npm prefix under nvm or volta, ``~/.local/bin``, a Homebrew prefix. Setup
+records the directories the configuring shell resolves them from, so the
+service finds the same programs the operator just used."""
+
+MANDREL_PROBE_TIMEOUT = 30.0
 TEMPLATE_RELATIVE_PATH = Path("deploy") / "launchd" / PLIST_NAME
 PROGRAM_KEY = "ProgramArguments"
 
@@ -122,7 +133,10 @@ class DeployOptions:
     data_dir: Path | None = None
     plist_path: Path | None = None
     log_dir: Path | None = None
-    path_env: str = DEFAULT_PATH_ENV
+    path_env: str | None = None
+    """PATH the service runs with; ``None`` resolves it with
+    :func:`service_path_env` from the configuring shell and installed plist."""
+
     install_package: bool = True
     verify_mandrel: bool = False
     """Whether the resolved Mandrel checkout must actually exist.
@@ -272,6 +286,22 @@ def installed_bark_url(*, plist_path: Path | None = None) -> str | None:
     resolved = (plist_path or default_plist_path()).expanduser()
     value = _plist_env(_read_plist(resolved)).get(BARK_URL_ENV, "")
     return value.strip() or None
+
+
+def installed_token(*, plist_path: Path | None = None) -> str | None:
+    """Return the bearer token the installed service was configured with.
+
+    The token lives only in the mode-600 plist after setup prints it once, so
+    this is what lets ``orch-hub token`` and ``orch-hub open`` hand it to the
+    operator again without a second credential store. Blank or absent is
+    ``None``; an unreadable plist raises, because "no token" and "cannot read
+    the configuration" call for different fixes.
+    """
+    resolved = (plist_path or default_plist_path()).expanduser()
+    env = _require_plist_env(
+        _require_parsable_plist(resolved), resolved, keys=(TOKEN_ENV,)
+    )
+    return env.get(TOKEN_ENV, "").strip() or None
 
 
 def installed_mandrel_path(*, plist_path: Path | None = None) -> Path | None:
@@ -443,6 +473,79 @@ def verify_mandrel_checkout(path: Path) -> None:
         )
 
 
+def probe_mandrel(mandrel_path: Path, path_env: str) -> str | None:
+    """Run the mandrel registry read the service will run, as the service will.
+
+    A checkout can pass :func:`verify_mandrel_checkout` and still not start: its
+    wrapper needs a Python 3.11+, and the one an interactive shell finds is not
+    necessarily on the PATH launchd gives the service. Then every registry read
+    and every ``mandrel status`` fails, the registry silently falls back to its
+    file, and every repo shows "not ready" for a reason no screen explains.
+    Running the real command under the service's own PATH turns that into one
+    error at setup time. Returns a problem description, or ``None`` when it ran.
+    """
+    binary = mandrel_path.expanduser() / MANDREL_BIN_RELATIVE_PATH
+    env = {"PATH": path_env, "HOME": str(Path.home())}
+    try:
+        result = subprocess.run(
+            [str(binary), "registry", "list", "--json"],
+            capture_output=True,
+            text=True,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            timeout=MANDREL_PROBE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return f"{binary} did not answer within {MANDREL_PROBE_TIMEOUT:.0f}s"
+    except OSError as exc:
+        return f"cannot run {binary}: {exc.strerror or exc}"
+    if result.returncode == 0:
+        return None
+    detail = next(
+        (line.strip() for line in (result.stderr + result.stdout).splitlines() if line.strip()),
+        f"exit {result.returncode}",
+    )
+    return (
+        f"mandrel cannot run under the service's PATH ({path_env}): {detail}. "
+        f"Give the checkout its own interpreter with "
+        f"`python3.13 -m venv {mandrel_path}/.venv` (any Python 3.11+), "
+        "or update mandrel (`git pull`) so it finds one itself"
+    )
+
+
+def service_path_env(
+    environ: Mapping[str, str],
+    existing: dict | None,
+    *,
+    which: Callable[..., str | None] = shutil.which,
+) -> str:
+    """PATH for the service: where this shell finds the service's tools, then
+    the installed plist's PATH, then the launchd-safe defaults.
+
+    The installed PATH is kept so an upgrade run from a different shell (an
+    agent's, a fresh terminal) does not lose a directory an earlier setup found.
+    Only absolute directories survive, each once, first occurrence winning.
+    """
+    candidates: list[str] = []
+    shell_path = (environ.get("PATH") or "").strip()
+    if shell_path:
+        for tool in SERVICE_TOOLS:
+            found = which(tool, path=shell_path)
+            if found:
+                candidates.append(str(Path(found).parent))
+    candidates.extend(_plist_env(existing).get("PATH", "").split(os.pathsep))
+    candidates.extend(DEFAULT_PATH_ENV.split(os.pathsep))
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for entry in candidates:
+        entry = entry.strip()
+        if entry and os.path.isabs(entry) and entry not in seen:
+            seen.add(entry)
+            ordered.append(entry)
+    return os.pathsep.join(ordered)
+
+
 def default_log_dir() -> Path:
     return Path.home() / "Library" / "Logs" / "orch-hub"
 
@@ -532,7 +635,7 @@ def resolve_deployment(
         .resolve(),
         plist_path=plist_path,
         log_dir=(options.log_dir or default_log_dir()).expanduser(),
-        path_env=options.path_env,
+        path_env=options.path_env or service_path_env(env, existing),
         bark_url=bark_url,
     )
 
@@ -561,6 +664,7 @@ def deploy_service(
     environ: Mapping[str, str] | None = None,
     token_generator: Callable[[], str] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
+    mandrel_probe: Callable[[Path, str], str | None] = probe_mandrel,
 ) -> DeployResult:
     """Install/update the package, rewrite plist, and bootstrap the service.
 
@@ -574,6 +678,12 @@ def deploy_service(
     deployment = resolve_deployment(
         options, environ=environ, token_generator=token_generator
     )
+    if options.verify_mandrel:
+        # Before anything is written or unloaded: a mandrel the service cannot
+        # run must not replace a working service with one that sees no repos.
+        problem = mandrel_probe(deployment.mandrel_path, deployment.path_env)
+        if problem:
+            raise LaunchdError(problem)
     plist_data = _render_plist_from_template(deployment)
     commands: list[CommandResult] = []
     if options.install_package and deployment.checkout is not None:

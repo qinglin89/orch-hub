@@ -261,9 +261,15 @@ if [ -n "$token" ]; then set -- "$@" --token "$token"; fi
 if [ -n "$host" ]; then set -- "$@" --host "$host"; fi
 if [ -n "$port" ]; then set -- "$@" --port "$port"; fi
 if ! "$payload/$COMMAND_NAME" "$@"; then
-    printf '\nthe runtime is installed but the service did not start.\n' >&2
-    printf 'inspect it with:  %s launchd status\n' "$COMMAND_NAME" >&2
-    printf 'go back with:     %s rollback\n' "$COMMAND_NAME" >&2
+    printf '\nthe runtime is installed but the service is not running (see the error above).\n' >&2
+    printf 'fix that and run this installer again; inspect with:  %s launchd status\n' "$COMMAND_NAME" >&2
+    # Rollback is advice only when there is something to go back to: on a first
+    # install it would just fail with "no previous version recorded".
+    set -- versions --json
+    if [ -n "$prefix" ]; then set -- "$@" --prefix "$prefix"; fi
+    if "$payload/$COMMAND_NAME" "$@" 2>/dev/null | grep -q '"previous": "'; then
+        printf 'or go back to the version this replaced:  %s rollback\n' "$COMMAND_NAME" >&2
+    fi
     exit 1
 fi
 

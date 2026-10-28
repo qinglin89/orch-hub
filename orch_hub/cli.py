@@ -34,7 +34,9 @@ from .launchd import (
     LaunchdError,
     deploy_service,
     installed_bark_url,
+    installed_bind,
     installed_mandrel_path,
+    installed_token,
     restart_service,
     start_service,
     status_service,
@@ -52,6 +54,7 @@ from .install import (
     upgrade,
 )
 from .git_meta import latest_commit
+from .handoff import HandoffError, copy_to_clipboard, open_in_browser
 from .housekeeping import housekeeping_pending
 from .models import (
     EvaluationQueueEntry,
@@ -101,6 +104,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_version(json_output=args.json)
     if args.command in _INSTALL_COMMANDS:
         return args.install_handler(args)
+    if args.command in ("token", "open"):
+        return args.handoff_handler(args)
     parser.error(f"unknown command: {args.command}")  # pragma: no cover
     return 2
 
@@ -142,6 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
     version_p = sub.add_parser("version", help="show the orch-hub runtime version")
     _add_json_arg(version_p)
     _add_install_commands(sub)
+    _add_handoff_commands(sub)
 
     launchd_p = sub.add_parser(
         "launchd", help="manage the macOS launchd service"
@@ -412,6 +418,33 @@ def _add_install_commands(sub) -> None:
     uninstall_p.set_defaults(install_handler=_cmd_uninstall)
 
 
+def _add_handoff_commands(sub) -> None:
+    # The token exists only in the installed plist after setup prints it once.
+    # These two verbs hand it back on this Mac without a second credential path:
+    # clipboard plus the plain dashboard URL, never the token in a URL.
+    token_p = sub.add_parser(
+        "token", help="print the dashboard bearer token, or copy it to the clipboard"
+    )
+    token_p.add_argument(
+        "--copy",
+        action="store_true",
+        help="copy the token to the clipboard instead of printing it",
+    )
+    _add_plist_path_arg(token_p)
+    token_p.set_defaults(handoff_handler=_cmd_token)
+
+    open_p = sub.add_parser(
+        "open", help="open the dashboard with the bearer token on the clipboard"
+    )
+    open_p.add_argument(
+        "--no-copy",
+        action="store_true",
+        help="open the dashboard without copying the token",
+    )
+    _add_plist_path_arg(open_p)
+    open_p.set_defaults(handoff_handler=_cmd_open)
+
+
 def _add_payload_arg(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--from",
@@ -516,11 +549,30 @@ def _add_plist_path_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _environ_with_installed_mandrel(plist_path: Path | None = None) -> dict[str, str]:
+    """The shell environment, plus the service's Mandrel checkout when unset.
+
+    The resident service keeps its configuration in the launchd plist, not in an
+    interactive shell, so an operator (or the agent that just ran the installer)
+    reading the portfolio from a fresh terminal would otherwise see an
+    unconfigured registry. An exported value still wins.
+    """
+    environ = dict(os.environ)
+    configured = (environ.get(MANDREL_PATH_ENV) or "").strip() or (
+        environ.get(LEGACY_MANDREL_PATH_ENV) or ""
+    ).strip()
+    if not configured:
+        mandrel_path = installed_mandrel_path(plist_path=plist_path)
+        if mandrel_path is not None:
+            environ[MANDREL_PATH_ENV] = str(mandrel_path)
+    return environ
+
+
 def _cmd_repos(*, json_output: bool) -> int:
     try:
         # Config.from_env raises ValueError for malformed service settings
         # (e.g. ORCH_HUB_PORT); report it as an operational error, not a crash.
-        config = Config.from_env()
+        config = Config.from_env(_environ_with_installed_mandrel())
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -759,12 +811,87 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_token(args: argparse.Namespace) -> int:
+    try:
+        token = installed_token(plist_path=args.plist_path)
+    except LaunchdError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if token is None:
+        print(
+            "error: no installed service token; configure the service with "
+            "`orch-hub setup` first",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.copy:
+        print(token)
+        return 0
+    try:
+        copy_to_clipboard(token)
+    except HandoffError as exc:
+        print(f"error: {exc}; run `orch-hub token` to print it instead", file=sys.stderr)
+        return 1
+    print("token copied to the clipboard")
+    return 0
+
+
+def _cmd_open(args: argparse.Namespace) -> int:
+    try:
+        host, port = installed_bind(plist_path=args.plist_path)
+        token = installed_token(plist_path=args.plist_path)
+    except LaunchdError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if token is None:
+        print(
+            "error: orch-hub is not set up on this Mac; run `orch-hub setup` first",
+            file=sys.stderr,
+        )
+        return 1
+    url = f"http://{host}:{port}/"
+    copied = False
+    if not args.no_copy:
+        try:
+            copy_to_clipboard(token)
+            copied = True
+        except HandoffError as exc:
+            print(f"warning: {exc}", file=sys.stderr)
+    opened = open_in_browser(url)
+    print(f"dashboard: {url}")
+    if copied:
+        print("token: copied to the clipboard; paste it into the sign-in field")
+    else:
+        print("token: run `orch-hub token --copy` to copy it")
+    if not opened:
+        print("open the dashboard URL above in your browser")
+    return 0
+
+
+def _generated_token_line(token: str) -> str:
+    """A generated token is shown once, and only to a person.
+
+    It exists nowhere else yet, so a human at a terminal needs to see it. Output
+    that is not a terminal is usually a script, a CI log, or a coding agent's
+    transcript (which a model provider receives) — a long-lived credential for
+    a code-execution surface does not belong in any of them, and the plist keeps
+    it retrievable with `orch-hub token`.
+    """
+    if sys.stdout.isatty():
+        return f"generated ORCH_HUB_TOKEN: {token}"
+    return (
+        "generated ORCH_HUB_TOKEN: not shown (output is not a terminal); "
+        "copy it with `orch-hub token --copy`"
+    )
+
+
 def _print_service_summary(deployment, generated_token: bool) -> None:
     """Shared post-configuration summary for setup and upgrade.
 
     Secrets are handled the same way the launchd deploy path handles them: a
-    generated token is printed exactly once because it exists nowhere else yet,
-    and the Bark URL is never printed at all because it embeds a device key.
+    generated token is shown once, to a terminal only (see
+    `_generated_token_line`), and the Bark URL is never printed at all because
+    it embeds a device key.
     """
     print(f"label: {LABEL}")
     print(f"plist: {deployment.plist_path}")
@@ -773,7 +900,7 @@ def _print_service_summary(deployment, generated_token: bool) -> None:
     print(f"data dir: {deployment.data_dir}")
     print(f"dashboard: {deployment.dashboard_url}")
     if generated_token:
-        print(f"generated ORCH_HUB_TOKEN: {deployment.token}")
+        print(_generated_token_line(deployment.token))
     else:
         print(f"token: {deployment.token_source}")
     print(f"bark push: {'enabled' if deployment.bark_url else 'disabled'}")
@@ -813,7 +940,7 @@ def _cmd_launchd_deploy(args: argparse.Namespace) -> int:
     print(f"program: {deployment.program}")
     print(f"dashboard: {deployment.dashboard_url}")
     if result.generated_token:
-        print(f"generated ORCH_HUB_TOKEN: {deployment.token}")
+        print(_generated_token_line(deployment.token))
     else:
         print(f"token: {deployment.token_source}")
     # Never echo the Bark URL: it embeds a device-key secret.
@@ -897,14 +1024,7 @@ def _cmd_notify_test(args: argparse.Namespace) -> int:
     is configured" from "push delivery actually works". Delivery is direct (not
     through the run manager), so it touches no run/history/control-dir state.
     """
-    environ = dict(os.environ)
-    configured_mandrel = (environ.get(MANDREL_PATH_ENV) or "").strip() or (
-        environ.get(LEGACY_MANDREL_PATH_ENV) or ""
-    ).strip()
-    if not configured_mandrel:
-        mandrel_path = installed_mandrel_path(plist_path=args.plist_path)
-        if mandrel_path is not None:
-            environ[MANDREL_PATH_ENV] = str(mandrel_path)
+    environ = _environ_with_installed_mandrel(plist_path=args.plist_path)
     try:
         config = Config.from_env(environ)
     except ValueError as exc:
