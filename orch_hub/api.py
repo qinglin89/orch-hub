@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from . import __version__
 from .admission import IntakeInFlightError, RepoAdmission, RunLiveError
 from .config import TOKEN_ENV, Config
 from .control_dir import (
@@ -727,7 +728,7 @@ def create_app(
     app = FastAPI(
         title="orch-hub",
         description="Local control plane for AI coding orchestrators.",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
     app.state.run_monitor = monitor
