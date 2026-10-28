@@ -83,7 +83,7 @@ from orch_hub.semantic_jobs import (
     SemanticJobManager,
 )
 from orch_hub.static_metrics import STATIC_METRICS_NAME, StaticEvaluator
-from orch_hub.subprocess_utils import CommandResult
+from orch_hub.subprocess_utils import CommandResult, run_command
 from orch_hub.task_store import STATUS_MISSING
 
 TOKEN = "test-token"
@@ -317,6 +317,79 @@ def test_repos_reports_only_failed_checks(monkeypatch):
     assert readiness["checks"] == [
         {"name": "git_clean", "message": "working tree has uncommitted changes"}
     ]
+
+
+def test_repos_failed_check_carries_its_fix_hint(monkeypatch):
+    # `hint` is additive: present on a failure item only when the check has one,
+    # with name/message unchanged (the same repos_payload CLI `repos --json` uses).
+    repo = make_repo()
+    report = ReadinessReport(
+        (
+            ReadinessCheck(
+                "git_clean",
+                False,
+                "working tree has uncommitted changes",
+                "commit or stash the uncommitted changes: a.py",
+            ),
+            ReadinessCheck("mandrel_status", False, "mandrel status failed: drift"),
+        )
+    )
+    monkeypatch.setattr(api, "discover_repos", lambda config: [repo])
+    monkeypatch.setattr(api, "check_readiness", lambda r, config: report)
+
+    data = build_client().get("/api/repos").json()
+    assert data["repos"][0]["readiness"]["checks"] == [
+        {
+            "name": "git_clean",
+            "message": "working tree has uncommitted changes",
+            "hint": "commit or stash the uncommitted changes: a.py",
+        },
+        {"name": "mandrel_status", "message": "mandrel status failed: drift"},
+    ]
+
+
+def test_repos_survives_an_unrunnable_mandrel(monkeypatch, tmp_path):
+    # A present-but-non-executable bin/mandrel used to raise PermissionError out
+    # of discovery/readiness and 500 this route. Now discovery falls back to the
+    # registry file and readiness reports a failed mandrel_status with a hint.
+    repo_dir = tmp_path / "repo"
+    repo_dir.mkdir()
+    mandrel = tmp_path / "mandrel"
+    (mandrel / ".registry").mkdir(parents=True)
+    (mandrel / ".registry" / "repos.local.json").write_text(
+        json.dumps(
+            [
+                {
+                    "name": "repo",
+                    "path": str(repo_dir),
+                    "manifest": str(repo_dir / ".ai-deploy-manifest.json"),
+                }
+            ]
+        )
+    )
+    config = Config(mandrel_path=mandrel, token=TOKEN)
+    config.mandrel_bin.parent.mkdir(parents=True)
+    config.mandrel_bin.write_text("#!/bin/sh\nexit 0\n")
+    config.mandrel_bin.chmod(0o644)
+    monkeypatch.setattr(api, "latest_commit", lambda repo: None)
+    real_check = api.check_readiness
+
+    def runner(args, **kwargs):
+        # Fake git; mandrel goes through the real wrapper, which hits the
+        # non-executable file above (never a real mandrel).
+        if str(args[0]) == "git":
+            return CommandResult(tuple(map(str, args)), 0, "", "")
+        return run_command(args, **kwargs)
+
+    monkeypatch.setattr(
+        api, "check_readiness", lambda r, cfg: real_check(r, cfg, runner=runner)
+    )
+
+    resp = build_client(config).get("/api/repos")
+    assert resp.status_code == 200
+    checks = {c["name"]: c for c in resp.json()["repos"][0]["readiness"]["checks"]}
+    assert checks["mandrel_status"]["message"].startswith("mandrel could not run:")
+    assert "chmod +x" in checks["mandrel_status"]["hint"]
 
 
 def test_repos_registry_error_returns_500(monkeypatch):

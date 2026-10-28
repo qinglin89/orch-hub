@@ -28,15 +28,30 @@ class ReadinessCheck:
     """One launch-readiness check outcome.
 
     ``name`` is a stable machine-readable key (e.g. ``git_clean``); ``message``
-    is a concise human-readable detail or failure reason.
+    is a concise human-readable detail or failure reason. ``hint`` is an optional
+    one-line, secret-free fix for a failed check (typically a copy-pasteable
+    command). It is additive: serialized forms carry ``hint`` only when it is
+    set, so consumers of the original keys see an unchanged shape.
     """
 
     name: str
     passed: bool
     message: str
+    hint: str | None = None
 
     def to_dict(self) -> dict:
-        return {"name": self.name, "passed": self.passed, "message": self.message}
+        return self._with_hint(
+            {"name": self.name, "passed": self.passed, "message": self.message}
+        )
+
+    def failure_dict(self) -> dict:
+        """The ``{"name", "message"[, "hint"]}`` reason item of a report."""
+        return self._with_hint({"name": self.name, "message": self.message})
+
+    def _with_hint(self, data: dict) -> dict:
+        if self.hint is not None:
+            data["hint"] = self.hint
+        return data
 
 
 @dataclass(frozen=True)
@@ -79,7 +94,8 @@ class ReadinessReport:
     ``checks`` holds every check that ran, in order, so callers can inspect the
     full picture. ``ready`` is true only when all checks passed. The serialized
     form (:meth:`to_dict`) exposes just the failures as reasons, matching the
-    documented ``{"ready": ..., "checks": [...]}`` API shape.
+    documented ``{"ready": ..., "checks": [...]}`` API shape; a reason item adds
+    ``hint`` only when its check carries one.
 
     ``placement`` is a passenger, not a check: it rides here because it comes
     back on the ``mandrel status`` call the readiness gate already makes (one
@@ -103,9 +119,7 @@ class ReadinessReport:
     def to_dict(self) -> dict:
         return {
             "ready": self.ready,
-            "checks": [
-                {"name": c.name, "message": c.message} for c in self.failures
-            ],
+            "checks": [c.failure_dict() for c in self.failures],
         }
 
 

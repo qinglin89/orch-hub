@@ -13,14 +13,21 @@ first — the placement is read per request from the payload of the call the gat
 already makes, never from a second subprocess and never from a run's
 launch-frozen capture, which would show the label of the last run rather than
 what the repo holds now.
+
+Every failed check also carries a one-line fix ``hint`` (see the "fix hints"
+section below, the single home of that wording). Hints are additive guidance:
+they never change a check's name, pass/fail outcome, or message, which other
+code matches on. They name commands by the configured absolute mandrel path and
+stay free of secrets.
 """
 
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 
-from .config import Config
+from .config import MANDREL_PATH_ENV, Config
 from .models import ManagedRepo, ProtocolPlacement, ReadinessCheck, ReadinessReport
 from .subprocess_utils import CommandNotFoundError, Runner, run_command
 
@@ -33,6 +40,9 @@ rather than probe for keys. So the placement is taken only from a payload whose
 version names the field; an older mandrel reports a version this hub then
 declines to read a line out of, rather than one it guesses at.
 """
+
+# How many dirty paths the git_clean hint names before summarizing the rest.
+_DIRTY_PATHS_SHOWN = 3
 
 
 def check_readiness(
@@ -62,22 +72,32 @@ def check_readiness(
             f"repo path present: {path}"
             if path_exists
             else f"repo path missing: {path}",
+            None if path_exists else _repo_path_hint(path, config),
         )
     )
-    checks.append(_file_check("manifest_exists", repo.manifest))
+    deploy_hint = _deploy_hint(path, config)
+    checks.append(_file_check("manifest_exists", repo.manifest, deploy_hint))
     checks.append(
         _file_check(
             "orchestrator_exists",
             path / ".mandrel" / "orchestrator" / "orchestrator.py",
+            deploy_hint,
         )
     )
     checks.append(
         _file_check(
             "venv_python_exists",
             path / ".mandrel" / "orchestrator" / ".venv" / "bin" / "python",
+            _venv_hint(path, config),
         )
     )
-    checks.append(_file_check("task_index_exists", path / ".ai-tasks" / "index.md"))
+    checks.append(
+        _file_check(
+            "task_index_exists",
+            path / ".ai-tasks" / "index.md",
+            _task_index_hint(path),
+        )
+    )
 
     if path_exists:
         checks.append(_git_clean_check(path, runner))
@@ -85,18 +105,19 @@ def check_readiness(
         checks.append(status_check)
     else:
         reason = "skipped: repo path missing"
-        checks.append(ReadinessCheck("git_clean", False, reason))
-        checks.append(ReadinessCheck("mandrel_status", False, reason))
+        checks.append(ReadinessCheck("git_clean", False, reason, _SKIPPED_HINT))
+        checks.append(ReadinessCheck("mandrel_status", False, reason, _SKIPPED_HINT))
 
     return ReadinessReport(tuple(checks), placement)
 
 
-def _file_check(name: str, target: Path) -> ReadinessCheck:
+def _file_check(name: str, target: Path, hint: str) -> ReadinessCheck:
     exists = target.exists()
     return ReadinessCheck(
         name,
         exists,
         f"found: {target}" if exists else f"missing: {target}",
+        None if exists else hint,
     )
 
 
@@ -104,19 +125,38 @@ def _git_clean_check(repo_path: Path, runner: Runner) -> ReadinessCheck:
     try:
         result = runner(["git", "status", "--porcelain"], cwd=repo_path)
     except CommandNotFoundError:
-        return ReadinessCheck("git_clean", False, "git executable not found")
+        # More specific than OSError (it subclasses FileNotFoundError): keep the
+        # established "not found" wording for a missing executable.
+        return ReadinessCheck(
+            "git_clean", False, "git executable not found", _GIT_TOOL_HINT
+        )
+    except OSError as exc:
+        # Present but unrunnable (permissions, bad interpreter, ...): fail the
+        # check rather than let the error escape and 500 the repo listing.
+        return ReadinessCheck(
+            "git_clean",
+            False,
+            f"git could not run: {_os_error_text(exc)}",
+            _GIT_TOOL_HINT,
+        )
     if not result.ok:
         detail = (
             _first_line(result.stderr)
             or _first_line(result.stdout)
             or f"exit {result.returncode}"
         )
-        return ReadinessCheck("git_clean", False, f"git status failed: {detail}")
+        return ReadinessCheck(
+            "git_clean",
+            False,
+            f"git status failed: {detail}",
+            _git_status_failed_hint(repo_path),
+        )
     clean = result.stdout.strip() == ""
     return ReadinessCheck(
         "git_clean",
         clean,
         "working tree clean" if clean else "working tree has uncommitted changes",
+        None if clean else _dirty_tree_hint(result.stdout),
     )
 
 
@@ -141,7 +181,21 @@ def _mandrel_status_check(
     except CommandNotFoundError:
         return (
             ReadinessCheck(
-                "mandrel_status", False, f"mandrel not found: {config.mandrel_bin}"
+                "mandrel_status",
+                False,
+                f"mandrel not found: {config.mandrel_bin}",
+                _mandrel_location_hint(config),
+            ),
+            ProtocolPlacement(),
+        )
+    except OSError as exc:
+        # E.g. a present-but-non-executable bin/mandrel (PermissionError).
+        return (
+            ReadinessCheck(
+                "mandrel_status",
+                False,
+                f"mandrel could not run: {config.mandrel_bin}: {_os_error_text(exc)}",
+                _mandrel_unrunnable_hint(config),
             ),
             ProtocolPlacement(),
         )
@@ -156,7 +210,12 @@ def _mandrel_status_check(
         or f"exit {result.returncode}"
     )
     return (
-        ReadinessCheck("mandrel_status", False, f"mandrel status failed: {detail}"),
+        ReadinessCheck(
+            "mandrel_status",
+            False,
+            f"mandrel status failed: {detail}",
+            _mandrel_drift_hint(repo.path, config),
+        ),
         placement,
     )
 
@@ -250,3 +309,110 @@ def _first_line(text: str) -> str:
         if stripped:
             return stripped
     return ""
+
+
+def _os_error_text(exc: OSError) -> str:
+    return exc.strerror or str(exc) or type(exc).__name__
+
+
+# ---- fix hints ----------------------------------------------------------------
+#
+# One line each, imperative, copy-pasteable where a command applies. Commands use
+# the configured absolute mandrel path and shell-quote every path so a repo under
+# a directory with spaces still pastes correctly. Nothing here reads secrets.
+
+_SKIPPED_HINT = "fix repo_path_exists first; this check runs once the path exists"
+
+_GIT_TOOL_HINT = (
+    "install git (xcode-select --install) and make sure it is on the PATH"
+    " orch-hub runs with"
+)
+
+_ORCH_HUB_SETUP_CMD = "orch-hub setup --mandrel /absolute/path/to/mandrel"
+
+
+def _cmd(*parts: object) -> str:
+    """A shell command line with every argument quoted only when it needs it."""
+    return " ".join(shlex.quote(str(part)) for part in parts)
+
+
+def _repo_path_hint(path: Path, config: Config) -> str:
+    redeploy = _cmd(config.mandrel_bin, "deploy") + " /new/path/to/repo"
+    remove = _cmd(config.mandrel_bin, "registry", "remove", path)
+    return (
+        f"if the repo moved, redeploy it from the new location with {redeploy};"
+        f" otherwise drop it from the registry with {remove}"
+    )
+
+
+def _deploy_hint(path: Path, config: Config) -> str:
+    deploy = _cmd(config.mandrel_bin, "deploy", "--bootstrap-orchestrator", path)
+    return f"run {deploy} then commit .gitignore and .ai-deploy-lock.json"
+
+
+def _venv_hint(path: Path, config: Config) -> str:
+    deploy = _cmd(config.mandrel_bin, "deploy", "--bootstrap-orchestrator", path)
+    return (
+        f"run {deploy} to create the scheduler's Python environment"
+        " (needs a Python 3.11+; --orchestrator-python /path/to/python picks one)"
+    )
+
+
+def _task_index_hint(path: Path) -> str:
+    return (
+        f"initialize the repo: open your coding agent in {shlex.quote(str(path))}"
+        " and run /ai-init, then commit .ai/"
+    )
+
+
+def _git_status_failed_hint(path: Path) -> str:
+    status = _cmd("git", "-C", path, "status")
+    return f"check that the repo is a readable git work tree: {status}"
+
+
+def _dirty_tree_hint(porcelain: str) -> str:
+    paths = _porcelain_paths(porcelain)
+    shown = ", ".join(paths[:_DIRTY_PATHS_SHOWN])
+    extra = len(paths) - _DIRTY_PATHS_SHOWN
+    if extra > 0:
+        shown += f" (+{extra} more)"
+    listing = f": {shown}" if shown else ""
+    return (
+        f"commit or stash the uncommitted changes{listing}; right after a"
+        " mandrel deploy these are usually .gitignore and .ai-deploy-lock.json"
+    )
+
+
+def _porcelain_paths(porcelain: str) -> list[str]:
+    """Paths named by ``git status --porcelain`` output, in order.
+
+    Each v1 line is a two-character status, a space, then the path, so the path
+    is ``line[3:]``. A rename stays as git prints it (``old -> new``) and a quoted
+    path keeps its quotes; both are display text here, never re-parsed. Lines are
+    not stripped first: the leading status column is often a space.
+    """
+    return [line[3:] for line in porcelain.splitlines() if len(line) > 3]
+
+
+def _mandrel_drift_hint(path: Path, config: Config) -> str:
+    status = _cmd(config.mandrel_bin, "status", path)
+    deploy = _cmd(config.mandrel_bin, "deploy", path)
+    return (
+        f"run {status} to see the drift; redeploy with {deploy}"
+        " and commit .ai-deploy-lock.json"
+    )
+
+
+def _mandrel_location_hint(config: Config) -> str:
+    return (
+        f"point orch-hub at your mandrel checkout ({MANDREL_PATH_ENV} is"
+        f" {shlex.quote(str(config.mandrel_path))}): {_ORCH_HUB_SETUP_CMD}"
+    )
+
+
+def _mandrel_unrunnable_hint(config: Config) -> str:
+    return (
+        f"make sure {shlex.quote(str(config.mandrel_bin))} is the executable"
+        f" mandrel CLI ({_cmd('chmod', '+x', config.mandrel_bin)}), or "
+        + _mandrel_location_hint(config)
+    )

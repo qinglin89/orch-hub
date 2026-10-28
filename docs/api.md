@@ -49,6 +49,45 @@ keeps missing index/file states explicit rather than silently dropping them.
 The task-detail route is active-index scoped; historical run/task access uses
 the run-scoped route below.
 
+### Readiness payload
+
+Each repo in `GET /api/repos` carries a `readiness` object. CLI
+`orch-hub repos --json` emits the same objects, and the dashboard's repo cards,
+repo detail, run controls, and intake section all read it from this route.
+`checks` lists only the failed checks, in the stable check order:
+
+```json
+{
+  "ready": false,
+  "checks": [
+    {
+      "name": "venv_python_exists",
+      "message": "missing: /work/app/.mandrel/orchestrator/.venv/bin/python",
+      "hint": "run /opt/mandrel/bin/mandrel deploy --bootstrap-orchestrator /work/app to create the scheduler's Python environment (needs a Python 3.11+; --orchestrator-python /path/to/python picks one)"
+    },
+    {
+      "name": "git_clean",
+      "message": "working tree has uncommitted changes",
+      "hint": "commit or stash the uncommitted changes: .gitignore, .ai-deploy-lock.json; right after a mandrel deploy these are usually .gitignore and .ai-deploy-lock.json"
+    }
+  ]
+}
+```
+
+`name` and `message` are unchanged by hints. `hint` is an additive, optional
+string: a one-line fix for that failure, usually a copy-pasteable command that
+names the configured absolute Mandrel CLI path and a shell-quoted repo path.
+Hints never contain secrets. A failure item omits the `hint` key when the hub
+has no hint for it, so clients should treat it as optional and render nothing
+when it is absent. Hints are guidance only and never change which checks fail
+or whether a launch or intake is allowed.
+
+A Mandrel CLI that is missing or cannot be executed (for example a
+non-executable `bin/mandrel`) does not fail the route. Discovery falls back to
+the Mandrel registry file, and readiness reports a failed `mandrel_status`
+check with a hint naming `ORCH_HUB_MANDREL_PATH` and
+`orch-hub setup --mandrel <path>`.
+
 ## Runs, history, logs, and human input
 
 | Method/path | Purpose |
