@@ -29,7 +29,7 @@ ARTIFACT = f"orch-hub-{VERSION}-darwin-arm64.run"
 REAL_TOOLS = (
     "sh", "curl", "git", "mktemp", "rm", "mkdir", "mv", "cat", "sed", "grep",
     "head", "tr", "cut", "dirname", "ls", "chmod", "tail", "rmdir", "env",
-    "shasum", "sha256sum", "perl", "cp",
+    "shasum", "sha256sum", "perl", "cp", "basename", "wc",
 )
 
 pytestmark = pytest.mark.skipif(
@@ -326,13 +326,51 @@ def test_a_tampered_download_is_never_run(machine: Machine):
     assert not list((machine.tmp / "tmp").iterdir())
 
 
-def test_a_missing_release_names_what_could_not_be_fetched(machine: Machine):
-    machine.add_python()
+def test_a_missing_release_is_caught_before_anything_is_installed(machine: Machine):
+    machine.add_brew()  # no Python yet: Homebrew would be the first side effect
 
     result = machine.run("--version", "9.9.9")
 
     assert result.returncode == 1
+    assert "orch-hub 9.9.9 is not available" in result.stderr
     assert "orch-hub-9.9.9-darwin-arm64.run" in result.stderr
+    assert not machine.brew_log.exists()
+    assert not machine.default_mandrel.exists()
+
+
+def test_dry_run_reports_a_plan_that_cannot_work(machine: Machine):
+    machine.add_python()
+
+    result = machine.run("--dry-run", ORCH_HUB_MANDREL_REF="v9.9.9")
+
+    assert result.returncode == 1
+    assert "mandrel v9.9.9 is not available" in result.stderr
+
+
+def test_sums_that_omit_the_installer_are_refused(machine: Machine):
+    machine.add_python()
+    sums = machine.release / "SHA256SUMS"
+    sums.write_text(
+        "".join(line + "\n" for line in sums.read_text().splitlines() if "release.json" in line),
+        encoding="utf-8",
+    )
+
+    result = machine.run()
+
+    assert result.returncode == 1
+    assert "does not list both" in result.stderr
+    assert machine.run_args() == []
+
+
+def test_sums_listing_another_target_still_verify(machine: Machine):
+    machine.add_python()
+    sums = machine.release / "SHA256SUMS"
+    sums.write_text(sums.read_text() + f"{'0' * 64}  orch-hub-{VERSION}-darwin-x86_64.run\n", encoding="utf-8")
+
+    result = machine.run("--no-open")
+
+    assert result.returncode == 0, result.stderr
+    assert machine.run_args()[:1] == ["--mandrel"]
 
 
 @pytest.mark.parametrize(("os_name", "arch"), [("Linux", "x86_64"), ("Darwin", "x86_64")])
@@ -381,15 +419,84 @@ def test_a_foreign_directory_is_not_mistaken_for_mandrel(machine: Machine):
     assert (foreign / "notes.txt").read_text() == "mine\n"
 
 
-def test_a_missing_mandrel_ref_leaves_no_half_clone(machine: Machine):
+def test_a_missing_mandrel_ref_is_caught_before_cloning(machine: Machine):
     machine.add_python()
 
     result = machine.run(ORCH_HUB_MANDREL_REF="v0.0.0-missing")
 
     assert result.returncode == 1
-    assert "no ref v0.0.0-missing" in result.stderr
+    assert "mandrel v0.0.0-missing is not available" in result.stderr
+    assert not (machine.home / ".local" / "share").exists()
+
+
+def test_a_failed_pin_leaves_no_checkout_to_mistake_for_the_users(machine: Machine):
+    broken = machine.add_python("python3.13")
+    broken.write_text(
+        '#!/bin/sh\nif [ "$1" = "-I" ]; then exit 0; fi\nexit 1\n', encoding="utf-8"
+    )
+
+    first = machine.run("--no-open")
+
+    assert first.returncode == 1
+    assert "cannot create" in first.stderr
     share = machine.home / ".local" / "share"
-    assert not any(share.iterdir()) if share.exists() else True
+    assert [p.name for p in share.iterdir()] == []
+
+    _stub_python(broken)
+    second = machine.run("--no-open")
+
+    assert second.returncode == 0, second.stderr
+    assert (machine.default_mandrel / ".venv" / "bin" / "python").exists()
+
+
+def test_the_default_checkout_gets_its_missing_pin_on_a_rerun(machine: Machine):
+    machine.add_python()
+    _git(machine.tmp, "clone", "-q", str(machine.mandrel_src), str(machine.default_mandrel))
+
+    result = machine.run("--no-open")
+
+    assert result.returncode == 0, result.stderr
+    assert (machine.default_mandrel / ".venv" / "bin" / "python").exists()
+
+
+def test_a_trailing_slash_names_the_same_directory(machine: Machine):
+    machine.add_python()
+    target = machine.tmp / "new-mandrel"
+
+    result = machine.run("--mandrel", f"{target}/", "--no-open")
+
+    assert result.returncode == 0, result.stderr
+    assert (target / "bin" / "mandrel").is_file()
+    assert machine.run_args()[:2] == ["--mandrel", str(target)]
+    assert sorted(p.name for p in machine.tmp.iterdir() if p.name.startswith(".")) == []
+
+
+def test_mandrel_paths_resolve_like_orch_hub_setup(machine: Machine):
+    """Legacy variable, blank values, and `~` behave as setup treats them."""
+    legacy = machine.tmp / "legacy-mandrel"
+    _git(machine.tmp, "clone", "-q", str(machine.mandrel_src), str(legacy))
+
+    result = machine.run(
+        "--no-open", ORCH_HUB_MANDREL_PATH="   ", ORCH_HUB_AI_NATIVE_DEPLOYMENT=str(legacy)
+    )
+    assert result.returncode == 0, result.stderr
+    assert machine.run_args()[:2] == ["--mandrel", str(legacy)]
+
+    machine.run_log.unlink()
+    machine.add_python()
+    result = machine.run("--no-open", ORCH_HUB_MANDREL_PATH="~/tools/mandrel")
+    assert result.returncode == 0, result.stderr
+    assert machine.run_args()[:2] == ["--mandrel", str(machine.home / "tools" / "mandrel")]
+
+
+def test_a_python_shim_that_does_not_run_is_skipped(machine: Machine):
+    machine.add_python("python3.14", new_enough=False)  # an inactive pyenv shim
+    good = machine.add_python("python3.12")
+
+    result = machine.run("--no-open")
+
+    assert result.returncode == 0, result.stderr
+    assert (machine.default_mandrel / ".venv" / "created-by").read_text().strip() == str(good)
 
 
 def test_unknown_options_are_refused(machine: Machine):

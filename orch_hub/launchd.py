@@ -487,11 +487,14 @@ def probe_mandrel(mandrel_path: Path, path_env: str) -> str | None:
     binary = mandrel_path.expanduser() / MANDREL_BIN_RELATIVE_PATH
     env = {"PATH": path_env, "HOME": str(Path.home())}
     try:
+        # cwd "/" is where launchd starts an agent with no WorkingDirectory;
+        # `python -m` puts the cwd on sys.path, so it is part of "as the service".
         result = subprocess.run(
             [str(binary), "registry", "list", "--json"],
             capture_output=True,
             text=True,
             env=env,
+            cwd="/",
             stdin=subprocess.DEVNULL,
             timeout=MANDREL_PROBE_TIMEOUT,
             check=False,
@@ -506,11 +509,18 @@ def probe_mandrel(mandrel_path: Path, path_env: str) -> str | None:
         (line.strip() for line in (result.stderr + result.stdout).splitlines() if line.strip()),
         f"exit {result.returncode}",
     )
-    return (
-        f"mandrel cannot run under the service's PATH ({path_env}): {detail}. "
+    problem = f"mandrel cannot run under the service's PATH ({path_env}): {detail}. "
+    if "python: not found" in detail or "python: command not found" in detail:
+        # A mandrel from before interpreter resolution runs an unversioned
+        # `python`, and neither a venv nor PATH tuning reaches that wrapper.
+        return problem + (
+            f"This mandrel predates interpreter resolution; update it with "
+            f"`git -C {mandrel_path} pull` (or check out its newest release tag)"
+        )
+    return problem + (
         f"Give the checkout its own interpreter with "
         f"`python3.13 -m venv {mandrel_path}/.venv` (any Python 3.11+), "
-        "or update mandrel (`git pull`) so it finds one itself"
+        "or set MANDREL_PYTHON in the service environment"
     )
 
 
@@ -530,10 +540,15 @@ def service_path_env(
     candidates: list[str] = []
     shell_path = (environ.get("PATH") or "").strip()
     if shell_path:
-        for tool in SERVICE_TOOLS:
-            found = which(tool, path=shell_path)
-            if found:
-                candidates.append(str(Path(found).parent))
+        found_dirs = {
+            str(Path(found).parent)
+            for tool in SERVICE_TOOLS
+            if (found := which(tool, path=shell_path))
+        }
+        # In the shell's own order, so the service keeps the operator's
+        # precedence (Homebrew before /usr/bin, say) rather than tool order.
+        shell_order = [entry.strip() for entry in shell_path.split(os.pathsep)]
+        candidates.extend(entry for entry in shell_order if entry in found_dirs)
     candidates.extend(_plist_env(existing).get("PATH", "").split(os.pathsep))
     candidates.extend(DEFAULT_PATH_ENV.split(os.pathsep))
     seen: set[str] = set()

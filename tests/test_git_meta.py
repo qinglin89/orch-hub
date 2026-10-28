@@ -111,6 +111,20 @@ def test_read_commits_unavailable_when_git_missing(tmp_path):
     )
 
 
+def test_git_that_cannot_run_is_an_unavailable_log_not_an_error(tmp_path):
+    """A repo dir the service cannot enter (or a git it cannot execute) raises
+    PermissionError from the subprocess wrapper; GET /api/repos calls
+    latest_commit for every repo, so this must degrade, not 500. (Path diffs
+    keep raising: evaluation evidence records the exception it hit.)"""
+    repo = make_repo(tmp_path)
+
+    def denied(args, **kwargs):
+        raise PermissionError(13, "Permission denied", str(tmp_path))
+
+    assert read_commits(repo, runner=denied) == CommitLog(available=False, commits=())
+    assert latest_commit(repo, runner=denied) is None
+
+
 def test_read_commits_unavailable_on_nonzero_exit(tmp_path):
     log = read_commits(make_repo(tmp_path), runner=make_runner(rc=128))
     assert log.available is False

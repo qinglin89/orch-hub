@@ -127,7 +127,7 @@ changes, run the same flow again, or use the explicit alias:
 | Setting | Resolution |
 |---|---|
 | Checkout | nearest orch-hub checkout above the current directory, or `--checkout` |
-| Token | `--token`, then `ORCH_HUB_TOKEN`, then existing installed plist token, then a generated token (shown once, to a terminal only; `orch-hub token --copy` retrieves it) |
+| Token | `--token`, then `ORCH_HUB_TOKEN`, then existing installed plist token, then a generated token (never printed; `orch-hub token --copy` retrieves it) |
 | Mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then the legacy environment name, then the value in an existing installed plist; first deployment fails with guidance if none is available |
 | Host/port/data dir | corresponding flags, then environment, then defaults |
 | Plist/log paths | `--plist-path` / `--log-dir`, then `~/Library/...` defaults |
@@ -136,7 +136,7 @@ changes, run the same flow again, or use the explicit alias:
 Common examples:
 
 ```bash
-# First deployment; prints a generated token if none exists.
+# First deployment; generates a token if none exists (`orch-hub token --copy` copies it).
 .venv/bin/orch-hub launchd deploy --mandrel /absolute/path/to/mandrel
 
 # Use an explicit token or rotate it.

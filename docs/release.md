@@ -79,12 +79,16 @@ run as root. It then:
    `python@3.13` first (announced; `--no-brew` stops with instructions instead).
    `jq` is handled the same way.
 3. Downloads the pinned release's `.run`, `release.json`, and `SHA256SUMS`
-   into a temporary directory, verifies the checksums, and runs the `.run` by
-   path. `--host`, `--port`, `--token`, `--prefix`, `--bin-dir`, and
+   into a temporary directory and verifies the two files it will use. Both
+   must be listed in `SHA256SUMS`, and lines for other targets are ignored. It
+   then runs the `.run` by path. `--host`, `--port`, `--token`, `--prefix`, `--bin-dir`, and
    `--no-service` pass through to it.
 4. Runs `orch-hub open`, then prints how to add a repo.
 
-`--dry-run` prints that plan and changes nothing. `--version VERSION` (or
+Before any of that, it checks that the pinned Mandrel tag and the release
+asset exist, so a plan that cannot work fails before Homebrew, a clone, or a
+venv is touched. `--dry-run` runs the same checks, prints the plan, and changes
+nothing. `--version VERSION` (or
 `latest`) picks another release.
 
 Checksums from the same origin catch a truncated or corrupted download, not a
@@ -111,11 +115,13 @@ sh orch-hub-0.2.0-darwin-arm64.run --mandrel /absolute/path/to/mandrel
 
 `sh <file>.run` is the intended invocation: a downloaded file is not executable
 and does not need to be. If no token was supplied or already installed, the run
-generates one. It shows the token once, and only when its output is a terminal;
-a script's or a coding agent's captured output gets a pointer instead. The token
-is written into the installed plist, which is mode `600` because it embeds that
-secret. `orch-hub token --copy` puts it on the clipboard, and `orch-hub open`
-does that and opens the dashboard. Neither puts it in a URL or a log.
+generates one and never prints it: installer output is as likely to land in a
+coding agent's transcript or a CI log as on a person's screen, and no check on
+the output stream tells those apart. The token is written into the installed
+plist, which is mode `600` because it embeds that secret. `orch-hub token
+--copy` puts it on the clipboard, `orch-hub open` does that and opens the
+dashboard, and `orch-hub token` prints it when you ask. None of them puts it in
+a URL or a log.
 
 Installer options:
 
@@ -222,7 +228,7 @@ Resolution order, per setting:
 | Setting | Resolution |
 |---|---|
 | Mandrel checkout | `--mandrel`, then `ORCH_HUB_MANDREL_PATH`, then the legacy `ORCH_HUB_AI_NATIVE_DEPLOYMENT`, then the installed plist. There is no portable default; the first setup fails with guidance if none exists. The value is verified: it must be a directory holding an **executable** `bin/mandrel`, because the registry runs that file directly, and that file must actually start: setup runs `bin/mandrel registry list --json` under the `PATH` the service will have, and refuses (before touching a running service) a checkout that fails there. |
-| Bearer token | `--token`, then `ORCH_HUB_TOKEN`, then the installed plist, then a generated token (shown once, to a terminal only). |
+| Bearer token | `--token`, then `ORCH_HUB_TOKEN`, then the installed plist, then a generated token (never printed; `orch-hub token --copy` retrieves it). |
 | Host / port / data dir | corresponding flag, then environment, then the installed plist, then default (`127.0.0.1`, `8765`, `~/.orch-hub`). |
 | Service `PATH` | The directories the configuring shell finds `claude`, `codex`, `cursor-agent`, `node`, `git`, and `jq` in, then the installed plist's `PATH`, then `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`. An agent CLI installed under nvm, volta, or `~/.local/bin` is therefore found by the service too. |
 | Plist / log paths | `--plist-path` / `--log-dir`, then the `~/Library/...` defaults. |

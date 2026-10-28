@@ -58,10 +58,10 @@ if [ "$1" = setup ] && [ -n "${FAKE_SETUP_FAILS:-}" ]; then
     exit 3
 fi
 if [ "$1" = versions ]; then
-    if [ -n "${FAKE_PREVIOUS:-}" ]; then
-        printf '{\\n  "previous": "%s"\\n}\\n' "$FAKE_PREVIOUS"
+    if [ -n "${FAKE_CURRENT:-}" ]; then
+        printf '{\\n  "current": "%s",\\n  "previous": null\\n}\\n' "$FAKE_CURRENT"
     else
-        printf '{\\n  "previous": null\\n}\\n'
+        printf '{\\n  "current": null,\\n  "previous": null\\n}\\n'
     fi
 fi
 exit 0
@@ -1252,13 +1252,27 @@ def test_a_service_that_does_not_start_names_the_way_back(
         env={
             "FAKE_ARGV_LOG": str(argv_log),
             "FAKE_SETUP_FAILS": "1",
-            "FAKE_PREVIOUS": "9.9.8",
+            "FAKE_CURRENT": "9.9.8",
         },
     )
     assert result.returncode == 1
-    assert "orch-hub rollback" in result.stderr
+    assert "orch-hub rollback --to 9.9.8" in result.stderr
     assert "orch-hub launchd status" in result.stderr
-    assert _calls(argv_log)[-1] == ["versions", "--json", "--prefix", str(tmp_path / "prefix")]
+    # The live version is read before anything is installed.
+    assert _calls(argv_log, probes=True)[0] == ["versions", "--json", "--prefix", str(tmp_path / "prefix")]
+
+
+def test_a_failed_reinstall_of_the_same_version_offers_no_rollback(
+    installer: Path, tmp_path: Path, argv_log: Path
+):
+    result = run_installer(
+        installer,
+        "--prefix",
+        str(tmp_path / "prefix"),
+        env={"FAKE_ARGV_LOG": str(argv_log), "FAKE_SETUP_FAILS": "1", "FAKE_CURRENT": "9.9.9"},
+    )
+    assert result.returncode == 1
+    assert "rollback" not in result.stderr
 
 
 def test_a_first_install_that_does_not_start_offers_no_rollback(
@@ -1311,15 +1325,21 @@ def test_the_scratch_directory_is_removed_after_a_failure(
     assert list(scratch.iterdir()) == []
 
 
-def _calls(argv_log: Path) -> list[list[str]]:
-    """Group the recorded argv lines into one list per invocation."""
+def _calls(argv_log: Path, *, probes: bool = False) -> list[list[str]]:
+    """Group the recorded argv lines into one list per invocation.
+
+    The installer's read-only `versions` probes are left out unless asked for,
+    so assertions about what it installs and configures read in order.
+    """
     calls: list[list[str]] = []
     for line in argv_log.read_text(encoding="utf-8").splitlines():
         if line in {"install", "setup", "versions"}:
             calls.append([line])
         else:
             calls[-1].append(line)
-    return calls
+    if probes:
+        return calls
+    return [call for call in calls if call[0] != "versions"]
 
 
 def _header(installer: Path) -> str:

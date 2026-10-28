@@ -125,18 +125,12 @@ python_is_new_enough() {
     "$1" -I -S -c 'import sys; sys.exit(sys.version_info < (3, 11))' >/dev/null 2>&1
 }
 
-# Same preference order as mandrel's own bin/mandrel: versioned names promise
-# their version; an unversioned python3 counts only when it is new enough (the
-# one macOS ships is not).
+# Same order as mandrel's own bin/mandrel, and every candidate is run once: a
+# pyenv/asdf shim answers `command -v` for an installed-but-inactive version and
+# then fails, and the python3 macOS ships is too old.
 find_python() {
     PYTHON=''
-    for _candidate in python3.16 python3.15 python3.14 python3.13 python3.12 python3.11; do
-        if command -v "$_candidate" >/dev/null 2>&1; then
-            PYTHON=$(command -v "$_candidate")
-            return 0
-        fi
-    done
-    for _candidate in python3 python; do
+    for _candidate in python3.16 python3.15 python3.14 python3.13 python3.12 python3.11 python3 python; do
         if command -v "$_candidate" >/dev/null 2>&1 && python_is_new_enough "$_candidate"; then
             PYTHON=$(command -v "$_candidate")
             return 0
@@ -209,30 +203,62 @@ is_mandrel_checkout() {
     [ -f "$1/bin/mandrel" ] && [ -d "$1/canonical" ]
 }
 
-# Decides MANDREL_DIR and whether it has to be cloned. An explicitly named or
-# already-configured checkout is used as-is; only the default location is ever
-# created by this script.
+trim() {
+    printf '%s' "$1" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//'
+}
+
+# An absolute path without trailing slashes, `~` expanded, relative paths taken
+# from the current directory: the forms a person or an agent types.
+normalize_dir() {
+    _dir=$1
+    # shellcheck disable=SC2088  # matching a literal, unexpanded `~` on purpose
+    case $_dir in
+        '~') _dir=$HOME ;;
+        '~/'*) _dir="$HOME/${_dir#\~/}" ;;
+    esac
+    case $_dir in
+        /*) ;;
+        *) _dir="$(pwd)/$_dir" ;;
+    esac
+    while [ "${#_dir}" -gt 1 ] && [ "${_dir%/}" != "$_dir" ]; do
+        _dir=${_dir%/}
+    done
+    printf '%s\n' "$_dir"
+}
+
+# Decides MANDREL_DIR and whether it has to be cloned, in the same order and
+# with the same blank-is-unset rule `orch-hub setup` resolves it, so the two
+# can never pick different checkouts. An explicitly named or already-configured
+# checkout is used as-is; this script only ever creates a missing one.
 resolve_mandrel() {
     MANDREL_CLONE=no
+    MANDREL_PIN=no
+    _env_current=$(trim "${ORCH_HUB_MANDREL_PATH:-}")
+    _env_legacy=$(trim "${ORCH_HUB_AI_NATIVE_DEPLOYMENT:-}")
     if [ -n "$mandrel_arg" ]; then
         MANDREL_DIR=$mandrel_arg
         MANDREL_ORIGIN='--mandrel'
-    elif [ -n "${ORCH_HUB_MANDREL_PATH:-}" ]; then
-        MANDREL_DIR=$ORCH_HUB_MANDREL_PATH
+    elif [ -n "$_env_current" ]; then
+        MANDREL_DIR=$_env_current
         MANDREL_ORIGIN='ORCH_HUB_MANDREL_PATH'
+    elif [ -n "$_env_legacy" ]; then
+        MANDREL_DIR=$_env_legacy
+        MANDREL_ORIGIN='ORCH_HUB_AI_NATIVE_DEPLOYMENT'
     else
-        MANDREL_DIR=$(installed_plist_mandrel)
+        MANDREL_DIR=$(trim "$(installed_plist_mandrel)")
         MANDREL_ORIGIN='the installed orch-hub service'
         if [ -z "$MANDREL_DIR" ]; then
             MANDREL_DIR="$HOME/.local/share/mandrel"
             MANDREL_ORIGIN='default location'
         fi
     fi
-    case $MANDREL_DIR in
-        /*) ;;
-        *) MANDREL_DIR="$(pwd)/$MANDREL_DIR" ;;
-    esac
+    MANDREL_DIR=$(normalize_dir "$MANDREL_DIR")
     if is_mandrel_checkout "$MANDREL_DIR"; then
+        # The default location is this script's own: a checkout an earlier run
+        # left without its interpreter pin (interrupted, or venv failed) gets it.
+        if [ "$MANDREL_ORIGIN" = 'default location' ] && ! [ -x "$MANDREL_DIR/.venv/bin/python" ]; then
+            MANDREL_PIN=yes
+        fi
         return 0
     fi
     if [ -e "$MANDREL_DIR" ] && [ -n "$(ls -A "$MANDREL_DIR" 2>/dev/null)" ]; then
@@ -242,12 +268,17 @@ resolve_mandrel() {
         die "the installed service names mandrel at $MANDREL_DIR, which is missing; pass --mandrel DIR"
     fi
     MANDREL_CLONE=yes
+    MANDREL_PIN=yes
 }
 
+# The clone is assembled beside its destination, pinned, and moved into place
+# only when complete, so an interrupted or failed run never leaves a checkout
+# that a later run would mistake for one the user brought.
 clone_mandrel() {
-    _partial="$MANDREL_DIR.partial.$$"
+    _parent=$(dirname "$MANDREL_DIR")
+    _partial="$_parent/.$(basename "$MANDREL_DIR").partial.$$"
+    mkdir -p "$_parent"
     rm -rf "$_partial"
-    mkdir -p "$(dirname "$MANDREL_DIR")"
     step "Cloning mandrel $MANDREL_REF into $MANDREL_DIR"
     git clone --quiet "$MANDREL_REPO" "$_partial" </dev/null ||
         { rm -rf "$_partial"; die "cannot clone $MANDREL_REPO"; }
@@ -255,25 +286,46 @@ clone_mandrel() {
         { rm -rf "$_partial"; die "mandrel has no ref $MANDREL_REF"; }
     is_mandrel_checkout "$_partial" ||
         { rm -rf "$_partial"; die "$MANDREL_REPO at $MANDREL_REF is not a mandrel checkout"; }
+    pin_mandrel_python "$_partial" || { rm -rf "$_partial"; exit 1; }
     rmdir "$MANDREL_DIR" 2>/dev/null || true
-    mv "$_partial" "$MANDREL_DIR"
+    mv "$_partial" "$MANDREL_DIR" ||
+        { rm -rf "$_partial"; die "cannot move the clone into $MANDREL_DIR"; }
 }
 
-# A checkout this script created gets its own .venv: bin/mandrel prefers it,
+# A checkout this script places gets its own .venv: bin/mandrel prefers it,
 # which pins mandrel's interpreter independently of any PATH (the launchd
 # service's PATH is minimal). A checkout the user brought is left untouched.
 pin_mandrel_python() {
-    [ -x "$MANDREL_DIR/.venv/bin/python" ] && return 0
+    [ -x "$1/.venv/bin/python" ] && return 0
     step "Pinning mandrel's Python ($PYTHON)"
-    "$PYTHON" -m venv "$MANDREL_DIR/.venv" </dev/null ||
-        die "cannot create $MANDREL_DIR/.venv with $PYTHON"
+    if ! "$PYTHON" -m venv "$1/.venv" </dev/null; then
+        printf 'error: cannot create %s/.venv with %s\n' "$1" "$PYTHON" >&2
+        return 1
+    fi
 }
 
 check_mandrel_runs() {
     if ! _out=$("$MANDREL_DIR/bin/mandrel" registry list --json 2>&1 </dev/null); then
         printf '%s\n' "$_out" >&2
-        die "mandrel at $MANDREL_DIR does not run; fix the error above (an older checkout may need 'git -C $MANDREL_DIR pull')"
+        die "mandrel at $MANDREL_DIR does not run; fix the error above (a mandrel older than $MANDREL_DEFAULT_REF runs an unversioned 'python': update it with 'git -C $MANDREL_DIR pull')"
     fi
+}
+
+# Read-only checks that the pinned mandrel ref and the release exist, run before
+# anything is installed (and by --dry-run), so a plan that cannot work is
+# reported before Homebrew, a clone, or a venv has been touched.
+preflight_sources() {
+    if [ "$MANDREL_CLONE" = yes ]; then
+        case $MANDREL_REF in
+            *[!0-9a-f]* | ?????? | ????? | ???? | ??? | ?? | ?)
+                git ls-remote --exit-code "$MANDREL_REPO" "$MANDREL_REF" >/dev/null 2>&1 </dev/null ||
+                    die "mandrel $MANDREL_REF is not available from $MANDREL_REPO"
+                ;;
+        esac
+    fi
+    # One byte, not a HEAD: release assets redirect to signed storage URLs.
+    curl -fsSL --retry 2 -r 0-0 -o /dev/null "$RELEASE_URL/$ARTIFACT" </dev/null ||
+        die "orch-hub $VERSION is not available at $RELEASE_URL/$ARTIFACT"
 }
 
 # --- orch-hub release ---------------------------------------------------------
@@ -296,8 +348,20 @@ download_release() {
             die "cannot download $RELEASE_URL/$_file"
     done
     step "Verifying checksums"
-    (cd "$WORK_DIR" && $SHA_CHECK SHA256SUMS >/dev/null) ||
+    # Exactly the files this run downloaded, each of which must be listed: a
+    # SHA256SUMS that simply omits the installer must not pass, and one that
+    # also lists another target's artifact must not fail.
+    grep -E "^[0-9a-f]{64}  ($(escape_ere "$ARTIFACT")|release\.json)\$" "$WORK_DIR/SHA256SUMS" \
+        > "$WORK_DIR/SHA256SUMS.selected" || true
+    [ "$(wc -l < "$WORK_DIR/SHA256SUMS.selected" | tr -d ' ')" = 2 ] ||
+        die "SHA256SUMS does not list both $ARTIFACT and release.json; refusing to run an unverified installer"
+    (cd "$WORK_DIR" && $SHA_CHECK SHA256SUMS.selected >/dev/null) ||
         die "checksum verification failed; the download is incomplete or altered"
+}
+
+escape_ere() {
+    # shellcheck disable=SC2016  # a sed program, not shell expansions
+    printf '%s' "$1" | sed 's/[.[\*^$()+?{|]/\\&/g'
 }
 
 cleanup() {
@@ -413,10 +477,11 @@ main() {
     # checkout the user brought already knows how to start, and if it cannot,
     # its own error says why.
     PYTHON=''
-    if [ "$MANDREL_CLONE" = yes ]; then
+    resolve_version
+    preflight_sources
+    if [ "$MANDREL_PIN" = yes ]; then
         ensure_python
     fi
-    resolve_version
 
     if [ "$dry_run" = yes ]; then
         ensure_jq
@@ -428,7 +493,8 @@ main() {
     check_agents
     if [ "$MANDREL_CLONE" = yes ]; then
         clone_mandrel
-        pin_mandrel_python
+    elif [ "$MANDREL_PIN" = yes ]; then
+        pin_mandrel_python "$MANDREL_DIR" || exit 1
     fi
     check_mandrel_runs
 

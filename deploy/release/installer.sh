@@ -237,6 +237,13 @@ payload=$work_dir/$PAYLOAD_DIR
 # source of truth that drifts the first time one of them moves. The installed
 # copy is still proven to run: `setup` waits for launchd's own service — which
 # is `<prefix>/current/orch-hub` — to answer its health endpoint.
+# Which version is live before this run, so a failure below can offer to go
+# back to exactly that one, and only when this run actually replaced it.
+set -- versions --json
+if [ -n "$prefix" ]; then set -- "$@" --prefix "$prefix"; fi
+before=$("$payload/$COMMAND_NAME" "$@" 2>/dev/null |
+    sed -n 's/^ *"current": "\([^"]*\)".*/\1/p' | head -n 1) || before=''
+
 set -- install --from "$payload"
 if [ -n "$prefix" ]; then set -- "$@" --prefix "$prefix"; fi
 if [ -n "$bin_dir" ]; then set -- "$@" --bin-dir "$bin_dir"; fi
@@ -263,12 +270,10 @@ if [ -n "$port" ]; then set -- "$@" --port "$port"; fi
 if ! "$payload/$COMMAND_NAME" "$@"; then
     printf '\nthe runtime is installed but the service is not running (see the error above).\n' >&2
     printf 'fix that and run this installer again; inspect with:  %s launchd status\n' "$COMMAND_NAME" >&2
-    # Rollback is advice only when there is something to go back to: on a first
-    # install it would just fail with "no previous version recorded".
-    set -- versions --json
-    if [ -n "$prefix" ]; then set -- "$@" --prefix "$prefix"; fi
-    if "$payload/$COMMAND_NAME" "$@" 2>/dev/null | grep -q '"previous": "'; then
-        printf 'or go back to the version this replaced:  %s rollback\n' "$COMMAND_NAME" >&2
+    # Rollback is advice only when this run replaced a different version: on a
+    # first install, or a re-run of the same one, it would go somewhere else.
+    if [ -n "$before" ] && [ "$before" != "$VERSION" ]; then
+        printf 'or go back to %s:  %s rollback --to %s\n' "$before" "$COMMAND_NAME" "$before" >&2
     fi
     exit 1
 fi

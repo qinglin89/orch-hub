@@ -6605,9 +6605,19 @@ async function scenarioFirstRun() {
     "manual deploy command missing"
   );
   check(
-    "first run: the card says to use your own mandrel checkout when it lives elsewhere",
-    cardText().indexOf("if you installed it elsewhere") !== -1,
+    "first run: the card says to use the configured mandrel checkout when it lives elsewhere",
+    cardText().indexOf("the checkout orch-hub was set up") !== -1,
     "no own-checkout note"
+  );
+  check(
+    "first run: the card previews the deploy and warns what it overwrites first",
+    cardText().indexOf(
+      "~/.local/share/mandrel/bin/mandrel deploy --dry-run /path/to/your-repo"
+    ) !== -1 &&
+      cardText().indexOf("overwrites") !== -1 &&
+      cardText().indexOf("CLAUDE.md") !== -1 &&
+      cardText().indexOf("clean working tree") !== -1,
+    "dry-run preview / overwrite warning missing"
   );
   check(
     "first run: the card covers committing the deploy receipts and /ai-init",
